@@ -1,0 +1,216 @@
+.setup {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.setup__card {
+  width: 100%;
+  max-width: 400px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 32px;
+}
+
+.setup__logo {
+  display: block;
+  width: 96px;
+  height: 96px;
+  border-radius: 20px;
+  margin: 0 auto 16px;
+}
+
+.setup__title {
+  font-size: 22px;
+  font-weight: 700;
+  margin-bottom: 6px;
+  text-align: center;
+}
+
+.setup__subtitle {
+  color: var(--muted);
+  margin-bottom: 24px;
+  text-align: center;
+}
+
+.setup__form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.setup__label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.setup__input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 9px 12px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.setup__input:focus {
+  border-color: var(--accent);
+}
+
+.setup__error {
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.setup__hint {
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 6px;
+}
+
+.setup__btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 10px;
+  font-weight: 600;
+  margin-top: 4px;
+  transition: background 0.15s;
+}
+
+/* "Sign in with Claude" sits directly in the card, not in a form —
+   center it and let it size to its content. */
+.setup__card > .setup__btn {
+  display: block;
+  margin: 0 auto;
+  width: fit-content;
+  padding: 10px 24px;
+}
+
+.setup__btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.setup__btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.setup__auth-pending {
+  text-align: center;
+  padding: 16px 0;
+}
+
+.setup__auth-msg {
+  font-size: 14px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.setup__auth-msg a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.setup__spinner {
+  width: 24px;
+  height: 24px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  margin: 16px auto;
+  animation: setup-spin 0.8s linear infinite;
+}
+
+@keyframes setup-spin {
+  to { transform: rotate(360deg); }
+}
+
+.setup__auth-waiting {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.setup__auth-done {
+  text-align: center;
+  padding: 8px 0;
+}
+
+.setup__auth-success {
+  font-size: 14px;
+  color: var(--text);
+  margin-bottom: 16px;
+}
+
+.setup__badge {
+  display: inline-block;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  margin-left: 8px;
+  text-transform: capitalize;
+}
+
+.setup__skip-warn {
+  margin-top: 16px;
+  font-size: 12px;
+  color: var(--accent);
+  text-align: center;
+}
+
+.setup__skip {
+  display: block;
+  width: 100%;
+  margin-top: 16px;
+  padding: 8px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: center;
+}
+
+.setup__skip:hover {
+  color: var(--text);
+}
+
+.setup__auth-help {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 10px;
+}
+
+.setup__auth-help p {
+  margin-bottom: 6px;
+}
+
+.setup__auth-help p:last-of-type {
+  margin-bottom: 8px;
+}
+
+.setup__auth-help-cmd {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+}

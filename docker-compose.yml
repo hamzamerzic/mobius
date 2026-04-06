@@ -1,0 +1,45 @@
+# Self-hosted deployment: Caddy for TLS + single app container.
+# For managed hosting (Railway, PikaPods), just run the app service.
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      - DOMAIN=${DOMAIN}
+    depends_on:
+      app:
+        condition: service_healthy
+
+  app:
+    build: .
+    container_name: mobius
+    restart: unless-stopped
+    environment:
+      - SECRET_KEY=${SECRET_KEY}
+      - DOMAIN=${DOMAIN}
+      - FRONTEND_ORIGIN=https://${DOMAIN}
+      - DATABASE_URL=sqlite:////data/db/ultimate.db
+      - DATA_DIR=/data
+    volumes:
+      - app_data:/data
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  caddy_data:
+  caddy_config:
+  app_data:

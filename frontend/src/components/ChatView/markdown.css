@@ -1,0 +1,155 @@
+/* ── Markdown block components ─────────────────────── */
+
+.md-blocks {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.75rem;
+}
+
+.md-blocks > * {
+  min-width: 0;
+}
+
+.md-paragraph {
+  word-break: break-word;
+  white-space: normal;
+  line-height: 1.7;
+  padding-left: 8px;
+  padding-right: 32px;
+}
+
+.md-heading {
+  font-weight: 600;
+  color: var(--text);
+  padding-left: 8px;
+  padding-right: 32px;
+}
+
+.md-heading--1 { font-size: 18px; }
+.md-heading--2 { font-size: 16px; }
+.md-heading--3 { font-size: 15px; }
+.md-heading--4, .md-heading--5, .md-heading--6 { font-size: 14.5px; }
+
+.md-code-block {
+  background: var(--surface);
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  padding: 14px 16px;
+  font-size: 13px;
+  font-family: var(--mono);
+  overflow-x: auto;
+  white-space: pre;
+  line-height: 1.6;
+}
+
+.md-code-lang {
+  display: block;
+  font-size: 10.5px;
+  color: var(--muted);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+  font-family: var(--font);
+  font-weight: 500;
+}
+
+.md-code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--text);
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.md-inline-code {
+  background: var(--surface2);
+  border: 1px solid var(--border-light);
+  border-radius: 5px;
+  padding: 2px 6px;
+  font-size: 13px;
+  font-family: var(--mono);
+  color: var(--accent);
+}
+
+.md-table-wrap {
+  overflow-x: auto;
+}
+
+.md-table {
+  border-collapse: collapse;
+  font-size: 13px;
+  width: 100%;
+}
+
+.md-table th,
+.md-table td {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.md-table th {
+  background: var(--surface);
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.md-table tr:nth-child(even) td {
+  background: var(--surface);
+}
+
+.md-blockquote {
+  border-left: 3px solid var(--accent);
+  padding: 4px 12px;
+  color: var(--muted);
+}
+
+.md-list {
+  margin: 0;
+  padding-left: 28px;
+}
+
+.md-list-item {
+  margin-bottom: 4px;
+  line-height: 1.7;
+  padding-left: 8px;
+}
+
+.md-math-block {
+  overflow-x: auto;
+  padding: 8px 0;
+}
+
+.md-math-inline {
+  vertical-align: middle;
+}
+
+.md-hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 4px 8px;
+}
+
+.md-image {
+  max-width: 100%;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.md-image:hover {
+  opacity: 0.85;
+}
+
+/* Links in markdown */
+.md-blocks a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.md-blocks a:hover { color: var(--accent-hover); }
+
+.md-blocks strong { font-weight: 600; }

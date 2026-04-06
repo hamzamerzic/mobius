@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="referrer" content="no-referrer">
+  <script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@18.3.1",
+      "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
+      "react-dom": "https://esm.sh/react-dom@18.3.1",
+      "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+      "recharts": "https://esm.sh/recharts@2.12.0?exports=LineChart,BarChart,PieChart,AreaChart,Line,Bar,Pie,Area,XAxis,YAxis,ZAxis,Tooltip,CartesianGrid,Legend,ResponsiveContainer,Cell,LabelList,Brush,ComposedChart,ScatterChart,Scatter,RadarChart,Radar,PolarGrid,PolarAngleAxis,PolarRadiusAxis,RadialBarChart,RadialBar&external=react,react-dom",
+      "date-fns": "https://esm.sh/date-fns@3.6.0"
+    }
+  }
+  </script>
+  <style>
+    /* Fallback defaults — overridden by server-injected theme from theme.py. */
+    :root {
+      --bg: #0c0f14; --surface: #14181f; --surface2: #1a1f28;
+      --border: #252b36; --border-light: #1c2029;
+      --text: #d4d4d8; --muted: #52525b;
+      --accent: #a78bfa; --accent-hover: #c4b5fd;
+      --accent-dim: rgba(167, 139, 250, 0.1);
+      --danger: #f87171; --green: #6ee7b7;
+      --font: 'Inter', system-ui, sans-serif;
+      --mono: 'JetBrains Mono', ui-monospace, monospace;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { height: 100%; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 14px;
+    }
+    #error-panel {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      padding: 32px 24px;
+      text-align: center;
+      gap: 16px;
+    }
+    #error-panel.visible { display: flex; }
+    .error-icon { font-size: 28px; opacity: 0.5; }
+    .error-title { font-size: 15px; font-weight: 600; color: var(--danger); }
+    .error-detail {
+      max-width: 560px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--muted);
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+      text-align: left;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    .error-actions { display: flex; gap: 10px; margin-top: 4px; }
+    .error-btn {
+      border: none;
+      border-radius: 8px;
+      padding: 9px 18px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      font-family: var(--font);
+    }
+    .error-btn--reload { background: var(--surface2); color: var(--text); }
+    .error-btn--reload:hover { background: var(--border); }
+    .error-btn--report { background: var(--accent); color: #fff; }
+    .error-btn--report:hover { background: var(--accent-hover); }
+    .error-btn--reported { background: var(--surface2); color: var(--green); pointer-events: none; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <div id="error-panel">
+    <div class="error-icon">!</div>
+    <div class="error-title" id="error-title">Something went wrong</div>
+    <div class="error-detail" id="error-detail"></div>
+    <div class="error-actions">
+      <button class="error-btn error-btn--reload" onclick="location.reload()">Reload app</button>
+      <button class="error-btn error-btn--report" id="report-btn" onclick="reportError()">Tell agent to fix</button>
+    </div>
+  </div>
+
+  <script>
+    // Populated by server-side injection in get_frame() — do not rename.
+    var _FRAME_APP_ID = 'unknown'
+    var _FRAME_CHAT_ID = ''
+    var _FRAME_PARENT_ORIGIN = 'UNSET'
+
+    var capturedError = ''
+    var capturedErrorOnce = false  // only the first error is reported (root cause)
+
+    function showErr(title, detail) {
+      if (!capturedErrorOnce) { capturedError = detail; capturedErrorOnce = true; }
+      document.getElementById('error-title').textContent = title
+      document.getElementById('error-detail').textContent = detail
+      document.getElementById('error-panel').classList.add('visible')
+      document.getElementById('root').style.display = 'none'
+    }
+
+    function reportError() {
+      window.parent.postMessage({
+        type: 'moebius:app-error',
+        appId: _FRAME_APP_ID,
+        chatId: _FRAME_CHAT_ID,
+        error: capturedError
+      }, _FRAME_PARENT_ORIGIN)
+      var btn = document.getElementById('report-btn')
+      btn.textContent = 'Reported'
+      btn.className = 'error-btn error-btn--reported'
+    }
+
+    window.addEventListener('error', function(e) {
+      showErr('Runtime error', e.error ? e.error.stack || e.message : e.message)
+    })
+    window.addEventListener('unhandledrejection', function(e) {
+      showErr('Unhandled error', e.reason ? (e.reason.stack || String(e.reason)) : String(e))
+    })
+  </script>
+
+  <script type="module">
+    import { createRoot } from 'react-dom/client';
+    import { createElement } from 'react';
+
+    const params = new URLSearchParams(location.search);
+    const appId = params.get('appId');
+    const token = params.get('token') || '';
+
+    if (!appId || !token) {
+      showErr('Configuration error', 'Missing appId or authentication token.');
+    } else {
+      try {
+        const url = `/api/apps/${appId}/module?token=${encodeURIComponent(token)}`;
+        const mod = await import(url);
+        const Component = mod.default;
+        if (!Component) {
+          showErr('Module error', 'The app module has no default export.');
+        } else {
+          createRoot(document.getElementById('root')).render(
+            createElement(Component, { appId, token })
+          );
+        }
+      } catch (err) {
+        showErr('Failed to load app', err.stack || err.message);
+      }
+    }
+  </script>
+</body>
+</html>
