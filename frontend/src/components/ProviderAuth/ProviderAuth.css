@@ -1,0 +1,104 @@
+.pa__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.pa__flow {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Center the button when inside the setup wizard card. */
+.setup__card .pa__flow {
+  align-items: center;
+}
+
+.setup__card .pa__done {
+  text-align: center;
+  padding: 8px 0;
+}
+
+.pa__form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.pa__input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 9px 12px;
+  outline: none;
+  transition: border-color 0.15s;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.pa__input:focus {
+  border-color: var(--accent);
+}
+
+.pa__btn {
+  align-self: inherit;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 10px 20px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.pa__btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.pa__btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.pa__btn--sm {
+  padding: 5px 12px;
+  font-size: 13px;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.pa__btn--sm:hover:not(:disabled) {
+  background: var(--surface2);
+}
+
+.pa__label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.pa__muted {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.pa__muted a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.pa__success {
+  color: var(--green, #6ee7b7);
+}
+
+.pa__error {
+  font-size: 13px;
+  color: var(--danger, #ef4444);
+  margin-top: 4px;
+}

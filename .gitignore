@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+*.db
+
+# Environment — never commit secrets
+.env
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Docker runtime data
+caddy_data/
+caddy_config/
+docker-compose.override.yml
+
+# Local app data (created by the agent during development)
+apps/
+
+# Runtime data volume — database, compiled apps, logs
+# These are created at runtime and should not be in the repo.
+backend/data/
+
+# Log files
+*.log
+.worktrees/
+.superpowers/
+
+# Internal planning docs — not for public release
+docs/

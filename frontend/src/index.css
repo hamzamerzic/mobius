@@ -1,0 +1,75 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+/* Theme colors are injected server-side into <head> via theme.py.
+   Do NOT define color variables here — they cause a flash to the
+   wrong color before the server-injected theme takes effect.
+   Only non-color defaults for dev mode (where server injection
+   doesn't happen). */
+:root {
+  --font: 'Inter', system-ui, -apple-system, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+  color-scheme: dark;
+}
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+  position: fixed;
+  inset: 0;
+  width: 100%;
+}
+
+
+/*
+ * Shell fade-in animation.
+ *
+ * !! CRITICAL: DO NOT change "from { opacity: 0.95 }" to "opacity: 0" !!
+ *
+ * If the shell starts at opacity 0, the BODY background shows through.
+ * The body background may not match the active theme (the CSS file's
+ * default --bg loads before the server-injected theme CSS).  This
+ * caused a "fade to dark/black" bug.
+ *
+ * Starting at 0.95 gives a subtle fade-in without ever exposing the
+ * potentially-wrong body color underneath.
+ */
+.shell {
+  animation: shellFadeIn 0.15s ease-out;
+}
+
+@keyframes shellFadeIn {
+  from { opacity: 0.95; }
+  to { opacity: 1; }
+}
+
+/* Prevent iOS auto-zoom on input focus (requires font-size >= 16px). */
+input, textarea, select {
+  font-size: 16px;
+}
+
+body {
+  /* background is set inline on <body> and injected by the server
+     to match the active theme.  Do NOT set it here — it causes a
+     flash to the default color before the theme CSS loads. */
+  color: var(--text);
+  font-family: var(--font);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'cv01', 'ss01';
+}
+
+button {
+  cursor: pointer;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+input, textarea {
+  font-family: inherit;
+  font-size: inherit;
+}

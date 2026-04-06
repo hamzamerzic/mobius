@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <!-- Server replaces this with the active theme's --bg color on every request. -->
+    <meta name="theme-color" content="#0c0f14" />
+    <meta name="description" content="AI-powered personal app platform." />
+    <!-- iOS PWA: hides Safari UI chrome when launched from home screen -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <meta name="apple-mobile-web-app-title" content="Möbius" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" href="/moebius.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" />
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <title>Möbius</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+  </head>
+  <!-- Server replaces background:#0c0f14 with the active theme color. -->
+  <body style="margin:0;background:#0c0f14">
+    <!-- Server replaces background:#0c0f14 with the active theme's --bg color. -->
+    <div id="splash" style="position:fixed;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;background:#0c0f14;z-index:9999;transition:opacity .3s ease;contain:strict">
+      <img src="/moebius.png" width="56" height="56" alt="" style="opacity:.4;will-change:opacity" />
+    </div>
+    <div id="root"></div>
+    <script>
+      // Hide splash immediately on refresh (user already logged in).
+      if (localStorage.getItem('token')) {
+        var s = document.getElementById('splash')
+        if (s) s.remove()
+      }
+      // Prevent browser from scrolling to top on refresh.
+      if ('scrollRestoration' in history) {
+        history.scrollRestoration = 'manual'
+      }
+      // If the shell JS fails to load within 8s, surface a recovery link so the
+      // user can restore the UI without knowing the server address.
+      setTimeout(function() {
+        if (!document.getElementById('root').hasChildNodes()) {
+          var d = document.createElement('div')
+          d.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:99999;background:#1e293b;border:1px solid #334155;border-radius:10px;padding:14px 20px;font-family:system-ui,sans-serif;font-size:13px;color:#94a3b8;text-align:center;white-space:nowrap'
+          d.innerHTML = 'Shell failed to load. <a href="/recover" style="color:#a78bfa;text-decoration:none;font-weight:500">Open recovery page \u2192</a>'
+          document.body.appendChild(d)
+        }
+      }, 8000)
+    </script>
+    <script>if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js')</script>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

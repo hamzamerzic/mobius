@@ -1,0 +1,165 @@
+/* ── Backdrop ──────────────────────────────────────── */
+
+.drawer-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.22s ease;
+}
+
+.drawer-overlay--visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* ── Panel ─────────────────────────────────────────── */
+
+.drawer {
+  position: fixed;
+  top: calc(52px + env(safe-area-inset-top));
+  left: 0;
+  bottom: 0;
+  z-index: 95;
+  width: 280px;
+  background: var(--bg);
+  border-right: 1px solid var(--border-light);
+  display: flex;
+  flex-direction: column;
+  transform: translateX(-100%);
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.drawer--open {
+  transform: translateX(0);
+  box-shadow: 8px 0 48px rgba(0, 0, 0, 0.5);
+}
+
+.drawer__body {
+  flex: 1;
+  overflow: hidden;
+  padding: 10px 8px 24px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── New chat ──────────────────────────────────────── */
+
+.drawer__item--new {
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.drawer__item--new:hover {
+  color: var(--accent);
+}
+
+/* ── Groups (History, Apps) ───────────────────────── */
+
+.drawer__group {
+  margin-top: 8px;
+  min-height: 0;  /* allow flex children to shrink below content size */
+}
+
+.drawer__group--flex {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+
+.drawer__label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 12px 10px 6px;
+}
+
+.drawer__scroll {
+  flex: 1;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+/* ── Items ─────────────────────────────────────────── */
+
+.drawer__item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-family: var(--font);
+  font-weight: 400;
+  text-align: left;
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.drawer__item:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+
+.drawer__item--active {
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.drawer__item-text {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Delete ────────────────────────────────────────── */
+
+.drawer__delete {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.drawer__item:hover .drawer__delete { opacity: 1; }
+
+/* Always show on touch devices. */
+@media (hover: none) {
+  .drawer__delete { opacity: 0.5; }
+}
+
+.drawer__delete:hover {
+  color: var(--danger);
+}
+
+/* ── Bottom group (Settings) ───────────────────────── */
+
+.drawer__group--bottom {
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-light);
+}

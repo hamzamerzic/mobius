@@ -1,0 +1,14 @@
+# Use this override when adding Möbius to an existing Caddy instance.
+# Copy to docker-compose.override.yml and adjust the network name.
+services:
+  caddy:
+    profiles: ["disabled"]
+  app:
+    build: .
+    container_name: mobius
+    networks:
+      - deploy_default
+
+networks:
+  deploy_default:
+    external: true

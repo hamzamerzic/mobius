@@ -1,0 +1,12 @@
+# Protected files — read-only for the agent.
+#
+# These files handle credential input (passwords, tokens).  The agent
+# can read them to understand the auth flow but cannot modify them.
+# Tampering could allow exfiltration of user credentials.
+#
+# When adding new files that handle secrets or auth tokens, add them
+# here.  The entrypoint enforces chmod 444 + root ownership on these
+# paths (relative to /data/shell/) after every copy or reset.
+src/components/LoginForm/LoginForm.jsx
+src/components/SetupWizard/SetupWizard.jsx
+src/components/ProviderAuth/ProviderAuth.jsx

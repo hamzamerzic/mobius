@@ -1,0 +1,21 @@
+.canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: none;
+}
+
+.canvas--empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+
+.canvas__hint {
+  color: var(--muted);
+  font-style: italic;
+  text-align: center;
+  padding: 24px;
+  max-width: 300px;
+}
