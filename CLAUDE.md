@@ -4,32 +4,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-Möbius is a self-hosted PWA where the owner chats with an AI agent to dynamically build the app including  mini-apps. The chat is the persistent control surface; a full-screen canvas renders whichever mini-app is active. The AI backend supports CLI-based providers (currently only Claude Code) so users can use their existing subscriptions without paying for API tokens. The whole platform runs in Docker on a VPS and is installable on Android/iOS as a PWA.
+Möbius is a self-hosted PWA where the owner chats with an AI agent to build mini-apps and modify the platform itself. The chat is the persistent control surface; a full-screen canvas renders whichever mini-app is active.
+
+The "agent" is the Claude Code CLI running as a subprocess inside the Docker container. When the user sends a chat message, the backend spawns a `claude` process with the message, streams its output back via SSE, and saves the result. The agent can compile JSX into mini-apps, edit the shell UI, manage files, and run scheduled tasks.
+
+The whole platform runs in a single Docker container and is installable on Android/iOS as a PWA.
 
 ## Commands
 
-### Local development
-
-```bash
-# Backend (from repo root, requires Python 3.12+ and a .env file)
-cd backend
-pip install -r requirements.txt
-uvicorn app.main:app --reload
-
-# Frontend (from repo root)
-cd frontend
-npm install
-npm run dev          # dev server at http://localhost:5173 with /api proxy to :8000
-npm run build        # production build into dist/
-```
-
-### Production
+### Build and test (Docker — recommended)
 
 ```bash
 cp .env.example .env   # fill in DOMAIN and SECRET_KEY
-docker compose up -d
+docker compose up -d --build
 docker compose logs -f
 ```
+
+`SECRET_KEY` must be at least 32 characters. Generate one with `python3 -c "import secrets; print(secrets.token_hex(32))"`. If not set, the entrypoint auto-generates one and persists it to `/data/.secret-key`.
+
+Rebuild after changes with `docker compose up -d --build`. The Docker image bundles everything the agent needs (Claude CLI, esbuild, Node) so the full platform works out of the box.
 
 ### Agent refresh
 
@@ -224,17 +217,22 @@ The catch-up burst replays ALL events from the start of the response. Any reconn
 
 ### Scroll positioning
 
-When the user sends a message, a dynamic spacer fills the viewport below the message. As the response streams in, a `MutationObserver` shrinks the spacer:
+When the user sends a message, a dynamic spacer fills the viewport below the message. A `ResizeObserver` on the list keeps `scrollHeight` constant as content changes:
 
 ```
-targetH  = clientHeight + userMsgEl.offsetTop
-contentH = scrollHeight - spacerEl.offsetHeight
-newH     = max(0, targetH - contentH)
+spacer = max(0, maxViewH + scrollTarget − listEl.offsetHeight)
 ```
 
-The formula is scroll-position-independent — no `scrollTop`. Including `scrollTop` creates a feedback loop where scrolling inflates the spacer.
+The spacer shrinks as content grows and grows as content is removed (e.g. thinking dots on stop). This keeps `maxScrollTop = scrollTarget` at all times — no scrolling past the message, no scroll clamping on stop.
 
-Constraints: `.chat__scroll` must have `position: relative` (for `offsetTop`). `.spacer-dynamic` must NOT have a CSS transition (breaks scroll math). `.chat__list` sets `min-height: 0` during streaming to prevent iOS bounce from interfering with spacer math.
+Key rules:
+- **Measure `listEl.offsetHeight`, not `scrollEl.scrollHeight`.** A scroll container's `scrollHeight` never goes below `clientHeight`, producing wrong values when content is short.
+- **Scroll to `scrollTarget`, not `scrollHeight`.** Using `scrollHeight` overshoots when transient content (thinking dots) is present. When that content is removed, `scrollTop` gets clamped and the message shifts.
+- **No React `style` prop on the spacer.** Direct DOM manipulation via ref — React re-applies style props on every render, fighting the spacer updates.
+- **`spacerActive` keeps `min-height: 0` on the list** while the spacer is active. Without this, `min-height: calc(100% + 1px)` inflates `offsetHeight` and breaks the formula.
+- **`lastUserMsgRef` via `lastUserIdx`** — assigning the same ref to multiple list elements is unreliable (React doesn't re-assign refs on existing elements).
+- **`maxViewH` tracks the largest viewport seen** (keyboard open vs closed). The spacer is sized for the full viewport, not the keyboard-reduced one. A `resize` listener catches keyboard dismiss.
+- `.chat__scroll` must have `position: relative` (for `offsetTop`). `.spacer-dynamic` must NOT have a CSS transition.
 
 ### Streaming rendering
 
