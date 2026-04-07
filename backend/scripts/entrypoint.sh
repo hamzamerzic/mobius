@@ -7,8 +7,18 @@
 cleanup() { kill "$(cat /var/run/crond.pid 2>/dev/null)" 2>/dev/null; }
 trap cleanup TERM INT
 
-# Fix /data ownership (volume may have been created by root).
-chown -R mobius:mobius /data 2>/dev/null || true
+# Fix ownership on directories that may have been created by root.
+# Avoids slow recursive chown on large volumes with many app files.
+for dir in /data /data/db /data/apps /data/compiled /data/shared /data/shell /data/logs /data/cron-logs /data/cli-auth; do
+  if [ -d "$dir" ]; then
+    chown mobius:mobius "$dir" 2>/dev/null || true
+  fi
+done
+# First boot: full recursive chown since everything was just created.
+if [ ! -f /data/.initialized ]; then
+  chown -R mobius:mobius /data 2>/dev/null || true
+  touch /data/.initialized
+fi
 
 # Auto-generate SECRET_KEY if not set (one-click deploy support).
 # Persisted to /data so it survives container restarts.
@@ -23,8 +33,18 @@ if [ -z "$SECRET_KEY" ]; then
   fi
 fi
 
+if [ -z "$SECRET_KEY" ]; then
+  echo "FATAL: SECRET_KEY is empty after generation attempt" >&2
+  exit 1
+fi
+
 # Start cron daemon (runs as root, jobs execute as mobius).
 cron
+
+# Verify cron started (pgrep may not exist in slim images).
+if command -v pgrep > /dev/null 2>&1; then
+  pgrep -x cron > /dev/null || echo "WARNING: cron daemon failed to start" >&2
+fi
 
 # Create cron log directory.
 mkdir -p /data/cron-logs
@@ -159,22 +179,6 @@ EOF
   chown mobius:mobius /data/shared/theme.css
 fi
 
-
-# Run lightweight DB migrations (add columns that create_all misses).
-python3 -c "
-from sqlalchemy import text, inspect
-from app.database import engine
-with engine.connect() as conn:
-  cols = [c['name'] for c in inspect(engine).get_columns('chats')]
-  if 'deleted_at' not in cols:
-    conn.execute(text('ALTER TABLE chats ADD COLUMN deleted_at DATETIME'))
-    conn.commit()
-    print('Added deleted_at column to chats')
-  if 'session_id' not in cols:
-    conn.execute(text('ALTER TABLE chats ADD COLUMN session_id VARCHAR(128)'))
-    conn.commit()
-    print('Added session_id column to chats')
-" 2>/dev/null || true
 
 # Drop to non-root user and start the server.
 exec su -s /bin/sh mobius -c "cd /app && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"

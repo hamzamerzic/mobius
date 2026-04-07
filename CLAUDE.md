@@ -217,22 +217,28 @@ The catch-up burst replays ALL events from the start of the response. Any reconn
 
 ### Scroll positioning
 
-When the user sends a message, a dynamic spacer fills the viewport below the message. A `ResizeObserver` on the list keeps `scrollHeight` constant as content changes:
+A dynamic spacer below the message list ensures at least a viewport of space after the user's message. The formula:
 
 ```
-spacer = max(0, maxViewH + scrollTarget − listEl.offsetHeight)
+spacer = max(0, viewH + scrollTarget − listEl.offsetHeight)
 ```
 
-The spacer shrinks as content grows and grows as content is removed (e.g. thinking dots on stop). This keeps `maxScrollTop = scrollTarget` at all times — no scrolling past the message, no scroll clamping on stop.
+The spacer has three modes controlled by `needsSpacerRef` and `scrollTargetRef`:
+
+1. **Send** (`needsSpacerRef=true`): computes `scrollTarget` from the last user message's `offsetTop`, scrolls to it, and starts a `ResizeObserver` to track content growth. While `spacer > 0` (content shorter than viewport), holds `scrollTop` at the user message. Once `spacer` hits 0 (content exceeds viewport), auto-follows new content if near the bottom.
+
+2. **Promote/stop** (`needsSpacerRef=false`, `scrollTargetRef` set): recalculates spacer height once without touching scroll. Compensates for content height changes when thinking dots are removed or stream items are promoted to messages.
+
+3. **Mount/history** (`scrollTargetRef=null`): does nothing. Spacer height is restored from `sessionStorage` alongside scroll position.
 
 Key rules:
+- **Use current `viewH`, not a cached max.** `interactive-widget=resizes-content` in the viewport meta tag makes Android resize the layout viewport when the keyboard opens. The spacer must track this.
 - **Measure `listEl.offsetHeight`, not `scrollEl.scrollHeight`.** A scroll container's `scrollHeight` never goes below `clientHeight`, producing wrong values when content is short.
-- **Scroll to `scrollTarget`, not `scrollHeight`.** Using `scrollHeight` overshoots when transient content (thinking dots) is present. When that content is removed, `scrollTop` gets clamped and the message shifts.
 - **No React `style` prop on the spacer.** Direct DOM manipulation via ref — React re-applies style props on every render, fighting the spacer updates.
 - **`spacerActive` keeps `min-height: 0` on the list** while the spacer is active. Without this, `min-height: calc(100% + 1px)` inflates `offsetHeight` and breaks the formula.
 - **`lastUserMsgRef` via `lastUserIdx`** — assigning the same ref to multiple list elements is unreliable (React doesn't re-assign refs on existing elements).
-- **`maxViewH` tracks the largest viewport seen** (keyboard open vs closed). The spacer is sized for the full viewport, not the keyboard-reduced one. A `resize` listener catches keyboard dismiss.
-- `.chat__scroll` must have `position: relative` (for `offsetTop`). `.spacer-dynamic` must NOT have a CSS transition.
+- **Spacer height is persisted** in `sessionStorage` alongside scroll position (`_spacerHeights`). Both are restored together on mount so the scroll math stays consistent.
+- `.chat__scroll` must have `position: relative` (for `offsetTop`). `.spacer-dynamic` must NOT have a CSS transition. Don't add `visualViewport` resize listeners — they fire on keyboard open/close and conflict with `interactive-widget`.
 
 ### Streaming rendering
 

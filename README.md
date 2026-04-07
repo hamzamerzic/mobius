@@ -141,6 +141,8 @@ Everything in `/data` — your database, built apps, credentials, experience fil
 
 If something breaks, go to `/recover` — a separate password-protected page (same password as your login) that lets you rebuild the shell from the original source, download a backup of all your data, or perform a factory reset. It works even if the React app is broken, since it's a static HTML page served directly by the backend.
 
+For the full security model including mini-app token scoping and accepted trade-offs, see [SECURITY.md](SECURITY.md).
+
 **Install on mobile:** On Android, open the site in Chrome and tap "Add to Home Screen" from the browser menu. On iOS, open in Safari and tap the Share button → "Add to Home Screen". HTTPS is required for installation.
 
 ---
@@ -216,3 +218,9 @@ Douglas Hofstadter described strange loops as systems that, by moving through le
 Möbius does the same thing in code: the agent builds the interface it runs inside, accumulates experience about the system it inhabits, and uses that experience to build better things within it. Like the strip it's named after, there's no clear inside or outside — just one continuous surface.
 
 Whether that's a profound observation or just a fun excuse for the name is left as an exercise for the reader.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE) for details.

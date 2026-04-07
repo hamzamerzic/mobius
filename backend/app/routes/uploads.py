@@ -15,7 +15,7 @@ from app import models
 from app.auth import decode_access_token
 from app.config import get_settings
 from app.database import get_db
-from app.deps import get_current_owner
+from app.deps import get_current_owner_or_app
 
 router = APIRouter(prefix="/api/chats", tags=["uploads"])
 
@@ -82,9 +82,9 @@ def _auth_token(
 
 @router.post("/{chat_id}/uploads")
 async def upload_files(
-  files: List[UploadFile],
   chat_id: str,
-  owner: models.Owner = Depends(get_current_owner),
+  files: List[UploadFile],
+  owner: models.Owner = Depends(get_current_owner_or_app),
   db: Session = Depends(get_db),
 ):
   """Saves uploaded files to /data/chats/{id}/uploads/ and records metadata."""
@@ -135,7 +135,7 @@ async def upload_files(
 @router.get("/{chat_id}/uploads")
 def list_uploads(
   chat_id: str,
-  owner: models.Owner = Depends(get_current_owner),
+  owner: models.Owner = Depends(get_current_owner_or_app),
   db: Session = Depends(get_db),
 ):
   """Returns the list of uploaded files for a chat."""
