@@ -107,7 +107,7 @@ export default function SetupWizard({ onDone }) {
             Generate images in chat using Google's Gemini AI.
           </p>
           <p className="setup__subtitle">
-            Get a free API key at{' '}
+            Get an API key at{' '}
             <a href="https://aistudio.google.com" target="_blank" rel="noopener noreferrer">
               aistudio.google.com
             </a>
@@ -141,7 +141,7 @@ export default function SetupWizard({ onDone }) {
         <img src="/moebius.png" alt="Möbius" className="setup__logo" />
         <h1 className="setup__title">Welcome to Möbius</h1>
         <p className="setup__subtitle">
-          Your blank canvas. Create an account to get started.
+          Create an account to get started.
         </p>
         <form className="setup__form" onSubmit={handleAccountSubmit}>
           <label className="setup__label">

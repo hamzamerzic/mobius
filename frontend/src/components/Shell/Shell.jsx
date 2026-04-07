@@ -22,17 +22,12 @@ export default function Shell() {
   const { loadTheme } = useTheme()
 
   const [apps, setApps] = useState([])
-  const [pendingReport, setPendingReport] = useState(null)
   const [appVersion, setAppVersion] = useState(0)
   const [toast, setToast] = useState(null)
   const [chats, setChats] = useState([])
   const chatsLoadedRef = useRef(false)
-  // Last app built/updated by the agent — shown as an "Open app" CTA in chat.
   const [builtApp, setBuiltApp] = useState(null)
-  // PWA install prompt deferred event.
   const [pwaPrompt, setPwaPrompt] = useState(null)
-
-  const activeChat = chats.find(c => c.id === activeChatId) || chats[0]
 
   usePushSubscription()
 
@@ -49,7 +44,7 @@ export default function Shell() {
       .catch(() => [])
   }, [])
 
-  // Load chats from server.
+  // Load chats; restore activeChatId if still present, else pick the first.
   const refreshChats = useCallback(() => {
     apiFetch('/chats')
       .then(r => r.json())
@@ -69,7 +64,7 @@ export default function Shell() {
   useEffect(() => { refreshChats() }, [refreshChats])
   useEffect(() => { if (drawerOpen) { refreshApps(); refreshChats() } }, [drawerOpen, refreshApps, refreshChats])
 
-  // PWA install prompt.
+  // Capture PWA install prompt if the user hasn't dismissed it.
   useEffect(() => {
     if (localStorage.getItem('pwa-prompt-dismissed')) return
     function onBeforeInstall(e) {
@@ -80,17 +75,7 @@ export default function Shell() {
     return () => window.removeEventListener('beforeinstallprompt', onBeforeInstall)
   }, [])
 
-  // --- system event handler ---
-  // Receives events from the chat SSE stream that are not chat content:
-  // theme_updated, app_updated, shell_rebuilt, shell_rebuild_failed.
-  // theme_updated: hot-reloads CSS variables (no rebuild, no reload).
-  // app_updated: refreshes app list; if the updated app is open in the
-  //   canvas, bumps appVersion to trigger iframe cache-bust reload.
-  // shell_rebuilt: saves view state to sessionStorage, fades out the
-  //   page, then reloads.  On the fresh load, App.jsx and Shell detect
-  //   the shell-reload flag and restore state without showing the splash.
-  // shell_rebuild_failed: shows a toast — the agent sees the error in
-  //   its tool output and will fix the issue.
+  // Handle non-content SSE events: theme changes, app updates, shell rebuilds.
   const handleSystemEvent = useCallback((ev) => {
     if (ev.type === 'theme_updated') {
       loadTheme()
@@ -108,9 +93,7 @@ export default function Shell() {
         setAppVersion(v => v + 1)
       }
     } else if (ev.type === 'shell_rebuilt') {
-      // Deduplicate: the SSE catch-up burst replays all events including
-      // past shell_rebuilt, which would cause an infinite reload loop.
-      // Ignore if we already handled one within the last 5 seconds.
+      // Deduplicate against the SSE catch-up burst to avoid reload loops.
       const now = Date.now()
       const lastRebuilt = Number(sessionStorage.getItem('shell-rebuilt-at') || 0)
       if (now - lastRebuilt < 5000) return
@@ -131,84 +114,57 @@ export default function Shell() {
     }
   }, [activeAppId, activeView, drawerOpen, activeChatId, loadTheme, refreshApps])
 
-  // Listen for error reports from mini-app iframes.
-  // Routes the error to the chat that last built the app (stored as chatId
-  // in the frame), so the agent has full context for the fix.  Falls back
-  // to a new/empty chat if the building chat was deleted.
+  // Listen for postMessage events from mini-app iframes:
+  //   moebius:app-error — route crash report to the chat that built the app
+  //     (stored as chat_id on the app record). Falls back to a new chat if
+  //     the building chat was deleted. Error is set as a draft (not auto-sent)
+  //     so the user can review before sending.
+  //   moebius:new-chat — open a new chat with optional pre-filled draft text.
+  //     Always forceNew to avoid reusing the current empty chat (which would
+  //     skip the useState initializer that reads pending-draft).
   useEffect(() => {
     async function handleAppError(e) {
       const appEntry = apps.find(a => String(a.id) === String(e.data.appId))
       const appName = appEntry?.name || `app ${e.data.appId}`
       const report = `The app "${appName}" crashed with this error:\n\`\`\`\n${e.data.error}\n\`\`\`\nPlease investigate and fix.`
-      setActiveView('chat')
 
       const buildingChatId = appEntry?.chat_id || e.data.chatId || null
       const buildingChat = buildingChatId && chats.find(c => c.id === buildingChatId)
       if (buildingChat) {
+        try { sessionStorage.setItem('pending-draft', report) } catch {}
+        // Set view and chatId together to avoid flashing the previous chat.
+        setActiveView('chat')
         setActiveChatId(buildingChatId)
         refreshChats()
       } else {
-        const empty = [...chats]
-          .filter(c => !c.has_messages)
-          .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))
-          [0]
-        if (empty) {
-          setActiveChatId(empty.id)
-          refreshChats()
-        } else {
-          try {
-            const res = await apiFetch('/chats', {
-              method: 'POST',
-              body: JSON.stringify({ title: 'New chat' }),
-            })
-            const chat = await res.json()
-            setActiveChatId(chat.id)
-            refreshChats()
-          } catch { /* fall back to current active chat */ }
-        }
+        newChat({ draft: report, forceNew: true })
       }
-
-      setPendingReport(report)
     }
 
     function onMessage(e) {
-      if (e.data?.type !== 'moebius:app-error') return
-      // Only accept messages from our sandboxed frames (origin is the string 'null'
-      // because they lack allow-same-origin) or from our own origin.
       if (e.origin !== 'null' && e.origin !== window.location.origin) return
-      handleAppError(e)
+      if (e.data?.type === 'moebius:app-error') {
+        handleAppError(e)
+      } else if (e.data?.type === 'moebius:new-chat') {
+        newChat({ draft: e.data.draft, forceNew: true })
+      }
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
   }, [apps, chats])
 
-  async function deleteApp(id) {
-    await apiFetch(`/apps/${id}`, { method: 'DELETE' })
-    if (activeAppId === id) setActiveView('chat')
-    refreshApps()
-  }
-
-  async function newChat() {
-    // pushState already happened in openDrawer if from drawer.
-    if (drawerPushedRef.current) {
-      drawerPushedRef.current = false
-      navStackRef.current.push({
-        view: activeViewRef.current,
-        chatId: activeChatIdRef.current,
-        appId: activeAppIdRef.current,
-      })
-    }
-    setActiveView('chat')
-    closeDrawer()
-
-    // Reuse the most recently updated empty chat so a draft typed before
-    // navigating away survives (new chat → history → new chat → draft is back).
-    const empty = [...chats]
+  async function newChat({ draft, forceNew } = {}) {
+    // Resolve chatId BEFORE switching views — setting activeView='chat'
+    // with the old chatId causes a visible flash of the previous chat.
+    // forceNew: always create a new chat (don't reuse empty). Required for
+    // moebius:new-chat because reusing the same chatId wouldn't remount
+    // ChatView, so the useState initializer wouldn't read pending-draft.
+    let chatId
+    const empty = !forceNew && [...chats]
       .filter(c => !c.has_messages)
       .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))
       [0]
 
-    let chatId
     if (empty) {
       chatId = empty.id
     } else {
@@ -223,6 +179,21 @@ export default function Shell() {
       } catch { return }
     }
 
+    // Push nav stack so back returns to the previous view (skip automatic calls).
+    if (draft || forceNew || drawerPushedRef.current) {
+      if (!drawerPushedRef.current) history.pushState(null, '')
+      drawerPushedRef.current = false
+      navStackRef.current.push({
+        view: activeViewRef.current,
+        chatId: activeChatIdRef.current,
+        appId: activeAppIdRef.current,
+      })
+    }
+    closeDrawer()
+    if (draft) {
+      try { sessionStorage.setItem('pending-draft', draft) } catch {}
+    }
+    setActiveView('chat')
     setActiveChatId(chatId)
   }
 
@@ -241,9 +212,7 @@ export default function Shell() {
     setChats(prev => prev.filter(c => c.id !== id))
   }
 
-  // If no chats exist yet, create one. Guard with chatsLoadedRef so we don't
-  // fire before the initial refreshChats resolves (chats=[] is also the
-  // pre-fetch state, not just the empty-server state).
+  // Bootstrap: create an initial chat once the server confirms zero chats exist.
   useEffect(() => {
     if (!chatsLoadedRef.current) return
     if (chats.length === 0 && activeChatId === null) {
@@ -291,8 +260,6 @@ export default function Shell() {
               onStreamEnd={() => { refreshApps(); loadTheme(); refreshChats() }}
               onFirstMessage={refreshChats}
               onSystemEvent={handleSystemEvent}
-              pendingReport={pendingReport}
-              onReportConsumed={() => setPendingReport(null)}
               builtApp={builtApp}
               onOpenApp={(id) => { navTo('canvas', { appId: id }); setBuiltApp(null) }}
               onMessageStart={() => setBuiltApp(null)}

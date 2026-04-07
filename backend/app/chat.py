@@ -162,7 +162,7 @@ async def run_chat(
     tz_line = f"\nTimezone: {timezone}" if timezone else ""
     if ctx or tz_line:
       user_message = (
-        f"<agent_context>\n{ctx}{tz_line}\n</agent_context>"
+        f"<agent_experience>\n{ctx}{tz_line}\n</agent_experience>"
         f"\n\n{user_message}"
       )
 

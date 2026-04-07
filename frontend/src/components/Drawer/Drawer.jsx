@@ -31,31 +31,31 @@ export default function Drawer({
             <span className="drawer__item-text">New chat</span>
           </button>
 
-          {allChats.length > 0 && (
-            <div className="drawer__group drawer__group--flex">
-              <p className="drawer__label">History</p>
-              <div className="drawer__scroll">
-                {allChats.map(chat => (
+          <div className="drawer__group drawer__group--flex">
+            <p className="drawer__label">History</p>
+            <div className="drawer__scroll">
+              {allChats.length > 0 ? allChats.map(chat => (
+                <button
+                  key={chat.id}
+                  className={`drawer__item ${activeView === 'chat' && activeChatId === chat.id ? 'drawer__item--active' : ''}`}
+                  onClick={() => onChat(chat.id)}
+                >
+                  <span className="drawer__item-text">{chat.title}</span>
                   <button
-                    key={chat.id}
-                    className={`drawer__item ${activeView === 'chat' && activeChatId === chat.id ? 'drawer__item--active' : ''}`}
-                    onClick={() => onChat(chat.id)}
+                    className="drawer__delete"
+                    onClick={(e) => { e.stopPropagation(); onDeleteChat(chat.id) }}
+                    aria-label="Delete chat"
                   >
-                    <span className="drawer__item-text">{chat.title}</span>
-                    <button
-                      className="drawer__delete"
-                      onClick={(e) => { e.stopPropagation(); onDeleteChat(chat.id) }}
-                      aria-label="Delete chat"
-                    >
-                      <svg width="8" height="8" viewBox="0 0 8 8" fill="none">
-                        <path d="M1 1l6 6M7 1L1 7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
-                      </svg>
-                    </button>
+                    <svg width="8" height="8" viewBox="0 0 8 8" fill="none">
+                      <path d="M1 1l6 6M7 1L1 7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+                    </svg>
                   </button>
-                ))}
-              </div>
+                </button>
+              )) : (
+                <p className="drawer__empty">No conversations yet</p>
+              )}
             </div>
-          )}
+          </div>
 
           {apps.length > 0 && (
             <div className="drawer__group drawer__group--flex">

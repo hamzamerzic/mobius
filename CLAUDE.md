@@ -215,44 +215,88 @@ The CLI subprocess publishes events to a `ChatBroadcast` (in-memory event bus). 
 
 The catch-up burst replays ALL events from the start of the response. Any reconnection path must reset `streamItems` before connecting — otherwise replayed events duplicate the initial response. When ChatView mounts and the agent is already running, it strips the partial assistant message from DB-loaded messages since the catch-up burst will replay it.
 
-### Scroll positioning
+### Chat UX — non-negotiable constraints
 
-A dynamic spacer below the message list ensures at least a viewport of space after the user's message. The formula:
+These behaviors are load-bearing. Any change to scroll, spacer, keyboard,
+or rendering code must preserve all of them.
 
-```
-spacer = max(0, viewH + scrollTarget − listEl.offsetHeight)
-```
+1. **Spacer on send.** When the user sends a message, a dynamic spacer is
+   added below the message list so the user's message scrolls to the top
+   of the viewport. The spacer height is set *before* `scrollTop`.
 
-The spacer has three modes controlled by `needsSpacerRef` and `scrollTargetRef`:
+2. **No scroll fighting.** The ResizeObserver updates spacer height as
+   content streams in. It only sets `scrollTop` in two cases: (a) content
+   shrank and the browser clamped scrollTop (clamp-fix), (b) content
+   filled the viewport and auto-follow kicks in (`gap < 50`). The user
+   can scroll freely at all other times.
 
-1. **Send** (`needsSpacerRef=true`): computes `scrollTarget` from the last user message's `offsetTop`, scrolls to it, and starts a `ResizeObserver` to track content growth. While `spacer > 0` (content shorter than viewport), holds `scrollTop` at the user message. Once `spacer` hits 0 (content exceeds viewport), auto-follows new content if near the bottom.
+3. **Re-anchor on promote.** When streaming ends and items are promoted
+   to messages, the content structure changes. The spacer is recalculated
+   and `scrollTop` is re-set to `scrollTarget` to prevent layout shift.
 
-2. **Promote/stop** (`needsSpacerRef=false`, `scrollTargetRef` set): recalculates spacer height once without touching scroll. Compensates for content height changes when thinking dots are removed or stream items are promoted to messages.
+4. **fullViewH for spacer sizing.** The spacer uses `fullViewHRef` — the
+   keyboard-closed viewport height captured once on mount. This prevents
+   the keyboard open/close cycle from changing `scrollHeight` and causing
+   scroll position resets. Do NOT use current `clientHeight` for the
+   spacer formula.
 
-3. **Mount/history** (`scrollTargetRef=null`): does nothing. Spacer height is restored from `sessionStorage` alongside scroll position.
+5. **overflow-anchor: none.** Chrome's scroll anchoring fights the spacer.
+   Disabled on `.chat__scroll`.
+
+6. **Keyboard handling.** `interactive-widget=resizes-content` is used.
+   The `.chat__scroll` container is always in the DOM (even on empty
+   chats). On non-PWA Android browser, opening the keyboard causes a
+   small visual shift (~3px) — this is native browser behavior and
+   cannot be prevented without removing `resizes-content`.
+
+7. **Scroll position is saved.** On every scroll event, position is saved
+   as `scrollHeight − scrollTop` in `_scrollPositions[chatId]`. Spacer
+   height is saved alongside in `_spacerHeights[chatId]`. Both persist to
+   `sessionStorage` on unmount. On mount, spacer is restored first, then
+   `scrollTop = scrollHeight − saved`. A 300ms re-apply corrects drift
+   from lazy renderers (highlight.js).
+
+8. **Streaming renders without jitter.** Block-memoized markdown: only
+   the last (active) block re-renders as tokens arrive.
+
+### Spacer implementation
+
+Formula: `spacer = max(0, fullViewH + scrollTarget − listEl.offsetHeight)`
+
+Two modes controlled by `needsSpacerRef` and `scrollTargetRef`:
+
+1. **Send** (`needsSpacerRef=true`): computes `scrollTarget` from the
+   last user message's `offsetTop`, sets spacer height, sets `scrollTop`,
+   starts a `ResizeObserver` to track content growth.
+
+2. **Promote/stop** (`isSend=false`, `scrollTargetRef` set): recalculates
+   spacer and re-anchors `scrollTop` to `scrollTarget`.
 
 Key rules:
-- **Use current `viewH`, not a cached max.** `interactive-widget=resizes-content` in the viewport meta tag makes Android resize the layout viewport when the keyboard opens. The spacer must track this.
-- **Measure `listEl.offsetHeight`, not `scrollEl.scrollHeight`.** A scroll container's `scrollHeight` never goes below `clientHeight`, producing wrong values when content is short.
-- **No React `style` prop on the spacer.** Direct DOM manipulation via ref — React re-applies style props on every render, fighting the spacer updates.
-- **`spacerActive` keeps `min-height: 0` on the list** while the spacer is active. Without this, `min-height: calc(100% + 1px)` inflates `offsetHeight` and breaks the formula.
-- **`lastUserMsgRef` via `lastUserIdx`** — assigning the same ref to multiple list elements is unreliable (React doesn't re-assign refs on existing elements).
-- **Spacer height is persisted** in `sessionStorage` alongside scroll position (`_spacerHeights`). Both are restored together on mount so the scroll math stays consistent.
-- `.chat__scroll` must have `position: relative` (for `offsetTop`). `.spacer-dynamic` must NOT have a CSS transition. Don't add `visualViewport` resize listeners — they fire on keyboard open/close and conflict with `interactive-widget`.
+- **Set spacer height before `scrollTop`.** Otherwise the browser clamps.
+- **Use `fullViewHRef`**, not current `clientHeight`. Set once on mount.
+- **Measure `listEl.offsetHeight`**, not `scrollEl.scrollHeight`.
+- **No React `style` prop on the spacer.** Direct DOM manipulation via ref.
+- **`spacerActive` keeps `min-height: 0` on the list** while active.
+- **`lastUserMsgRef` via `lastUserIdx`** — one ref, one element.
+- `.chat__scroll` must have `position: relative` and `overflow-anchor: none`.
+- `.spacer-dynamic` must NOT have a CSS transition.
+
+### Known limitation — non-PWA Android browser
+
+When opening the keyboard on non-PWA Android browser, the viewport resize
+(`interactive-widget=resizes-content`) causes a small visual shift of the
+chat content (~3px). This is native browser behavior — the browser adjusts
+scroll position to keep the focused input visible in the smaller viewport.
+This does not occur on PWA (standalone mode) because the keyboard behavior
+differs. No fix is possible without removing `resizes-content`, which
+would require a different keyboard handling approach (visualViewport API
+with overlay mode).
 
 ### Scroll restoration
 
-Scroll position is saved as distance-from-bottom (`scrollHeight - scrollTop`) on every scroll event in `_scrollPositions[chatId]`. Spacer height is saved alongside it in `_spacerHeights[chatId]`. Both are persisted to `sessionStorage` on unmount.
-
-On mount, the spacer is restored first (it affects `scrollHeight`), then `scrollTop = scrollHeight - saved`. A delayed re-apply (300ms) corrects drift from lazy renderers — KaTeX math, syntax highlighting, and table styling load async and change content height after the initial restore.
-
-**Do not hide/fade the scroll area during restoration.** Attempts to suppress reflow jitter with `visibility: hidden` or `opacity: 0` cause a visible flash that's worse than the jitter itself, because `useLayoutEffect` fires after React commits DOM mutations but the browser may have already painted the previous frame.
-
-### Android keyboard
-
-The viewport meta tag includes `interactive-widget=resizes-content`, which makes Android Chrome resize the layout viewport (not just the visual viewport) when the keyboard opens. This is required so `position: fixed` elements (the shell, input bar) reflow correctly. Without it, the browser scrolls the page to keep the focused input visible, pushing the toolbar off screen.
-
-The spacer uses current `viewH` (not a cached max) because the viewport legitimately shrinks when the keyboard opens. A cached `maxViewH` would size the spacer for the full viewport even with the keyboard open, causing the scroll target to land at the wrong position on subsequent sends.
+**Do not hide/fade the scroll area during restoration.** `visibility:
+hidden` or `opacity: 0` cause a visible flash.
 
 ### Streaming rendering
 
@@ -272,7 +316,7 @@ Each chat stores a `session_id` from the CLI. First message starts a fresh sessi
 
 The skill (`skill/agent-skill.md`) is passed as `--system-prompt-file` only on the first message. Resumed sessions inherit the system prompt from creation — start a fresh chat after deploying skill changes.
 
-Dynamic per-session data (experience file, timezone) is injected into the first user message as an `<agent_context>` block, not the system prompt. Static content goes first for prompt cache efficiency.
+Dynamic per-session data (experience file, timezone) is injected into the first user message as an `<agent_experience>` block, not the system prompt. Static content goes first for prompt cache efficiency.
 
 ### Agent write access
 

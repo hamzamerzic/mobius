@@ -156,6 +156,15 @@
   color: var(--danger);
 }
 
+/* ── Empty state ──────────────────────────────────── */
+
+.drawer__empty {
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--muted);
+  opacity: 0.6;
+}
+
 /* ── Bottom group (Settings) ───────────────────────── */
 
 .drawer__group--bottom {
