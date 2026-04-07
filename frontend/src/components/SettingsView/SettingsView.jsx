@@ -45,24 +45,40 @@ export default function SettingsView({ onThemeChange }) {
       const mode = newMode ? 'light' : 'dark'
       const newCss = buildThemeCss(colors, meta, mode)
 
-      await apiFetch('/storage/shared/theme.css', {
-        method: 'PUT',
-        body: JSON.stringify({ content: newCss }),
-      })
+      // Apply immediately to the DOM — no round-trip delay.
+      const el = document.getElementById('mobius-theme') || (() => {
+        const s = document.createElement('style')
+        s.id = 'mobius-theme'
+        document.head.appendChild(s)
+        return s
+      })()
+      const bgMatch = newCss.match(/--bg:\s*(#[0-9a-fA-F]{3,8})/)
+      if (bgMatch) {
+        document.body.style.background = bgMatch[1]
+        const themeMeta = document.querySelector('meta[name="theme-color"]')
+        if (themeMeta) themeMeta.setAttribute('content', bgMatch[1])
+      }
+      el.textContent = newCss.replace(/@import\s+url\([^)]+\)\s*;[^\S\n]*\n?/g, '')
 
-      await apiFetch('/storage/shared/theme-mode', {
-        method: 'PUT',
-        body: JSON.stringify({ content: JSON.stringify(mode) }),
-      })
+      // Persist in background — don't await sequentially.
+      await Promise.all([
+        apiFetch('/storage/shared/theme.css', {
+          method: 'PUT',
+          body: JSON.stringify({ content: newCss }),
+        }),
+        apiFetch('/storage/shared/theme-mode', {
+          method: 'PUT',
+          body: JSON.stringify({ content: JSON.stringify(mode) }),
+        }),
+      ])
 
-      await apiFetch('/notify', {
+      apiFetch('/notify', {
         method: 'POST',
         body: JSON.stringify({ type: 'theme_updated' }),
-      })
-
-      onThemeChange?.()
+      }).catch(() => {})
     } catch {
       setLightMode(!newMode)
+      onThemeChange?.()  // reload original theme on error
     } finally {
       setThemeSwitching(false)
     }

@@ -4,7 +4,7 @@ import Attachments from './Attachments.jsx'
 
 
 function stripAugmentation(text) {
-  let cleaned = text.replace(/\s*<agent_context>[\s\S]*?<\/agent_context>\s*/g, '')
+  let cleaned = text.replace(/\s*<agent_experience>[\s\S]*?<\/agent_experience>\s*/g, '')
   cleaned = cleaned.replace(/\s*\[Files in this session:\n[\s\S]*?\]\s*/g, '')
   return cleaned.trim()
 }

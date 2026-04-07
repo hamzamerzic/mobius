@@ -5,6 +5,8 @@ static files.  API routes are registered first; the frontend SPA is
 mounted last as a catch-all so that client-side routing works.
 """
 
+import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -13,9 +15,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from sqlalchemy.exc import OperationalError
 
 from app.config import get_settings
 from app.database import Base, engine, run_migrations
+from app.push import init_vapid
 from app.routes import (
   ai_router, apps_router, auth_router,
   chat_router, chats_router, chats_stream_router,
@@ -24,25 +28,31 @@ from app.routes import (
   recover_router, settings_router, storage_router, uploads_router,
 )
 
-import time
-from sqlalchemy.exc import OperationalError
-for _attempt in range(10):
-  try:
-    run_migrations(engine)
-    Base.metadata.create_all(bind=engine)
-    break
-  except OperationalError as _e:
-    # Transient: DB file locked, volume not mounted yet, etc.
-    if _attempt < 9:
-      delay = min(2 ** _attempt, 10)
-      print(f"DB init failed (attempt {_attempt + 1}/10, retry in {delay}s): {_e}")
-      time.sleep(delay)
-    else:
-      print(f"DB init failed after 10 attempts: {_e}")
-      raise
 
-from app.push import init_vapid
-init_vapid()
+def _init_db():
+  """Run migrations and create tables, retrying on transient failures."""
+  for attempt in range(10):
+    try:
+      run_migrations(engine)
+      Base.metadata.create_all(bind=engine)
+      return
+    except OperationalError as e:
+      if attempt < 9:
+        delay = min(2 ** attempt, 10)
+        print(f"DB init retry {attempt + 1}/10 in {delay}s: {e}")
+        time.sleep(delay)
+      else:
+        raise
+
+
+@asynccontextmanager
+async def lifespan(app):
+  _init_db()
+  init_vapid()
+  # Seed a Hello World app on first boot (no-op if apps already exist).
+  from scripts.seed_hello import seed as seed_hello
+  await seed_hello()
+  yield
 
 settings = get_settings()
 
@@ -65,6 +75,7 @@ app = FastAPI(
   title="Möbius",
   description="Self-hosted AI agent platform.",
   version="0.1.0",
+  lifespan=lifespan,
 )
 
 app.state.limiter = limiter

@@ -1,5 +1,6 @@
 .setup {
   height: 100%;
+  overflow-y: auto;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -52,6 +53,8 @@
 }
 
 .setup__input {
+  width: 100%;
+  box-sizing: border-box;
   background: var(--bg, #0c0f14);
   border: 1px solid var(--border, #252b36);
   border-radius: 6px;
@@ -74,6 +77,7 @@
   font-size: 13px;
   color: var(--muted, #52525b);
   margin-top: 6px;
+  margin-bottom: 16px;
 }
 
 .setup__btn {
