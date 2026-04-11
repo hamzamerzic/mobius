@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import DOMPurify from 'dompurify'
-import { getToken } from '../../../api/client.js'
+import { getToken, BASE } from '../../../api/client.js'
 import { renderInlineMath, renderBlockMath, renderMathToString } from './math.js'
 import ImageLightbox from './ImageLightbox.jsx'
 import '../lightbox.css'
@@ -78,7 +78,7 @@ function InlineToken({ token }) {
 
 function resolveImageSrc(href) {
   let src = DOMPurify.sanitize(href)
-  if (src.startsWith('/api/')) {
+  if (src.startsWith('/api/') || src.startsWith(BASE + '/api/')) {
     const url = new URL(src, location.origin)
     url.searchParams.set('token', getToken())
     src = url.pathname + url.search

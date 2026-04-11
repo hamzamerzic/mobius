@@ -43,9 +43,7 @@ When you ask for something, the agent builds it as a small app, live, no reload.
 
 ## Get Started
 
-### Railway (one click)
-
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/mobius?referralCode=5TQuhr)
+### <a href="https://railway.com/deploy/mobius?referralCode=5TQuhr"><img src="https://railway.com/button.svg" alt="Deploy on Railway" height="28"></a>
 
 Click **Deploy Now**, log in to Railway, and deploy. Once it's finished, go to **Settings → Networking → Generate Domain**. You'll get a URL like `xxx.up.railway.app`. Open it, and the setup wizard walks you through creating your account and signing in with Claude.
 
@@ -53,7 +51,7 @@ Bookmark `https://xxx.up.railway.app/recover`. If the UI ever breaks, that's whe
 
 If you're logging in on your phone, save to home screen for the best experience.
 
-### Self-hosted
+### Deploy Self-hosted
 
 **Requirements:** a Linux server with Docker, a domain name pointing to it, and a Claude subscription.
 

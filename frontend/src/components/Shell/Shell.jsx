@@ -3,7 +3,7 @@ import Drawer from '../Drawer/Drawer.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
 import ChatView from '../ChatView/ChatView.jsx'
 import SettingsView from '../SettingsView/SettingsView.jsx'
-import { apiFetch } from '../../api/client.js'
+import { apiFetch, BASE } from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
 import useNavigation from '../../hooks/useNavigation.js'
 import useTheme from '../../hooks/useTheme.js'
@@ -232,7 +232,7 @@ export default function Shell() {
           onClick={() => { if (backFiredRef.current) return; drawerOpen ? closeDrawer() : openDrawer() }}
           onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && (drawerOpen ? closeDrawer() : openDrawer())}
         >
-          <img className="shell__logo" src="/moebius.png" alt="" width="30" height="30" />
+          <img className="shell__logo" src={`${BASE}/moebius.png`} alt="" width="30" height="30" />
           <span className="shell__wordmark">Möbius</span>
         </div>
       </header>

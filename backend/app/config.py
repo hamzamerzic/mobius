@@ -15,27 +15,27 @@ class Settings(BaseSettings):
   database_url: str = "sqlite:////data/db/ultimate.db"
   data_dir: str = "/data"
   frontend_origin: str = "http://localhost:5173"
-  api_base_url: str = "http://localhost:8000"
+  api_base_url: str = f"http://localhost:{os.environ.get('PORT', '8000')}"
 
   model_config = SettingsConfigDict(env_file=".env")
 
   @model_validator(mode="before")
   @classmethod
   def auto_detect_platform_domain(cls, values):
-    """On Railway/managed platforms, derive domain and origin automatically."""
+    """On Railway/managed platforms, derive domain and origin automatically.
+
+    api_base_url is NOT set here — the default (http://localhost:$PORT)
+    is correct for all deployment modes since the agent always talks to
+    the server on the same host.
+    """
     domain = values.get("domain") or values.get("DOMAIN") or "localhost"
     origin = values.get("frontend_origin") or values.get("FRONTEND_ORIGIN") or ""
     railway_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
-    port = os.environ.get("PORT", "8000")
     if railway_domain and domain == "localhost":
       values["domain"] = railway_domain
       values["frontend_origin"] = f"https://{railway_domain}"
-      # Use localhost for agent subprocess calls (same container),
-      # with the correct port that Railway assigned.
-      values["api_base_url"] = f"http://localhost:{port}"
     elif domain != "localhost" and (not origin or origin == "http://localhost:5173"):
       values["frontend_origin"] = f"https://{domain}"
-      values["api_base_url"] = f"https://{domain}"
     return values
 
   @field_validator("secret_key")

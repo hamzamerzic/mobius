@@ -24,7 +24,11 @@ export default function Drawer({
         className={`drawer-overlay ${open ? 'drawer-overlay--visible' : ''}`}
         onClick={onClose}
       />
-      <nav className={`drawer ${open ? 'drawer--open' : ''}`} aria-hidden={!open}>
+      <nav
+        className={`drawer ${open ? 'drawer--open' : ''}`}
+        aria-hidden={!open}
+        inert={!open ? '' : undefined}
+      >
         <div className="drawer__body">
 
           <button className="drawer__item drawer__item--new" onClick={onNewChat}>

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { getToken } from '../../api/client.js'
+import { getToken, BASE } from '../../api/client.js'
 
 // Characters revealed per frame at 60fps.
 // 3 chars/frame × 60fps = ~180 chars/sec — fast but smooth.
@@ -153,14 +153,26 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
     abortRef.current = controller
 
     try {
-      const res = await fetch(`/api/chats/${chatIdRef.current}/stream`, {
+      const res = await fetch(`${BASE}/api/chats/${chatIdRef.current}/stream`, {
         headers: { Authorization: `Bearer ${getToken()}` },
         signal: controller.signal,
       })
 
       if (res.status === 204) {
-        // No active stream — agent isn't running.
+        // No active stream — the broadcast is gone, which means either
+        // the agent never started on this chat or it already finalized
+        // and saved the response to the DB.  In both cases the right
+        // move is to DROP any stale partial items we may still hold
+        // from a previous connection.  Promoting them would duplicate
+        // whatever the DB fetch is about to return.  Null the
+        // controller so visibility/online handlers can fire future
+        // reconnections.
+        abortRef.current = null
+        setConnectionError(null)
+        retryCount.current = 0
         setIsStreaming(false)
+        setStreamItems([])
+        textBufferRef.current = ''
         return
       }
 
@@ -284,6 +296,7 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
       }
 
       // Stream closed without done event.
+      abortRef.current = null
       flushBuffer()
       setIsStreaming(false)
       requestAnimationFrame(() => onStreamEndRef.current?.())
@@ -298,6 +311,9 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
       // duplicating the initial portion of the response.
       if (retryCount.current >= 3) {
         setConnectionError('disconnected')
+        // Null the stale controller so visibility/online handlers can
+        // trigger reconnection after retries exhaust.
+        abortRef.current = null
       } else {
         setConnectionError('retrying')
         const delay = Math.pow(2, retryCount.current) * 1000
@@ -330,7 +346,8 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
         body.attachments = attachments
       }
       try { body.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone } catch {}
-      const res = await fetch(`/api/chats/${chatIdRef.current}/messages`, {
+      body.viewport = { width: window.innerWidth, height: window.innerHeight }
+      const res = await fetch(`${BASE}/api/chats/${chatIdRef.current}/messages`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

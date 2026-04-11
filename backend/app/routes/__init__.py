@@ -15,6 +15,7 @@ from app.routes.uploads import router as uploads_router
 from app.routes.generate import router as generate_router
 from app.routes.push import router as push_router
 from app.routes.notifications import router as notifications_router
+from app.routes.debug import router as debug_router
 
 __all__ = [
   "auth_router",
@@ -32,4 +33,5 @@ __all__ = [
   "generate_router",
   "push_router",
   "notifications_router",
+  "debug_router",
 ]

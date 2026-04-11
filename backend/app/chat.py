@@ -23,7 +23,15 @@ from app.providers import get_provider
 
 
 def _get_logger() -> logging.Logger:
-  """Returns a logger that writes to the data/logs/chat.log file."""
+  """Returns a logger that writes to the data/logs/chat.log file.
+
+  Default level is INFO so chat.log stays small — one line per chat
+  start/done/error, not one per streaming delta.  Set
+  `MOEBIUS_CHAT_DEBUG=1` to capture all stream events when investigating
+  a parser issue.  The env var is read once on first access (the logger
+  handler is memoized); toggling it at runtime has no effect — restart
+  the process to pick up a change.
+  """
   logger = logging.getLogger("moebius.chat")
   if logger.handlers:
     return logger
@@ -35,7 +43,9 @@ def _get_logger() -> logging.Logger:
     logging.Formatter("%(asctime)s %(levelname)s %(message)s")
   )
   logger.addHandler(handler)
-  logger.setLevel(logging.DEBUG)
+  logger.setLevel(
+    logging.DEBUG if os.getenv("MOEBIUS_CHAT_DEBUG") else logging.INFO
+  )
   return logger
 
 
@@ -82,15 +92,48 @@ async def _drain(stream: asyncio.StreamReader) -> None:
 # Track active subprocesses per chat ID so we can stop them on demand.
 _active_procs: dict[str, asyncio.subprocess.Process] = {}
 
+# Guards against duplicate agent spawns.  send_message adds the chat_id
+# before creating the background task; run_chat removes it in finally.
+# This closes the TOCTOU gap between is_chat_running and proc registration.
+_starting: set[str] = set()
+
+
+def get_active_procs() -> dict[str, asyncio.subprocess.Process]:
+  """Accessor for the active-procs dict.  Prefer this over importing
+  `_active_procs` directly so the internal structure can change without
+  breaking debug/status routes and tests."""
+  return _active_procs
+
+
+def get_starting() -> set[str]:
+  """Accessor for the starting-set.  See `get_active_procs` for why."""
+  return _starting
+
 
 def is_chat_running(chat_id: str) -> bool:
-  """Returns True if an agent subprocess is running for this chat."""
+  """Returns True if an agent subprocess is running or starting for this chat."""
+  if chat_id in _starting:
+    return True
   proc = _active_procs.get(chat_id)
   if proc is not None and proc.returncode is None:
     return True
-  # Also check the broadcast — it may be running even if proc was cleaned up.
   bc = get_broadcast(chat_id)
   return bc is not None and bc.running
+
+
+def mark_starting(chat_id: str) -> bool:
+  """Atomically marks a chat as starting.  Returns False if already active."""
+  if is_chat_running(chat_id):
+    return False
+  _starting.add(chat_id)
+  return True
+
+
+def discard_starting(chat_id: str) -> None:
+  """Removes a chat_id from the starting set.  Call from send_message's
+  error handler if the caller fails before scheduling run_chat — otherwise
+  the chat_id leaks and the chat is stuck 'starting' until process restart."""
+  _starting.discard(chat_id)
 
 
 async def stop_chat(chat_id: str | None = None, db: Session = None) -> bool:
@@ -131,12 +174,38 @@ def _finalize_response(
   )
 
 
+async def _close_browser_session(chat_id: str) -> None:
+  """Close this chat's agent-browser session so Chrome doesn't linger.
+
+  Best-effort: logs and swallows any error so cleanup never blocks a
+  chat from completing. agent-browser must be on PATH (installed by the
+  Dockerfile); if it's not (e.g. local dev outside the container), the
+  call silently no-ops.
+  """
+  if not chat_id:
+    return
+  try:
+    proc = await asyncio.create_subprocess_exec(
+      "agent-browser", "--session", f"chat-{chat_id}", "close",
+      stdout=asyncio.subprocess.DEVNULL,
+      stderr=asyncio.subprocess.DEVNULL,
+    )
+    await asyncio.wait_for(proc.wait(), timeout=5.0)
+  except FileNotFoundError:
+    pass  # agent-browser not installed (local dev)
+  except asyncio.TimeoutError:
+    log.warning("agent-browser close timed out for chat %s", chat_id)
+  except Exception as exc:
+    log.warning("agent-browser close failed for chat %s: %s", chat_id, exc)
+
+
 async def run_chat(
   messages: list[schemas.ChatMessage],
   chat_id: str = "",
   session_id: str | None = None,
   attachments: list[dict] | None = None,
   timezone: str | None = None,
+  viewport: dict | None = None,
 ) -> None:
   """Runs the provider CLI as a subprocess and publishes events to the
   chat's ChatBroadcast.  Caller must create the broadcast before calling."""
@@ -160,9 +229,19 @@ async def run_chat(
       ctx = ""
     # Dynamic fields go at the end for cache efficiency.
     tz_line = f"\nTimezone: {timezone}" if timezone else ""
-    if ctx or tz_line:
+    vp_line = f"\nViewport: {viewport['width']}x{viewport['height']}" if viewport else ""
+    if ctx or tz_line or vp_line:
+      # One-line pointer so the agent knows the block is a real file.
+      # The seed's "About this file" section inside the block owns the
+      # full spec (how to read, append, delete).
+      meta = (
+        "The <agent_experience> block below is a snapshot of "
+        "/data/shared/agent-experience.md — see 'About this file' "
+        "inside for how to read and update it."
+      )
       user_message = (
-        f"<agent_experience>\n{ctx}{tz_line}\n</agent_experience>"
+        f"{meta}\n\n"
+        f"<agent_experience>\n{ctx}{tz_line}{vp_line}\n</agent_experience>"
         f"\n\n{user_message}"
       )
 
@@ -233,14 +312,15 @@ async def run_chat(
     session_id=session_id,
     base_env=base_env,
     data_dir=settings.data_dir,
+    chat_id=chat_id,
   )
 
   data_dir = Path(settings.data_dir)
   cwd = str(data_dir) if data_dir.exists() else str(Path.cwd())
 
   log.info(
-    "chat start provider=%s session=%s msg_len=%d",
-    provider.name, session_id or "new", len(user_message),
+    "chat start chat_id=%s provider=%s session=%s msg_len=%d",
+    chat_id, provider.name, session_id or "new", len(user_message),
   )
   try:
     proc = await asyncio.create_subprocess_exec(
@@ -311,8 +391,8 @@ async def run_chat(
 
             if event_type == "done":
               log.info(
-                "chat done cost_usd=%.4f",
-                event.get("cost_usd", 0),
+                "chat done chat_id=%s cost_usd=%.4f",
+                chat_id, event.get("cost_usd", 0),
               )
               bc.publish({"type": "done"})
               break
@@ -372,6 +452,11 @@ async def run_chat(
       except asyncio.TimeoutError:
         log.warning("subprocess did not exit cleanly, killing")
         proc.kill()
+      # Tear down this chat's agent-browser session so Chrome doesn't
+      # linger between turns.  Best-effort — log and continue on failure
+      # so we never block a chat from completing on cleanup issues.
+      await _close_browser_session(chat_id)
+      browser_session_closed = True
 
   except Exception as exc:
     _active_procs.pop(chat_id, None)
@@ -382,4 +467,11 @@ async def run_chat(
     set_active_broadcast(None)
     bc.mark_completed()
   finally:
+    _starting.discard(chat_id)
+    # If the inner finally ran, the session is already closed and we
+    # don't pay for a second agent-browser subprocess.  Only close from
+    # the outer finally when a crash during setup means the inner
+    # finally never ran.
+    if not locals().get("browser_session_closed"):
+      await _close_browser_session(chat_id)
     db.close()

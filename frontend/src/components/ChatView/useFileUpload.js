@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { getToken } from '../../api/client.js'
+import { getToken, BASE } from '../../api/client.js'
 
 /**
  * Hook encapsulating file upload state and API calls for chat attachments.
@@ -31,7 +31,7 @@ export default function useFileUpload({ chatId }) {
         // Content-Type with the boundary, which apiFetch overrides with JSON.
         const fd = new FormData()
         fd.append('files', fileList[i])
-        const res = await fetch(`/api/chats/${chatId}/uploads`, {
+        const res = await fetch(`${BASE}/api/chats/${chatId}/uploads`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${getToken()}` },
           body: fd,

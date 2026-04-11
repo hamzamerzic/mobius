@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { apiFetch } from '../../api/client.js'
+import { apiFetch, BASE } from '../../api/client.js'
 import './AppCanvas.css'
 
 // version: bumped by Shell when an app_updated event arrives for this
@@ -33,7 +33,7 @@ export default function AppCanvas({ appId, version = 0 }) {
 
   if (!token) return null
 
-  const src = `/api/apps/${appId}/frame?token=${encodeURIComponent(token)}&v=${version}`
+  const src = `${BASE}/api/apps/${appId}/frame?token=${encodeURIComponent(token)}&v=${version}`
 
   return (
     <iframe

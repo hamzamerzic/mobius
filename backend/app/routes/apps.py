@@ -1,6 +1,8 @@
 """Routes for managing the mini-app registry."""
 
 import json
+import re
+import shutil
 import subprocess
 from pathlib import Path
 from urllib.parse import urlencode
@@ -111,14 +113,48 @@ def delete_app(
   db: Session = Depends(get_db),
   _: models.Owner = Depends(get_current_owner),
 ):
-  """Deletes a mini-app from the registry."""
+  """Permanently deletes a mini-app — DB row, compiled bundle, source tree.
+
+  This is irreversible.  The caller is expected to confirm with the
+  partner before invoking (the agent skill spells this out).
+  """
   app = (
     db.query(models.App).filter(models.App.id == app_id).first()
   )
   if not app:
     raise HTTPException(status_code=404, detail="App not found.")
+
+  # Capture paths before dropping the DB row.  Delete the row first so
+  # a partial filesystem cleanup leaves the registry coherent — stale
+  # files are harmless orphans, a DB row pointing at missing files is
+  # a live 404.
+  compiled_path = app.compiled_path
+  app_name = app.name
+
   db.delete(app)
   db.commit()
+
+  # Compiled bundle — one file under /data/compiled/.
+  if compiled_path:
+    try:
+      Path(compiled_path).unlink(missing_ok=True)
+    except OSError:
+      pass  # best effort — a stale compiled file is harmless
+
+  # Source tree under /data/apps/<slug>/.  Only delete directories whose
+  # name is a URL-safe slug, to avoid path-traversal via a tampered name
+  # field.  If the agent used a non-slug name, the source tree is left.
+  if app_name and re.fullmatch(r"[a-zA-Z0-9_-]+", app_name):
+    settings = get_settings()
+    source_dir = Path(settings.data_dir) / "apps" / app_name
+    try:
+      resolved = source_dir.resolve()
+      apps_root = (Path(settings.data_dir) / "apps").resolve()
+      if (resolved.is_dir()
+          and str(resolved).startswith(str(apps_root) + "/")):
+        shutil.rmtree(resolved, ignore_errors=True)
+    except OSError:
+      pass
 
 
 @router.get("/{app_id}/frame")
@@ -145,13 +181,20 @@ def get_frame(
   if not compiled.exists():
     raise HTTPException(status_code=404, detail="Compiled module missing.")
 
-  frame_path = (
+  # Frame priority: agent-editable copy first, then dev-mode path, then
+  # the baked-in fallback.  The agent can edit
+  # /data/shell/public/app-frame.html directly — that file is seeded
+  # once on first boot from /app/shell-src/public/ and is never
+  # overwritten on subsequent boots, so edits persist across
+  # restarts without needing a shell rebuild.
+  frame_candidates = [
+    Path(get_settings().data_dir) / "shell" / "public" / "app-frame.html",
     Path(__file__).parent.parent.parent.parent
-    / "frontend" / "public" / "app-frame.html"
-  )
-  if not frame_path.exists():
-    frame_path = Path("/app/app-frame.html")
-  if not frame_path.exists():
+    / "frontend" / "public" / "app-frame.html",
+    Path("/app/app-frame.html"),
+  ]
+  frame_path = next((p for p in frame_candidates if p.exists()), None)
+  if frame_path is None:
     raise HTTPException(status_code=404, detail="Frame not found.")
 
   html = frame_path.read_text(encoding="utf-8")

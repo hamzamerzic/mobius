@@ -88,7 +88,7 @@ class ClaudeProvider(BaseProvider):
   cli_cmd = "claude"
   auth_dir = "claude"
 
-  def build(self, user_message, session_id, base_env, data_dir):
+  def build(self, user_message, session_id, base_env, data_dir, chat_id=None):
     cmd = [
       "claude",
       "-p",
@@ -104,6 +104,9 @@ class ClaudeProvider(BaseProvider):
       if skill:
         cmd += ["--system-prompt-file", str(skill)]
 
+    # The agent uses agent-browser (installed in the image) via Bash for
+    # screenshots and interactive testing — no MCP browser tools needed.
+
     # Load user-configurable settings (model, effort).
     agent_settings = _load_agent_settings(data_dir)
     if agent_settings.get("model"):
@@ -111,13 +114,22 @@ class ClaudeProvider(BaseProvider):
     if agent_settings.get("effort"):
       cmd += ["--effort", agent_settings["effort"]]
 
-    # Message is a positional argument — always last.
-    cmd.append(user_message)
+    # Message is a positional argument — always last.  The "--" terminates
+    # option parsing so the agent doesn't confuse it with a flag value.
+    cmd += ["--", user_message]
 
     env = dict(base_env)
     creds = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
     if creds.exists():
       env["CLAUDE_CONFIG_DIR"] = str(creds.parent)
+
+    # Per-chat agent-browser session.  Every agent-browser invocation
+    # in this subprocess picks up AGENT_BROWSER_SESSION via env, so
+    # each chat gets its own isolated Chrome instance and they don't
+    # fight over the "default" session when building in parallel.
+    # The session is torn down by chat.py in the finally block.
+    if chat_id:
+      env["AGENT_BROWSER_SESSION"] = f"chat-{chat_id}"
 
     return ProviderResult(cmd=cmd, env=env)
 
