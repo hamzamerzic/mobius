@@ -94,6 +94,7 @@ Never delete `/app/static/` — it's the only recovery fallback and is root-owne
 | `routes/settings.py` | Owner-level configuration (API keys) |
 | `routes/storage.py` | Per-app and shared file storage |
 | `routes/uploads.py` | Per-chat file upload management |
+| `routes/debug.py` | Observability: active procs, broadcasts, chat logs |
 
 ### Frontend (`frontend/src/`)
 
@@ -146,14 +147,46 @@ Every mini-app is a JSX file that esbuild compiles to an ES module. It must `exp
 ```
 /data/
 ├── db/ultimate.db          SQLite database
-├── compiled/app-*.js       esbuild output (one file per app)
-├── apps/{id}/              per-app data files (written by mini-apps)
+├── compiled/app-*.js       esbuild output (one file per app, keyed by numeric id)
+├── apps/<slug>/index.jsx   agent-editable JSX source (keyed by app name slug)
+├── apps/<slug>/...         per-app data files written by the mini-app at runtime
 ├── shared/                 cross-app shared files (theme.css, agent-experience.md)
 ├── shell/                  agent's editable shell copy (src/ + dist/)
 ├── cli-auth/claude/        CLI credentials (.credentials.json)
 ├── cron-logs/              output from scheduled task scripts
 └── service-token.txt       long-lived JWT for cron scripts (chmod 600)
 ```
+
+### Copying apps between instances
+
+`POST /api/apps/` (with `jsx_source` in the body) stores the source
+in the DB and writes the compiled bundle to `/data/compiled/app-N.js`
+— but it does NOT write `/data/apps/<slug>/index.jsx`. Without that
+on-disk source, the destination agent can't find and edit the app
+later; it would have to recreate it from scratch. Also note that
+`GET /api/apps/{id}` does not return `jsx_source` (the `AppOut`
+schema omits it) so the source is not retrievable via API once
+shipped.
+
+**When copying an app to another instance, ship both:**
+
+```bash
+# 1. POST the source → DB + compiled bundle
+docker exec <dst> curl -s -X POST \
+  -H "Authorization: Bearer $TOK" \
+  -H "Content-Type: application/json" \
+  -d "$(python3 -c 'import json,sys;print(json.dumps({"name":"X","description":"...","jsx_source":open(sys.argv[1]).read()}))' /tmp/src.jsx)" \
+  http://localhost:8000/api/apps/
+
+# 2. Copy the source tree so the agent can edit in place later
+docker exec <src> cat /data/apps/<slug>/index.jsx > /tmp/src.jsx
+docker exec <dst> mkdir -p /data/apps/<slug>
+docker cp /tmp/src.jsx <dst>:/data/apps/<slug>/index.jsx
+docker exec <dst> chown -R mobius:mobius /data/apps/<slug>
+```
+
+Direct `docker cp` between containers is not supported — always
+stage through the host filesystem in `/tmp/`.
 
 ## Code style
 
@@ -191,7 +224,7 @@ Key details:
 
 ## Version pinning
 
-All key tool versions are pinned in the Dockerfile: `esbuild@0.20.2`, `@anthropic-ai/claude-code@2.1.92`, `python:3.12-slim`, `node:20-slim`.
+All key tool versions are pinned in the Dockerfile: `esbuild@0.20.2`, `@anthropic-ai/claude-code@2.1.101`, `agent-browser` (unpinned, downloads its own Chromium), `python:3.12-slim`, `node:20-slim`.
 
 The CLI is pinned because the PKCE OAuth workaround depends on internal constants (client_id, token URL, credential format) extracted from the CLI binary.
 
@@ -225,10 +258,16 @@ or rendering code must preserve all of them.
    of the viewport. The spacer height is set *before* `scrollTop`.
 
 2. **No scroll fighting.** The ResizeObserver updates spacer height as
-   content streams in. It only sets `scrollTop` in two cases: (a) content
-   shrank and the browser clamped scrollTop (clamp-fix), (b) content
-   filled the viewport and auto-follow kicks in (`gap < 50`). The user
-   can scroll freely at all other times.
+   content streams in. It sets `scrollTop` in two cases: (a) content
+   shrank and the browser clamped scrollTop below `scrollTarget`
+   (clamp-fix), (b) auto-follow — if the user is "near the bottom",
+   snap to bottom so content growth doesn't leave them mid-stream.
+   "Near the bottom" is `gap < 50` updated by a passive scroll
+   listener on `.chat__scroll` — fires on every scroll (including
+   programmatic snaps) so the ResizeObserver always has a fresh
+   reading. When the user scrolls up past 50px, `nearBottom` goes
+   false and auto-follow stops immediately (no one-tick lag). The
+   user can scroll freely at all other times.
 
 3. **Re-anchor on promote.** When streaming ends and items are promoted
    to messages, the content structure changes. The spacer is recalculated
@@ -244,10 +283,14 @@ or rendering code must preserve all of them.
    Disabled on `.chat__scroll`.
 
 6. **Keyboard handling.** `interactive-widget=resizes-content` is used.
-   The `.chat__scroll` container is always in the DOM (even on empty
-   chats). On non-PWA Android browser, opening the keyboard causes a
-   small visual shift (~3px) — this is native browser behavior and
-   cannot be prevented without removing `resizes-content`.
+   The `.chat__scroll` container mounts on the first user send and
+   stays mounted for the rest of the session — empty chats render a
+   standalone `.chat__empty-wrap` sibling instead. The shift-prevention
+   the scroll container provides is only needed once there's a message
+   list to anchor, so the empty state is exempt. On non-PWA Android
+   browser, opening the keyboard causes a small visual shift (~3px)
+   once the scroll container is mounted — this is native browser
+   behavior and cannot be prevented without removing `resizes-content`.
 
 7. **Scroll position is saved.** On every scroll event, position is saved
    as `scrollHeight − scrollTop` in `_scrollPositions[chatId]`. Spacer

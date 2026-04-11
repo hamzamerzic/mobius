@@ -1,0 +1,26 @@
+services:
+  app:
+    image: mobius-test:ci
+    build: .
+    container_name: mobius-test
+    restart: "no"
+    environment:
+      - SECRET_KEY=${SECRET_KEY:-}
+      - DOMAIN=localhost
+      - FRONTEND_ORIGIN=http://localhost:8001
+      - DATABASE_URL=sqlite:////data/db/ultimate.db
+      - DATA_DIR=/data
+      - AGENT_BROWSER_STREAM_PORT=9225
+    volumes:
+      - test_data:/data
+    ports:
+      - "8001:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  test_data:

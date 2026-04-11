@@ -73,6 +73,7 @@ class SendMessage(BaseModel):
   content: str
   attachments: list[dict] | None = None
   timezone: str | None = None
+  viewport: dict | None = None
 
 
 class PushKeys(BaseModel):

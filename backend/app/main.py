@@ -23,7 +23,7 @@ from app.push import init_vapid
 from app.routes import (
   ai_router, apps_router, auth_router,
   chat_router, chats_router, chats_stream_router,
-  generate_router, notifications_router,
+  debug_router, generate_router, notifications_router,
   notify_router, proxy_router, push_router,
   recover_router, settings_router, storage_router, uploads_router,
 )
@@ -107,6 +107,7 @@ app.include_router(uploads_router)
 app.include_router(generate_router)
 app.include_router(push_router)
 app.include_router(notifications_router)
+app.include_router(debug_router)
 
 
 @app.get("/api/health")

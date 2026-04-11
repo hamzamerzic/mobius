@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
-import { getToken } from '../../api/client.js'
+import { getToken, BASE } from '../../api/client.js'
 import ImageLightbox from './markdown/ImageLightbox.jsx'
 
 export default function Attachments({ attachments, chatId }) {
@@ -16,7 +16,7 @@ export default function Attachments({ attachments, chatId }) {
           {images.map((img, i) => (
             <AttachImage
               key={i}
-              src={`/api/chats/${chatId}/uploads/${img.name}?token=${token}`}
+              src={`${BASE}/api/chats/${chatId}/uploads/${img.name}?token=${token}`}
               alt={img.name}
             />
           ))}
@@ -26,7 +26,7 @@ export default function Attachments({ attachments, chatId }) {
         <a
           key={i}
           className="chat__attach-file"
-          href={`/api/chats/${chatId}/uploads/${f.name}?token=${token}`}
+          href={`${BASE}/api/chats/${chatId}/uploads/${f.name}?token=${token}`}
           target="_blank"
           rel="noopener noreferrer"
         >

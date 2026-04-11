@@ -4,6 +4,13 @@
   padding: 0;
 }
 
+/* Hide scrollbars globally. Shell-wide (not just .chat__scroll) so
+   all scrollable containers look clean. Applied here instead of in
+   theme.css because the theme-switching frontend code rewrites
+   theme.css and strips out any custom rules. */
+html, body, * { scrollbar-width: none; -ms-overflow-style: none; }
+*::-webkit-scrollbar { display: none; width: 0; height: 0; }
+
 /* Theme colors are injected server-side into <head> via theme.py.
    Do NOT define color variables here — they cause a flash to the
    wrong color before the server-injected theme takes effect.

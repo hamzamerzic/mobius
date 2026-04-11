@@ -39,5 +39,13 @@ backend/data/
 .worktrees/
 .superpowers/
 
+# Playwright
+tests/.auth/
+test-results/
+playwright-report/
+
 # Internal planning docs — not for public release
 docs/
+
+# Internal dev artifacts — not for public release
+demo-logs/
