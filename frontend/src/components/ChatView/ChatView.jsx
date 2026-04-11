@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react'
-import { apiFetch, getToken } from '../../api/client.js'
+import { apiFetch, getToken, BASE } from '../../api/client.js'
 import { ProgressiveMarkdown } from './markdown/BlockRenderer.jsx'
 import useStreamConnection from './useStreamConnection.js'
 import useVoiceInput from './useVoiceInput.js'
@@ -183,11 +183,16 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // Restore scroll position before paint, then re-apply after 300ms to
   // correct drift from lazy renderers (KaTeX, highlight.js).
   useLayoutEffect(() => {
+    // Capture full viewport height as soon as the scroll element mounts.
+    // Must happen outside the needsScrollRef guard — the scroll element may
+    // not exist on the initial render (empty state), so the first render
+    // where it appears may not have needsScrollRef set.
+    const el = scrollRef.current
+    if (el && !fullViewHRef.current) fullViewHRef.current = el.clientHeight
+
     if (!needsScrollRef.current) return
     needsScrollRef.current = false
-    const el = scrollRef.current
     if (!el) return
-    if (!fullViewHRef.current) fullViewHRef.current = el.clientHeight
     // Spacer height must be restored first — it affects scrollHeight.
     const savedSpacer = _spacerHeights[chatId]
     const sp = el.querySelector('.spacer-dynamic')
@@ -204,6 +209,18 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       }
     }
     applyScroll()
+    // Restore scrollTarget so the spacer effect sets up a ResizeObserver.
+    // Without this, returning to a streaming chat leaves the spacer frozen
+    // because scrollTargetRef was nulled on cleanup.  Use the last user
+    // message's offsetTop (same as the send path) so the spacer formula
+    // produces the correct height for keeping that message at the top.
+    if (savedSpacer && parseInt(savedSpacer) > 0) {
+      const userMsgs = el.querySelectorAll('.chat__msg--user')
+      const lastUserEl = userMsgs[userMsgs.length - 1]
+      scrollTargetRef.current = lastUserEl
+        ? Math.max(0, lastUserEl.offsetTop - 4)
+        : el.scrollTop
+    }
     // Re-apply after lazy renderers settle.
     const tid = setTimeout(applyScroll, 300)
     return () => clearTimeout(tid)
@@ -259,14 +276,24 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     const spacerH = Math.max(0, viewH + st - listH)
     spacerEl.style.height = `${spacerH}px`
 
-    // Promote: recalculate spacer only, don't touch scroll.
-    if (!isSend) return
-    scrollEl.scrollTop = st
+    if (isSend) scrollEl.scrollTop = st
 
-    // ResizeObserver: update spacer as content streams in. Only touches
-    // scrollTop when content shrank (clamp fix) or filled the viewport
-    // (auto-follow). During normal streaming the user can scroll freely.
+    // ResizeObserver: keep the spacer in sync as content streams in,
+    // tool blocks expand, or lazy renderers (highlight.js, KaTeX) resize.
+    // Set up on every path (send, promote, reconnect) — not just send —
+    // so the spacer stays correct after switching chats and returning.
     let prevH = spacerH
+    // Track whether the user is near the bottom so auto-follow works
+    // during streaming.  Updated on EVERY scroll event (including
+    // programmatic snaps) so the ResizeObserver always has a fresh
+    // reading — no stale-by-one-tick problem.
+    let nearBottom = true
+    const onScroll = () => {
+      const g = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
+      nearBottom = g < 50
+    }
+    scrollEl.addEventListener('scroll', onScroll, { passive: true })
+
     const ro = new ResizeObserver(() => {
       if (scrollTargetRef.current == null) return
       const target = scrollTargetRef.current
@@ -281,14 +308,21 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       }
       prevH = h
 
-      // Content filled the reserved space — auto-follow if near bottom.
-      if (h <= 0) {
-        const gap = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
-        if (gap < 50) scrollEl.scrollTop = scrollEl.scrollHeight
+      // Auto-follow: if the user is near the bottom (updated in real
+      // time by the scroll listener above), snap to bottom.  The scroll
+      // listener fires on the programmatic snap too, keeping nearBottom
+      // true for the next resize.  When the user scrolls up past 50px,
+      // the listener sets nearBottom=false and auto-follow stops.
+      const gap = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
+      if (nearBottom && gap > 1) {
+        scrollEl.scrollTop = scrollEl.scrollHeight
       }
     })
     ro.observe(listEl)
-    return () => { ro.disconnect() }
+    return () => {
+      ro.disconnect()
+      scrollEl.removeEventListener('scroll', onScroll)
+    }
   }, [messages])
 
 
@@ -386,7 +420,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
   async function handleStop() {
     try {
-      await fetch('/api/chat/stop', {
+      await fetch(`${BASE}/api/chat/stop`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -407,18 +441,17 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
   return (
     <div className={`chat${showEmpty ? ' chat--empty' : ''}`}>
-      <div className="chat__scroll" ref={scrollRef} onScroll={handleScroll}>
-
-      {showEmpty ? (
+      {showEmpty && (
         <div className="chat__empty-wrap">
           <div className="chat__empty">
-            <img className="chat__empty-glyph" src="/moebius.png" alt="" width="120" height="120" />
+            <img className="chat__empty-glyph" src={`${BASE}/moebius.png`} alt="" width="120" height="120" />
             <p className="chat__empty-title">What's on your mind?</p>
             <p className="chat__empty-sub">Try: "What can you do?" or "Build me a weather app"<br />The agent learns from every session and gets better over time.</p>
           </div>
         </div>
-      ) : (
-      <>
+      )}
+      {!showEmpty && (
+      <div className="chat__scroll" ref={scrollRef} onScroll={handleScroll}>
         <ul className="chat__list" style={spacerActive ? { minHeight: 0 } : undefined}>
           {hasMore && (
             <li className="chat__older">
@@ -479,9 +512,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         </ul>
 
         <div className="spacer-dynamic" ref={spacerRef} aria-hidden="true" />
-      </>
-      )}
       </div>
+      )}
 
       {builtApp && !sending && (
         <div className="chat__open-app">

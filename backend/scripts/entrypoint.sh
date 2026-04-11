@@ -86,6 +86,12 @@ if [ -n "$_token" ]; then
   echo "Service token written/refreshed at /data/service-token.txt"
 fi
 
+# The python block above imports app.database, which opens the SQLite
+# engine as root and creates an empty /data/db/ultimate.db file owned by
+# root. That then breaks uvicorn running as mobius. Re-chown /data/db
+# here so the mobius user can always write.
+chown -R mobius:mobius /data/db 2>/dev/null || true
+
 # Copy frontend source to /data/shell/ on first boot (or recovery).
 if [ ! -d /data/shell/src ]; then
   echo "Initializing editable shell source in /data/shell/..."

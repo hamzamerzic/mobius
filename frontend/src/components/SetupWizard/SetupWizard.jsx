@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { apiFetch, setToken, setSetupInProgress } from '../../api/client.js'
+import { apiFetch, setToken, setSetupInProgress, BASE } from '../../api/client.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import './SetupWizard.css'
 
@@ -74,7 +74,7 @@ export default function SetupWizard({ onDone }) {
     return (
       <div className="setup">
         <div className="setup__card">
-          <img src="/moebius.png" alt="Möbius" className="setup__logo" />
+          <img src={`${BASE}/moebius.png`} alt="Möbius" className="setup__logo" />
           <h1 className="setup__title">Connect your AI</h1>
           <p className="setup__subtitle">
             Sign in with your Claude account. Requires a Pro or Max subscription.
@@ -101,7 +101,7 @@ export default function SetupWizard({ onDone }) {
     return (
       <div className="setup">
         <div className="setup__card">
-          <img src="/moebius.png" alt="Möbius" className="setup__logo" />
+          <img src={`${BASE}/moebius.png`} alt="Möbius" className="setup__logo" />
           <h1 className="setup__title">Image generation (optional)</h1>
           <p className="setup__subtitle">
             Generate images in chat using Google's Gemini AI.
@@ -138,7 +138,7 @@ export default function SetupWizard({ onDone }) {
   return (
     <div className="setup">
       <div className="setup__card">
-        <img src="/moebius.png" alt="Möbius" className="setup__logo" />
+        <img src={`${BASE}/moebius.png`} alt="Möbius" className="setup__logo" />
         <h1 className="setup__title">Welcome to Möbius</h1>
         <p className="setup__subtitle">
           Create an account to get started.

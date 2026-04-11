@@ -5,11 +5,13 @@
   background: var(--bg);
 }
 
-/* Empty state: content sits inside .chat__scroll so Android's
-   interactive-widget=resizes-content has a scroll container to resize
-   when the keyboard opens. min-height fills the visible area. */
-.chat__empty-wrap {
-  min-height: 100%;
+/* Empty state: sits outside .chat__scroll as a direct flex child so it
+   doesn't fight the scroll container's min-height, spacers, or overflow
+   rules.  flex:1 + centering groups it naturally with the input bar. */
+.chat--empty .chat__empty-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;

@@ -32,8 +32,11 @@ export const LIGHT_COLORS = {
 
 export function parseThemeMeta(css) {
   const imports = []
-  css.replace(/@import\s+url\(\s*['"]([^'"]+)['"]\s*\)\s*;[^\S\n]*\n?/g, (_, url) => {
+  let rest = css
+  // Strip @imports (captured separately)
+  rest = rest.replace(/@import\s+url\(\s*['"]([^'"]+)['"]\s*\)\s*;[^\S\n]*\n?/g, (_, url) => {
     imports.push(`@import url('${url}');`)
+    return ''
   })
   const font = (css.match(/--font:\s*([^;]+);/) || [])[1]?.trim() || "'Inter', system-ui, sans-serif"
   const mono = (css.match(/--mono:\s*([^;]+);/) || [])[1]?.trim() || "'JetBrains Mono', ui-monospace, monospace"
@@ -44,7 +47,29 @@ export function parseThemeMeta(css) {
     const key = `--${name}`
     if (key !== '--font' && key !== '--mono') colors[key] = value.trim()
   })
-  return { imports, font, mono, fontSize, colors }
+  // Capture everything OUTSIDE the first top-level :root {...} block so
+  // arbitrary extra CSS (scrollbar rules, animations, user tweaks) is
+  // preserved across theme toggles. We strip the first :root block by
+  // counting brace depth so nested rules don't confuse us.
+  const extras = stripRootBlock(rest).trim()
+  return { imports, font, mono, fontSize, colors, extras }
+}
+
+function stripRootBlock(css) {
+  const m = css.match(/:root\s*\{/)
+  if (!m) return css
+  const start = m.index
+  let depth = 0
+  let i = css.indexOf('{', start)
+  for (; i < css.length; i++) {
+    const c = css[i]
+    if (c === '{') depth++
+    else if (c === '}') {
+      depth--
+      if (depth === 0) return css.slice(0, start) + css.slice(i + 1)
+    }
+  }
+  return css.slice(0, start)  // unclosed block — drop the rest
 }
 
 export function buildThemeCss(colors, meta, mode) {
@@ -52,6 +77,7 @@ export function buildThemeCss(colors, meta, mode) {
   const vars = Object.entries(colors)
     .map(([k, v]) => `  ${k}: ${v};`)
     .join('\n')
+  const extrasBlock = meta.extras ? '\n' + meta.extras + '\n' : ''
   return `${importBlock}:root {
   /* Colors - ${mode} theme */
 ${vars}
@@ -62,5 +88,5 @@ ${vars}
   font-size: ${meta.fontSize};
   color-scheme: ${mode};
 }
-`
+${extrasBlock}`
 }

@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.broadcast import create_broadcast, get_broadcast
-from app.chat import is_chat_running, run_chat
+from app.chat import discard_starting, is_chat_running, mark_starting, run_chat
 from app.config import get_settings
 from app.database import get_db
 from app.deps import get_current_owner
@@ -65,62 +65,72 @@ async def send_message(
   if not chat:
     raise HTTPException(status_code=404, detail="Chat not found.")
 
-  if is_chat_running(chat_id):
+  if not mark_starting(chat_id):
     raise HTTPException(status_code=409, detail="Agent is already running.")
 
-  # Build the full message history for the agent.
-  msgs = [schemas.ChatMessage(role=m["role"], content=m.get("content", ""))
-          for m in (chat.messages or [])]
+  # From here until create_task, any exception must discard the
+  # starting guard — otherwise the chat_id stays in the set forever and
+  # the chat is stuck "starting" until process restart.  run_chat's
+  # outer finally only fires after the task is scheduled.
+  try:
+    # Build the full message history for the agent.
+    msgs = [schemas.ChatMessage(role=m["role"], content=m.get("content", ""))
+            for m in (chat.messages or [])]
 
-  # Append a file notification when the chat has uploads so the agent
-  # knows what files are available in this session.  Validate each stored
-  # path against data_dir before injecting it — a tampered DB record could
-  # otherwise point the agent at credentials or other sensitive files.
-  settings = get_settings()
-  content = body.content
-  if chat.uploads:
-    safe_entries = []
-    for f in chat.uploads:
-      safe = _safe_upload_path(f['path'], settings.data_dir)
-      if safe is not None:
-        safe_entries.append(
-          f"- {f['name']} → {safe}"
-          f" ({f.get('mime_type', 'unknown')}, {round(f['size'] / 1024)} KB)"
-        )
-    if safe_entries:
-      lines = "\n".join(safe_entries)
-      content += f"\n\n[Files in this session:\n{lines}]"
+    # Append a file notification when the chat has uploads so the
+    # agent knows what files are available in this session.  Validate
+    # each stored path against data_dir before injecting it — a
+    # tampered DB record could otherwise point the agent at
+    # credentials or other sensitive files.
+    settings = get_settings()
+    content = body.content
+    if chat.uploads:
+      safe_entries = []
+      for f in chat.uploads:
+        safe = _safe_upload_path(f['path'], settings.data_dir)
+        if safe is not None:
+          safe_entries.append(
+            f"- {f['name']} → {safe}"
+            f" ({f.get('mime_type', 'unknown')}, {round(f['size'] / 1024)} KB)"
+          )
+      if safe_entries:
+        lines = "\n".join(safe_entries)
+        content += f"\n\n[Files in this session:\n{lines}]"
 
-  msgs.append(schemas.ChatMessage(role="user", content=content))
+    msgs.append(schemas.ChatMessage(role="user", content=content))
 
-  # Save the user message to the DB immediately so the chat list
-  # reflects it before the background task starts.  This also sets the
-  # title from the first message.
-  user_msg = {
-    "role": "user",
-    "content": content,
-    "ts": int(time.time() * 1000),
-  }
-  if body.attachments:
-    user_msg["attachments"] = body.attachments
-  existing = list(chat.messages or [])
-  existing.append(user_msg)
-  chat.messages = existing
-  if len(existing) == 1:
-    chat.title = body.content[:40] or "New chat"
-  chat.updated_at = datetime.now(UTC)
-  db.commit()
+    # Save the user message to the DB immediately so the chat list
+    # reflects it before the background task starts.  This also sets
+    # the title from the first message.
+    user_msg = {
+      "role": "user",
+      "content": content,
+      "ts": int(time.time() * 1000),
+    }
+    if body.attachments:
+      user_msg["attachments"] = body.attachments
+    existing = list(chat.messages or [])
+    existing.append(user_msg)
+    chat.messages = existing
+    if len(existing) == 1:
+      chat.title = body.content[:40] or "New chat"
+    chat.updated_at = datetime.now(UTC)
+    db.commit()
 
-  # Create the broadcast before spawning the task so the stream endpoint
-  # can subscribe immediately without a race.
-  bc = create_broadcast(chat_id)  # noqa: F841 — registered in global registry
+    # Create the broadcast before spawning the task so the stream
+    # endpoint can subscribe immediately without a race.
+    bc = create_broadcast(chat_id)  # noqa: F841 — registered in global registry
 
-  asyncio.create_task(
-    run_chat(
-      msgs, chat_id=chat_id, session_id=chat.session_id,
-      attachments=body.attachments, timezone=body.timezone,
+    asyncio.create_task(
+      run_chat(
+        msgs, chat_id=chat_id, session_id=chat.session_id,
+        attachments=body.attachments, timezone=body.timezone,
+        viewport=body.viewport,
+      )
     )
-  )
+  except Exception:
+    discard_starting(chat_id)
+    raise
 
   return JSONResponse(status_code=202, content={"status": "started"})
 

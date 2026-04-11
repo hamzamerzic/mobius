@@ -1,6 +1,7 @@
 """Initializes the agent experience file and writes upstream diffs."""
 
 import os
+import pwd
 import shutil
 from pathlib import Path
 
@@ -11,8 +12,35 @@ SEED_PATH = Path("/app/scripts/seed-agent-experience.md")
 DIFF_PATH = DATA_DIR / "shared" / "upstream-diff.txt"
 
 
+def _ensure_mobius_writable(path: Path) -> None:
+  """Makes `path` owned+writable by the mobius user.
+
+  The entrypoint runs as root, so files/dirs it creates come out
+  root-owned and often without the execute bit on directories. The
+  CLI subprocess runs as `mobius` and silently fails any Edit tool
+  call against a root-owned file — or any `cd` / `stat` into a
+  directory without the execute bit. The agent never updates its own
+  experience log as a result.
+
+  Chown everything to mobius:mobius and apply correct mode: 775 for
+  directories (rwx + traverse), 664 for files (rw, no exec).
+  """
+  if not path.exists():
+    return
+  try:
+    mobius = pwd.getpwnam("mobius")
+  except KeyError:
+    return  # not running in the container image; nothing to do
+  try:
+    os.chown(path, mobius.pw_uid, mobius.pw_gid)
+    os.chmod(path, 0o775 if path.is_dir() else 0o664)
+  except PermissionError:
+    pass  # best effort — skip silently on dev hosts
+
+
 def init():
   EXPERIENCE_PATH.parent.mkdir(parents=True, exist_ok=True)
+  _ensure_mobius_writable(EXPERIENCE_PATH.parent)
 
   # Migrate from old agent-context.md if it exists and experience doesn't.
   # Keep the old file around in case it has useful content the agent wrote.
@@ -28,6 +56,10 @@ def init():
       print(f"Created empty {EXPERIENCE_PATH}")
   else:
     print(f"Already exists: {EXPERIENCE_PATH}")
+
+  # Always re-chown: catches upgrades where the file existed from a
+  # prior (buggy) boot and was left root-owned.
+  _ensure_mobius_writable(EXPERIENCE_PATH)
 
 
 if __name__ == "__main__":

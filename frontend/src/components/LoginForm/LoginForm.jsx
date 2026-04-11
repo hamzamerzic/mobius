@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { setToken } from '../../api/client.js'
+import { setToken, BASE } from '../../api/client.js'
 import './LoginForm.css'
 
 export default function LoginForm({ onLogin }) {
@@ -24,7 +24,7 @@ export default function LoginForm({ onLogin }) {
     setLoading(true)
     try {
       const body = new URLSearchParams({ username, password })
-      const res = await fetch('/api/auth/token', {
+      const res = await fetch(`${BASE}/api/auth/token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body,
@@ -46,7 +46,7 @@ export default function LoginForm({ onLogin }) {
   return (
     <div className="login">
       <div className="login__card">
-        <img src="/moebius.png" alt="Möbius" className="login__logo" />
+        <img src={`${BASE}/moebius.png`} alt="Möbius" className="login__logo" />
         <h1 className="login__title">Möbius</h1>
         <p className="login__tagline">Your AI. Your apps. Your server.</p>
         {expired && (
@@ -86,7 +86,7 @@ export default function LoginForm({ onLogin }) {
         </form>
         <p className="login__hint">
           The{' '}
-          <a href="/recover" target="_blank" rel="noopener noreferrer">recovery page</a>
+          <a href={`${BASE}/recover`} target="_blank" rel="noopener noreferrer">recovery page</a>
           {' '}lets you restore a backup or reset the app — but it requires the same password.
           If you've forgotten your password, you'll need to access the server directly to reset the database.
         </p>
