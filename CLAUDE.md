@@ -261,13 +261,14 @@ or rendering code must preserve all of them.
    content streams in. It sets `scrollTop` in two cases: (a) content
    shrank and the browser clamped scrollTop below `scrollTarget`
    (clamp-fix), (b) auto-follow — if the user is "near the bottom",
-   snap to bottom so content growth doesn't leave them mid-stream.
-   "Near the bottom" is `gap < 50` updated by a passive scroll
-   listener on `.chat__scroll` — fires on every scroll (including
-   programmatic snaps) so the ResizeObserver always has a fresh
-   reading. When the user scrolls up past 50px, `nearBottom` goes
-   false and auto-follow stops immediately (no one-tick lag). The
-   user can scroll freely at all other times.
+   snap to bottom so content growth doesn't leave them behind.
+   Auto-follow starts **OFF** after every send — the user sees their
+   message at the top and the response growing below it, like a
+   terminal. Auto-follow only engages when the user actively scrolls
+   to within 50px of the bottom. "Near the bottom" (`gap < 50`) is
+   tracked by a passive scroll listener on `.chat__scroll`. This
+   avoids yanking the user away from what they're reading — they
+   scroll down when ready.
 
 3. **Re-anchor on promote.** When streaming ends and items are promoted
    to messages, the content structure changes. The spacer is recalculated
