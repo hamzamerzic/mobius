@@ -224,7 +224,7 @@ Key details:
 
 ## Version pinning
 
-All key tool versions are pinned in the Dockerfile: `esbuild@0.20.2`, `@anthropic-ai/claude-code@2.1.101`, `agent-browser` (unpinned, downloads its own Chromium), `python:3.12-slim`, `node:20-slim`.
+All key tool versions are pinned in the Dockerfile: `esbuild@0.20.2`, `@anthropic-ai/claude-code@2.1.112`, `agent-browser` (unpinned, downloads its own Chromium), `python:3.12-slim`, `node:20-slim`.
 
 The CLI is pinned because the PKCE OAuth workaround depends on internal constants (client_id, token URL, credential format) extracted from the CLI binary.
 
