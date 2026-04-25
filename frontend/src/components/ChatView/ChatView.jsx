@@ -119,6 +119,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     onNeedsRefresh: fetchMessages,
   })
 
+  // Mirror isStreaming as a ref so the ResizeObserver callback (which
+  // never re-binds) can gate auto-follow on it. Tool-block toggles in
+  // finished messages grow the list and were tripping auto-follow.
+  const isStreamingRef = useRef(false)
+  isStreamingRef.current = isStreaming
+
   const { files: pendingFiles, addFiles, removeFile, clearFiles } = useFileUpload({ chatId })
 
   const { listening, listeningRef, toggleVoice } = useVoiceInput({
@@ -389,13 +395,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       }
       prevH = h
 
-      // Auto-follow: only fires when the list actually grew (content
-      // streaming), not when it merely re-measures due to viewport
-      // resize. Without this gate, a keyboard open/close cycle could
-      // briefly flip nearBottom true (as clientHeight changes) and
-      // snap scrollTop to the bottom, drifting the scroll position
-      // across keyboard cycles.
-      if (lH > prevListH) {
+      // Auto-follow: only fires while a stream is actively writing
+      // and the list actually grew. Two gates:
+      //   isStreamingRef — user-initiated growth (tool-block expand,
+      //     image lightbox close) on a finished message must not
+      //     snap the scroll.
+      //   lH > prevListH — re-measures from viewport resize (keyboard
+      //     open/close) must not snap either.
+      if (isStreamingRef.current && lH > prevListH) {
         const gap = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
         if (nearBottom && gap > 1) {
           scrollEl.scrollTop = scrollEl.scrollHeight
