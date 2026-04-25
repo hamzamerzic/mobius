@@ -35,7 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
     fonts-liberation fonts-noto-color-emoji \
     && npm install -g esbuild@0.20.2 \
-    && npm install -g @anthropic-ai/claude-code@2.1.112 \
+    && npm install -g @anthropic-ai/claude-code@2.1.119 \
     && npm install -g agent-browser \
     && agent-browser install \
     && mv /root/.agent-browser /opt/agent-browser \
@@ -62,6 +62,29 @@ COPY protected-files.txt ./protected-files.txt
 # Frontend static files + app-frame served by FastAPI.
 COPY --from=frontend /build/dist ./static/
 COPY frontend/public/app-frame.html ./app-frame.html
+
+# Self-host three.js. The app-frame import map points at /vendor/three/...
+# so mini-apps with `import * as THREE from 'three'` resolve to a same-
+# origin fetch instead of the esm.sh waterfall (cold-load saves 1-3s on
+# any 3D app). Pinned to match the version we previously served via CDN.
+RUN mkdir -p /tmp/vendor && cd /tmp/vendor \
+    && npm init -y >/dev/null \
+    && npm install --silent three@0.162.0 \
+    && mkdir -p /app/static/vendor/three/addons \
+    && cp node_modules/three/build/three.module.js /app/static/vendor/three/three.module.js \
+    && cp -r node_modules/three/examples/jsm/. /app/static/vendor/three/addons/ \
+    && rm -rf /tmp/vendor
+
+# Self-hosted vendor libs for mini-app import maps. Pinned via npm
+# install at image build time, served same-origin under /vendor/ with
+# a long cache. Eliminates the cold-load esm.sh waterfall for three.js.
+RUN mkdir -p /tmp/vendor-install && cd /tmp/vendor-install \
+    && npm init -y >/dev/null \
+    && npm install --no-audit --no-fund --silent three@0.162.0 \
+    && mkdir -p /app/static/vendor/three/addons \
+    && cp node_modules/three/build/three.module.js /app/static/vendor/three/three.module.js \
+    && cp -r node_modules/three/examples/jsm/. /app/static/vendor/three/addons/ \
+    && cd / && rm -rf /tmp/vendor-install
 
 # Full frontend source so the agent can edit and rebuild the shell.
 # /app/shell-src/ is the read-only reference (originals for recovery).

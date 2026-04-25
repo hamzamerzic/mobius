@@ -151,6 +151,22 @@ for init_script in /data/apps/*/init-cron.sh; do
   [ -f "$init_script" ] && su -s /bin/sh mobius -c "bash $init_script" 2>/dev/null || true
 done
 
+# Ensure mobius's crontab has the full PATH at the top. Must run AFTER
+# init-cron.sh — those scripts call `crontab -u mobius` which overwrites
+# the file. Without PATH, cron's minimal /usr/bin:/bin can't resolve
+# `#!/usr/bin/env node` shebangs (claude pre-2.1.119 was such a script);
+# defensive against any future shebang script the agent creates.
+# Uses `crontab -u` rather than direct file writes so cron's locking
+# and file ownership are handled correctly.
+if crontab -u mobius -l 2>/dev/null | grep -q '^PATH='; then
+  : # already set
+elif crontab -u mobius -l 2>/dev/null | grep -q .; then
+  { echo 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+    crontab -u mobius -l 2>/dev/null
+  } | crontab -u mobius -
+  echo "Added PATH= to mobius crontab"
+fi
+
 # Initialize agent experience file (seeds from template on first boot).
 python3 /app/scripts/init_agent_context.py
 
