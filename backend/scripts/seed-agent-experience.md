@@ -30,11 +30,33 @@ remove the stale line.
 - Update in the SAME turn as the action, before writing the final
   assistant message.
 
-**What goes in:**
+**What goes in your /data/shared/agent-experience.md (this file):**
 - A new app was built → `- Built **Name** (id N). <description>`
 - A gotcha or workaround discovered → a one-liner
 - A partner preference learned → a one-liner
 - Shell / CSS / cron changed → what and why
+
+**What goes in `backend/scripts/seed-agent-experience.md` (the seed
+that ships to other Möbius users on first boot)** is a stricter
+filter — that file is the kickstart for fresh installs, NOT a
+knowledge dump of one user's app history. The bar for adding
+something there:
+
+> **Frequency × cost test.** If most agents would re-discover this
+> within a single build of an unrelated app, AND the discovery
+> costs more than a couple of tool calls, AND the friction would
+> be paid on most builds — seed it. Otherwise don't. A fix
+> specific to one library/visual quirk that only matters when
+> building one kind of app belongs in the running experience
+> file, not the seed.
+
+In other words: prefer seeding **platform contracts the agent
+cannot read off the codebase** (storage API shape, register_app.py
+preference, scoped-token gotcha, theme-reset path) and **patterns
+that pay off on every build** (mobile-first, CSS variables, mini-
+app contract). Don't seed library-specific shader tricks, niche
+canvas-pointer quirks, or anything that the agent will only need
+when building exactly the kind of app the previous agent built.
 
 **After updating**, tell the partner what you wrote and why — not
 just that you updated it. They can't see your tool calls.
@@ -178,32 +200,10 @@ fetch(url, { headers: { Authorization: `Bearer ${token}` } })
     headers: { Authorization: \`Bearer \${token}\` }
   })`. Without the header the proxy returns silently empty data and
   the app looks broken for no visible reason.
-- Canvas ref trap: a `ref={el => { canvas = el; scale(dpr) }}` callback
-  runs on every React render, so every re-render re-applies the DPR
-  scale and the drawing gets progressively distorted. Guard with a
-  `useCallback`, a `useRef`-based "already initialized" flag, or an
-  explicit `resetTransform()` before each setup.
-- Pointer-driven canvas apps (drawing, particles, gestures) — assume
-  three problems by default, each one-liner:
-  (a) **`setPointerCapture` throws on synthetic pointers.** Always
-  `try { el.setPointerCapture(e.pointerId) } catch {}` — headless
-  testing dispatches synthetic pointers that have no registered
-  pointerId, and the throw kills the whole canvas.
-  (b) **`globalCompositeOperation = 'lighter'` saturates overlapping
-  strokes to pure white**, erasing the palette. Use `source-over`
-  when palette must show; reserve `lighter` for glow/bloom effects
-  on a dark background where saturation is the goal.
-  (c) **`pointermove` fires at sub-pixel rate** → overdraw + perf
-  cliff. Throttle by minimum-pixel-distance (skip points within 2–3
-  px of the previous one) before drawing.
 - Three.js: `import * as THREE from 'three'` and
   `import { OrbitControls } from 'three/addons/controls/OrbitControls.js'`
-  just work (self-hosted at `/vendor/three/` via the app-frame import
-  map — no esm.sh waterfall). Visual gotchas: cloud density lives
-  in the PNG's alpha channel, not red — multiply by alpha when
-  sampling for a custom shader. ACES tone mapping crushes dark
-  oceans to flat black; switch to `LinearToneMapping` or lower
-  exposure if sea color matters.
+  just work (self-hosted at `/vendor/three/` via the app-frame
+  import map — no esm.sh waterfall).
 
 ## Debug endpoints
 

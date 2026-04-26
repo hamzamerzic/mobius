@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { flushSync } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import Drawer from '../Drawer/Drawer.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
@@ -184,8 +185,8 @@ export default function Shell() {
 
     // Push nav stack so back returns to the previous view, but only
     // for user-initiated calls (drawer click, draft restore, explicit
-    // forceNew). Skip for bootstrap (no chats exist on app load), where
-    // there's nothing to "go back to."
+    // forceNew). Skip for bootstrap (no chats exist on app load),
+    // where there's nothing to "go back to."
     const userInitiated = !!draft || !!forceNew || drawerOpen
     if (userInitiated) {
       navStackRef.current.push({
@@ -193,9 +194,17 @@ export default function Shell() {
         chatId: activeChatIdRef.current,
         appId: activeAppIdRef.current,
       })
+      // CRITICAL: same flushSync pattern as `useNavigation.navTo`.
+      // The drawer must be visually closed (DOM updated) BEFORE
+      // history.pushState runs, or the back-gesture animation
+      // captures a "two drawers" snapshot. See useNavigation.js for
+      // the full rationale and CLAUDE.md "Navigation — non-negotiable
+      // constraints" for the rule.
+      flushSync(() => closeDrawer())
       try { history.pushState(null, '', '/') } catch { /* ignore */ }
+    } else {
+      closeDrawer()
     }
-    closeDrawer()
     if (draft) {
       try { sessionStorage.setItem('pending-draft', draft) } catch {}
     }

@@ -342,6 +342,57 @@ with overlay mode).
 **Do not hide/fade the scroll area during restoration.** `visibility:
 hidden` or `opacity: 0` cause a visible flash.
 
+### Navigation — non-negotiable constraints
+
+These behaviors are load-bearing. Any change to `useNavigation.js` or
+the navigation-related parts of `Shell.jsx` must preserve all of them.
+Lock-in tests live in `tests/navigation.spec.mjs`.
+
+1. **Drawer is purely visual state.** `openDrawer` and `closeDrawer`
+   only flip a React state flag. They do NOT call `history.pushState`
+   or `history.back`. Drawer cycles must add **zero** entries to
+   `history.length` — guarded by tests 8 and 11.
+
+2. **Each navigation pushes exactly one history entry.** `navTo`
+   pushes one navStack entry (capturing the prior view) AND one
+   browser history entry. Each back-gesture pops one. There is no
+   "drawer-as-back-stack" coupling.
+
+3. **`flushSync` before `pushState` when navigating from drawer-open.**
+   Both `useNavigation.navTo` and `Shell.newChat` MUST close the
+   drawer via `flushSync(() => setDrawerOpen(false))` BEFORE calling
+   `history.pushState`. Without this, Chrome Android's swipe-back
+   animation captures a "two drawers" snapshot during the gesture
+   (the entry-being-left's state has the drawer still visible because
+   React batches the close). This is the BFCache visual artifact;
+   `flushSync` is React 18's sanctioned escape hatch for exactly
+   this DOM-coordination case. Locked in by the "BFCache snapshot
+   contract" test in `tests/navigation.spec.mjs`.
+
+4. **Back-gesture closes the drawer as a side-effect.** The popstate
+   / Navigation API handler always closes the drawer, regardless of
+   what view it pops to. There is NO "back closes drawer first, then
+   navigates on second back" half-step. One back = one nav (drawer
+   closes too).
+
+5. **`navStackRef` must be scrubbed on chat delete.** `Shell.deleteChat`
+   filters `navStackRef.current` to remove entries whose `chatId`
+   matches the deleted chat. Without this, back-gesture after delete
+   navigates into a 404'd chat.
+
+6. **At the bottom of `navStackRef`, back-gesture exits the PWA.** We
+   don't try to trap it. The browser's default behavior takes over.
+
+### Navigation — known cosmetic limit
+
+Chrome Android renders the swipe-back animation with a rasterized
+snapshot of the previous page state. Even with the `flushSync`
+guard above, there is a sub-frame window where the snapshot can
+include the drawer if the user swipes mid-state-update. We accept
+this as a sub-100ms visual hint; the test asserts the API contract
+(no drawer class on DOM at pushState time) which is the closest
+deterministic guarantee available.
+
 ### Streaming rendering
 
 Block-memoized markdown renderer: `marked.lexer()` tokenizes into blocks, each rendered as a `React.memo()` component. Only the last (active) block re-renders as tokens arrive. Text tokens are buffered and drained via `requestAnimationFrame` for a typewriter effect (~3 chars/frame at 60fps). Don't replace this with streaming-markdown or innerHTML approaches — they lose control over individual element types.

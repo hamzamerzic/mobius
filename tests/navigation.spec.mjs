@@ -459,6 +459,67 @@ test.describe('Drawer state machine — extended invariants', () => {
 // If you change that, also delete this comment + write the test
 // using direct DB manipulation or a real agent integration.
 
+test.describe('BFCache snapshot contract', () => {
+  // Single regression-guard for the rule documented in
+  // `useNavigation.navTo` and CLAUDE.md "Navigation — non-negotiable
+  // constraints":
+  //
+  //   When navTo runs from a drawer-open state, the DOM MUST be
+  //   updated to drawer-closed BEFORE history.pushState fires.
+  //
+  // Otherwise, Chrome Android's swipe-back animation captures the
+  // entry-being-left's snapshot with the drawer visible, producing
+  // a "two drawers" visual artifact during the gesture.
+  //
+  // We test this by hooking history.pushState, recording whether
+  // the drawer's `--open` class is on the DOM at the moment of the
+  // call, and asserting it is NOT.
+
+  test('21. navTo flushSync: pushState fires AFTER drawer-close commits to DOM', async ({ page }) => {
+    await setup(page)
+
+    // Hook history.pushState BEFORE any nav happens so we observe the
+    // call. Record whether the drawer's `--open` class is on the DOM
+    // at the exact moment pushState fires.
+    await page.evaluate(() => {
+      window.__pushStateLog = []
+      const original = history.pushState.bind(history)
+      history.pushState = function(...args) {
+        const drawerEl = document.querySelector('.drawer')
+        const isOpen = drawerEl && drawerEl.classList.contains('drawer--open')
+        window.__pushStateLog.push({
+          drawerOpenAtPush: !!isOpen,
+          drawerClassList: drawerEl ? Array.from(drawerEl.classList) : null,
+        })
+        return original(...args)
+      }
+    })
+
+    // Open the drawer (purely visual — should not call pushState).
+    await openDrawer(page)
+    expect((await getNavState(page)).drawerOpen).toBe(true)
+
+    // Sanity: openDrawer did not call pushState. (Verifies the
+    // "drawer is purely visual" contract from a different angle.)
+    const beforeNav = await page.evaluate(() => window.__pushStateLog.length)
+    expect(beforeNav).toBe(0)
+
+    // Click Settings in the drawer — always available, so this is the
+    // most reliable navTo trigger across test environments.
+    await navigateToSettings(page)
+
+    // navTo fired. Inspect the log: pushState must have been called at
+    // least once, and at the moment it was called the drawer's `--open`
+    // class must have been removed from the DOM. That's the BFCache
+    // snapshot guarantee that prevents the "two drawers" artifact.
+    const log = await page.evaluate(() => window.__pushStateLog)
+    expect(log.length).toBeGreaterThan(0)
+    for (const entry of log) {
+      expect(entry.drawerOpenAtPush).toBe(false)
+    }
+  })
+})
+
 test.describe('Browser restrictions (documented)', () => {
   test('7. BFCache "two drawers" trade-off (documented)', async ({ page }) => {
     // On Chrome Android, the back-gesture animation shows the cached

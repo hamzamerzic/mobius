@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { flushSync } from 'react-dom'
 
 const ACTIVE_CHAT_KEY = 'moebius_active_chat'
 
@@ -84,15 +85,30 @@ export default function useNavigation() {
       chatId: activeChatIdRef.current,
       appId: activeAppIdRef.current,
     })
-    setDrawerOpen(false)
+    // CRITICAL: close the drawer SYNCHRONOUSLY (flushSync) before we
+    // call history.pushState. Chrome Android's swipe-back animation
+    // shows a rasterized snapshot of the previous page state during
+    // the gesture; that snapshot is captured at the moment we leave
+    // the entry. Without flushSync, React batches the setDrawerOpen
+    // and the DOM still shows drawer-open at pushState time → the
+    // back-gesture animation displays "two drawers" (the live one
+    // sliding away + the snapshot's drawer sliding in) for ~250ms.
+    //
+    // flushSync is React 18's sanctioned escape hatch for exactly
+    // this: coordinating React state changes with browser API calls
+    // that read DOM. See:
+    // https://react.dev/reference/react-dom/flushSync
+    //
+    // Tested by tests/navigation.spec.mjs §"BFCache snapshot
+    // contract" — the drawer must NOT have its `--open` class on
+    // the DOM at the moment history.pushState fires.
+    flushSync(() => {
+      drawerOpenRef.current = false
+      setDrawerOpen(false)
+    })
     setActiveView(view)
     if ('chatId' in opts) setActiveChatId(opts.chatId)
     if ('appId' in opts) setActiveAppId(opts.appId)
-    // Push exactly one history entry so the next back-gesture has
-    // somewhere to land. We pushState AFTER setDrawerOpen(false) so
-    // the BFCache snapshot the browser captures of the current entry
-    // shows the closed drawer (avoids "two drawers" during the
-    // back-gesture animation on Chrome Android).
     try { history.pushState(null, '', '/') } catch { /* ignore */ }
   }
 
