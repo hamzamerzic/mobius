@@ -145,12 +145,16 @@
     const params = new URLSearchParams(location.search);
     const appId = params.get('appId');
     const token = params.get('token') || '';
+    const version = params.get('v') || '0';
 
     if (!appId || !token) {
       showErr('Configuration error', 'Missing appId or authentication token.');
     } else {
       try {
-        const url = `/api/apps/${appId}/module?token=${encodeURIComponent(token)}`;
+        // Include the version in the URL so the browser / SW cache is
+        // busted whenever the agent updates the app. Without this, the
+        // module URL is stable and clients never pick up edits.
+        const url = `/api/apps/${appId}/module?token=${encodeURIComponent(token)}&v=${encodeURIComponent(version)}`;
         const mod = await import(url);
         const Component = mod.default;
         if (!Component) {

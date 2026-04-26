@@ -3,13 +3,15 @@
 // Cache strategy by URL:
 //   /vendor/*                   cache-first    (immutable bundled libs)
 //   /assets/*                   cache-first    (Vite-hashed shell assets)
-//   /api/apps/{id}/module       network-first  (agent recompiles must be live; cache is offline fallback)
+//   /api/apps/{id}/module       cache-first    (URL is version-busted via `?v=`,
+//                                                so cache is naturally invalidated
+//                                                whenever the agent updates the app)
 //   /api/proxy?url=*.{img/font} SWR            (cacheable static assets only)
 //   esm.sh/*                    cache-first    (versioned URLs are immutable)
 // Everything else (HTML, /api/*) goes straight to the network.
 //
 // Bumping VERSION purges old caches on activate.
-const VERSION = 'v2'
+const VERSION = 'v3'
 const CACHES = {
   vendor: `mobius-vendor-${VERSION}`,
   assets: `mobius-assets-${VERSION}`,
@@ -55,7 +57,8 @@ self.addEventListener('fetch', (event) => {
       return
     }
     if (/^\/api\/apps\/\d+\/module/.test(path)) {
-      event.respondWith(networkFirst(req, CACHES.apps))
+      // Version is in the query string; same URL = same content.
+      event.respondWith(cacheFirst(req, CACHES.apps))
       return
     }
     if (path === '/api/proxy') {
