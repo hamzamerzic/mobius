@@ -142,6 +142,36 @@ Shell flow: `App.jsx` checks setup status → shows `SetupWizard` (first boot), 
 
 Every mini-app is a JSX file that esbuild compiles to an ES module. It must `export default` a React component receiving `{ appId, token }` props. The component calls `/api/storage/apps/{appId}/...` for persistence. See `skill/agent-skill.md` for the full contract.
 
+### Mini-app sandbox — accepted same-origin decision
+
+`AppCanvas.jsx` mounts the mini-app iframe with
+`sandbox="allow-scripts allow-same-origin"`. The combination grants
+the mini-app's JS DOM access to the parent shell — including the
+owner JWT in `localStorage` — and is flagged as risky by generic
+audits.
+
+**This is an accepted trade-off, not a bug.** Möbius is a single-
+owner PWA where every mini-app is authored by the owner's own agent
+(Claude Code CLI running with the owner's credentials). The threat
+model treats the agent and the owner as the same trust principal:
+if the agent is compromised, it already has shell write access and
+can edit the platform itself. Sandboxing the iframe more strictly
+buys nothing against that adversary, while same-origin gives the
+agent's apps simple `fetch('/api/...')` calls and access to the
+font/CSS shell environment.
+
+Removing `allow-same-origin` would require relocating mini-apps to
+a separate origin (a subdomain like `apps.<DOMAIN>`, or `srcdoc=` /
+`data:` URIs). That's a non-trivial refactor — service-worker scope,
+import maps, the `/api/apps/{id}/module` route, the storage API
+auth, and the Caddy config all need to change in lockstep — and it's
+only worth doing if the threat model changes (e.g. multi-tenant
+deployments, third-party app marketplace, untrusted-author apps).
+
+**Re-evaluate when:** Möbius gains multiple owners on one instance,
+mini-apps come from sources other than the owner's own agent, or the
+agent's CLI runs with reduced trust relative to the owner.
+
 ### Data layout (`/data/` volume)
 
 ```
