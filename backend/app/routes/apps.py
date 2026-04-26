@@ -161,6 +161,7 @@ def delete_app(
 def get_frame(
   app_id: int,
   token: str | None = None,
+  v: int = 0,
   db: Session = Depends(get_db),
 ):
   """Serves the mini-app runtime frame with the module inlined.
@@ -203,11 +204,15 @@ def get_frame(
   from app.theme import inject_theme_into_html
   html = inject_theme_into_html(html, get_settings().data_dir)
 
-  # Inject appId/token into the module script so it can load the component.
+  # Inject appId/token/version into the module script so it can load the
+  # component. The `v` is propagated into the module URL inside the frame
+  # so that bumping the app version (on `app_updated` events) busts the
+  # browser/SW cache; without `v`, the module URL is stable and clients
+  # would never pick up agent edits.
   html = html.replace(
     'const params = new URLSearchParams(location.search);',
     'const params = new URLSearchParams("'
-    + urlencode({"appId": app_id, "token": token})
+    + urlencode({"appId": app_id, "token": token, "v": v})
     + '");',
   )
   # Inject appId/chatId into the plain script globals so reportError()
@@ -232,12 +237,20 @@ def get_frame(
 def get_module(
   app_id: int,
   token: str | None = None,
+  v: int | None = None,
   db: Session = Depends(get_db),
 ):
   """Serves the compiled JS module for a mini-app.
 
   Accepts a token query parameter so that the app-frame iframe
   can load the module without custom request headers.
+
+  Caching: when a version (`v`) is supplied, the URL is treated as
+  immutable — the client may cache the response indefinitely. The
+  agent bumps the app version on every update via the `app_updated`
+  event flow, which changes the URL and invalidates the cache
+  naturally. Without `v`, fall back to no-cache so legacy clients
+  never get stuck on stale modules.
   """
   if not token or not auth.decode_access_token(token):
     raise HTTPException(
@@ -253,10 +266,15 @@ def get_module(
     raise HTTPException(
       status_code=404, detail="Compiled module not found on disk."
     )
+  cache_header = (
+    "public, max-age=31536000, immutable"
+    if v is not None
+    else "no-cache"
+  )
   return FileResponse(
     path,
     media_type="application/javascript",
-    headers={"Cache-Control": "no-cache"},
+    headers={"Cache-Control": cache_header},
   )
 
 
