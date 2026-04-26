@@ -45,7 +45,19 @@ _STYLE = """
   }
   .btn-outline:hover { background: var(--surface2, #1a1f28); }
   .error { color: var(--danger, #f87171); font-size: 13px; margin-bottom: 12px; }
-  .msg { color: var(--green, #6ee7b7); font-size: 13px; margin-bottom: 16px; }
+  .msg {
+    background: rgba(110, 231, 183, 0.08);
+    border: 1px solid var(--green, #6ee7b7);
+    color: var(--green, #6ee7b7);
+    font-size: 14px; font-weight: 500;
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 18px;
+    display: flex; align-items: flex-start; gap: 10px;
+  }
+  .msg::before {
+    content: "\\2713"; font-size: 16px; font-weight: 700; flex: 0 0 auto;
+  }
   .actions { display: flex; flex-direction: column; gap: 10px; }
   .section { margin-bottom: 20px; }
   .section-title { font-size: 13px; color: var(--muted, #52525b); margin-bottom: 8px; }
