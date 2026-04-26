@@ -29,6 +29,33 @@ const _spacerHeights = (() => {
   catch { return {} }
 })()
 
+/** Cheap structural equality for chat-message arrays. Returns true when
+ *  the lists have the same length AND the last message has the same
+ *  role/content/blocks. Avoids re-renders when the background fetch
+ *  returns the same data we just rendered from cache.
+ *
+ *  Conservative — false negatives (saying "different" when actually
+ *  identical) just trigger a redundant re-render, which is the worst-
+ *  case status quo. False positives (saying "same" when actually
+ *  different) would cause stale rendering, so this comparison stays on
+ *  the safe side: any structural difference in the last entry returns
+ *  false. */
+function sameMessageList(a, b) {
+  if (a === b) return true
+  if (!a || !b) return false
+  if (a.length !== b.length) return false
+  if (a.length === 0) return true
+  const la = a[a.length - 1]
+  const lb = b[b.length - 1]
+  if (la === lb) return true
+  if (!la || !lb) return false
+  if (la.role !== lb.role) return false
+  if (la.content !== lb.content) return false
+  // Different number of blocks → different.
+  if ((la.blocks?.length || 0) !== (lb.blocks?.length || 0)) return false
+  return true
+}
+
 
 export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystemEvent, builtApp, onOpenApp, onMessageStart }) {
   const queryClient = useQueryClient()
@@ -57,21 +84,41 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     } catch { return '' }
   })
 
-  // Single setter that updates BOTH local state and the query cache.
-  // Use this instead of bare setMessages/setOffset for any change that
-  // should survive a remount. Caller passes a function (prev) => next
-  // for the messages array, or a literal array.
+  // Mirror `messages` in a ref so commitMessages can compute the next
+  // value without putting a side-effect (setQueryData) inside a
+  // setState updater. setState updaters must be pure; React may call
+  // them multiple times during concurrent rendering. Reading from a
+  // ref + calling setQueryData once outside the updater is correct.
+  const messagesRef = useRef(messages)
+  messagesRef.current = messages
+
+  // Single setter that updates local state AND the query cache.
+  //
+  // ALWAYS writes the query cache (so even empty chats have an entry,
+  // ensuring a cache hit on the next visit). Skips the React state
+  // update when messages are structurally identical — that's the
+  // path that was causing back-navigation jitter, because the
+  // background fetch would re-set the same array reference and
+  // trigger a redundant re-render of the spacer effect.
   const commitMessages = useCallback((updater, nextOffset) => {
-    setMessages(prev => {
-      const next = typeof updater === 'function' ? updater(prev) : updater
-      queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => ({
-        ...(existing || {}),
-        messages: next,
-        offset: nextOffset !== undefined ? nextOffset : (existing?.offset ?? 0),
-      }))
-      return next
-    })
-    if (nextOffset !== undefined) setOffset(nextOffset)
+    const prev = messagesRef.current
+    const next = typeof updater === 'function' ? updater(prev) : updater
+    queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => ({
+      ...(existing || {}),
+      messages: next,
+      offset: nextOffset !== undefined ? nextOffset : (existing?.offset ?? 0),
+    }))
+    if (sameMessageList(prev, next)) {
+      // Offset may still have changed (older-messages pagination).
+      if (nextOffset !== undefined) {
+        setOffset(o => o === nextOffset ? o : nextOffset)
+      }
+      return
+    }
+    setMessages(next)
+    if (nextOffset !== undefined) {
+      setOffset(o => o === nextOffset ? o : nextOffset)
+    }
   }, [chatId, queryClient])
 
   // DOM refs
@@ -81,11 +128,19 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   const fileInputRef = useRef(null)
   const lastUserMsgRef = useRef(null)
 
-  // Lifecycle guards
+  // Lifecycle guards. With a cache hit, messages are populated on the
+  // very first render, so:
+  //   - `needsScrollRef` starts true so the *first* useLayoutEffect
+  //     applies the saved scroll position synchronously, before paint.
+  //     Without this, the user sees scrollTop=0 briefly, then the
+  //     fetch resolves and the restoration teleports us to the saved
+  //     position. That's the visible jitter on chat-back-nav.
+  //   - `hadMessagesRef` reflects the cached length so `doSend`'s
+  //     "first message" branch doesn't fire spuriously.
   const chatIdStaleRef = useRef(false)
-  const hadMessagesRef = useRef(false)
+  const hadMessagesRef = useRef((cached?.messages?.length ?? 0) > 0)
   const promotedRef = useRef(false)
-  const needsScrollRef = useRef(false)
+  const needsScrollRef = useRef(!!cached)
 
   // Spacer state — see CLAUDE.md "Chat UX — non-negotiable constraints".
   // spacerActive: keeps min-height: 0 on the list while the spacer is active,
