@@ -9,19 +9,15 @@ _(none right now)_
 
 ## Next up — UX polish
 
-- **App-back-refresh feels like a reload.** When the last view was a
-  mini-app and the user navigates away then back, the app appears to
-  reload (iframe re-fetches module). Should preserve scroll/state
-  similarly to how chats now do via the query cache. Likely fix:
-  iframe's `src` is hashed by `appVersion` which forces remount; or
-  the React `<AppCanvas key={...}>` is too aggressive.
-- **BFCache "two drawers" cosmetic.** Navigating away from
-  drawer-open captures the drawer-open state in the BFCache snapshot.
-  `flushSync(() => setDrawerOpen(false))` before `pushState` in
-  `navTo` would fix it deterministically. ~3 lines.
 - **Drawer chat list / apps list still imperative.** Migrate to
   `useChats` / `useApps` queries (the foundation is in place; this
   is the mechanical follow-up to the TanStack work).
+- **Spacer test 9 flake under Playwright chromium.** "Short response
+  — spacer preserved after reload" times out in the full chromium
+  suite ~1 in 2 runs but passes alone. Likely resource contention
+  in the parallel test runner. If CI is flaky on this, either bump
+  retries to 1 in `playwright.config.js` or split the suite into
+  smaller projects.
 
 ## Next up — agent / iteration loop
 
@@ -56,6 +52,14 @@ _(none right now)_
 
 ## Closed (recent)
 
+- (74d3800) Navigation hardening: flushSync(setDrawerOpen(false))
+  before pushState in navTo + Shell.newChat. CLAUDE.md "Navigation
+  non-negotiable constraints" section locks 6 rules. Test 21
+  "BFCache snapshot contract" Playwright guard. Seed audit removed
+  3 over-fitted gotchas + added the frequency × cost philosophy
+  for what goes in the seed vs the running experience file.
+- (5388561) App-back-refresh fix: app token cached via TanStack
+  Query, module URL version-busted, SW cache-first for module URLs.
 - (84ca8b6) Drawer rewrite: purely visual state, navigation pushes /
   pops history. Eliminated the +1 history leak and the "back closes
   drawer first" half-step.
