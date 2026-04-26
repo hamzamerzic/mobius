@@ -48,7 +48,15 @@
         }
       }, 8000)
     </script>
-    <script>if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js')</script>
+    <script>
+      if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js')
+      // Request persistent storage so cached app modules and offline
+      // state aren't evicted under storage pressure. Best-effort —
+      // browser may deny without prompting.
+      if (navigator.storage && navigator.storage.persist) {
+        navigator.storage.persisted().then(p => p || navigator.storage.persist()).catch(() => {})
+      }
+    </script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

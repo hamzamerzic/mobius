@@ -10,6 +10,17 @@ import { test, expect } from '@playwright/test'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
+/** Click the Settings entry in the drawer; assumes drawer is open. */
+async function navigateToSettings(page) {
+  await page.evaluate(() => {
+    const buttons = document.querySelectorAll('.drawer button')
+    for (const b of buttons) {
+      if (b.textContent.trim() === 'Settings') { b.click(); return }
+    }
+  })
+  await page.evaluate(() => new Promise(r => setTimeout(r, 400)))
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -209,14 +220,11 @@ test.describe('Back button edge cases', () => {
   test('8. Drawer open/close cycles do not leak history entries', async ({ page }) => {
     // Regression guard: each openDrawer() pushes a sentinel history
     // entry so Chrome's back-forward preview shows a clean state.
-    // closeDrawer() pops that entry (via history.back), otherwise
-    // every toggle adds a zombie and the user has to press back once
-    // per toggle before the app actually navigates anywhere.
-    //
-    // The design tolerates ONE orphan sentinel (handleBack's early-
-    // return consumes it harmlessly). What must not happen: growth per
-    // cycle. So we measure the length after one toggle pair, then
-    // after five — they must match.
+    // closeDrawer() funnels through history.back() so handleBack pops
+    // the sentinel — otherwise every toggle adds a zombie and the user
+    // has to press back once per toggle before the app actually
+    // navigates anywhere. After one cycle and after five, history.length
+    // must match (no growth per cycle).
     await setup(page)
 
     await openDrawer(page)
@@ -229,12 +237,228 @@ test.describe('Back button edge cases', () => {
     }
     const afterFive = await page.evaluate(() => history.length)
 
-    // No per-cycle leak: five cycles must not add more entries than one.
     expect(afterFive).toBe(afterOne)
 
-    // Drawer should be closed at the end.
     const state = await getNavState(page)
     expect(state.drawerOpen).toBe(false)
+  })
+
+  test('9. Drawer close (toggle) on a non-default view stays on that view', async ({ page }) => {
+    // Regression guard for the bug where closeDrawer's history.back()
+    // was popping the navStack and yanking the user out of the current
+    // view. Sequence: navigate to settings, open drawer, close it via
+    // the X button — must stay on settings, not pop back to chat.
+    await setup(page)
+
+    // Move to a non-default view (settings) so navStack is non-empty.
+    await openDrawer(page)
+    await navigateToSettings(page)
+    const onSettings = await page.evaluate(
+      () => !!document.querySelector('.settings')
+    )
+    expect(onSettings).toBe(true)
+
+    // Open drawer (sentinel + drawer open) and close via the X button.
+    await openDrawer(page)
+    expect((await getNavState(page)).drawerOpen).toBe(true)
+
+    await closeDrawerToggle(page)
+    const stillOnSettings = await page.evaluate(
+      () => !!document.querySelector('.settings')
+    )
+    const afterClose = await getNavState(page)
+    expect(afterClose.drawerOpen).toBe(false)
+    expect(stillOnSettings).toBe(true)
+  })
+
+  test('10. Drawer back-gesture (popstate) closes drawer without navigating', async ({ page }) => {
+    // Same regression as #9 but via OS back gesture rather than X
+    // button. From settings + drawer-open, history.back() must close
+    // the drawer and leave us on settings (not pop navStack).
+    await setup(page)
+
+    await openDrawer(page)
+    await navigateToSettings(page)
+    const onSettings = await page.evaluate(
+      () => !!document.querySelector('.settings')
+    )
+    expect(onSettings).toBe(true)
+
+    await openDrawer(page)
+    expect((await getNavState(page)).drawerOpen).toBe(true)
+
+    await goBack(page)
+
+    const stillOnSettings = await page.evaluate(
+      () => !!document.querySelector('.settings')
+    )
+    const afterBack = await getNavState(page)
+    expect(afterBack.drawerOpen).toBe(false)
+    expect(stillOnSettings).toBe(true)
+  })
+})
+
+test.describe('Drawer state machine — extended invariants', () => {
+  // These tests pin down each state transition of the navigation/drawer
+  // state machine. State variables: activeView, drawerOpen, drawerPushed
+  // (sentinel pushed on openDrawer, cleared by handleBack or navTo),
+  // navStack (pushed by navTo, popped by handleBack).
+  //
+  // Each test isolates a single transition or invariant. If you change
+  // useNavigation.js and a test fails, that test name describes the
+  // exact behavior you broke.
+
+  test('11. openDrawer is idempotent — second open while open is a no-op', async ({ page }) => {
+    // Without an idempotency guard, every open pushes another sentinel
+    // and the user has to press back N times to exit a "stuck" drawer.
+    await setup(page)
+    const before = await page.evaluate(() => history.length)
+    await openDrawer(page)
+    const afterFirst = await page.evaluate(() => history.length)
+    await openDrawer(page) // already open — must not push another entry
+    const afterSecond = await page.evaluate(() => history.length)
+    expect(afterFirst - before).toBe(1)
+    expect(afterSecond).toBe(afterFirst)
+  })
+
+  test('12. closeDrawer when drawer already closed is a no-op', async ({ page }) => {
+    // Defensive: someone wires an extra close into a useEffect cleanup
+    // that fires when drawer is already closed. Must not call history.back
+    // (which would consume the wrong entry).
+    await setup(page)
+    const before = await page.evaluate(() => history.length)
+    await closeDrawerToggle(page) // drawer is already closed
+    const after = await page.evaluate(() => history.length)
+    expect(after).toBe(before)
+  })
+
+  test('13. Drawer open -> nav-to-settings -> back returns to chat (not drawer)', async ({ page }) => {
+    // After navTo, the sentinel is "consumed" semantically — drawerPushedRef
+    // is false. Back from settings must pop the navStack, not re-open the
+    // drawer.
+    await setup(page)
+    const startId = (await getNavState(page)).activeChatId
+
+    await openDrawer(page)
+    await navigateToSettings(page)
+    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
+
+    await goBack(page)
+    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(false)
+    const after = await getNavState(page)
+    expect(after.drawerOpen).toBe(false)
+    expect(after.activeChatId).toBe(startId)
+    expect(after.hasChat).toBe(true)
+  })
+
+  test('14. Drawer open -> nav-to-settings -> drawer-open -> back closes drawer (stays on settings)', async ({ page }) => {
+    // After navTo to settings, opening drawer again pushes a NEW sentinel.
+    // Back must close the drawer and stay on settings, not pop to chat.
+    await setup(page)
+
+    await openDrawer(page)
+    await navigateToSettings(page)
+    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
+
+    await openDrawer(page) // sentinel #2
+    expect((await getNavState(page)).drawerOpen).toBe(true)
+
+    await goBack(page)
+    expect((await getNavState(page)).drawerOpen).toBe(false)
+    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
+  })
+
+  test('15. Drawer cycles stabilize at +1 history entry, do not grow', async ({ page }) => {
+    // Honest documentation of a known browser-API limitation. After the
+    // FIRST open/close cycle, history.length is +1 because history.back()
+    // doesn't truncate forward entries — the sentinel sits as a stale
+    // forward entry. SUBSEQUENT cycles overwrite that forward entry via
+    // pushState's natural truncate-forward behavior, so length stops
+    // growing. Net cost: one extra back-press to exit the app after
+    // touching the drawer at least once. We accept this rather than
+    // synthesizing a more complex push/back dance.
+    await setup(page)
+    const before = await page.evaluate(() => history.length)
+    await openDrawer(page)
+    await closeDrawerToggle(page)
+    const afterOne = await page.evaluate(() => history.length)
+    await openDrawer(page)
+    await closeDrawerToggle(page)
+    const afterTwo = await page.evaluate(() => history.length)
+    // First cycle adds at most one stranded forward sentinel.
+    expect(afterOne - before).toBeLessThanOrEqual(1)
+    // Subsequent cycles must not grow further.
+    expect(afterTwo).toBe(afterOne)
+  })
+
+  test('16. Settings -> drawer-open -> nav-to-other-chat -> back returns to settings', async ({ page }) => {
+    // navStack should record settings as the "previous view"; back from
+    // chat must pop to settings, not deeper.
+    await setup(page)
+
+    await openDrawer(page)
+    await navigateToSettings(page)
+    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
+
+    await openDrawer(page)
+    await navigateToChat(page, 0) // goes to a chat
+    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(false)
+
+    await goBack(page)
+    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
+  })
+
+  test('17. activeChatId in localStorage matches the displayed chat after back', async ({ page }) => {
+    // Sanity: when handleBack pops navStack, the URL/localStorage and
+    // displayed view must agree. Decoupling these silently shows the
+    // wrong content with the right URL.
+    await setup(page)
+    const startId = (await getNavState(page)).activeChatId
+
+    await openDrawer(page)
+    await navigateToSettings(page)
+    await goBack(page)
+
+    const after = await getNavState(page)
+    expect(after.activeChatId).toBe(startId)
+    expect(after.hasChat).toBe(true)
+  })
+
+  test('18. Triple cycle: chat -> settings -> chat -> back -> back exits cleanly', async ({ page }) => {
+    // Stress test: navigate forward several steps and back through them,
+    // verifying each pop hits the correct prior view.
+    await setup(page)
+    const startId = (await getNavState(page)).activeChatId
+
+    await openDrawer(page)
+    await navigateToSettings(page)
+    await openDrawer(page)
+    await navigateToChat(page, 0)
+
+    await goBack(page) // -> settings
+    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
+
+    await goBack(page) // -> chat
+    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(false)
+    expect((await getNavState(page)).activeChatId).toBe(startId)
+  })
+
+  test('19. closeDrawer via toggle and via popstate produce identical state', async ({ page }) => {
+    // The drawer-as-back-stack pattern means both close paths funnel
+    // through handleBack. They must converge to the same end state.
+    await setup(page)
+
+    await openDrawer(page)
+    await closeDrawerToggle(page)
+    const viaToggle = await getNavState(page)
+
+    await openDrawer(page)
+    await goBack(page)
+    const viaBack = await getNavState(page)
+
+    expect(viaToggle.drawerOpen).toBe(viaBack.drawerOpen)
+    expect(viaToggle.hasChat).toBe(viaBack.hasChat)
+    expect(viaToggle.activeChatId).toBe(viaBack.activeChatId)
   })
 })
 

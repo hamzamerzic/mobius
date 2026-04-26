@@ -1,15 +1,15 @@
 // Service worker: PWA install + Web Push + runtime asset caching.
 //
 // Cache strategy by URL:
-//   /vendor/*                   cache-first  (immutable bundled libs)
-//   /assets/*                   cache-first  (Vite-hashed shell assets)
-//   /api/apps/{id}/module       SWR          (recompiled bundles via versioned URL)
-//   /api/proxy?url=*.{img/font} SWR          (cacheable static assets only)
-//   esm.sh/*                    cache-first  (versioned URLs are immutable)
+//   /vendor/*                   cache-first    (immutable bundled libs)
+//   /assets/*                   cache-first    (Vite-hashed shell assets)
+//   /api/apps/{id}/module       network-first  (agent recompiles must be live; cache is offline fallback)
+//   /api/proxy?url=*.{img/font} SWR            (cacheable static assets only)
+//   esm.sh/*                    cache-first    (versioned URLs are immutable)
 // Everything else (HTML, /api/*) goes straight to the network.
 //
 // Bumping VERSION purges old caches on activate.
-const VERSION = 'v1'
+const VERSION = 'v2'
 const CACHES = {
   vendor: `mobius-vendor-${VERSION}`,
   assets: `mobius-assets-${VERSION}`,
@@ -55,7 +55,7 @@ self.addEventListener('fetch', (event) => {
       return
     }
     if (/^\/api\/apps\/\d+\/module/.test(path)) {
-      event.respondWith(staleWhileRevalidate(req, CACHES.apps))
+      event.respondWith(networkFirst(req, CACHES.apps))
       return
     }
     if (path === '/api/proxy') {
@@ -94,6 +94,27 @@ async function staleWhileRevalidate(req, cacheName) {
     return res
   }).catch(() => cached)
   return cached || network
+}
+
+// Network-first with a 3-second timeout. If the network is slow, fall
+// back to cache so the app stays responsive on shaky connections —
+// per the offline-first PWA pattern (slicker.me/webdev/pwas-offline-first).
+const NETWORK_FIRST_TIMEOUT_MS = 3000
+
+async function networkFirst(req, cacheName) {
+  const cache = await caches.open(cacheName)
+  const cachedPromise = cache.match(req)
+  try {
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), NETWORK_FIRST_TIMEOUT_MS)
+    const res = await fetch(req, { signal: ctrl.signal })
+    clearTimeout(timer)
+    if (res.ok) cache.put(req, res.clone()).catch(() => {})
+    return res
+  } catch {
+    const cached = await cachedPromise
+    return cached || Response.error()
+  }
 }
 
 // Web Push: show notification when a push arrives.

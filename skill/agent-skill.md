@@ -329,7 +329,8 @@ export default function MyApp({ appId, token }) {
 ### Available libraries
 
 The `app-frame.html` import map provides these for bare-specifier
-imports, so they load fast and cache across apps:
+imports, so they load fast and cache across apps. `three` is
+self-hosted at `/vendor/three/` (no esm.sh waterfall):
 
 ```jsx
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
@@ -339,6 +340,8 @@ import { LineChart, BarChart, PieChart, AreaChart, ComposedChart,
   CartesianGrid, Legend, ResponsiveContainer, Cell, LabelList, Brush,
   PolarGrid, PolarAngleAxis, PolarRadiusAxis } from 'recharts'
 import { format, parseISO, addDays, differenceInDays } from 'date-fns'
+import * as THREE from 'three'
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 ```
 
 **Any other library is fair game via runtime dynamic import from esm.sh:**

@@ -54,31 +54,36 @@ export default function useNavigation() {
   drawerOpenRef.current = drawerOpen
   // Android back gesture synthesizes a click on the logo ~300ms later.
   const backFiredRef = useRef(false)
-  // True when openDrawer pushed an entry that hasn't been consumed by navTo.
+  // True when openDrawer pushed an entry that hasn't been consumed yet.
   const drawerPushedRef = useRef(false)
 
-  // pushState when the drawer opens — page is clean (no drawer, correct
-  // chat visible), so Chrome Android caches the right back-forward preview.
-  // If the user closes without navigating, the entry becomes a harmless
-  // no-op on back (stack is empty, nothing changes visually).
+  // Drawer-as-back-stack pattern: openDrawer pushes a history sentinel,
+  // closeDrawer triggers history.back() to pop it, and handleBack is the
+  // single place that flips drawerOpen state to false. This means there's
+  // exactly one path that closes the drawer, no matter who initiates it
+  // (X button, back gesture, swipe-to-close): everything funnels through
+  // popstate -> handleBack. No coordination flags, no race windows.
   function openDrawer() {
+    if (drawerOpenRef.current) return
     history.pushState(null, '')
     drawerPushedRef.current = true
     setDrawerOpen(true)
   }
 
   function closeDrawer() {
-    const wasPushed = drawerPushedRef.current
-    drawerPushedRef.current = false
-    // Update the ref synchronously so the popstate handler fired by
-    // history.back() below sees drawer-closed state and early-returns
-    // without running handleBack.
-    drawerOpenRef.current = false
-    setDrawerOpen(false)
-    // Pop the sentinel entry that openDrawer pushed. Without this, every
-    // open/close cycle leaks one history entry — the user has to press
-    // back once per toggle before the app actually navigates back.
-    if (wasPushed) history.back()
+    if (!drawerOpenRef.current) return
+    if (drawerPushedRef.current) {
+      // Funnel through history.back() so handleBack handles the state
+      // change. Without this every open/close cycle leaks a sentinel
+      // entry and the user has to press back once per cycle before the
+      // app actually navigates back.
+      history.back()
+    } else {
+      // Defensive: if somehow drawer is open without a sentinel, just
+      // close it directly.
+      drawerOpenRef.current = false
+      setDrawerOpen(false)
+    }
   }
 
   function navTo(view, opts = {}) {
@@ -100,10 +105,18 @@ export default function useNavigation() {
     function handleBack() {
       backFiredRef.current = true
       setTimeout(() => { backFiredRef.current = false }, 400)
-      // Clear the drawer-pushed flag — the history entry openDrawer
-      // pushed is now being consumed by this back event. Without this,
-      // a stale true leaks into the next closeDrawer and triggers a
-      // spurious history.back().
+      // Drawer-first: if the drawer is open, closing it consumes this
+      // back event. The user expects "back closes the drawer," not
+      // "back closes the drawer AND navigates one step." If the drawer
+      // wasn't pushed (defensive), still close it but don't return.
+      if (drawerOpenRef.current && drawerPushedRef.current) {
+        drawerPushedRef.current = false
+        drawerOpenRef.current = false
+        setDrawerOpen(false)
+        return
+      }
+      // No drawer (or drawer closed without a sentinel): treat as a
+      // real navigation back — pop the nav stack.
       drawerPushedRef.current = false
       drawerOpenRef.current = false
       setDrawerOpen(false)
@@ -122,7 +135,7 @@ export default function useNavigation() {
       function onNavigate(e) {
         if (e.navigationType !== 'traverse') return
         if (!e.canIntercept) return
-        // Nothing to go back to — let the browser handle it (exits PWA).
+        // Nothing to do — let the browser handle it (exits PWA).
         if (navStackRef.current.length === 0 && !drawerOpenRef.current) return
         e.intercept({ handler() { handleBack() } })
       }
