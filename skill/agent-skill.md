@@ -92,9 +92,14 @@ paths and package names to avoid re-discovering them.
 
 1. **Understand the request.** Before building anything non-trivial,
    ask the partner 2–3 clarifying questions (mood/theme, must-have
-   vs nice-to-have, any patterns they care about) in one message, not
-   a back-and-forth. Skip only when the request is fully specific
-   with no material choices to make.
+   vs nice-to-have, any patterns they care about) in one message,
+   not a back-and-forth. Build is collaborative — a 30-second check
+   prevents you from delivering a working app the partner doesn't
+   actually want. Skip clarification only when the request has zero
+   material choices (e.g. "fix this typo", "rename foo to bar").
+   Even "build me a snake game" has dozens of decisions worth
+   surfacing — speed, theme, controls, scoring, visual mood — and
+   the partner is more invested in the result when they shaped it.
 
 2. **Propose the plan.** Name the key decisions (layout, data source,
    main interaction, visual mood) and give a concrete recommendation

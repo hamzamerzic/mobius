@@ -54,6 +54,58 @@ order is implicit.
   point — proves the app contract works and gives the user somewhere
   to click.
 
+## Mini-app contract (everything you need; do NOT read app-frame.html)
+
+A mini-app is a single JSX file whose default export is a React
+component receiving `{ appId, token }` props. The platform compiles
+it via esbuild and renders it in a sandboxed iframe.
+
+```jsx
+export default function MyApp({ appId, token }) {
+  // ... your UI
+  return <div>...</div>
+}
+```
+
+**Available imports** (already in the import map — no install needed):
+`react`, `react/jsx-runtime`, `react-dom`, `react-dom/client`,
+`recharts`, `date-fns`, `three`, `three/addons/*`. Anything else
+loads via dynamic `import()` from esm.sh.
+
+**Storage API** (per-app key/value file storage):
+
+```js
+// read
+fetch(`/api/storage/apps/${appId}/file.json`, {
+  headers: { Authorization: `Bearer ${token}` }
+}).then(r => r.ok ? r.json() : null)
+
+// write
+fetch(`/api/storage/apps/${appId}/file.json`, {
+  method: 'PUT',
+  headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ content: JSON.stringify(myData) })
+})
+
+// delete
+fetch(`/api/storage/apps/${appId}/file.json`, {
+  method: 'DELETE',
+  headers: { Authorization: `Bearer ${token}` }
+})
+```
+
+A 404 on first read is normal — handle with a default value.
+
+**External fetches** go through `/api/proxy?url=<urlencoded>`:
+
+```js
+const url = `/api/proxy?url=${encodeURIComponent(externalUrl)}`
+fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+```
+
+**Register / update**: use `python "$SCRIPTS_DIR/register_app.py" "<name>" "<description>" apps/<name>/index.jsx`
+— it handles compile + DB write + on-disk source in one call.
+
 ## Shell structure
 
 | File | Controls |
@@ -140,11 +192,12 @@ order is implicit.
   px of the previous one) before drawing.
 - Three.js: `import * as THREE from 'three'` and
   `import { OrbitControls } from 'three/addons/controls/OrbitControls.js'`
-  just work (pinned in the app-frame import map). Visual gotchas:
-  cloud density lives in the PNG's alpha channel, not red — multiply
-  by alpha when sampling for a custom shader. ACES tone mapping
-  crushes dark oceans to flat black; switch to `LinearToneMapping`
-  or lower exposure if sea color matters.
+  just work (self-hosted at `/vendor/three/` via the app-frame import
+  map — no esm.sh waterfall). Visual gotchas: cloud density lives
+  in the PNG's alpha channel, not red — multiply by alpha when
+  sampling for a custom shader. ACES tone mapping crushes dark
+  oceans to flat black; switch to `LinearToneMapping` or lower
+  exposure if sea color matters.
 
 ## Debug endpoints
 
