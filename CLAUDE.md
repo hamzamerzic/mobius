@@ -372,56 +372,158 @@ with overlay mode).
 **Do not hide/fade the scroll area during restoration.** `visibility:
 hidden` or `opacity: 0` cause a visible flash.
 
-### Navigation — non-negotiable constraints
+### Navigation — DO NOT CHANGE WITHOUT READING THIS WHOLE SECTION
 
-These behaviors are load-bearing. Any change to `useNavigation.js` or
-the navigation-related parts of `Shell.jsx` must preserve all of them.
-Lock-in tests live in `tests/navigation.spec.mjs`.
+The current model (the "fa605f6 + drawer-first" model) is the result
+of multiple iterations across attempts that each broke something
+different. **Three architectures have been tried and rejected.**
+Before changing anything in `useNavigation.js`, `Shell.jsx`'s
+navigation paths, or `Drawer/*.css`'s transitions, you must
+internalize the desiderata, the anti-patterns, and the trade-offs
+below. Otherwise we *will* re-implement a previously-rejected
+design and ship a regression.
 
-1. **Drawer is purely visual state.** `openDrawer` and `closeDrawer`
-   only flip a React state flag. They do NOT call `history.pushState`
-   or `history.back`. Drawer cycles must add **zero** entries to
-   `history.length` — guarded by tests 8 and 11.
+Lock-in tests live in `tests/navigation.spec.mjs` (tests 1–24).
 
-2. **Each navigation pushes exactly one history entry.** `navTo`
-   pushes one navStack entry (capturing the prior view) AND one
-   browser history entry. Each back-gesture pops one. There is no
-   "drawer-as-back-stack" coupling.
+#### Desiderata (what the user explicitly cares about)
 
-3. **`flushSync` before `pushState` when navigating from drawer-open.**
-   Both `useNavigation.navTo` and `Shell.newChat` MUST close the
-   drawer via `flushSync(() => setDrawerOpen(false))` BEFORE calling
-   `history.pushState`. Without this, Chrome Android's swipe-back
-   animation captures a "two drawers" snapshot during the gesture
-   (the entry-being-left's state has the drawer still visible because
-   React batches the close). This is the BFCache visual artifact;
-   `flushSync` is React 18's sanctioned escape hatch for exactly
-   this DOM-coordination case. Locked in by the "BFCache snapshot
-   contract" test in `tests/navigation.spec.mjs`.
+1. **No "two drawers" artifact during Chrome Android swipe-back.**
+   The back-gesture animation must not show the drawer mid-slide
+   over the destination view. This is the most visible symptom and
+   the headline reason this section exists.
+2. **Drawer slide-in/out animations stay visible.** The user values
+   the 250ms drawer transition. Any "snap-shut" workaround degrades
+   UX and is rejected.
+3. **One back-press to exit the PWA from the home view.** Not two,
+   not "first back closes a phantom sentinel." Phone users
+   instinctively map back-from-home to "leave the app."
+4. **Drawer-close via overlay tap / X button does not navigate.**
+   Closing the drawer must NEVER pop the navStack or change view.
+   This was the most recent regression — every close path was
+   over-popping.
+5. **Drawer-first back behavior.** A back-gesture while the drawer
+   is open closes the drawer ONLY. It does not also navigate. This
+   matches user mental model on mobile.
+6. **Back-gesture from a deep view (chat reached via drawer-tap)
+   returns to the previous view.** One back = one nav.
+7. **Drawer is conceptually a virtual route.** Open pushes a
+   sentinel; close consumes it. The URL stays at `/` so this
+   route-ness is invisible to users.
 
-4. **Back-gesture closes the drawer as a side-effect.** The popstate
-   / Navigation API handler always closes the drawer, regardless of
-   what view it pops to. There is NO "back closes drawer first, then
-   navigates on second back" half-step. One back = one nav (drawer
-   closes too).
+#### Architecture (how we satisfy them)
 
-5. **`navStackRef` must be scrubbed on chat delete.** `Shell.deleteChat`
-   filters `navStackRef.current` to remove entries whose `chatId`
-   matches the deleted chat. Without this, back-gesture after delete
-   navigates into a 404'd chat.
+```
+              ┌───────────────────────┐
+              │ openDrawer            │
+              │   pushState(null,'')  │──── browser history grows by 1
+              │   drawerPushedRef=t   │
+              │   setDrawerOpen(true) │
+              └───────────────────────┘
+                         │
+                  drawer is open
+                         │
+        ┌────────────────┼─────────────────────┐
+        │                │                     │
+        v                v                     v
+  closeDrawer       navTo(view)         user swipes back
+  (X / overlay)     (drawer item tap)   (OS gesture)
+        │                │                     │
+        │ (drawerPushed? │ drawerPushed=false  │
+        │  history.back  │ navStack.push(prior)│
+        │  → handleBack) │ (no pushState)      │
+        v                v                     v
+  ──────────────  same handler ─────────────────
+                   `handleBack`:
+              ┌─ if drawerOpenRef && drawerPushedRef:
+              │     close drawer state, return  ← drawer-first guard
+              │
+              └─ else:
+                    pop navStack, restore view
+```
 
-6. **At the bottom of `navStackRef`, back-gesture exits the PWA.** We
-   don't try to trap it. The browser's default behavior takes over.
+Key load-bearing pieces:
 
-### Navigation — known cosmetic limit
+- **`navTo` does NOT pushState.** This is the structural fix for the
+  Chrome BFCache "two drawers" artifact. Browser history stays
+  pinned to the entry above base (the drawer-sentinel from
+  `openDrawer`). Chrome's snapshot of the entry being navigated TO
+  on swipe-back was captured BEFORE any drawer interaction, so it's
+  drawer-free. Test 21 (`tests/navigation.spec.mjs`) locks this in.
+- **`closeDrawer` funnels through `history.back()`.** Every close
+  path (overlay tap, X button, OS back-gesture) ends up calling
+  `handleBack`. There is exactly ONE place that mutates the
+  drawer-state during close. Tests 22–24 lock this in for each path.
+- **`handleBack`'s drawer-first guard.** `if (drawerOpenRef.current
+  && drawerPushedRef.current) { close drawer; return }`. Without
+  this guard, closeDrawer's synthetic `history.back()` would over-
+  pop `navStackRef` and unexpectedly navigate. Test 10 locks this
+  in.
+- **`drawerPushedRef` cleared in three places.** (a) `navTo` (the
+  drawer-sentinel becomes the nav back-target instead of a drawer-
+  close target). (b) `handleBack` after the drawer-first branch.
+  (c) `handleBack` after the navStack-pop branch (defensive). A
+  stale `true` causes the next `closeDrawer` to fire a spurious
+  `history.back()`.
 
-Chrome Android renders the swipe-back animation with a rasterized
-snapshot of the previous page state. Even with the `flushSync`
-guard above, there is a sub-frame window where the snapshot can
-include the drawer if the user swipes mid-state-update. We accept
-this as a sub-100ms visual hint; the test asserts the API contract
-(no drawer class on DOM at pushState time) which is the closest
-deterministic guarantee available.
+#### Anti-patterns (tried, rejected — do not silently re-implement)
+
+| Approach | Tried in | Why rejected |
+|---|---|---|
+| **`navTo` pushes per-nav + drawer purely visual** (no pushState in drawer) | 84ca8b6 (current `main` until f1ce5cd, before this fix) | Looked clean; caused the "two drawers" BFCache artifact because every nav created a new entry whose snapshot Chrome cached mid-drawer-animation. |
+| **`flushSync(setDrawerOpen(false))` before `pushState` in navTo** | 74d3800 | Insufficient. flushSync commits the React class change but the 250ms CSS `transform` transition keeps drawer pixels on screen for the snapshot. We tested the wrong invariant (DOM class) and shipped it confidently. |
+| **Perpetual single-sentinel pattern** (one sentinel forever, re-pushed after each consumed back) | local 2026-04-26 (reverted before deploy) | Required an extra back-press to exit the PWA from the bottom of the in-app stack. The user explicitly rejected this UX cost. |
+| **`closeDrawer` mutates drawer state directly + then `history.back()`** | fa605f6's original `closeDrawer` | Subtle bug: when the user opened drawer ON a deep view (e.g. chat reached via drawer-tap), navStack was non-empty. The `history.back()` fired the popstate handler whose check `if (navStack empty && drawer closed) return` did NOT early-return, so handleBack ran and popped navStack. Result: closing drawer over-navigated to a previous view. |
+| **Snap-close drawer transition** (remove or zero the close transition) | not implemented, considered | User rejected: wants the slide-out animation visible in normal close paths. |
+| **Drawer-as-route in URL** (e.g. `/?drawer=open`) | not implemented, considered | Adds visible URL noise; breaks no-shareable-URL contract; the structural BFCache fix doesn't depend on URL. |
+
+If you find yourself proposing one of these, **stop and read this
+section before writing code.** Each was a real ~half-day-or-more
+detour that ended in revert.
+
+#### Gotchas
+
+- **Navigation API `intercept()` does NOT pop `history.length`.** It
+  moves the active history index back without removing entries.
+  Tests asserting `history.length` strict equality across drawer
+  cycles will fail spuriously — the UX-relevant invariant is
+  "active index returns + view unchanged + drawer closed." Tests
+  3, 8, 15 reflect this; if you're tempted to tighten them, don't.
+- **Don't add early-return guards in `openDrawer`/`closeDrawer`
+  beyond what fa605f6 had.** The toggle in `Shell.jsx` already
+  guards on `aria-expanded` so the click handlers are idempotent.
+  Adding `if (drawerOpenRef.current) return` in `openDrawer` plus a
+  synchronous `drawerOpenRef.current = true` set caused a visible
+  "first drawer open is slow to render" regression on the user's
+  phone (root cause not fully understood; suspected interaction
+  with React 18 batching + the synchronous ref-set racing with
+  state commit on the cold path).
+- **`drawerPushedRef` is the single source of truth for "is there a
+  drawer-sentinel above current entry?"**. It's a ref, not state,
+  because it's mutated synchronously inside `navTo` and
+  `closeDrawer` before async events fire. Don't move this to React
+  state — it must be readable in the same JS task as the
+  history-mutating call.
+- **`Shell.newChat`'s `userInitiated` branch.** When the user
+  invokes "new chat" from the drawer, `drawerPushedRef` is true
+  and the drawer-sentinel becomes the back-target — we do NOT
+  `pushState` in that case. When `newChat` is called from a
+  draft/forceNew context (no drawer involved), we DO `pushState`
+  to install a fresh sentinel above the chat the user came from.
+  Subtle but correct.
+- **`navStackRef` must be scrubbed on chat delete.**
+  `Shell.deleteChat` filters `navStackRef.current` to remove
+  entries whose `chatId` matches the deleted chat. Without this,
+  back-gesture after delete navigates into a 404'd chat.
+- **Edge case: deep-link arrival + click-to-open-app.** User taps
+  a notification (lands on `/chat/<id>`). We parse, set state,
+  `replaceState('/')`. No sentinel exists. User clicks "Open app"
+  banner → `navTo('canvas', ...)` runs without a drawer-sentinel.
+  Back from canvas exits PWA instead of returning to chat. This
+  is a known small regression vs the perpetual-sentinel option;
+  acceptable because (a) it requires the specific notification ->
+  build-app -> open-app -> swipe-back flow, (b) fixing it would
+  require either a perpetual sentinel (rejected) or per-nav
+  pushState (the BFCache regression).
 
 ### Streaming rendering
 
