@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef } from 'react'
-import { flushSync } from 'react-dom'
 
 const ACTIVE_CHAT_KEY = 'moebius_active_chat'
 
@@ -22,30 +21,37 @@ const deepLink = (() => {
 })()
 
 /**
- * Navigation: drawer is purely visual state, navigation pushes to
- * the browser history, back/forward gestures pop the nav stack.
+ * Navigation: drawer-as-virtual-route + custom navStack.
  *
- * Architecture:
- *   - `openDrawer` / `closeDrawer` only flip a React state flag — no
- *     `pushState`, no `history.back`. The drawer is an overlay, not a
- *     route. This eliminates the +1 history leak the previous
- *     "drawer-as-back-stack" pattern carried, and keeps the visible
- *     UX simple ("back goes to the previous view, not into a drawer
- *     state").
- *   - `navTo(view, opts)` pushes a sentinel history entry AND a
- *     navStack entry capturing where we came from. Each navigation
- *     adds exactly one history entry; each back-gesture pops one.
- *   - `popstate` (or Navigation API `traverse`) treats every back as
- *     "pop the navStack and restore prior view." Drawer is closed as
- *     a side-effect — there is no "back closes the drawer first"
- *     half-step.
- *   - At the bottom of the navStack, the next back-gesture leaves the
- *     PWA naturally (browser default). We don't try to trap it.
+ * **READ CLAUDE.md "Navigation — DO NOT CHANGE WITHOUT READING THIS
+ * WHOLE SECTION" before editing this file.** It documents the full
+ * desiderata, the architecture diagram, the table of rejected
+ * alternatives, and the gotchas. This docstring is a summary, not
+ * the spec.
  *
- * `backFiredRef` is preserved for the existing Android-back-gesture
- * hack in Shell.jsx (the OS synthesizes a click on the logo ~300ms
- * after a back gesture; the hack ignores that click). Not load-
- * bearing for navigation logic.
+ * Three load-bearing pieces:
+ *
+ *   1. `openDrawer` pushes a sentinel history entry. Browser history
+ *      grows by one. Drawer is conceptually a "virtual route" but the
+ *      URL stays at `/` (we pass `null, ''` to pushState).
+ *
+ *   2. `navTo(view, opts)` updates internal state + `navStackRef` and
+ *      **does NOT call pushState**. The user stays on the drawer-
+ *      sentinel entry while the in-app view changes. This is the
+ *      structural fix for the Chrome Android BFCache "two drawers"
+ *      swipe-back artifact: Chrome's per-entry snapshot of the base
+ *      entry was captured before any drawer opened, so it's clean.
+ *
+ *   3. Every drawer-close path (X button, overlay tap, OS back-
+ *      gesture) funnels through `history.back()` → `handleBack`.
+ *      `handleBack` has a **drawer-first guard**: if the drawer was
+ *      open with a sentinel, just close drawer and return — do NOT
+ *      pop `navStackRef`. This prevents the "tap overlay
+ *      unexpectedly navigates to home" regression we shipped earlier.
+ *
+ * `backFiredRef` is preserved for the Android-back-gesture click
+ * synthesis hack in Shell.jsx (the OS sends a click on the logo
+ * ~300ms after a back gesture; the hack ignores it).
  */
 export default function useNavigation() {
   const [activeView, setActiveView] = useState(
@@ -70,46 +76,50 @@ export default function useNavigation() {
   drawerOpenRef.current = drawerOpen
   // Android back gesture synthesizes a click on the logo ~300ms later.
   const backFiredRef = useRef(false)
+  // True when openDrawer pushed an entry that hasn't been consumed by
+  // a navigation or a back-gesture yet.
+  const drawerPushedRef = useRef(false)
 
   function openDrawer() {
+    history.pushState(null, '')
+    drawerPushedRef.current = true
     setDrawerOpen(true)
   }
 
   function closeDrawer() {
-    setDrawerOpen(false)
+    if (!drawerOpenRef.current) return
+    if (drawerPushedRef.current) {
+      // Funnel through history.back() so handleBack handles the state
+      // transition. This makes back-gesture and overlay-tap follow
+      // exactly the same code path through handleBack, with the
+      // drawer-first guard there preventing navStack over-pop.
+      history.back()
+    } else {
+      // Defensive: drawer open without a sentinel (shouldn't happen
+      // in normal flow). Just close it directly.
+      drawerOpenRef.current = false
+      setDrawerOpen(false)
+    }
   }
 
   function navTo(view, opts = {}) {
+    // Consume the drawer sentinel if present — the user's tap on a
+    // drawer item IS the navigation, so the sentinel becomes the
+    // entry that holds this navTo's "back-to" position.
+    drawerPushedRef.current = false
     navStackRef.current.push({
       view: activeViewRef.current,
       chatId: activeChatIdRef.current,
       appId: activeAppIdRef.current,
     })
-    // CRITICAL: close the drawer SYNCHRONOUSLY (flushSync) before we
-    // call history.pushState. Chrome Android's swipe-back animation
-    // shows a rasterized snapshot of the previous page state during
-    // the gesture; that snapshot is captured at the moment we leave
-    // the entry. Without flushSync, React batches the setDrawerOpen
-    // and the DOM still shows drawer-open at pushState time → the
-    // back-gesture animation displays "two drawers" (the live one
-    // sliding away + the snapshot's drawer sliding in) for ~250ms.
-    //
-    // flushSync is React 18's sanctioned escape hatch for exactly
-    // this: coordinating React state changes with browser API calls
-    // that read DOM. See:
-    // https://react.dev/reference/react-dom/flushSync
-    //
-    // Tested by tests/navigation.spec.mjs §"BFCache snapshot
-    // contract" — the drawer must NOT have its `--open` class on
-    // the DOM at the moment history.pushState fires.
-    flushSync(() => {
-      drawerOpenRef.current = false
-      setDrawerOpen(false)
-    })
+    drawerOpenRef.current = false
+    setDrawerOpen(false)
     setActiveView(view)
     if ('chatId' in opts) setActiveChatId(opts.chatId)
     if ('appId' in opts) setActiveAppId(opts.appId)
-    try { history.pushState(null, '', '/') } catch { /* ignore */ }
+    // No pushState here — see top-of-file rationale. The drawer
+    // sentinel (if there was one) remains in browser history and
+    // serves as the back-target for this navigation.
   }
 
   useEffect(() => {
@@ -117,11 +127,25 @@ export default function useNavigation() {
     // into state, no need to keep it visible.
     history.replaceState(null, '', '/')
 
-    function applyBack() {
+    function handleBack() {
       backFiredRef.current = true
       setTimeout(() => { backFiredRef.current = false }, 400)
-      // Drawer is a transient overlay — close it on every nav,
-      // regardless of what state we're popping back into.
+      // Drawer-first: if the drawer is open AND its sentinel is the
+      // entry being consumed by this back, treat the event as just a
+      // drawer-close — don't pop navStack. Catches both real
+      // back-gestures on a drawer-open view AND closeDrawer's
+      // history.back() (overlay tap, X button). Without this guard,
+      // closing the drawer from any deep view over-pops navStack and
+      // navigates back unexpectedly.
+      if (drawerOpenRef.current && drawerPushedRef.current) {
+        drawerPushedRef.current = false
+        drawerOpenRef.current = false
+        setDrawerOpen(false)
+        return
+      }
+      // No drawer (or drawer open without a sentinel — defensive):
+      // treat as real navigation back. Pop navStack and restore.
+      drawerPushedRef.current = false
       drawerOpenRef.current = false
       setDrawerOpen(false)
       const entry = navStackRef.current.pop()
@@ -130,19 +154,18 @@ export default function useNavigation() {
         setActiveChatId(entry.chatId)
         setActiveAppId(entry.appId)
       }
-      // navStack empty: nothing to restore. The browser already
-      // navigated; if there's no further entry, the PWA exits.
     }
 
-    // Navigation API path (modern Chrome): intercept() suppresses
-    // the back-forward slide animation on desktop and gives us a
-    // cleaner handler invocation than popstate.
+    // Navigation API path (modern Chrome): intercept() suppresses the
+    // back-forward slide on desktop and gives us a cleaner handler
+    // invocation than popstate.
     if (typeof navigation !== 'undefined' && navigation.addEventListener) {
       function onNavigate(e) {
         if (e.navigationType !== 'traverse') return
         if (!e.canIntercept) return
+        // Nothing to go back to — let the browser handle it (exits PWA).
         if (navStackRef.current.length === 0 && !drawerOpenRef.current) return
-        e.intercept({ handler() { applyBack() } })
+        e.intercept({ handler() { handleBack() } })
       }
       navigation.addEventListener('navigate', onNavigate)
       return () => navigation.removeEventListener('navigate', onNavigate)
@@ -151,7 +174,7 @@ export default function useNavigation() {
     // popstate fallback (Safari, older Chrome).
     function onPopState() {
       if (navStackRef.current.length === 0 && !drawerOpenRef.current) return
-      applyBack()
+      handleBack()
     }
     window.addEventListener('popstate', onPopState)
     return () => window.removeEventListener('popstate', onPopState)
@@ -182,6 +205,7 @@ export default function useNavigation() {
     navTo,
     canGoBack: navStackRef.current.length > 0,
     backFiredRef,
+    drawerPushedRef,
     navStackRef,
     activeViewRef,
     activeChatIdRef,

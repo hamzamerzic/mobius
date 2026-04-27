@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { flushSync } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import Drawer from '../Drawer/Drawer.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
@@ -18,7 +17,7 @@ export default function Shell() {
     activeAppId, setActiveAppId,
     activeChatId, setActiveChatId,
     drawerOpen, openDrawer, closeDrawer,
-    navTo, backFiredRef, navStackRef,
+    navTo, backFiredRef, drawerPushedRef, navStackRef,
     activeViewRef, activeChatIdRef, activeAppIdRef,
   } = useNavigation()
 
@@ -183,28 +182,22 @@ export default function Shell() {
       } catch { return }
     }
 
-    // Push nav stack so back returns to the previous view, but only
-    // for user-initiated calls (drawer click, draft restore, explicit
-    // forceNew). Skip for bootstrap (no chats exist on app load),
-    // where there's nothing to "go back to."
-    const userInitiated = !!draft || !!forceNew || drawerOpen
-    if (userInitiated) {
+    // Push nav stack so back returns to the previous view (skip
+    // automatic calls — bootstrap or chat-deletion-induced re-create).
+    // If the drawer was open, its sentinel becomes this nav's back-
+    // target (no new pushState needed). Otherwise, push our own
+    // sentinel so back returns to the previous view rather than
+    // exiting the PWA.
+    if (draft || forceNew || drawerPushedRef.current) {
+      if (!drawerPushedRef.current) history.pushState(null, '')
+      drawerPushedRef.current = false
       navStackRef.current.push({
         view: activeViewRef.current,
         chatId: activeChatIdRef.current,
         appId: activeAppIdRef.current,
       })
-      // CRITICAL: same flushSync pattern as `useNavigation.navTo`.
-      // The drawer must be visually closed (DOM updated) BEFORE
-      // history.pushState runs, or the back-gesture animation
-      // captures a "two drawers" snapshot. See useNavigation.js for
-      // the full rationale and CLAUDE.md "Navigation — non-negotiable
-      // constraints" for the rule.
-      flushSync(() => closeDrawer())
-      try { history.pushState(null, '', '/') } catch { /* ignore */ }
-    } else {
-      closeDrawer()
     }
+    closeDrawer()
     if (draft) {
       try { sessionStorage.setItem('pending-draft', draft) } catch {}
     }
