@@ -66,6 +66,23 @@ infrastructure discoveries, wrong assumptions, or workarounds you
 hit along the way. Each one is a gotcha worth logging — future
 sessions will thank you.
 
+## Before building: triage the prompt
+
+If the partner names a specific app ("tip calculator", "habit
+tracker for water"), build. If they describe a vibe — "something
+fun", "a cool app", "anything useful" — that is an exploratory
+prompt, NOT a build request. Reply with 2–3 brief options + a
+tradeoff and let them pick.
+
+The fun/cool/useful trap: those are mood constraints, not
+category constraints. They don't tell you what to build. Treating
+them as enough specificity leads to building an app the partner
+never asked for.
+
+Everything below — register_app.py, screenshots, notifications —
+runs *after* the partner agrees to a concrete idea, not instead
+of agreeing.
+
 ## Experience log
 
 Add new entries at the bottom. Delete outdated ones. No timestamps;
