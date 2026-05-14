@@ -6,6 +6,9 @@ import { renderInlineMath, renderBlockMath, renderMathToString } from './math.js
 import ImageLightbox from './ImageLightbox.jsx'
 import '../lightbox.css'
 
+const SAFE_LINK_PROTOCOLS = new Set(['http:', 'https:', 'mailto:'])
+const SAFE_IMAGE_PROTOCOLS = new Set(['http:', 'https:'])
+
 /**
  * Renders inline markdown tokens (text, bold, italic, code, links, math).
  * Takes a marked inline token array and produces React elements.
@@ -43,9 +46,13 @@ function InlineToken({ token }) {
   }
 
   if (token.type === 'link') {
+    const href = safeLinkHref(token.href)
+    if (!href) {
+      return <InlineContent tokens={token.tokens} />
+    }
     return (
       <a
-        href={DOMPurify.sanitize(token.href)}
+        href={href}
         target="_blank"
         rel="noopener noreferrer"
         title={token.title || undefined}
@@ -76,8 +83,25 @@ function InlineToken({ token }) {
   return token.raw || token.text || ''
 }
 
+function safeUrl(href, protocols) {
+  const cleaned = DOMPurify.sanitize(href || '').trim()
+  if (!cleaned) return null
+  try {
+    const url = new URL(cleaned, location.origin)
+    if (!protocols.has(url.protocol)) return null
+    return cleaned
+  } catch {
+    return null
+  }
+}
+
+function safeLinkHref(href) {
+  return safeUrl(href, SAFE_LINK_PROTOCOLS)
+}
+
 function resolveImageSrc(href) {
-  let src = DOMPurify.sanitize(href)
+  let src = safeUrl(href, SAFE_IMAGE_PROTOCOLS)
+  if (!src) return null
   if (src.startsWith('/api/') || src.startsWith(BASE + '/api/')) {
     const url = new URL(src, location.origin)
     url.searchParams.set('token', getToken())
@@ -89,6 +113,7 @@ function resolveImageSrc(href) {
 function ExpandableImage({ href, alt }) {
   const [open, setOpen] = useState(false)
   const src = resolveImageSrc(href)
+  if (!src) return null
   return (
     <>
       <img

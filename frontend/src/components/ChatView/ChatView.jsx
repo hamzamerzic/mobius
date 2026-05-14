@@ -176,8 +176,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // and gets a 204 (no active broadcast — the chat finished while the
   // user was offline or on poor connectivity). Replaces stale messages
   // with the current DB state.
-  const fetchMessages = useCallback(async () => {
-    if (sendingRef.current) return
+  const fetchMessages = useCallback(async ({ force = false } = {}) => {
+    if (sendingRef.current && !force) return
     try {
       const res = await apiFetch(`/chats/${chatId}?limit=20`)
       const data = await res.json()
@@ -634,7 +634,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       })
     } catch { /* network error during stop is non-critical */ }
     promoteStreamToMessages()
-    disconnect()
+    disconnect({ clearStreaming: true })
     setSending(false)
     onStreamEnd?.()
   }

@@ -42,8 +42,12 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
     _setStreamItems(next)
   }
 
-  const [isStreaming, setIsStreaming] = useState(false)
-  const [connectionError, setConnectionError] = useState(null)
+  const [isStreaming, _setIsStreaming] = useState(false)
+  const isStreamingRef = useRef(false)
+  function setIsStreaming(v) { isStreamingRef.current = v; _setIsStreaming(v) }
+  const [connectionError, _setConnectionError] = useState(null)
+  const connectionErrorRef = useRef(null)
+  function setConnectionError(v) { connectionErrorRef.current = v; _setConnectionError(v) }
 
   const abortRef = useRef(null)
   const retryCount = useRef(0)
@@ -126,7 +130,7 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
     })
   }, [])
 
-  const disconnect = useCallback(() => {
+  const disconnect = useCallback(({ clearStreaming = false } = {}) => {
     if (abortRef.current) {
       abortRef.current.abort()
       abortRef.current = null
@@ -136,6 +140,12 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
       rafRef.current = null
     }
     drainingRef.current = false
+    if (clearStreaming) {
+      setIsStreaming(false)
+      setConnectionError(null)
+      retryCount.current = 0
+      justSentAtRef.current = 0
+    }
   }, [])
 
   useEffect(() => () => disconnect(), [chatId, disconnect])
@@ -197,7 +207,13 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
         textBufferRef.current = ''
         // The chat may have finished while we were offline — re-fetch
         // messages from the DB so the component shows the final state.
-        onNeedsRefreshRef.current?.()
+        // Let ChatView clear its `sending` state, then force a refresh
+        // from persisted DB state. This path is terminal: there is no
+        // active broadcast left to clobber.
+        requestAnimationFrame(() => {
+          onStreamEndRef.current?.()
+          onNeedsRefreshRef.current?.({ force: true })
+        })
         return
       }
 
@@ -408,22 +424,39 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
     connectRef.current?.(true)
   }, [])
 
-  // Reconnect on visibility change or network recovery.
-  // The !abortRef.current guard prevents firing during active streaming
-  // (the controller exists while connected).  When it does fire (e.g.
-  // connection was lost while backgrounded), we reset state so the
-  // catch-up burst doesn't duplicate existing streamItems.
+  // Reconnect on visibility change or network recovery, but ONLY
+  // when we believe a stream is active (isStreamingRef). Idle chats
+  // are left alone — no pointless 204 + DB refetch on every tab
+  // switch.
+  //
+  // Two cases on wake while streaming:
+  // (a) Connection cleanly closed while backgrounded (abortRef is
+  //     null, isStreaming still true) → reconnect with reset.
+  // (b) Connection died silently — TCP dropped during sleep, no
+  //     error event fired, abortRef still non-null. We abort the
+  //     stale controller and reconnect; the catch-up burst replays
+  //     everything the client missed.
+  //
+  // Without this, the UI shows frozen "thinking" dots forever
+  // after screen-lock during streaming.
   useEffect(() => {
     function onVisible() {
-      if (document.visibilityState === 'visible' && !abortRef.current) {
-        connectRef.current?.(true)
+      if (document.visibilityState !== 'visible') return
+      if (!isStreamingRef.current) return
+      if (abortRef.current) {
+        abortRef.current.abort()
+        abortRef.current = null
       }
+      connectRef.current?.(true)
     }
 
     function onOnline() {
-      if (!abortRef.current) {
-        connectRef.current?.(true)
+      if (!isStreamingRef.current && !connectionErrorRef.current) return
+      if (abortRef.current) {
+        abortRef.current.abort()
+        abortRef.current = null
       }
+      connectRef.current?.(true)
     }
 
     document.addEventListener('visibilitychange', onVisible)
