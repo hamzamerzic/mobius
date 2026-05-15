@@ -108,6 +108,8 @@ async def send_message(
       "content": content,
       "ts": int(time.time() * 1000),
     }
+    if body.hidden:
+      user_msg["hidden"] = True
     if body.attachments:
       user_msg["attachments"] = body.attachments
     existing = list(chat.messages or [])

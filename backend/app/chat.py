@@ -372,6 +372,7 @@ async def _run_chat_impl(
     assistant_blocks = []
     session_captured = False
     last_save_time = 0.0
+    suppress_text = False
     _DB_SAVE_INTERVAL = 1.0  # seconds between incremental DB saves
 
     # Default 1 hour, clamped to [30, 7200].
@@ -432,6 +433,17 @@ async def _run_chat_impl(
                 "provider error: %s", event.get("message"),
               )
 
+            # AskUserQuestion auto-answers with is_error in -p mode.
+            # Suppress Claude's fallback text and the synthetic tool
+            # result. TODO: with the Agent SDK's canUseTool callback
+            # the auto-answer never fires and this is unnecessary.
+            if event_type == "question":
+              suppress_text = True
+            if suppress_text and event_type in (
+              "text", "tool_output", "tool_end",
+            ):
+              continue
+
             bc.publish(event)
 
             # Accumulate blocks and throttle DB saves.
@@ -443,6 +455,7 @@ async def _run_chat_impl(
               if (now - last_save_time >= _DB_SAVE_INTERVAL
                   or event_type in (
                     "tool_start", "tool_end", "error",
+                    "question",
                   )):
                 last_save_time = now
                 _update_last_assistant_message(

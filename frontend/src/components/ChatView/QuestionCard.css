@@ -1,0 +1,104 @@
+.qcard {
+  margin: 8px 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--surface, rgba(255,255,255,.06));
+  border: 1px solid var(--border-light, var(--border));
+}
+.qcard--answered {
+  pointer-events: none;
+}
+
+.qcard__q + .qcard__q {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-light, var(--border));
+}
+
+.qcard__header {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+.qcard__text {
+  font-size: 14px;
+  margin-bottom: 6px;
+  color: var(--text);
+}
+
+.qcard__opts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.qcard__opt {
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background .15s, border-color .15s;
+}
+.qcard__opt:hover:not(:disabled) {
+  background: var(--surface2, rgba(128,128,128,.1));
+}
+.qcard__opt--on {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+.qcard__opt--on:hover:not(:disabled) {
+  background: var(--accent-hover, var(--accent));
+}
+.qcard__opt:disabled {
+  cursor: default;
+  opacity: .6;
+}
+.qcard__opt--dim {
+  opacity: .35;
+  border-color: transparent;
+}
+
+.qcard__input {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface2, rgba(128,128,128,.1));
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+  box-sizing: border-box;
+}
+.qcard__input:focus {
+  border-color: var(--accent);
+}
+
+.qcard__submit {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  padding: 10px;
+  border-radius: 8px;
+  border: none;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter .15s;
+}
+.qcard__submit:hover:not(:disabled) {
+  background: var(--accent-hover, var(--accent));
+}
+.qcard__submit:disabled {
+  opacity: .4;
+  cursor: default;
+}

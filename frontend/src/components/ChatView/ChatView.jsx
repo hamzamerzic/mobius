@@ -8,6 +8,7 @@ import useVoiceInput from './useVoiceInput.js'
 import useFileUpload from './useFileUpload.js'
 import ConnectionStatus from './ConnectionStatus.jsx'
 import ToolBlock from './ToolBlock.jsx'
+import QuestionCard from './QuestionCard.jsx'
 import MsgContent from './MsgContent.jsx'
 import './ChatView.css'
 
@@ -51,8 +52,14 @@ function sameMessageList(a, b) {
   if (!la || !lb) return false
   if (la.role !== lb.role) return false
   if (la.content !== lb.content) return false
-  // Different number of blocks → different.
-  if ((la.blocks?.length || 0) !== (lb.blocks?.length || 0)) return false
+  const bla = la.blocks, blb = lb.blocks
+  if ((bla?.length || 0) !== (blb?.length || 0)) return false
+  if (bla && blb) {
+    for (let i = 0; i < bla.length; i++) {
+      if (bla[i] !== blb[i]
+          && JSON.stringify(bla[i]) !== JSON.stringify(blb[i])) return false
+    }
+  }
   return true
 }
 
@@ -246,6 +253,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     }
     const blocks = items.map(item => {
       if (item.type === 'text') return { type: 'text', content: item.content }
+      if (item.type === 'question') return { type: 'question', questions: item.questions }
       const status = item.status === 'running' ? 'done' : item.status
       return { type: 'tool', ...item, status }
     })
@@ -617,6 +625,52 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     }
   }, [sending, streamSend, pendingFiles, commitMessages])
 
+  // Sends the answer without a visible user message bubble.
+  // TODO: when migrating to Claude Agent SDK, replace this with the
+  // canUseTool callback which returns answers as updatedInput — the
+  // hidden message, answer persistence endpoint, and this function
+  // all become unnecessary.
+  const doSendSilent = useCallback(async (text, resolvedAnswers) => {
+    if (!text.trim() || sending) return
+    onMessageStart?.()
+    promotedRef.current = false
+
+    // Update the question block with answers so the completed state persists.
+    if (resolvedAnswers) {
+      commitMessages(prev => {
+        const updated = [...prev]
+        const lastIdx = updated.length - 1
+        if (lastIdx >= 0 && updated[lastIdx].role === 'assistant') {
+          const msg = { ...updated[lastIdx] }
+          msg.blocks = (msg.blocks || []).map(b =>
+            b.type === 'question' ? { ...b, answers: resolvedAnswers } : b
+          )
+          updated[lastIdx] = msg
+        }
+        return updated
+      })
+      // Persist answers to DB so the completed state survives reload.
+      // TODO: replace with SDK canUseTool approach — answers would flow
+      // back as updatedInput and this endpoint becomes unnecessary.
+      apiFetch(`/chats/${chatId}/question-answers`, {
+        method: 'POST',
+        body: JSON.stringify({ answers: resolvedAnswers }),
+      }).catch(() => {})
+    }
+
+    setSending(true)
+    needsSpacerRef.current = true
+    try {
+      await streamSend(text, undefined, { hidden: true })
+    } catch (err) {
+      setSending(false)
+      commitMessages(prev => [
+        ...prev,
+        { role: 'assistant', content: `Error: ${err.message}`, blocks: [] },
+      ])
+    }
+  }, [sending, streamSend, commitMessages])
+
   function handleSubmit(e) {
     e.preventDefault()
     doSend(input.trim())
@@ -668,7 +722,17 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             </li>
           )}
 
-          {messages.map((msg, i) => (
+          {messages.map((msg, i) => {
+            if (msg.hidden) return null
+            const hasQuestion = msg.role === 'assistant'
+              && msg.blocks?.some(b => b.type === 'question')
+            const isLastMsg = i === messages.length - 1
+              || messages.slice(i + 1).every(m => m.hidden)
+            const questionBlock = hasQuestion
+              ? msg.blocks.find(b => b.type === 'question') : null
+            const questionAnswerable = hasQuestion && isLastMsg && !sending
+              && !questionBlock?.answers
+            return (
             <li
               key={msg.id || msg.ts || `${msg.role}-${i}`}
               className={`chat__msg chat__msg--${msg.role}`}
@@ -677,7 +741,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                 ? (e) => { e.currentTarget.querySelector('.chat__ts')?.classList.toggle('chat__ts--visible') }
                 : undefined}
             >
-              <MsgContent msg={msg} chatId={chatId} />
+              <MsgContent
+                msg={msg}
+                chatId={chatId}
+                onQuestionAnswer={questionAnswerable ? doSendSilent : undefined}
+                questionAnswers={questionBlock?.answers}
+              />
               {msg.ts && msg.role === 'user' && (
                 <time className="chat__ts">
                   {new Date(msg.ts).toLocaleString([], {
@@ -687,7 +756,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                 </time>
               )}
             </li>
-          ))}
+          )})}
 
           {sending && streamItems.length > 0 && (
             <li className="chat__msg chat__msg--assistant">
@@ -696,6 +765,17 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                   return (
                     <div key={`s-${i}`} className="chat__tools">
                       <ToolBlock t={item} />
+                    </div>
+                  )
+                }
+                if (item.type === 'question') {
+                  return (
+                    <div key={`s-${i}`}>
+                      <QuestionCard
+                        questions={item.questions}
+                        onAnswer={doSendSilent}
+                        disabled={isStreaming}
+                      />
                     </div>
                   )
                 }

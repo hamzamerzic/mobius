@@ -78,6 +78,7 @@ class SendMessage(BaseModel):
   attachments: list[dict] | None = None
   timezone: str | None = None
   viewport: dict | None = None
+  hidden: bool = False
 
 
 class PushKeys(BaseModel):

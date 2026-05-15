@@ -312,6 +312,12 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
               if (i !== -1) updated[i] = { ...updated[i], status: 'done' }
               return updated
             })
+          } else if (event.type === 'question') {
+            flushBuffer()
+            setStreamItems(prev => [...prev, {
+              type: 'question',
+              questions: event.questions || [],
+            }])
           } else if (event.type === 'error') {
             flushBuffer()
             setStreamItems(prev => {
@@ -386,7 +392,7 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
     connectRef.current?.(true)
   }, [])
 
-  const sendMessage = useCallback(async (text, attachments) => {
+  const sendMessage = useCallback(async (text, attachments, { hidden = false } = {}) => {
     justSentAtRef.current = Date.now()
     setStreamItems([])
     textBufferRef.current = ''
@@ -395,6 +401,7 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
 
     try {
       const body = { content: text }
+      if (hidden) body.hidden = true
       if (attachments && attachments.length > 0) {
         body.attachments = attachments
       }

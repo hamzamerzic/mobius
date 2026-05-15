@@ -69,6 +69,48 @@ def test_finalize_blocks_completes_running_tools():
   assert blocks[0]["status"] == "done"
 
 
+def test_question_event_creates_block():
+  blocks = []
+  questions = [
+    {"question": "Color?", "header": "Prefs",
+     "multiSelect": False, "options": [
+       {"label": "Red", "description": "warm"},
+       {"label": "Blue", "description": "cool"},
+     ]},
+  ]
+  changed = process_event({"type": "question", "questions": questions}, blocks)
+  assert changed
+  assert blocks == [{"type": "question", "questions": questions}]
+
+
+def test_question_block_in_built_message():
+  blocks = [
+    {"type": "text", "content": "Let me ask:"},
+    {"type": "question", "questions": [{"question": "Color?"}]},
+  ]
+  msg = build_assistant_message(blocks)
+  assert msg["content"] == "Let me ask:"
+  assert any(b["type"] == "question" for b in msg["blocks"])
+
+
+def test_question_does_not_affect_tool_blocks():
+  """A question event should not interfere with existing tool blocks."""
+  blocks = [
+    {"type": "tool", "tool": "Bash", "input": "ls",
+     "output": "", "status": "running"},
+  ]
+  process_event(
+    {"type": "question", "questions": [{"question": "Color?"}]},
+    blocks,
+  )
+  assert len(blocks) == 2
+  assert blocks[0]["status"] == "running"
+  assert blocks[1]["type"] == "question"
+  # tool_end still marks the running tool as done.
+  process_event({"type": "tool_end"}, blocks)
+  assert blocks[0]["status"] == "done"
+
+
 def test_unknown_event_returns_false():
   blocks = []
   changed = process_event({"type": "unknown"}, blocks)

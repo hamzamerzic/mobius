@@ -195,3 +195,34 @@ def recover_chat(
   chat.deleted_at = None
   db.commit()
   return {"ok": True}
+
+
+class QuestionAnswers(BaseModel):
+  answers: dict
+
+
+@router.post("/{chat_id}/question-answers")
+async def save_question_answers(
+  chat_id: str,
+  body: QuestionAnswers,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Saves the user's answers into the last question block."""
+  chat = db.query(models.Chat).filter(
+    models.Chat.id == chat_id,
+    models.Chat.deleted_at.is_(None),
+  ).first()
+  if not chat:
+    raise HTTPException(status_code=404, detail="Chat not found.")
+  msgs = list(chat.messages or [])
+  for msg in reversed(msgs):
+    if msg.get("role") != "assistant":
+      continue
+    for block in msg.get("blocks", []):
+      if block.get("type") == "question":
+        block["answers"] = body.answers
+        chat.messages = msgs
+        db.commit()
+        return {"ok": True}
+  raise HTTPException(status_code=404, detail="No question block found.")

@@ -97,9 +97,14 @@ class ChatBroadcast:
     # replay.  Fire-and-forget — the task is tied to the current
     # event loop and survives until TTL elapses.
     try:
+      bc_ref = self
       asyncio.get_running_loop().call_later(
         _COMPLETED_TTL_SECS,
-        lambda: _broadcasts.pop(self.chat_id, None),
+        lambda: (
+          _broadcasts.pop(bc_ref.chat_id, None)
+          if _broadcasts.get(bc_ref.chat_id) is bc_ref
+          else None
+        ),
       )
     except RuntimeError:
       # No running loop (synchronous context) — the reactive

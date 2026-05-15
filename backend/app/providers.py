@@ -147,9 +147,12 @@ class ClaudeProvider(BaseProvider):
     elif inner_type == "content_block_start":
       block = inner.get("content_block", {})
       if block.get("type") == "tool_use":
+        name = block.get("name", "")
+        if name == "AskUserQuestion":
+          return None
         return {
           "type": "tool_start",
-          "tool": block.get("name", ""),
+          "tool": name,
           "input": "",
         }
     return None
@@ -162,12 +165,19 @@ class ClaudeProvider(BaseProvider):
     results = []
     for block in event.get("message", {}).get("content", []):
       if block.get("type") == "tool_use":
+        name = block.get("name", "")
         inp = block.get("input", {})
-        summary = _summarize_input(block.get("name", ""), inp)
+        if name == "AskUserQuestion":
+          results.append({
+            "type": "question",
+            "questions": inp.get("questions", []),
+          })
+          continue
+        summary = _summarize_input(name, inp)
         if summary:
           results.append({
             "type": "tool_input",
-            "tool": block.get("name", ""),
+            "tool": name,
             "input": summary,
           })
     return results if results else None

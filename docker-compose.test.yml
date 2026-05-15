@@ -3,6 +3,7 @@ services:
     image: mobius-test:ci
     build: .
     container_name: mobius-test
+    init: true
     restart: "no"
     environment:
       - SECRET_KEY=${SECRET_KEY:-}

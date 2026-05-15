@@ -64,6 +64,13 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
         break
     return True
 
+  if event_type == "question":
+    assistant_blocks.append({
+      "type": "question",
+      "questions": event.get("questions", []),
+    })
+    return True
+
   return False
 
 
