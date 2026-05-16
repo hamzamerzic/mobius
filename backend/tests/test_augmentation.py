@@ -110,16 +110,13 @@ def test_message_saved_before_run_chat(client, db, auth, chat):
   assert "hello world" in captured_messages[0]["content"]
 
 
-def test_double_send_queues_message(client, db, auth, chat):
-  """Sending a message while agent is running queues it without killing."""
+def test_double_send_rejected_when_running(client, db, auth, chat):
+  """Sending a message while agent is running returns 409."""
   from app.chat import _active_procs
-  from app import models
-  from unittest.mock import MagicMock, AsyncMock
+  from unittest.mock import MagicMock
 
   mock_proc = MagicMock()
   mock_proc.returncode = None
-  mock_proc.kill = MagicMock()
-  mock_proc.wait = AsyncMock()
   _active_procs[chat.id] = mock_proc
 
   try:
@@ -128,13 +125,7 @@ def test_double_send_queues_message(client, db, auth, chat):
       json={"content": "second message"},
       headers=auth,
     )
-    assert resp.status_code == 202
-    assert resp.json()["status"] == "queued"
-    # Agent must NOT be killed — current turn finishes naturally.
-    mock_proc.kill.assert_not_called()
-    # Message must be saved to DB for the next turn.
-    db.refresh(chat)
-    assert any(m["content"] == "second message" for m in chat.messages)
+    assert resp.status_code == 409
   finally:
     _active_procs.pop(chat.id, None)
 
