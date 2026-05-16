@@ -321,11 +321,13 @@ async def _run_chat_impl(
     # dict access on viewport so a malformed payload (missing keys,
     # wrong types) doesn't crash the agent spawn — skip the line
     # instead.
+    provider_obj = get_provider(provider_id)
+    provider_line = f"\nProvider: {provider_obj.name}"
     tz_line = f"\nTimezone: {timezone}" if timezone else ""
     vp_w = (viewport or {}).get("width")
     vp_h = (viewport or {}).get("height")
     vp_line = f"\nViewport: {vp_w}x{vp_h}" if vp_w and vp_h else ""
-    if ctx or tz_line or vp_line:
+    if ctx or provider_line or tz_line or vp_line:
       # One-line pointer so the agent knows the block is a real file.
       # The seed's "About this file" section inside the block owns the
       # full spec (how to read, append, delete).
@@ -336,7 +338,8 @@ async def _run_chat_impl(
       )
       user_message = (
         f"{meta}\n\n"
-        f"<agent_experience>\n{ctx}{tz_line}{vp_line}\n</agent_experience>"
+        f"<agent_experience>\n{ctx}"
+        f"{provider_line}{tz_line}{vp_line}\n</agent_experience>"
         f"\n\n{user_message}"
       )
 

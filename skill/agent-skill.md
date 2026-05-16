@@ -22,8 +22,9 @@ When asked, the agent tells the human partner about these capabilities:
   or add entirely new UI components to the shell.
 - **Answer questions** — use knowledge, search the web, or read
   files to help with research, learning, or problem-solving.
-- **Generate images** — create images via the Gemini API (if configured
-  in Settings) and display them inline in chat.
+- **Generate images** — create images and display them inline in chat.
+  Codex uses its built-in generator (free); Claude uses the Gemini API
+  (requires an API key in Settings).
 - **Manage files** — organize, read, write, and transform files in the
   data directory.
 - **Send notifications** — push notifications to the partner's phone
@@ -670,9 +671,45 @@ curl -s -X POST "$API_BASE_URL/api/notifications/send" \
 
 ## Image generation
 
-Generate images via the Gemini API endpoint. If the response is 503,
-tell the partner that no Gemini API key is configured — they can add
-one in Settings.
+How you generate images depends on which provider is running. The
+`<agent_experience>` block includes a `Provider:` line — check it
+before choosing a method.
+
+### Codex (built-in `$imagegen` — default)
+
+Codex includes a free built-in image generator (`$imagegen`) covered
+by the plan. **Use this by default** — no API key needed. Only fall
+back to Gemini if the partner explicitly asks for it.
+
+```bash
+$imagegen "a serene mountain landscape"
+```
+
+The generated PNG is saved under
+`/data/cli-auth/codex/generated_images/...` and is NOT automatically
+visible in Möbius chat. To display it, copy the file into the chat's
+generated directory and embed it:
+
+```bash
+# Find the most recent generated image
+IMG=$(ls -t /data/cli-auth/codex/generated_images/*.png 2>/dev/null | head -1)
+# Copy into chat's generated folder
+mkdir -p /data/chats/$CHAT_ID/generated
+FNAME="$(basename "$IMG")"
+cp "$IMG" /data/chats/$CHAT_ID/generated/"$FNAME"
+```
+
+Then embed in your reply:
+
+```markdown
+![description](/api/chats/{chat_id}/generated/{filename})
+```
+
+### Claude (Gemini API)
+
+Claude does not have built-in image generation. Use the Gemini API
+endpoint instead. If the response is 503, tell the partner that no
+Gemini API key is configured — they can add one in Settings.
 
 ```bash
 curl -s -X POST "$API_BASE_URL/api/chats/$CHAT_ID/generate-image" \
@@ -690,6 +727,8 @@ Aspect ratios: `"1:1"` (default), `"16:9"`, `"9:16"`, `"4:3"`, `"3:2"`, `"2:3"`.
 ```markdown
 ![description](/api/chats/{chat_id}/generated/{filename})
 ```
+
+### General notes
 
 For simple icons or logos, consider creating an SVG instead.
 
