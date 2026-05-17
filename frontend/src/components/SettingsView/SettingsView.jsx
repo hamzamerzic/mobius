@@ -128,9 +128,11 @@ function ProviderRow({
         <span className={`provider-row__radio${isDefault ? ' provider-row__radio--on' : ''}`}>
           {isDefault && <span className="provider-row__radio-dot" />}
         </span>
-        <span className="provider-row__name">{name}</span>
-        <span className={`provider-row__status provider-row__status--${connected ? 'connected' : 'disconnected'}`}>
-          {connected ? 'Connected' : 'Not connected'}
+        <span className="provider-row__info">
+          <span className="provider-row__name">{name}</span>
+          <span className={`provider-row__status provider-row__status--${connected ? 'connected' : 'disconnected'}`}>
+            {connected ? 'Connected' : 'Not connected'}
+          </span>
         </span>
       </button>
       <button
@@ -195,6 +197,27 @@ export default function SettingsView({ onThemeChange }) {
       .then(r => r.ok ? r.json() : null)
       .then(data => { if (data === 'light') setLightMode(true) })
       .catch(() => {})
+  }, [])
+
+  // Stable identity-preserving callbacks: passing fresh arrow
+  // functions in JSX re-mounted ProviderRow's event handlers every
+  // render, which combined with the row's CSS transitions made the
+  // panel feel jittery. With the updater form, deps are empty.
+  const toggleClaudeAuth = useCallback(
+    () => setExpandedAuth(prev => prev === 'claude' ? null : 'claude'),
+    [],
+  )
+  const toggleCodexAuth = useCallback(
+    () => setExpandedAuth(prev => prev === 'codex' ? null : 'codex'),
+    [],
+  )
+  const onClaudeAuthDone = useCallback(() => {
+    setClaudeAuthenticated(true)
+    setExpandedAuth(null)
+  }, [])
+  const onCodexAuthDone = useCallback(() => {
+    setCodexAuthenticated(true)
+    setExpandedAuth(null)
   }, [])
 
   async function selectProvider(newProvider) {
@@ -343,32 +366,22 @@ export default function SettingsView({ onThemeChange }) {
                 onSelect={selectProvider}
                 disabled={providerSaving}
                 expanded={expandedAuth === 'claude'}
-                onToggleExpand={() => setExpandedAuth(
-                  expandedAuth === 'claude' ? null : 'claude',
-                )}
+                onToggleExpand={toggleClaudeAuth}
               >
-                <ProviderAuth compact onDone={() => {
-                  setClaudeAuthenticated(true)
-                  setExpandedAuth(null)
-                }} />
+                <ProviderAuth compact onDone={onClaudeAuthDone} />
               </ProviderRow>
 
               <ProviderRow
                 id="codex"
-                name="Codex (OpenAI)"
+                name="OpenAI Codex"
                 isDefault={provider === 'codex'}
                 connected={codexAuthenticated}
                 onSelect={selectProvider}
                 disabled={providerSaving}
                 expanded={expandedAuth === 'codex'}
-                onToggleExpand={() => setExpandedAuth(
-                  expandedAuth === 'codex' ? null : 'codex',
-                )}
+                onToggleExpand={toggleCodexAuth}
               >
-                <CodexAuth onConnected={() => {
-                  setCodexAuthenticated(true)
-                  setExpandedAuth(null)
-                }} />
+                <CodexAuth onConnected={onCodexAuthDone} />
               </ProviderRow>
             </div>
           )}
