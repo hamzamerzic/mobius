@@ -7,16 +7,20 @@ import { del as idbDel } from 'idb-keyval'
 
 export const BASE = (import.meta.env.BASE_URL || '/').replace(/\/$/, '')
 
+// localStorage access can throw in private-browsing modes or when the
+// storage quota is hit. App.jsx reads getToken() during initial render
+// to decide between Shell / Login / SetupWizard — an uncaught throw
+// here would crash the splash. Wrap all three helpers defensively.
 export function getToken() {
-  return localStorage.getItem('token')
+  try { return localStorage.getItem('token') } catch { return null }
 }
 
 export function setToken(token) {
-  localStorage.setItem('token', token)
+  try { localStorage.setItem('token', token) } catch {}
 }
 
 export function clearToken() {
-  localStorage.removeItem('token')
+  try { localStorage.removeItem('token') } catch {}
   // Setup-wizard resume state assumes an active token. If the token
   // is gone (logout / expiry), clear the resume key so the user
   // doesn't get bounced back into the wizard after they re-login.

@@ -10,6 +10,13 @@ function CodexAuth({ onConnected }) {
   const [code, setCode] = useState('')
   const [error, setError] = useState('')
   const pollRef = useRef(null)
+  // Generation counter for in-flight poll fetches. setInterval gets
+  // cleared on cancel, but a request that was already awaiting a
+  // response when cancel ran could still resolve after and call
+  // setStatus('complete'/'failed') over the user's intended 'idle'.
+  // Each startLogin bumps the gen; each poll captures it and bails
+  // if it no longer matches.
+  const pollGenRef = useRef(0)
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -36,12 +43,17 @@ function CodexAuth({ onConnected }) {
       setCode(data.code)
       setStatus('pending')
 
-      // Poll for completion.
+      // Poll for completion. Bump the generation so any older
+      // in-flight poll responses are ignored when they resolve.
       stopPolling()
+      pollGenRef.current += 1
+      const myGen = pollGenRef.current
       pollRef.current = setInterval(async () => {
         try {
           const r = await apiFetch('/auth/provider/codex/status')
+          if (myGen !== pollGenRef.current) return
           const s = await r.json()
+          if (myGen !== pollGenRef.current) return
           if (s.status === 'complete') {
             stopPolling()
             setStatus('complete')
@@ -62,6 +74,10 @@ function CodexAuth({ onConnected }) {
   }
 
   function cancelPending() {
+    // Bump the gen so any poll request that's already mid-fetch will
+    // bail when it resolves, rather than overwriting our 'idle' with
+    // a stale 'complete'/'failed'.
+    pollGenRef.current += 1
     stopPolling()
     setStatus('idle')
     setUrl('')

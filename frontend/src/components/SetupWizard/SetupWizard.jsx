@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { apiFetch, setToken, setSetupInProgress, BASE } from '../../api/client.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import './SetupWizard.css'
@@ -13,13 +13,16 @@ const SETUP_STEP_KEY = 'setup-step'
 export default function SetupWizard({ onDone, initialStep = 'account' }) {
   const [step, setStep] = useState(initialStep)
 
-  // Persist + restore step. Only persist past 'account' — the account
-  // step has no token yet, so there's nothing to resume to. Clear on
-  // unmount via onDone (handled by the consumer in App.jsx).
-  useEffect(() => {
-    if (step === 'account') return
-    try { localStorage.setItem(SETUP_STEP_KEY, step) } catch {}
-  }, [step])
+  // Writes to localStorage synchronously alongside setStep so a refresh
+  // in the microsecond gap between setStep and a useEffect flush can't
+  // lose the resume position. Only persist past 'account' — that step
+  // has no token yet, so there's nothing to resume to.
+  function goToStep(next) {
+    if (next !== 'account') {
+      try { localStorage.setItem(SETUP_STEP_KEY, next) } catch {}
+    }
+    setStep(next)
+  }
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
@@ -52,7 +55,7 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
       const data = await res.json()
       setToken(data.access_token)
       setSetupInProgress(true)
-      setStep('provider')
+      goToStep('provider')
     } catch {
       setError('Network error. Is the backend running?')
     } finally {
@@ -96,14 +99,14 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
             No API key needed.
           </p>
 
-          <ProviderAuth onDone={() => setStep('gemini')} />
+          <ProviderAuth onDone={() => goToStep('gemini')} />
 
           <p className="setup__skip-warn">
             Skipping means the AI agent won't work — all chat messages will fail until you sign in with Claude.
           </p>
           <button
             className="setup__skip"
-            onClick={() => setStep('gemini')}
+            onClick={() => goToStep('gemini')}
           >
             Skip for now
           </button>
