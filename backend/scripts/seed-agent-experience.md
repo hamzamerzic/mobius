@@ -201,19 +201,41 @@ fetch(url, { headers: { Authorization: `Bearer ${token}` } })
 - Trust the actual viewport over the mobile-first default. Desktop
   layouts on desktop.
 
-## Theme readability
+## Before writing a theme: read the shell's own CSS
 
-Whatever the aesthetic, the partner must be able to read chat
-content. The backend hard-enforces the readability invariants on
-every theme injection (strips blur filters, clamps surface alphas
-to 1, pushes root-element pseudo-overlays behind UI, strips
-unscoped global focus rules, injects any missing core variables) —
-so you can't break the app even if you try. But fighting the
-sanitizer is wasted effort: prefer opaque surfaces, low-opacity
-ornaments (≤ 0.25), and scoped selectors from the start.
+The CSS variable list in `theme.py:DEFAULT_THEME` gives names and
+defaults but NOT *which DOM element paints which variable*. That's
+the load-bearing question. Open these two files first:
 
-After writing a theme, screenshot the chat to confirm legibility.
-If you have to squint, redesign.
+- `/data/shell/src/components/Shell/Shell.css` — `.shell` paints
+  `var(--bg)` solidly across the entire viewport (`position: fixed;
+  inset: 0`). Any pseudo-element ornament on `html` / `body` will
+  be hidden behind that opaque layer once the partner is logged in.
+  If you want background ornaments, paint them on `.shell::before`
+  / `.shell::after`, not on body's pseudo-elements.
+- `/data/shell/src/components/ChatView/ChatView.css` — `.chat` also
+  paints `var(--bg)` and `.chat__text--user` / `.chat__text--assistant`
+  paint `var(--surface)` / `var(--surface2)` as their bubble backs.
+
+**Treat `--bg`, `--surface`, `--surface2`, `--border`, `--border-light`
+as OPAQUE FILL colors.** Many shell components rely on them as solid
+backgrounds for legibility. If you set them to `rgba(..., <1)`, chat
+bubbles + drawer + banners become unreadable over whatever sits
+behind. (`theme.py` injects defaults for any of these you forget,
+so the shell never falls back to invisible hardcoded literals — but
+that's a safety net, not a license to leave them out.)
+
+**Verify legibility on the authenticated view, not the login page.**
+The login screen renders without `.shell`, so it doesn't preview the
+actual chat. Take a screenshot AFTER logging in / from a chat with
+a few messages to see what the partner will see. If text is hard to
+read, redesign.
+
+Pseudo-element ornaments are a tool, not a budget — you don't owe
+them to anyone. One quiet `body::before { opacity: 0.15 }` often
+beats four animated layers. The experience log loves dramatic themes
+because builds got logged; that doesn't mean every theme should be
+dramatic.
 
 ## Shell change costs
 

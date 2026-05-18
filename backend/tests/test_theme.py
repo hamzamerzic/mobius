@@ -4,7 +4,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite:////tmp/mobius_test/test.db")
 os.environ.setdefault("DATA_DIR", "/tmp/mobius_test")
 os.environ.setdefault("FRONTEND_ORIGIN", "http://localhost:5173")
 
-from app.theme import inject_theme_into_html, extract_imports, _enforce_readability
+from app.theme import inject_theme_into_html, extract_imports, _ensure_core_vars
 
 
 def test_extract_imports_splits_imports_from_css():
@@ -46,158 +46,22 @@ def test_inject_theme_adds_link_tags_for_imports(tmp_path):
   assert "--font" in result
 
 
-def test_enforce_readability_strips_backdrop_filter():
-  css = """\
-.sidenav {
-  background: #14181f;
-  backdrop-filter: blur(8px);
-  border: 1px solid #252b36;
-}
-.modal { backdrop-filter: blur(10px) saturate(120%); }
-"""
-  out = _enforce_readability(css)
-  assert "backdrop-filter" not in out
-  assert "background: #14181f" in out
-  assert "border: 1px solid #252b36" in out
-
-
-def test_enforce_readability_strips_webkit_backdrop_filter():
-  css = ".chrome { -webkit-backdrop-filter: blur(8px); color: red; }"
-  out = _enforce_readability(css)
-  assert "backdrop-filter" not in out
-  assert "color: red" in out
-
-
-def test_enforce_readability_does_not_eat_custom_prop_filter():
-  """`--my-filter: blur(...)` is a custom-property definition, NOT
-  a `filter:` declaration. Stripping it would corrupt the variable
-  and any rules that read it."""
-  css = ":root { --my-filter: blur(4px); }\n.hero { backdrop-filter: var(--my-filter); }"
-  out = _enforce_readability(css)
-  # The custom property is preserved.
-  assert "--my-filter: blur(4px)" in out
-  # The actual backdrop-filter usage IS stripped.
-  assert "backdrop-filter: var" not in out
-
-
-def test_enforce_readability_strips_filter_blur_only():
-  css = """\
-.hero { filter: blur(4px); }
-.swatch { filter: hue-rotate(-12deg); }
-.mandala { filter: grayscale(60%) blur(2px); }
-"""
-  out = _enforce_readability(css)
-  # filter: blur(...) gone
-  assert "filter: blur" not in out
-  # filter: grayscale(60%) blur(2px) also gone (any line containing blur())
-  assert "blur(" not in out
-  # but hue-rotate (no blur) preserved
-  assert "filter: hue-rotate" in out
-
-
-def test_enforce_readability_clamps_low_alpha_surfaces():
-  css = """\
-:root {
-  --bg: rgba(10, 12, 18, 0.6);
-  --surface: rgba(20, 60, 38, 0.78);
-  --surface2: rgba(28, 78, 50, 0.88);
-  --border: rgba(50, 60, 80, 0.4);
-}
-"""
-  out = _enforce_readability(css)
-  # readable surfaces forced opaque
-  assert "--bg: rgba(10, 12, 18, 1)" in out
-  assert "--surface: rgba(20, 60, 38, 1)" in out
-  assert "--surface2: rgba(28, 78, 50, 1)" in out
-  # non-surface variables untouched (border alpha is fine to be partial)
-  assert "--border: rgba(50, 60, 80, 0.4)" in out
-
-
-def test_enforce_readability_clamps_modern_color_syntax():
-  """CSS Color 4 syntax: rgb(R G B / A) — clamp when A < 0.9."""
-  css = """\
-:root {
-  --bg: rgb(10 12 18 / 0.6);
-  --surface: rgb(20 60 38 / 0.78);
-  --surface2: rgb(28 78 50 / 95%);
-}
-"""
-  out = _enforce_readability(css)
-  assert "--bg: rgb(10 12 18 / 1)" in out
-  assert "--surface: rgb(20 60 38 / 1)" in out
-  # 95% >= 90% threshold — left alone.
-  assert "--surface2: rgb(28 78 50 / 95%)" in out
-
-
-def test_enforce_readability_preserves_high_alpha_surfaces():
-  """Themes that already use alpha >= 0.9 stay untouched."""
-  css = ":root { --surface: rgba(20, 60, 38, 0.95); --surface2: rgba(28, 78, 50, 1); }"
-  out = _enforce_readability(css)
-  assert "--surface: rgba(20, 60, 38, 0.95)" in out
-  assert "--surface2: rgba(28, 78, 50, 1)" in out
-
-
-def test_enforce_readability_forces_root_overlays_behind_content():
-  """A theme that puts `position: fixed; inset: 0` overlays on
-  body/html pseudo-elements without pushing them behind the UI
-  gets auto-corrected: pointer-events: none + z-index: -1 are
-  appended so the overlay can't sit on top of chat."""
-  css = """\
-body::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background: rgba(212, 164, 55, 0.5);
-  z-index: 10;
-}
-.foo { color: red; }
-"""
-  out = _enforce_readability(css)
-  # The overlay rule gets pushed behind.
-  assert "z-index: -1" in out
-  assert "pointer-events: none" in out
-  # Original positive z-index stripped.
-  assert "z-index: 10" not in out
-  # Unrelated rule untouched.
-  assert ".foo { color: red; }" in out
-
-
-def test_enforce_readability_strips_unscoped_focus_rules():
-  """A theme that tries to set `input:focus-visible` or
-  `textarea:focus` globally (no parent class) would clobber the
-  shell's own focus styling. Scoped rules are left alone."""
-  css = """\
-input:focus-visible { outline: 2px solid red; }
-textarea:focus { border-color: red; }
-.my-theme input:focus { background: yellow; }
-.chat__input { color: green; }
-"""
-  out = _enforce_readability(css)
-  assert "input:focus-visible" not in out
-  assert "textarea:focus" not in out
-  # Scoped selector preserved.
-  assert ".my-theme input:focus" in out
-  # Unrelated chat rule preserved.
-  assert ".chat__input { color: green; }" in out
-
-
-def test_enforce_readability_injects_missing_core_vars():
-  """If the agent's theme defines only a few variables, missing
-  core variables get filled in from DEFAULT_THEME so the shell
-  doesn't fall back to invisible hardcoded literals like #111."""
+def test_ensure_core_vars_injects_missing():
+  """If the theme defines only some variables, missing core
+  variables get filled in from DEFAULT_THEME so the shell can't
+  fall back to an invisible hardcoded literal like #111."""
   css = ":root { --accent: #ff00aa; }"
-  out = _enforce_readability(css)
-  # Original kept.
+  out = _ensure_core_vars(css)
+  # Original kept verbatim.
   assert "--accent: #ff00aa" in out
-  # Critical missing ones injected.
+  # Missing variables injected.
   assert "--bg:" in out
   assert "--text:" in out
   assert "--surface:" in out
 
 
-def test_enforce_readability_skips_var_injection_when_all_present():
-  """When the theme defines all core variables, no injection
-  block is appended (no spurious diff)."""
+def test_ensure_core_vars_skips_when_all_present():
+  """A complete theme stays byte-identical."""
   css = """\
 :root {
   --bg: #000;
@@ -216,27 +80,40 @@ def test_enforce_readability_skips_var_injection_when_all_present():
   --mono: monospace;
 }
 """
-  out = _enforce_readability(css)
-  assert "injected defaults" not in out
+  assert _ensure_core_vars(css) == css
 
 
-def test_enforce_readability_keeps_animations_and_ornaments():
-  """Pseudo-element ornaments, animations, fonts, colors all preserved."""
+def test_ensure_core_vars_leaves_creative_css_alone():
+  """Anything other than variable injection is a no-op: blur,
+  translucent surfaces, fixed-position overlays, global focus
+  rules, animations — all preserved. The agent has creative
+  freedom; readability is a documentation concern, not a
+  server-side rewrite."""
   css = """\
-body::before {
-  content: '';
-  position: fixed;
-  background-image: url('data:image/svg+xml;utf8,<svg/>');
-  opacity: 0.2;
-  animation: drift 60s linear infinite;
+:root {
+  --bg: #082015;
+  --surface: rgba(20, 60, 38, 0.78);
+  --surface2: rgba(28, 78, 50, 0.88);
+  --text: #f0e6c8;
+  --muted: #9bb3a3;
+  --accent: #d4a437;
+  --accent-hover: #f0c451;
+  --accent-dim: rgba(212, 164, 55, 0.14);
+  --border: #2d6e47;
+  --border-light: #1a4d2e;
+  --danger: #c4554e;
+  --green: #1a8c4a;
+  --font: 'Inter', sans-serif;
+  --mono: monospace;
 }
-@keyframes drift { from { transform: rotate(0); } to { transform: rotate(360deg); } }
+.sidenav { backdrop-filter: blur(8px); }
+.hero { filter: blur(4px); }
+body::before { position: fixed; inset: 0; z-index: 10; }
+input:focus-visible { outline: 2px solid red; }
 """
-  out = _enforce_readability(css)
-  # ornaments + animations preserved — only blur/low-alpha surfaces are touched.
-  assert "body::before" in out
-  assert "opacity: 0.2" in out
-  assert "@keyframes drift" in out
+  out = _ensure_core_vars(css)
+  # Output is byte-identical because all core vars are defined.
+  assert out == css
 
 
 def test_inject_theme_no_imports_no_link_tags(tmp_path):
