@@ -169,11 +169,40 @@ which doesn't mount `.shell` and gives a misleading preview).
 - Mini-apps get a scoped token, not the owner's full JWT. It can access
   storage, proxy, AI, notifications, push — but NOT auth, settings, or chat.
 - Storage 404 on first load is normal — handle with default value.
+- **Storage API read shape is asymmetric**: `PUT` takes
+  `{content: JSON.stringify(myData)}`; `GET` returns the parsed
+  inner object directly, NOT an envelope. Past agents have lost
+  rebuild cycles assuming GET mirrors PUT. (See the skill for the
+  full API examples.)
 - Back gesture in apps: use `pushState`/`popstate` for internal navigation.
 - Three.js: `import * as THREE from 'three'` and
   `import { OrbitControls } from 'three/addons/controls/OrbitControls.js'`
   just work (self-hosted at `/vendor/three/` via the app-frame
   import map — no esm.sh waterfall).
+
+## Screenshots — quick start
+
+For previewing a mini-app, the direct app-frame URL works once
+you sign the token in the query:
+
+```bash
+APP_URL="$API_BASE_URL/api/apps/$APP_ID/frame?token=$AGENT_TOKEN&v=$(date +%s)"
+agent-browser set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT"
+agent-browser open "$APP_URL"
+agent-browser wait 1500   # scale up for Three.js / fonts / lazy loads
+agent-browser screenshot /data/chats/$CHAT_ID/generated/preview.png
+```
+
+For previewing the authenticated shell with your theme applied, use
+`bash "$SCRIPTS_DIR/preview_shell.sh"` — it handles the localStorage
+token dance.
+
+Embed the resulting PNG inline so the partner sees it:
+`![preview](/api/chats/<chat_id>/generated/preview.png)`. `Read` is
+private to your vision; only the embed reaches the chat.
+
+Full agent-browser docs (snapshot, click, fill, etc.) are in the
+skill under "agent-browser as a visual testing tool."
 
 ## Debug endpoints
 

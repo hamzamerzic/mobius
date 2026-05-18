@@ -222,6 +222,7 @@ paths and package names to avoid re-discovering them.
    |---|---|
    | Created an app (`POST /api/apps/`) | **`Bash`**: `echo '- Built **X** (id N). <short description>' >> /data/shared/agent-experience.md`. Then **`Bash`** the notification curl (see Notifications section). Both tool calls run before the final assistant message. |
    | Updated an app (`PATCH /api/apps/{id}`) | **`Bash`** the notification curl. Don't append to the log — updates aren't logged. |
+   | Deleted an app (`DELETE /api/apps/{id}`) | **`Bash`**: `echo '- Deleted **X** (id N). <reason>' >> /data/shared/agent-experience.md`. Apps cannot be recovered — record it so future agents don't try to extend something that's gone. |
    | Took a screenshot | In the SAME message: emit `![caption](/api/chats/<chat_id>/generated/<name>.png)` **before** any description of what's in it. `Read` is private to you; only the `![]` embed is visible to the partner. See step 6. |
    | Discovered a gotcha or workaround | **`Bash`**: `echo '- Gotcha: <one-line note>' >> /data/shared/agent-experience.md`. |
    | Learned a partner preference | **`Bash`**: `echo '- Partner preference: <one-line note>' >> /data/shared/agent-experience.md`. |
@@ -311,8 +312,9 @@ curl -s -X DELETE -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/app
    delete [name]? This cannot be undone."
 4. Only delete after the partner confirms
 
-Append a line to the **Experience log** in the experience file in the
-same turn as the registration/update/deletion.
+Log creates and deletions in the experience file in the same turn.
+(Updates skip the log — they're noise unless they revealed something
+non-obvious; see step 7.)
 
 ### Component shape
 

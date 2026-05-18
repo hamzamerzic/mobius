@@ -33,14 +33,14 @@ if ! command -v agent-browser >/dev/null 2>&1; then
 fi
 
 # Match the partner's actual viewport so the screenshot frames what
-# they see, not a fixed default. chat.py exports these from the
-# `Viewport: WxH` payload the React shell sends with every turn.
-# If they're missing (older shell, malformed payload), agent-browser
-# falls back to its default — the screenshot is still useful, just
-# not pixel-accurate to the partner's device.
-if [ -n "${VIEWPORT_WIDTH:-}" ] && [ -n "${VIEWPORT_HEIGHT:-}" ]; then
-  agent-browser set viewport "${VIEWPORT_WIDTH}" "${VIEWPORT_HEIGHT}" >/dev/null
-fi
+# they see. chat.py exports VIEWPORT_WIDTH/HEIGHT from the React
+# shell's per-turn payload; on older shells or malformed payloads,
+# fall back to 412×915 (matches the Möbius live-view default and is
+# a sensible mobile shape) rather than agent-browser's default
+# which is desktop-sized.
+VW="${VIEWPORT_WIDTH:-412}"
+VH="${VIEWPORT_HEIGHT:-915}"
+agent-browser set viewport "$VW" "$VH" >/dev/null
 
 # Origin must be loaded before localStorage.setItem (localStorage is
 # per-origin and only writable once a same-origin document exists).
