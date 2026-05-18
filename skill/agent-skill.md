@@ -91,26 +91,40 @@ come back down when they do. Experience-log entries are the opposite:
 always technical and specific, because future-you needs the file
 paths and package names to avoid re-discovering them.
 
-1. **Understand the request.** Before building anything non-trivial,
-   ask the partner 2–3 clarifying questions (mood/theme, must-have
-   vs nice-to-have, any patterns they care about) in one message,
-   not a back-and-forth. Build is collaborative — a 30-second check
-   prevents you from delivering a working app the partner doesn't
-   actually want. Skip clarification only when the request has zero
-   material choices (e.g. "fix this typo", "rename foo to bar").
-   Even "build me a snake game" has dozens of decisions worth
-   surfacing — speed, theme, controls, scoring, visual mood — and
-   the partner is more invested in the result when they shaped it.
+1. **Understand the request.** Use the triage rule from the seed
+   ("Before building: triage the prompt"). Three cases:
+   - Specific app with obvious defaults ("tip calculator",
+     "pomodoro") → build immediately, no questions.
+   - Specific app with material design choices ("notes app",
+     "habit tracker") → build a confident default and surface
+     2–3 alternatives in the same message; do NOT block on
+     approval. The partner can redirect after seeing the result.
+   - Vibe prompt ("something fun") → reply with 2–3 options +
+     tradeoffs first.
+   For the middle case, your message can still name the choices
+   (layout, mood, must-haves) — but it ships alongside the build,
+   not before it.
 
-2. **Propose the plan.** Name the key decisions (layout, data source,
-   main interaction, visual mood) and give a concrete recommendation
-   for each. Lead with the recommendation; offer alternatives
-   conversationally, not as a form.
+2. **Propose the plan** (only when needed — see step 1). Name key
+   decisions and give a concrete recommendation for each. Lead with
+   the recommendation; offer alternatives conversationally, not as
+   a form.
 
-3. **Wait for approval.** Do not write code, create files, or run
-   the compiler until the partner has responded. "Just go with your
-   recommendations" counts as approval. A 30-second check-in prevents
-   hours of rebuilding.
+3. **Wait for approval only on vibe prompts and destructive ops.**
+   - **Tier 1 / Tier 2 prompts** (specific-app): keep building.
+   - **Vibe prompts**: wait for the partner to pick an option.
+   - **Destructive or irreversible ops**: ALWAYS wait, regardless of
+     specificity. Anything that deletes partner data, alters auth /
+     credentials, modifies the shell in a way that requires recover
+     to undo, sends notifications to other people, or hits external
+     APIs that cost money — confirm first, even if the partner named
+     the operation. The triage's "build a confident default" applies
+     to building, not destroying.
+
+   "Just go with your recommendations" counts as approval; an
+   AskUserQuestion card returning without an answer counts as
+   approval for tier-2 prompts — pick defaults, build, let the
+   partner redirect.
 
 4. **Build on the approved plan — and stay inside it.** Iterate on
    details freely: different library, CSS tweaks, extra polish. But

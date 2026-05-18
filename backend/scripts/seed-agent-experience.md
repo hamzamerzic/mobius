@@ -68,20 +68,47 @@ sessions will thank you.
 
 ## Before building: triage the prompt
 
-If the partner names a specific app ("tip calculator", "habit
-tracker for water"), build. If they describe a vibe — "something
-fun", "a cool app", "anything useful" — that is an exploratory
-prompt, NOT a build request. Reply with 2–3 brief options + a
-tradeoff and let them pick.
+Three tiers — pick the matching one and act:
+
+1. **Specific app with obvious defaults** ("tip calculator",
+   "pomodoro timer", "stopwatch"): build immediately. No
+   questions. The category resolves design.
+2. **Specific app with material design choices** ("notes app",
+   "habit tracker", "markdown previewer"): build with a confident
+   default — pick mood, structure, and the 2–3 most useful
+   features yourself — and surface 2–3 alternatives in ONE
+   message so the partner can redirect after seeing the result.
+   **Do not block on approval.** A shipped v1 they can react to
+   beats a perfect v1 negotiated up front.
+3. **Vibe prompt** ("something fun", "a cool app", "anything
+   useful"): mood is a constraint, not a category. Reply with
+   2–3 brief options + a tradeoff and let them pick.
 
 The fun/cool/useful trap: those are mood constraints, not
 category constraints. They don't tell you what to build. Treating
 them as enough specificity leads to building an app the partner
 never asked for.
 
+**If the AskUserQuestion tool / question card returns without an
+answer** (dismissed, errored, partner skipped) — do NOT retry.
+Pick the recommended defaults, build, and let the partner redirect
+after. Hesitating wastes turns; ambiguous responses to a tool the
+partner doesn't see as blocking are not signal.
+
 Everything below — register_app.py, screenshots, notifications —
-runs *after* the partner agrees to a concrete idea, not instead
-of agreeing.
+runs *after* you've decided to build, not instead of deciding.
+
+## Partner-facing language
+
+Default to partner-facing language in chat messages. Mention
+internals (JSX, storage paths, JWT, library names, file paths,
+numeric app IDs) only when the partner uses those terms first or
+explicitly asks how it works. "Saves automatically" beats
+"autosaves to storage". "I added a streaks view" beats "I
+extended StreaksPanel to read from `/api/storage/apps/$id/
+streaks.json`".
+
+Implementation details belong in the experience log, not in chat.
 
 ## Experience log
 
@@ -114,12 +141,16 @@ loads via dynamic `import()` from esm.sh.
 **Storage API** (per-app key/value file storage):
 
 ```js
-// read
+// read — GET returns the PARSED INNER OBJECT directly, NOT `{content: "..."}`.
+// The write/read shapes are asymmetric: write wraps in `{content: ...}`,
+// read unwraps. Symmetry would have suggested an envelope; reality is the
+// parsed inner object.
 fetch(`/api/storage/apps/${appId}/file.json`, {
   headers: { Authorization: `Bearer ${token}` }
 }).then(r => r.ok ? r.json() : null)
+// → returns myData directly (whatever you wrote), or null on 404
 
-// write
+// write — `content` MUST be a JSON-string of the inner data.
 fetch(`/api/storage/apps/${appId}/file.json`, {
   method: 'PUT',
   headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -162,19 +193,35 @@ fetch(url, { headers: { Authorization: `Bearer ${token}` } })
 
 ## Design principles
 
-- CSS variables (`var(--bg)`, `var(--accent)`, etc.) — never hardcode colors
-- Check `/data/shared/theme-mode` to know light vs dark mode
-- Typography: choose fonts that match the mood, Google Fonts via `@import`
-- Color: cohesive palette using the existing CSS variables as a base
-- Motion: subtle CSS transitions for hover and state changes
-- Spatial: generous negative space, consistent padding
-- Mobile-first: the partner's viewport size is in the session context
+- Use CSS variables, don't hardcode colors. The full set is in
+  `theme.py:DEFAULT_THEME` — `grep var\\(-- frontend/src/` for live usage.
+  Don't invent fallbacks like `var(--fg, #111)` — there is no `--fg`,
+  and a near-black fallback is invisible on dark mode.
+- `/data/shared/theme-mode` tells you light vs dark.
+- Trust the actual viewport over the mobile-first default. Desktop
+  layouts on desktop.
+
+## Theme readability
+
+Whatever the aesthetic, the partner must be able to read chat
+content. The backend hard-enforces the readability invariants on
+every theme injection (strips blur filters, clamps surface alphas
+to 1, pushes root-element pseudo-overlays behind UI, strips
+unscoped global focus rules, injects any missing core variables) —
+so you can't break the app even if you try. But fighting the
+sanitizer is wasted effort: prefer opaque surfaces, low-opacity
+ornaments (≤ 0.25), and scoped selectors from the start.
+
+After writing a theme, screenshot the chat to confirm legibility.
+If you have to squint, redesign.
 
 ## Shell change costs
 
 - **theme.css only (no rebuild):** color variables, gradients, background
-  images, `@keyframe` animations, Google Fonts via `@import`, CSS filters,
-  pseudo-elements on stable class names, `backdrop-filter`. Hot-reloaded instantly.
+  images, `@keyframe` animations, Google Fonts via `@import`, pseudo-elements
+  on stable class names. Hot-reloaded instantly. (Note: blur filters — both
+  `backdrop-filter` and `filter: blur(...)` — are stripped at injection per
+  the readability section above; don't rely on them.)
 - **app-frame.html (no rebuild):** `/data/shell/public/app-frame.html` is
   read per-request by the backend, not compiled. Edit it directly to add
   libraries to the import map or change the mini-app runtime.

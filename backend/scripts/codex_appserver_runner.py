@@ -51,7 +51,14 @@ from app.codex_appserver import translate_notification  # noqa: E402
 _INIT_TIMEOUT_SECS = 30
 # Hard cap on a single turn (defense against runaway).  chat.py also
 # has its own timeout; this is a safety net for stuck protocol state.
-_TURN_TIMEOUT_SECS = int(os.environ.get("CODEX_TURN_TIMEOUT_SECS", "1800"))
+#
+# Lowered from 1800 → 600 after session-12 caught Codex generating a
+# `bash -lc "cat > file <<EOF ...JSX with backticks... EOF"` heredoc
+# with unbalanced quotes that hung the shell. All 3 builds burned the
+# full 30 minutes before the runner cut them off. 10 minutes is plenty
+# for a real build, and failing fast surfaces these bugs in one test
+# session instead of one per hour.
+_TURN_TIMEOUT_SECS = int(os.environ.get("CODEX_TURN_TIMEOUT_SECS", "600"))
 
 
 def _emit(event: dict) -> None:

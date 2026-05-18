@@ -7,6 +7,18 @@ priority within each section. Update as items ship or get re-scoped.
 
 _(none right now)_
 
+## Next up — agent UX
+
+- **Notify on pending input.** When the agent leaves a turn open
+  waiting for the partner (AskUserQuestion card with no answer yet,
+  or prose clarifying questions that block building), it should
+  send a push notification so the partner sees it even if the tab
+  is in the background. Surfaced after a live demo where the agent
+  asked theme questions, the partner switched apps, and didn't see
+  the prompt until much later. Seed should remind the agent to fire
+  `notifications/send` whenever a turn ends without delivering work;
+  today notifications are only the post-build courtesy.
+
 ## Next up — UX polish
 
 - **Drawer chat list / apps list still imperative.** Migrate to

@@ -331,6 +331,15 @@
 .chat__input::placeholder { color: var(--muted); }
 .chat__input:disabled { opacity: 0.5; }
 
+/* Suppress the global textarea:focus-visible outline (index.css) on
+   the chat input specifically. The .chat__form:focus-within box-shadow
+   already provides a fully-visible, theme-aware keyboard focus ring
+   around the whole composer; the inner 2px outline draws a sharp
+   rectangle inside the rounded form glow and looks like a purple
+   square. Keep the global rule for Setup/Login/Settings inputs that
+   don't have their own focus-within container. */
+.chat__input:focus-visible { outline: none; }
+
 .chat__send {
   flex-shrink: 0;
   width: 36px;
