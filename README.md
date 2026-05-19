@@ -59,12 +59,23 @@ When you ask for something, the agent builds it as a small app, live, no reload.
 
 ## What Can You Change?
 
-Apps are the most obvious thing the agent builds — but they aren't the only adaptive surface. The platform itself is yours to reshape.
+Apps are the most obvious thing the agent builds — but they aren't the only adaptive surface. The platform itself is yours to reshape. The split that matters:
 
-- **Visual identity.** "Make it feel warmer." "Restyle the whole shell as a 1970s synthesizer panel." "Tighten the mobile spacing and bump the contrast." The agent edits the CSS, rebuilds, and the new look is live within seconds.
-- **Shell features.** Missing an attachment button? File preview pane? Chat search? Describe what you want; the agent adds it.
-- **Providers.** Switch between Claude Code and Codex from Settings. Plug in your own API keys.
-- **Data flows.** Add a webhook, a scheduled job, a new storage shape. The platform exposes these as ordinary primitives the agent can compose.
+### Capabilities — the part the platform grows into
+
+The shell ships small on purpose. Missing a feature? Describe it and the agent builds it. File upload, notifications, scheduled jobs, a richer settings panel, a web-search button. The harness keeps a candidate list of *generally useful* additions; the ones that survive scrutiny get upstreamed into the shipped image, so the next clean install of Möbius starts with them already in place. You add things by using them; the starting point grows.
+
+By default the agent has read-write on `/data` (your shell, your apps, your storage) and read-only on `/app` (the image's server code). That's the security boundary I want my own agent to respect. Backend changes that survive a redeploy are on the roadmap behind a staging-overlay + diff-review gate.
+
+### Presentation — the part that stays yours
+
+Capabilities are general; *taste* is the opposite.
+
+- **Visual identity.** "Make it feel warmer." "Restyle the whole shell as a 1970s synthesizer panel." "Wood-paneled reading room, soft serifs, no rounded corners." "Drifting aurora gradient with hand-drawn doodles parallaxing across." The agent edits the CSS, rebuilds, and the new look is live within seconds — and stays only on your volume.
+- **Layout.** Want the drawer gone and a persistent Chat / Apps / Settings bottom-nav instead? Prompt for it. The navigation model of the whole instance changes in one chat.
+- **Providers.** Switch between Claude Code and Codex from Settings. Plug in your own API keys. Gemini handles image generation.
+
+For a fuller walk-through with screenshots, see the [companion blog post](https://hamzamerzic.info/blog/2026/mobius-an-app-that-builds-itself/).
 
 If the UI ever ends up in a state you don't want, every instance ships with `/recover` — a built-in escape hatch that resets the shell while preserving your chats, apps, and data.
 

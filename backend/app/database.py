@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from app.config import get_settings
@@ -11,17 +11,29 @@ from app.config import get_settings
 def _make_engine():
   """Creates the SQLAlchemy engine, ensuring the DB directory exists."""
   settings = get_settings()
+  is_sqlite = settings.database_url.startswith("sqlite")
   if settings.database_url.startswith("sqlite:////"):
     db_path = Path(settings.database_url.replace("sqlite:////", "/"))
     db_path.parent.mkdir(parents=True, exist_ok=True)
-  connect_args = (
-    {"check_same_thread": False}
-    if settings.database_url.startswith("sqlite")
-    else {}
-  )
-  return create_engine(
-    settings.database_url, connect_args=connect_args
-  )
+  connect_args = {"check_same_thread": False} if is_sqlite else {}
+  eng = create_engine(settings.database_url, connect_args=connect_args)
+  if is_sqlite:
+    # SQLite under concurrent writes:
+    # - WAL lets readers run while a single writer writes (no
+    #   blanket lock the way the default DELETE journal does).
+    # - busy_timeout waits up to N ms for a lock instead of
+    #   immediately raising "database is locked" when two
+    #   coroutines try to commit in the same window.
+    # - synchronous=NORMAL keeps durability for the WAL but skips
+    #   the per-commit fsync that FULL does; safe for chat data.
+    @event.listens_for(eng, "connect")
+    def _set_sqlite_pragmas(dbapi_conn, _record):
+      cur = dbapi_conn.cursor()
+      cur.execute("PRAGMA journal_mode=WAL")
+      cur.execute("PRAGMA busy_timeout=5000")
+      cur.execute("PRAGMA synchronous=NORMAL")
+      cur.close()
+  return eng
 
 
 engine = _make_engine()
