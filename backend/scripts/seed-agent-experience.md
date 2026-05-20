@@ -201,6 +201,13 @@ which doesn't mount `.shell` and gives a misleading preview).
 
 ## Gotchas
 
+- **Editing an existing app's JSX auto-recompiles.** A file watcher
+  on `/data/apps/*/index.jsx` recompiles the bundle ~1s after you
+  save. You don't need to re-run `register_app.py` just to push code
+  changes to an existing app — only for the initial create (so the
+  app gets an id + DB row). If your edit doesn't seem to land,
+  refresh the iframe; if it still doesn't, check that
+  `/data/compiled/app-<id>.js` mtime advanced.
 - **Reverting the theme:** `DELETE /api/storage/shared/theme.css` (no
   body needed). The platform owns defaults — `/api/theme` returns the
   user override if present, otherwise the built-in default. Don't try

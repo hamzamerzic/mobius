@@ -48,12 +48,23 @@ def _init_db():
 
 @asynccontextmanager
 async def lifespan(app):
+  import asyncio as _asyncio
   _init_db()
   init_vapid()
   # Seed a Hello World app on first boot (no-op if apps already exist).
   from scripts.seed_hello import seed as seed_hello
   await seed_hello()
-  yield
+  # Start the JSX file watcher so direct edits to /data/apps/*/index.jsx
+  # auto-recompile and refresh the served bundle — agents don't need to
+  # re-run register_app.py just to push a code change.
+  from app.app_watcher import start_watcher
+  _watcher = start_watcher(_asyncio.get_running_loop())
+  try:
+    yield
+  finally:
+    if _watcher is not None:
+      _watcher.stop()
+      _watcher.join(timeout=2)
 
 settings = get_settings()
 
