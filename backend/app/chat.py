@@ -14,6 +14,7 @@ import weakref
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app import auth, models, schemas
@@ -51,6 +52,27 @@ def _get_logger() -> logging.Logger:
 
 
 
+def _safe_commit(db: Session) -> bool:
+  """Commits and returns True; on OperationalError (e.g. SQLite lock),
+  rolls back and returns False so the caller can skip and continue.
+
+  Without this, a single transient lock burst poisons the session and
+  every subsequent operation in this turn raises PendingRollbackError,
+  killing the chat. With it, a missed streaming-save is a missed
+  streaming-save; the next event tries again.
+  """
+  try:
+    db.commit()
+    return True
+  except OperationalError as exc:
+    _get_logger().warning("db commit dropped (rolled back): %s", exc)
+    try:
+      db.rollback()
+    except Exception:
+      pass
+    return False
+
+
 def _save_message(db: Session, chat_id: str, message: dict):
   """Appends a message to the chat's messages array in the DB."""
   if not chat_id:
@@ -62,7 +84,7 @@ def _save_message(db: Session, chat_id: str, message: dict):
   msgs = list(chat.messages or [])
   msgs.append(message)
   chat.messages = msgs
-  db.commit()
+  _safe_commit(db)
 
 
 def _update_last_assistant_message(db: Session, chat_id: str, message: dict):
@@ -79,7 +101,7 @@ def _update_last_assistant_message(db: Session, chat_id: str, message: dict):
   else:
     msgs.append(message)
   chat.messages = msgs
-  db.commit()
+  _safe_commit(db)
 
 
 async def _drain(stream: asyncio.StreamReader) -> None:
@@ -732,7 +754,7 @@ async def _run_chat_impl(
                   )
                   if chat_obj:
                     chat_obj.session_id = sid
-                    db.commit()
+                    _safe_commit(db)
                 session_captured = True
                 break
 

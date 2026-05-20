@@ -93,12 +93,12 @@ made during a build — test fixtures, temp files, sample notes you
 typed to verify a flow. Cleaning up after yourself is just good
 hygiene.
 
-But if an action would erase, overwrite, or irreversibly change
-something the *partner* could miss — their notes, their habits,
-their custom theme, app data they actually use — confirm in chat
-before running it. One extra turn is cheap; an unwanted delete is
-expensive. The check is "would this hurt to undo," not "is the
-verb dangerous."
+Before any command or API call that deletes, overwrites,
+truncates, resets, migrates, or bulk-edits existing partner-owned
+data, stop and ask in chat — unless the data was created by you
+in this same turn as a disposable test fixture. Do not infer
+consent from usefulness, reversibility, or confidence. When
+unsure who owns it, ask.
 
 ## Speaking to the partner
 

@@ -70,7 +70,25 @@ class _JsxHandler(FileSystemEventHandler):
     if not path.endswith(f"/{_INDEX_JSX}"):
       return
     # Hop back to the asyncio loop thread to touch _pending safely.
-    asyncio.run_coroutine_threadsafe(self._reschedule(path), self._loop)
+    # Loop may already be closing if the watchdog thread fires during
+    # shutdown — guard so we don't crash the observer thread.
+    if self._loop.is_closed():
+      return
+    try:
+      asyncio.run_coroutine_threadsafe(self._reschedule(path), self._loop)
+    except RuntimeError:
+      # Loop stopped between the is_closed check and the call. Drop it.
+      pass
+
+  def close(self) -> None:
+    """Cancels any pending debounce timers.
+
+    Called from `lifespan` shutdown so a timer that hasn't fired yet
+    doesn't post a `create_task` to a loop that's about to close.
+    """
+    for handle in self._pending.values():
+      handle.cancel()
+    self._pending.clear()
 
   async def _reschedule(self, path: str) -> None:
     handle = self._pending.pop(path, None)
@@ -132,16 +150,19 @@ class _JsxHandler(FileSystemEventHandler):
       db.close()
 
 
-def start_watcher(loop: asyncio.AbstractEventLoop) -> Observer | None:
+def start_watcher(
+  loop: asyncio.AbstractEventLoop,
+) -> tuple[Observer, _JsxHandler]:
   """Starts a watchdog Observer on the apps directory.
 
-  Returns the observer so the caller can `stop()`/`join()` it on
-  shutdown.  Returns None if watchdog isn't importable (degraded mode).
+  Returns `(observer, handler)` so the caller can stop the observer
+  AND drain the handler's pending debounce timers on shutdown.
   """
   apps_dir = Path(get_settings().data_dir) / "apps"
   apps_dir.mkdir(parents=True, exist_ok=True)
+  handler = _JsxHandler(loop)
   observer = Observer()
-  observer.schedule(_JsxHandler(loop), str(apps_dir), recursive=True)
+  observer.schedule(handler, str(apps_dir), recursive=True)
   observer.start()
   log.info("app watcher started on %s", apps_dir)
-  return observer
+  return observer, handler
