@@ -5,7 +5,7 @@
 <h1 align="center">Möbius</h1>
 
 <p align="center">
-  Your own adaptive AI workspace — chat, apps, server, and UI that improve through use.
+  A self-hosted personalized assistant that gets better the more you use it, instead of worse.
 </p>
 
 <p align="center">
@@ -27,7 +27,7 @@
 
 ## What is Möbius?
 
-Most software asks you to adapt to it. Möbius is built around the opposite idea.
+Most software asks you to adapt to it. AI assistants tend to make this worse with time — context drifts, preferences leak between tasks, memory accumulates in the wrong places, sessions feel less coherent the more you use them. Möbius is built around the opposite idea: it improves the more you interact with it.
 
 It's a self-hosted PWA with a chat on one side and a canvas on the other. You describe what you want, and the agent inside builds it — a small piece of software that lands next to the chat, runs in your browser, and is yours to keep.
 
@@ -62,14 +62,22 @@ When you ask for something, the agent builds it as a small app right inside the 
 
 Apps are the most obvious thing the agent builds, but the platform itself is also yours to reshape. Two layers, treated differently: **capabilities** (general features like file upload or notifications — candidates for upstreaming so the next Möbius install inherits them) and **presentation** (your theme, layout, and fonts, which live only on your volume and stay yours).
 
-<p align="center">
-  <img src="assets/screenshots/theme-00-baseline.png" width="180" alt="Möbius baseline shell — purple accent on dark, sans-serif" />
-  <img src="assets/screenshots/theme-01-cozy.png" width="180" alt="Möbius after 'cozy reading nook' — walnut and amber, soft serif" />
-  <img src="assets/screenshots/theme-02-brutalist.png" width="180" alt="Möbius after 'brutalist green-on-black terminal' — phosphor green on near-black, JetBrains Mono" />
-  <img src="assets/screenshots/theme-04-ambient.png" width="180" alt="Möbius after 'slow drifting ambient' — teal-to-violet gradient mesh, glassy bubbles" />
-</p>
+<table align="center">
+  <tr>
+    <td align="center" width="25%"><img src="assets/screenshots/theme-00-baseline.png" alt="Möbius baseline shell — purple accent on dark, sans-serif" /></td>
+    <td align="center" width="25%"><img src="assets/screenshots/theme-01-cozy.png" alt="Möbius after 'cozy reading nook' — walnut and amber, soft serif" /></td>
+    <td align="center" width="25%"><img src="assets/screenshots/theme-04-ambient.png" alt="Möbius after 'slow drifting ambient' — teal-to-violet gradient mesh, glassy bubbles" /></td>
+    <td align="center" width="25%"><img src="assets/screenshots/theme-06-medieval.png" alt="Möbius after 'medieval manuscript' — parchment cream background, blackletter wordmark, calligraphic prompt" /></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>baseline</sub></td>
+    <td align="center"><sub>cozy reading nook</sub></td>
+    <td align="center"><sub>drifting ambient</sub></td>
+    <td align="center"><sub>medieval manuscript</sub></td>
+  </tr>
+</table>
 
-<sub>Same instance, four prompts: baseline; cozy reading nook; brutalist green-on-black terminal; slow drifting ambient. The colors, fonts, and layout are CSS the agent wrote in response to a single sentence.</sub>
+<sub>Same instance, four prompts. The colors, fonts, and layout are CSS the agent wrote in response to a single sentence.</sub>
 
 <p align="center">
   <img src="assets/screenshots/theme-07-dynamic.gif" width="280" alt="Möbius with a 'playful room' theme: drifting bubbles, parallax silhouettes, warm-cool gradient cycling" />
@@ -90,12 +98,18 @@ If the UI ever ends up in a state you don't want, every instance ships with `/re
 
 Möbius ships with a deliberately minimal chat — no file upload, no scheduled jobs panel, no notifications button. To check the demo wasn't stage-managed, I tore the file-upload pipeline out (the FastAPI route, the React component, the works) and asked the agent for it back in one ordinary message: *"I'd like to send files and images along with my messages. Can you add file upload to the chat?"*
 
-<p align="center">
-  <img src="assets/screenshots/upload-01-bare.png" width="260" alt="Composer with just a text field and a disabled send arrow. No paperclip, no mic." />
-  <img src="assets/screenshots/upload-04-in-use.png" width="260" alt="Composer with the paperclip restored, a file attached inline in the sent message, and the agent's reply describing what it sees." />
-</p>
+<table align="center">
+  <tr>
+    <td align="center" width="50%"><img src="assets/screenshots/upload-01-bare.png" alt="Composer with just a text field and a disabled send arrow. No paperclip, no mic." /></td>
+    <td align="center" width="50%"><img src="assets/screenshots/upload-04-in-use.png" alt="Composer with the paperclip restored, a file attached inline in the sent message, and the agent's reply describing what it sees." /></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>before</sub></td>
+    <td align="center"><sub>after</sub></td>
+  </tr>
+</table>
 
-<sub>Before and after, one chat. The endpoint, the schema, the drag-and-drop overlay, the paste handler, the chip row, the image thumbnails — all written by the agent in the same session. The frontend was serving the new components by the end of the conversation.</sub>
+<sub>One chat. The endpoint, the schema, the drag-and-drop overlay, the paste handler, the chip row, the image thumbnails — all written by the agent in the same session. The frontend was serving the new components by the end of the conversation.</sub>
 
 The same loop handles every general capability: notifications, scheduled jobs, web-search buttons, voice mode, richer settings. You describe what you want; the agent builds it. [Full story →](https://hamzamerzic.info/blog/2026/mobius-an-app-that-builds-itself/)
 
