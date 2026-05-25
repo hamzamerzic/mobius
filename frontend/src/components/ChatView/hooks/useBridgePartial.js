@@ -38,21 +38,29 @@ import { useRef } from 'react'
  * }}
  */
 export default function useBridgePartial({ runningAtMount, lastMsgAtMount }) {
-  // Captured ONCE; subsequent argument changes don't re-arm the
-  // bridge. The ref-based capture intentionally ignores re-renders
-  // so a render with stale args can't flip the gate mid-turn.
+  // Captured at most ONCE per hook instance, the first time the
+  // arguments resolve to a "yes, bridge" state (running=true AND
+  // last message is an assistant message with a real ts). After
+  // that the captured ts is sticky — subsequent re-renders with
+  // different args don't re-arm or clear the gate.
+  //
+  // The "at-most-once" framing matters because the inputs are
+  // populated by an async fetch in ChatView.jsx. The hook may
+  // render several times with runningAtMount=false / lastMsg=null
+  // before the fetch lands; only the first valid set captures.
+  // bridgedRef is the second one-shot — once markBridged() fires,
+  // no future render flips back to true.
   const keptPartialTsRef = useRef(null)
   const capturedRef = useRef(false)
   const bridgedRef = useRef(false)
 
-  if (!capturedRef.current) {
+  if (!capturedRef.current
+      && runningAtMount
+      && lastMsgAtMount
+      && lastMsgAtMount.role === 'assistant'
+      && lastMsgAtMount.ts != null) {
     capturedRef.current = true
-    if (runningAtMount
-        && lastMsgAtMount
-        && lastMsgAtMount.role === 'assistant'
-        && lastMsgAtMount.ts != null) {
-      keptPartialTsRef.current = lastMsgAtMount.ts
-    }
+    keptPartialTsRef.current = lastMsgAtMount.ts
   }
 
   function shouldBridge(currentLastMsg) {

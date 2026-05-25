@@ -44,9 +44,19 @@ import { useState, useRef, useCallback } from 'react'
  *   swapOptimisticTs: (cid: string, serverTs: number, position?: number) => void,
  *   promoteByTs: (ts: number) => PendingMsg | null,
  *   cancelByTs: (ts: number) => void,
+ *   cancelByCid: (cid: string) => void,
  *   hydrate: (serverList: Array<{ts: number, content: string, role?: string, attachments?: Array, position?: number}>) => void,
  *   clear: () => void,
  * }}
+ *
+ * Note: `cancelByCid` exists alongside `cancelByTs` because the
+ * optimistic-add → server-confirm round-trip has two failure modes
+ * keyed by different identifiers: rollback-on-error (the optimistic
+ * never got a server ts; cid is the only handle) and the
+ * server-said-started removal (also pre-swap, also cid-keyed). The
+ * design enumerated five ops, but two of the call sites listed
+ * under "add(...)" (lines 719-723, 742-746) are actually cid-keyed
+ * removes; cancelByCid is the faithful mapping.
  */
 export default function usePendingQueue() {
   const [pendingMessages, setPendingMessages] = useState([])
@@ -96,6 +106,10 @@ export default function usePendingQueue() {
     apply(prev => prev.filter(m => m.ts !== ts))
   }, [apply])
 
+  const cancelByCid = useCallback((cid) => {
+    apply(prev => prev.filter(m => m.cid !== cid))
+  }, [apply])
+
   // Replace the queue wholesale from authoritative server state.
   // Preserves the client-side cid when an existing local entry shares
   // a ts with the server entry — keeps QueuedMessages's expanded
@@ -129,6 +143,7 @@ export default function usePendingQueue() {
     swapOptimisticTs,
     promoteByTs,
     cancelByTs,
+    cancelByCid,
     hydrate,
     clear,
   }

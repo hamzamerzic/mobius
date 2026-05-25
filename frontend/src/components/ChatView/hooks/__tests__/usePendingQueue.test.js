@@ -75,6 +75,18 @@ test('cancelByTs removes by ts', () => {
   assert.equal(result.current.pendingMessagesRef.current[0].cid, 'b')
 })
 
+test('cancelByCid removes the matching entry (pre-swap rollback path)', () => {
+  // Used in doSend's error rollback and the "server said started"
+  // branch — both run before the optimistic ts has been swapped to
+  // the server ts, so cid is the only stable handle.
+  const { result } = renderHook(usePendingQueue)
+  result.current.add(fixtureMsg({ cid: 'optimistic-x', ts: 99 }))
+  result.current.add(fixtureMsg({ cid: 'optimistic-y', ts: 100 }))
+  result.current.cancelByCid('optimistic-x')
+  assert.equal(result.current.pendingMessagesRef.current.length, 1)
+  assert.equal(result.current.pendingMessagesRef.current[0].cid, 'optimistic-y')
+})
+
 test('hydrate replaces wholesale; ref updates synchronously', () => {
   const { result } = renderHook(usePendingQueue)
   result.current.add(fixtureMsg({ cid: 'local', ts: 1 }))
