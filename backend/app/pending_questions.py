@@ -1,11 +1,11 @@
 """Shared `PendingQuestion` definition for the AskUserQuestion flow.
 
 The SDK runner constructs one inside `can_use_tool` and inserts it
-into the `_pending_questions` registry owned by `chat.py`. Routes
-resolve the future via `chat.deliver_answer()`. Keeping the class
-in its own module avoids a circular import (chat.py → runner;
-runner needs the class) and removes the duck-typed-by-accident
-duplication that lived in both modules during the SDK migration.
+into the registry owned by `app.questions` (see `_pending` there).
+Routes resolve the future via `questions.claim()` + setting the
+result, or `questions.deliver_answer()`. Keeping the class in its
+own module avoids a circular import (questions → runner; runner
+needs the class).
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from typing import Any
 class PendingQuestion:
   """A question waiting for the partner's AskUserQuestion answer.
 
-  Lives in `chat._pending_questions[chat_id]` while the SDK runner's
+  Lives in `questions._pending[chat_id]` while the SDK runner's
   `can_use_tool` callback is blocked on `await future`. The
   `POST /messages` handler resolves `future` when an answers payload
   arrives, which unblocks the callback and lets the SDK continue.

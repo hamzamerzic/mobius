@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import time
-import weakref
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -18,7 +17,7 @@ from pathlib import Path
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from app import auth, models, questions, schemas
+from app import auth, chat_queue, models, questions, schemas
 from app.broadcast import ChatBroadcast, create_broadcast, get_broadcast, set_active_broadcast
 from app.config import get_settings
 from app.events import process_event, build_assistant_message, finalize_blocks
@@ -87,17 +86,6 @@ def _save_message(db: Session, chat_id: str, message: dict):
   msgs.append(message)
   chat.messages = msgs
   _safe_commit(db)
-
-
-def _notify_pending_question(db: Session, chat_id: str, event: dict):
-  """Thin shim — delegates to questions.notify (ticket 033).
-
-  Kept so the existing `notify_pending_question_cb` kwarg threaded
-  into the SDK runners doesn't need a runner-side change in this
-  commit. Dropped in commit 2 when runners pick up the alias-free
-  call site.
-  """
-  questions.notify(db, chat_id, event)
 
 
 @dataclass
@@ -185,46 +173,10 @@ async def _drain(stream: asyncio.StreamReader) -> None:
     pass
 
 
-# Per-chat asyncio locks serialize read-modify-write on
-# chat.pending_messages. The lock guards three operations that all
-# touch the queue: append (POST /messages), cancel (DELETE /pending),
-# and promote (turn-end drain). Without serialization, two of those
-# fired concurrently can read the same snapshot and one commit
-# overwrites the other — silently dropping queue entries.
-#
-# WeakValueDictionary lets entries collect when no caller is holding
-# the lock, so the dict can't grow unbounded. Lookups are atomic from
-# the asyncio scheduler's POV (no await between get + check + insert),
-# so concurrent callers for the same chat get the same lock instance.
-_queue_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
-  weakref.WeakValueDictionary()
-)
-
-
-# Pending AskUserQuestion state lives in `app.questions._pending`
-# (ticket 033). The alias below keeps existing references in this
-# module — including the runners' `pending_questions=` DI kwarg —
-# pointing at the SAME dict, so both names mutate the same registry
-# during commit 1. Commit 2 drops the alias and routes pass
-# `questions._pending` explicitly at the SDK call sites.
-from app.pending_questions import PendingQuestion
-
-_pending_questions = questions._pending
-
-
-def deliver_answer(chat_id: str, answers: dict) -> bool:
-  """Thin shim — delegates to questions.deliver_answer (ticket 033)."""
-  return questions.deliver_answer(chat_id, answers)
-
-
-def get_pending_question(chat_id: str) -> "PendingQuestion | None":
-  """Thin shim — delegates to questions.get (ticket 033)."""
-  return questions.get(chat_id)
-
-
-def claim_pending_question(chat_id: str) -> "PendingQuestion | None":
-  """Thin shim — delegates to questions.claim (ticket 033)."""
-  return questions.claim(chat_id)
+# Queue management (per-chat lock, promote, drain_and_release) lives
+# in `app.chat_queue` after ticket 033. The pending-question registry
+# lives in `app.questions`. chat.py imports both and uses them
+# directly; no shims remain.
 
 class _ChatEventSink:
   """Bridges SDK-runner events to broadcast + DB state.
@@ -363,15 +315,6 @@ def _read_skill_text() -> str:
   return ""
 
 
-def get_queue_lock(chat_id: str) -> asyncio.Lock:
-  """Returns the per-chat queue lock, creating it if needed."""
-  lock = _queue_locks.get(chat_id)
-  if lock is None:
-    lock = asyncio.Lock()
-    _queue_locks[chat_id] = lock
-  return lock
-
-
 def current_run_generation(chat_id: str) -> int:
   """Returns the current generation for a chat (0 if none)."""
   return registry.current_generation(chat_id)
@@ -470,11 +413,6 @@ def _clear_pending_messages(db: Session | None, chat_id: str) -> None:
     db.rollback()
 
 
-def _cancel_pending_question(chat_id: str) -> None:
-  """Thin shim — delegates to questions.cancel (ticket 033)."""
-  questions.cancel(chat_id)
-
-
 def _finalize_broadcast_if_running(chat_id: str) -> None:
   """Publishes a terminal done event when the chat broadcast is live."""
   bc = get_broadcast(chat_id)
@@ -538,7 +476,7 @@ async def stop_chat_for(chat_id: str, db: Session = None) -> bool:
   """
   bump_run_generation(chat_id)
   _clear_pending_messages(db, chat_id)
-  _cancel_pending_question(chat_id)
+  questions.cancel(chat_id)
   all_stopped = True
   for handle in registry.get_handles(chat_id):
     ok = await handle.stop(timeout=2.0)
@@ -579,90 +517,6 @@ def _finalize_response(
   _update_last_assistant_message(
     db, chat_id, build_assistant_message(assistant_blocks),
   )
-
-
-def _promote_pending_messages_locked(
-  db: Session,
-  chat_id: str,
-) -> tuple[list[schemas.ChatMessage], dict | None, str | None]:
-  """Inner promote logic. PRECONDITION: caller holds the per-chat queue
-  lock. This sync variant exists so the finally block in _run_chat_impl
-  can do its 'late-drain + release _starting' critical section atomically
-  under a single lock acquisition without needing re-entrant locks.
-
-  Returns (next_messages, first_pending, session_id) on success.
-  Returns ([], None, session_id) when the pending queue is empty or
-  when next_messages construction fails (malformed transcript entry).
-  """
-  if not chat_id:
-    return [], None, None
-  chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
-  if not chat:
-    return [], None, None
-  # Refresh inside the lock so we see commits from any append or
-  # cancel that completed while we waited.
-  db.refresh(chat)
-  pending = list(chat.pending_messages or [])
-  if not pending:
-    return [], None, chat.session_id
-
-  existing = list(chat.messages or [])
-  first_pending = pending[0]
-  # Build next_messages BEFORE committing so a malformed transcript
-  # entry can't silently consume a pending turn. If construction
-  # raises, log and leave the queue intact for retry.
-  try:
-    next_messages = [
-      schemas.ChatMessage(
-        role=m.get("role", "user"),
-        content=m.get("content", "") or "",
-      )
-      for m in existing
-    ]
-    next_messages.append(
-      schemas.ChatMessage(
-        role=first_pending.get("role", "user"),
-        content=first_pending.get("content", "") or "",
-      )
-    )
-  except Exception:
-    _get_logger().exception(
-      "promote: next_messages construction failed chat_id=%s — "
-      "leaving pending queue intact", chat_id,
-    )
-    return [], None, chat.session_id
-
-  chat.messages = existing + [first_pending]
-  chat.pending_messages = pending[1:]
-  chat.updated_at = datetime.now(UTC)
-  db.commit()
-
-  return next_messages, first_pending, chat.session_id
-
-
-async def _promote_pending_messages(
-  db: Session,
-  chat_id: str,
-) -> tuple[list[schemas.ChatMessage], dict | None, str | None]:
-  """Atomically promotes the head of the pending queue into the transcript.
-
-  Held under the per-chat queue lock so the read-modify-write on
-  pending_messages doesn't race with append (POST /messages) or
-  cancel (DELETE /pending/{ts}).
-
-  This function does NOT claim _starting — the caller is responsible
-  for ensuring exclusive promotion (e.g., via mark_starting before
-  call in stale-pending path, or by virtue of being the only finally
-  block for a given run in the turn-end path). Adding mark_starting
-  here was a round-7 over-engineering that broke the finally path:
-  _starting still contains the original send's claim when the finally
-  fires, so the in-promote mark_starting always returned False and
-  no queued turn ever got promoted in production.
-  """
-  if not chat_id:
-    return [], None, None
-  async with get_queue_lock(chat_id):
-    return _promote_pending_messages_locked(db, chat_id)
 
 
 def _clear_pending_queue(db: Session, chat_id: str) -> None:
@@ -738,6 +592,27 @@ def _schedule_continuation(
     discard_starting(chat_id)
 
 
+# Queue drain helpers — pre-bound to the chat-side callbacks so the
+# call sites in _run_chat_impl stay short. `chat_queue.drain_and_release`
+# takes `discard_starting` + `forget_chat` as kwargs so it doesn't
+# import back into chat.py (avoids a cycle); these bound names just
+# keep that ergonomic.
+
+async def _drain_and_release(
+  db: Session,
+  chat_id: str,
+  we_own_gen: bool,
+) -> tuple[dict | None, list, str | None]:
+  """Local helper around chat_queue.drain_and_release that binds the
+  chat.py-owned discard_starting + forget_chat callbacks. Behavior is
+  identical to ticket 033's pre-extract _drain_and_release."""
+  return await chat_queue.drain_and_release(
+    db, chat_id, we_own_gen,
+    discard_starting=discard_starting,
+    forget_chat=forget_chat,
+  )
+
+
 async def _close_browser_session(chat_id: str) -> None:
   """Close this chat's agent-browser session so Chrome doesn't linger.
 
@@ -763,46 +638,6 @@ async def _close_browser_session(chat_id: str) -> None:
     log.warning("agent-browser close timed out for chat %s", chat_id)
   except Exception as exc:
     log.warning("agent-browser close failed for chat %s: %s", chat_id, exc)
-
-
-async def _drain_and_release(
-  db: Session,
-  chat_id: str,
-  we_own_gen: bool,
-) -> tuple[dict | None, list, str | None]:
-  """End-of-turn queue drain. Returns (next_user, next_messages,
-  next_session_id) for the caller to publish + schedule.
-
-  Under the per-chat queue lock:
-    - Promotes the head of pending_messages (if any).
-    - If nothing to promote AND we_own_gen, releases _starting so any
-      subsequent POST sees is_chat_running=False and starts a fresh run.
-
-  Doing this in a single locked critical section closes the race
-  between the run_chat finally and a POST that arrives in the window
-  after the subprocess exits but before _starting is released. Both
-  ends serialize on the same lock; whichever side wins ordering, the
-  message is either promoted here or POST takes the start path.
-
-  When we_own_gen is False (Stop bumped the gen), we must not promote
-  or release _starting — the newer owner (Stop, or the continuation
-  it scheduled) is responsible for those.
-  """
-  if not we_own_gen:
-    return None, [], None
-  async with get_queue_lock(chat_id):
-    next_messages, first_pending, next_session_id = (
-      _promote_pending_messages_locked(db, chat_id)
-    )
-    if first_pending is None:
-      discard_starting(chat_id)
-      # Chat is fully idle — nothing in flight, nothing queued. Drop
-      # the per-chat generation counter so long-running containers
-      # don't accumulate one entry per chat-ever-touched. A future
-      # send re-creates the entry from 0; Stop semantics still rely
-      # on monotonic bumps within a single live run.
-      forget_chat(chat_id)
-    return first_pending, next_messages, next_session_id
 
 
 async def run_chat(
@@ -1027,8 +862,8 @@ async def _run_chat_impl(
         cwd=cwd,
         chat_id=chat_id,
         bc=sink,
-        pending_questions=_pending_questions,
-        notify_pending_question_cb=_notify_pending_question,
+        pending_questions=questions._pending,
+        notify_pending_question_cb=questions.notify,
         db=db,
         agent_settings=agent_settings,
       )
@@ -1158,8 +993,8 @@ async def _run_chat_impl(
         chat_id=chat_id,
         skill_text=_read_skill_text(),
         bc=sink,
-        pending_questions=_pending_questions,
-        notify_pending_question_cb=_notify_pending_question,
+        pending_questions=questions._pending,
+        notify_pending_question_cb=questions.notify,
         db=db,
         agent_settings=agent_settings,
       )
@@ -1404,7 +1239,7 @@ async def _run_chat_impl(
               _update_last_assistant_message(
                 db, chat_id, save_message_to_db,
               )
-              _notify_pending_question(db, chat_id, event)
+              questions.notify(db, chat_id, event)
               if proc and proc.returncode is None:
                 proc.kill()
               bc.publish({"type": "done", "cost_usd": 0})

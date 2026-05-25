@@ -2,7 +2,6 @@
 
 import os
 import tempfile
-import weakref
 
 import pytest
 from fastapi.testclient import TestClient
@@ -40,20 +39,18 @@ def fresh_db():
   # leaving these uncleared would cross-contaminate.
   from app import chat as chat_mod
   from app import broadcast as bc_mod
+  from app import chat_queue as chat_queue_mod
   from app import questions as questions_mod
   from app.runner_registry import registry
-  # ticket 033: pending-question registry now lives in app.questions.
-  # chat_mod._pending_questions is an alias for questions_mod._pending
-  # during commit 1; clearing through the canonical name keeps the
-  # fixture future-proof when the alias is dropped in commit 2.
+  # ticket 033: pending-question registry lives in app.questions;
+  # queue locks live in app.chat_queue. Reset both canonical homes.
   questions_mod._pending.clear()
   registry._starting.clear()
   registry._handles.clear()
   registry._generation.clear()
-  # Reset the per-chat queue-lock registry by reassigning to a fresh
-  # WeakValueDictionary so a lock held by a leaked task from a prior
-  # test can't be returned to the next test's caller.
-  chat_mod._queue_locks = weakref.WeakValueDictionary()
+  # Reset the per-chat queue-lock registry so a lock held by a leaked
+  # task from a prior test can't be returned to the next test's caller.
+  chat_queue_mod.reset_for_tests()
   # Drop any cached skill text loaded by a prior test; the next caller
   # will re-read from disk. Using setattr in case the attribute is
   # declared lazily below the read-site.

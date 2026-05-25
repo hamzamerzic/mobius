@@ -374,7 +374,7 @@ def test_promote_pending_messages(db):
   """_promote_pending_messages moves only the first pending into transcript."""
   import asyncio
   from app import models
-  from app.chat import _promote_pending_messages
+  from app.chat_queue import promote_pending_messages as _promote_pending_messages
 
   chat = models.Chat(
     id="promote-test",
@@ -415,7 +415,7 @@ def test_promote_drains_all_sequentially(db):
   """Calling _promote_pending_messages repeatedly drains the queue one by one."""
   import asyncio
   from app import models
-  from app.chat import _promote_pending_messages
+  from app.chat_queue import promote_pending_messages as _promote_pending_messages
 
   chat = models.Chat(
     id="drain-test",
@@ -459,8 +459,9 @@ def test_promote_locked_atomic_with_append(db):
   wrapper's _starting release would be stranded."""
   import asyncio
   from app import models
-  from app.chat import (
-    _promote_pending_messages_locked, get_queue_lock,
+  from app.chat_queue import (
+    promote_pending_messages_locked as _promote_pending_messages_locked,
+    get_lock as get_queue_lock,
   )
   from app.routes.chats_stream import _append_to_pending
   from app.database import SessionLocal
@@ -537,7 +538,7 @@ def test_promote_succeeds_when_starting_is_held_by_current_run(db):
   production."""
   import asyncio
   from app import models
-  from app.chat import _promote_pending_messages
+  from app.chat_queue import promote_pending_messages as _promote_pending_messages
 
   chat = models.Chat(
     id="starting-held-test",
@@ -570,7 +571,7 @@ def test_promote_and_append_dont_lose_messages(db):
   append's commit is preserved."""
   import asyncio
   from app import models
-  from app.chat import _promote_pending_messages
+  from app.chat_queue import promote_pending_messages as _promote_pending_messages
   from app.routes.chats_stream import _append_to_pending
   from app.database import SessionLocal
   from app.schemas import SendMessage

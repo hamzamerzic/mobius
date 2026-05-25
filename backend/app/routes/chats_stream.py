@@ -12,15 +12,15 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.responses import Response
 from sqlalchemy.orm import Session
 
-from app import models, schemas
+from app import models, questions, schemas
 from app.broadcast import create_broadcast, get_broadcast
 from app.chat import (
-  claim_pending_question,
   discard_starting,
   is_chat_running,
   mark_starting,
   run_chat,
 )
+from app import chat_queue
 from app.config import get_settings
 from app.database import get_db
 from app.deps import get_current_owner
@@ -112,8 +112,7 @@ async def _append_to_pending(
   race with a concurrent send. So they ride along with the queue
   append, atomic.
   """
-  from app.chat import get_queue_lock
-  async with get_queue_lock(chat.id):
+  async with chat_queue.get_lock(chat.id):
     db.refresh(chat)
     # Apply answers AFTER refresh so we don't lose the write.
     _apply_answers_to_last_question(chat, body.answers)
@@ -219,23 +218,22 @@ async def send_message(
   # call db.commit() on the chat row.
   #
   # Load-bearing for the SDK answer-delivery path below (committed at
-  # the claim_pending_question short-circuit). Redundant for the queue
-  # path, where _append_to_pending re-applies after db.refresh. Don't
-  # remove without re-tracing both paths.
+  # the questions.claim short-circuit). Redundant for the queue path,
+  # where _append_to_pending re-applies after db.refresh. Don't remove
+  # without re-tracing both paths.
   _apply_answers_to_last_question(chat, body.answers)
 
   # SDK in-process answer delivery: if the Claude Agent SDK is blocked
   # in a PreToolUse hook waiting for an AskUserQuestion answer (held
-  # in `_pending_questions[chat_id]`), resolve the future in-place and
+  # in `questions._pending[chat_id]`), resolve the future in-place and
   # return — the SDK then continues the active turn with the answer.
-  # The subprocess providers leave `_pending_questions` empty (their
+  # The subprocess providers leave `questions._pending` empty (their
   # AskUserQuestion intercept kills the proc and the answer becomes a
   # new queued turn), so this short-circuit no-ops for them and the
   # existing queue path takes over.
   if body.answers:
-    from app.chat import get_queue_lock
-    async with get_queue_lock(chat_id):
-      pending = claim_pending_question(chat_id)
+    async with chat_queue.get_lock(chat_id):
+      pending = questions.claim(chat_id)
       if pending is not None:
         db.commit()  # persist the answers we just wrote
         if not pending.future.done():
@@ -316,11 +314,9 @@ async def send_message(
       # (e.g., two stale-pending POSTs racing).
       if mark_starting(chat_id):
         try:
-          from app.chat import (
-            _promote_pending_messages, _schedule_continuation,
-          )
+          from app.chat import _schedule_continuation
           next_messages, next_user, next_session_id = (
-            await _promote_pending_messages(db, chat_id)
+            await chat_queue.promote_pending_messages(db, chat_id)
           )
           if next_user:
             _schedule_continuation(
@@ -427,8 +423,7 @@ async def cancel_pending_message(
   # DELETE that races a concurrent POST/promote can read a stale
   # snapshot and commit, undoing the other operation. Serializing
   # here makes all three queue mutations pairwise atomic.
-  from app.chat import get_queue_lock
-  async with get_queue_lock(chat_id):
+  async with chat_queue.get_lock(chat_id):
     db.refresh(chat)
     pending = list(chat.pending_messages or [])
     remaining = [m for m in pending if m.get("ts") != ts]

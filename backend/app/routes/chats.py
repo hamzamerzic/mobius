@@ -184,7 +184,7 @@ async def patch_chat(
   from sqlalchemy.orm.attributes import flag_modified
   from app.config import get_settings as get_app_settings
   from app.providers import effective_agent_settings
-  from app.chat import get_queue_lock
+  from app.chat_queue import get_lock as get_queue_lock
 
   async with get_queue_lock(chat_id):
     chat = get_active_chat_or_404(db, chat_id)
