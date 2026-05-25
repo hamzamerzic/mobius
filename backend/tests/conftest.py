@@ -41,12 +41,7 @@ def fresh_db():
   from app import chat as chat_mod
   from app import broadcast as bc_mod
   from app.runner_registry import registry
-  chat_mod._starting.clear()
-  chat_mod._active_procs.clear()
-  chat_mod._active_clients.clear()
-  chat_mod._active_sessions.clear()
   chat_mod._pending_questions.clear()
-  chat_mod._run_generation.clear()
   registry._starting.clear()
   registry._handles.clear()
   registry._generation.clear()

@@ -1,0 +1,24 @@
+{
+  "active_procs": [
+    {
+      "chat_id": "chat-subproc",
+      "pid": 4242,
+      "running": true,
+      "returncode": null
+    }
+  ],
+  "active_sdk_clients": [
+    {
+      "chat_id": "chat-sdk-claude"
+    }
+  ],
+  "active_sdk_sessions": [
+    {
+      "chat_id": "chat-sdk-codex"
+    }
+  ],
+  "starting": [
+    "chat-starting"
+  ],
+  "broadcasts": []
+}

@@ -168,7 +168,6 @@ def test_claude_runner_registers_then_unregisters_handle():
       return None
 
   async def _scenario() -> None:
-    active_clients = {}
     task = asyncio.create_task(
       runner.run_claude_sdk_turn(
         user_message="hello",
@@ -181,7 +180,6 @@ def test_claude_runner_registers_then_unregisters_handle():
         pending_questions={},
         notify_pending_question_cb=lambda *_args, **_kwargs: None,
         db=None,
-        active_clients=active_clients,
       )
     )
     for _ in range(20):
@@ -308,7 +306,6 @@ def test_codex_runner_registers_then_unregisters_handle(monkeypatch):
         pending_questions={},
         notify_pending_question_cb=lambda *_args, **_kwargs: None,
         db=None,
-        active_sessions={},
       )
     )
     for _ in range(20):

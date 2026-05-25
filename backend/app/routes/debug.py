@@ -12,14 +12,9 @@ from fastapi import APIRouter, Depends, Query
 
 from app import models
 from app.broadcast import get_broadcast, get_all_active_broadcasts
-from app.chat import (
-  get_active_clients,
-  get_active_procs,
-  get_active_sessions,
-  get_starting,
-)
 from app.config import get_settings
 from app.deps import get_current_owner
+from app.runner_registry import RunnerKind, registry
 
 router = APIRouter(prefix="/api/debug", tags=["debug"])
 
@@ -37,16 +32,23 @@ def debug_status(
   "running" if it appears in ANY of the three lists.
   """
   active = []
-  for chat_id, proc in get_active_procs().items():
+  for handle in registry.handles_by_kind(RunnerKind.SUBPROCESS):
+    proc = handle.proc
     active.append({
-      "chat_id": chat_id,
+      "chat_id": handle.chat_id,
       "pid": proc.pid,
       "running": proc.returncode is None,
       "returncode": proc.returncode,
     })
 
-  sdk_clients = [{"chat_id": cid} for cid in get_active_clients()]
-  sdk_sessions = [{"chat_id": cid} for cid in get_active_sessions()]
+  sdk_clients = [
+    {"chat_id": handle.chat_id}
+    for handle in registry.handles_by_kind(RunnerKind.CLAUDE_SDK)
+  ]
+  sdk_sessions = [
+    {"chat_id": handle.chat_id}
+    for handle in registry.handles_by_kind(RunnerKind.CODEX_SDK)
+  ]
 
   broadcasts = []
   for bc in get_all_active_broadcasts():
@@ -61,7 +63,7 @@ def debug_status(
     "active_procs": active,
     "active_sdk_clients": sdk_clients,
     "active_sdk_sessions": sdk_sessions,
-    "starting": list(get_starting()),
+    "starting": list(registry._starting),
     "broadcasts": broadcasts,
   }
 

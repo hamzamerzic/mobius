@@ -22,11 +22,11 @@ import './ProviderModelPicker.css'
  *  Add to this list when a new model lands; the value is what gets
  *  passed to ClaudeAgentOptions(model=...) / Codex thread.start. */
 export const CLAUDE_MODELS = [
-  { value: 'claude-opus-4-7-20251215', label: 'Opus 4.7' },
-  { value: 'claude-opus-4-6-20251015', label: 'Opus 4.6' },
-  { value: 'claude-opus-4-5-20251001', label: 'Opus 4.5' },
-  { value: 'claude-sonnet-4-7-20251215', label: 'Sonnet 4.7' },
   { value: 'claude-sonnet-4-5-20251001', label: 'Sonnet 4.5' },
+  { value: 'claude-sonnet-4-7-20251215', label: 'Sonnet 4.7' },
+  { value: 'claude-opus-4-5-20251001', label: 'Opus 4.5' },
+  { value: 'claude-opus-4-6-20251015', label: 'Opus 4.6' },
+  { value: 'claude-opus-4-7-20251215', label: 'Opus 4.7' },
   { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
 ]
 

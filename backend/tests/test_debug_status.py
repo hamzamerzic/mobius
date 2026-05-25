@@ -1,79 +1,35 @@
-"""`/api/debug/status` must reflect EVERY runtime registry.
+"""Golden-file coverage for `/api/debug/status`."""
 
-Three concurrent runtime registries exist: `_active_procs`
-(subprocess-backed turns), `_active_clients` (Claude SDK clients),
-`_active_sessions` (Codex SDK threads). The monitoring scripts in
-the runbook poll `/api/debug/status` to detect chat completion — if
-any registry is missing from the response, an in-flight chat appears
-idle and the monitor reports false-done.
-
-Added after the blast-radius review caught that the original status
-endpoint was blind to SDK turns. See
-`_003-tech-debt-and-test-gaps.md` TG-6 for context.
-"""
-
+import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
+from app.chat import SubprocessHandle
+from app.runner_registry import RunnerKind, registry
 
-def test_status_reports_subprocess_runtimes(client, auth):
-  """Subprocess-backed chats appear in `active_procs`."""
-  from app import chat as chat_mod
 
+class _Handle:
+  def __init__(self, chat_id: str, kind: RunnerKind):
+    self.chat_id = chat_id
+    self.kind = kind
+
+  async def stop(self, timeout: float = 2.0) -> bool:
+    del timeout
+    return True
+
+
+def test_debug_status_shape_matches_golden(client, auth):
   proc = MagicMock()
   proc.pid = 4242
   proc.returncode = None
-  chat_mod._active_procs["chat-subproc"] = proc
-  try:
-    r = client.get("/api/debug/status", headers=auth)
-    assert r.status_code == 200
-    body = r.json()
-    chat_ids = {entry["chat_id"] for entry in body["active_procs"]}
-    assert "chat-subproc" in chat_ids
-  finally:
-    chat_mod._active_procs.pop("chat-subproc", None)
+  registry.register(SubprocessHandle(chat_id="chat-subproc", proc=proc))
+  registry.register(_Handle("chat-sdk-claude", RunnerKind.CLAUDE_SDK))
+  registry.register(_Handle("chat-sdk-codex", RunnerKind.CODEX_SDK))
+  registry._starting.add("chat-starting")
 
-
-def test_status_reports_sdk_clients(client, auth):
-  """Claude SDK-backed chats appear in `active_sdk_clients`."""
-  from app import chat as chat_mod
-
-  chat_mod._active_clients["chat-sdk-claude"] = object()
-  try:
-    r = client.get("/api/debug/status", headers=auth)
-    assert r.status_code == 200
-    body = r.json()
-    chat_ids = {entry["chat_id"] for entry in body["active_sdk_clients"]}
-    assert "chat-sdk-claude" in chat_ids
-  finally:
-    chat_mod._active_clients.pop("chat-sdk-claude", None)
-
-
-def test_status_reports_sdk_sessions(client, auth):
-  """Codex SDK-backed chats appear in `active_sdk_sessions`."""
-  from app import chat as chat_mod
-
-  chat_mod._active_sessions["chat-sdk-codex"] = (object(), object())
-  try:
-    r = client.get("/api/debug/status", headers=auth)
-    assert r.status_code == 200
-    body = r.json()
-    chat_ids = {entry["chat_id"] for entry in body["active_sdk_sessions"]}
-    assert "chat-sdk-codex" in chat_ids
-  finally:
-    chat_mod._active_sessions.pop("chat-sdk-codex", None)
-
-
-def test_status_response_has_all_runtime_keys(client, auth):
-  """Every runtime registry field is always present (even when empty),
-  so monitors can rely on a stable schema."""
   r = client.get("/api/debug/status", headers=auth)
+
   assert r.status_code == 200
-  body = r.json()
-  for key in (
-    "active_procs",
-    "active_sdk_clients",
-    "active_sdk_sessions",
-    "starting",
-    "broadcasts",
-  ):
-    assert key in body, f"missing key in /api/debug/status: {key}"
+  golden_path = Path(__file__).with_name("golden_debug_status.json")
+  expected = json.loads(golden_path.read_text(encoding="utf-8"))
+  assert r.json() == expected

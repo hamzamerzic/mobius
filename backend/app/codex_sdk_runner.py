@@ -662,7 +662,6 @@ async def run_codex_sdk_turn(
   pending_questions: dict,
   notify_pending_question_cb,
   db,
-  active_sessions: dict,
   agent_settings: dict | None = None,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
@@ -681,7 +680,6 @@ async def run_codex_sdk_turn(
       question notification. Bridged into the approval_handler so
       the push fires when the model asks.
     db: SQLAlchemy session for the notify callback above.
-    active_sessions: Shared live-session registry for Stop and steer.
 
   Returns:
     Dict with `session_id`, `cost_usd`, `usage`, and `error`.
@@ -872,7 +870,6 @@ async def run_codex_sdk_turn(
         effort=effort,
       )
       active_turn = ActiveCodexTurn(thread, turn, chat_id=chat_id)
-      active_sessions[chat_id] = active_turn
       registry.register(active_turn)
 
       async for notification in turn.stream():
@@ -971,31 +968,26 @@ async def run_codex_sdk_turn(
       "error": str(exc),
     }
   finally:
-    current = active_sessions.get(chat_id)
+    current = registry.get_handle(chat_id, RunnerKind.CODEX_SDK)
     if isinstance(current, ActiveCodexTurn) and current.turn is turn:
-      active_sessions.pop(chat_id, None)
-      current.mark_finished()
-    current_handle = registry.get_handle(chat_id, RunnerKind.CODEX_SDK)
-    if isinstance(current_handle, ActiveCodexTurn) and current_handle.turn is turn:
       registry.unregister(chat_id, RunnerKind.CODEX_SDK)
+      current.mark_finished()
 
 
 async def steer_into_active_turn(
   chat_id: str,
-  active_sessions: dict,
   message: str,
 ) -> bool:
   """Delivers a message into the active Codex turn via `steer()`.
 
   Args:
-    chat_id: Möbius chat identifier to look up in `active_sessions`.
-    active_sessions: Registry containing `ActiveCodexTurn` handles.
+    chat_id: Möbius chat identifier to look up in the registry.
     message: Text to inject into the in-flight turn.
 
   Returns:
     True when the turn existed and accepted the steering input.
   """
-  current = active_sessions.get(chat_id)
+  current = registry.get_handle(chat_id, RunnerKind.CODEX_SDK)
   if not isinstance(current, ActiveCodexTurn) or current.turn is None:
     return False
 
@@ -1005,8 +997,8 @@ async def steer_into_active_turn(
     return False
   except Exception as exc:
     if _is_closed_turn_error(exc):
-      if active_sessions.get(chat_id) is current:
-        active_sessions.pop(chat_id, None)
+      if registry.get_handle(chat_id, RunnerKind.CODEX_SDK) is current:
+        registry.unregister(chat_id, RunnerKind.CODEX_SDK)
         current.mark_finished()
       return False
     raise

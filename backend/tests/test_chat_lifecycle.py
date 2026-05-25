@@ -15,41 +15,60 @@ import asyncio
 import time
 
 from app import chat as chat_mod
+from app.runner_registry import RunnerKind, registry
 
 
-class HangingClient:
-  """Fake ActiveClaudeClient whose interrupt() never returns."""
+class HangingHandle:
+  """Fake handle whose stop() never returns before the timeout."""
 
-  async def interrupt(self):
-    await asyncio.Event().wait()  # forever
+  chat_id = "testchat"
+  kind = RunnerKind.CLAUDE_SDK
+
+  async def stop(self, timeout=2.0):
+    await asyncio.sleep(timeout + 0.1)
+    return False
 
 
 def test_stop_chat_for_wedged_sdk_client_times_out(client, auth, chat):
   """A wedged SDK client must not hang stop_chat_for past ~2s."""
-  chat_mod._active_clients[chat.id] = HangingClient()
+  hanging = HangingHandle()
+  hanging.chat_id = chat.id
+  registry.register(hanging)
   start = time.monotonic()
-  asyncio.run(chat_mod.stop_chat_for(chat.id))
+  stopped = asyncio.run(chat_mod.stop_chat_for(chat.id))
   elapsed = time.monotonic() - start
   assert elapsed < 3.0, f"stop_chat_for hung for {elapsed}s"
-  assert chat.id not in chat_mod._active_clients
+  assert stopped is False
+  assert registry.get_handle(chat.id, RunnerKind.CLAUDE_SDK) is hanging
 
 
 def test_global_stop_targets_sdk_only_chats(client, auth, chat):
   """stop_chat(None) must interrupt chats registered only in
-  _active_clients / _active_sessions (no proc, no broadcast)."""
+  the runner registry (no proc, no broadcast)."""
   called = {"claude": False, "codex": False}
 
   class FakeClient:
-    async def interrupt(self):
+    chat_id = "claude-chat-id"
+    kind = RunnerKind.CLAUDE_SDK
+
+    async def stop(self, timeout=2.0):
+      del timeout
       called["claude"] = True
+      return True
 
   class FakeSession:
-    async def interrupt(self):
-      called["codex"] = True
+    chat_id = "codex-chat-id"
+    kind = RunnerKind.CODEX_SDK
 
-  chat_mod._active_clients["claude-chat-id"] = FakeClient()
-  chat_mod._active_sessions["codex-chat-id"] = FakeSession()
-  asyncio.run(chat_mod.stop_chat(None))
+    async def stop(self, timeout=2.0):
+      del timeout
+      called["codex"] = True
+      return True
+
+  registry.register(FakeClient())
+  registry.register(FakeSession())
+  stopped = asyncio.run(chat_mod.stop_chat(None))
+  assert stopped is True
   assert called["claude"] and called["codex"]
-  assert "claude-chat-id" not in chat_mod._active_clients
-  assert "codex-chat-id" not in chat_mod._active_sessions
+  assert registry.get_handle("claude-chat-id", RunnerKind.CLAUDE_SDK) is None
+  assert registry.get_handle("codex-chat-id", RunnerKind.CODEX_SDK) is None

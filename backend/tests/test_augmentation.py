@@ -3,7 +3,9 @@
 import io
 from unittest.mock import patch
 
+from app.chat import SubprocessHandle
 from app.broadcast import get_broadcast
+from app.runner_registry import RunnerKind, registry
 
 
 def _mark_done(chat_id):
@@ -11,6 +13,10 @@ def _mark_done(chat_id):
   bc = get_broadcast(chat_id)
   if bc and bc.running:
     bc.mark_completed()
+
+
+def _register_proc(chat_id, proc):
+  registry.register(SubprocessHandle(chat_id=chat_id, proc=proc))
 
 
 def test_no_augmentation_without_uploads(client, db, auth, chat):
@@ -112,12 +118,11 @@ def test_message_saved_before_run_chat(client, db, auth, chat):
 
 def test_send_while_running_queues_message(client, db, auth, chat):
   """Sending a message while agent is running queues it (202 + queued)."""
-  from app.chat import _active_procs
   from unittest.mock import MagicMock
 
   mock_proc = MagicMock()
   mock_proc.returncode = None
-  _active_procs[chat.id] = mock_proc
+  _register_proc(chat.id, mock_proc)
 
   try:
     resp = client.post(
@@ -146,17 +151,16 @@ def test_send_while_running_queues_message(client, db, auth, chat):
     assert cancel.status_code == 200
     assert cancel.json()["pending_messages"] == []
   finally:
-    _active_procs.pop(chat.id, None)
+    registry.unregister(chat.id, RunnerKind.SUBPROCESS)
 
 
 def test_multiple_queued_messages_ordered(client, db, auth, chat):
   """Multiple sends while running are queued in order."""
-  from app.chat import _active_procs
   from unittest.mock import MagicMock
 
   mock_proc = MagicMock()
   mock_proc.returncode = None
-  _active_procs[chat.id] = mock_proc
+  _register_proc(chat.id, mock_proc)
 
   try:
     resp1 = client.post(
@@ -177,7 +181,7 @@ def test_multiple_queued_messages_ordered(client, db, auth, chat):
     assert chat.pending_messages[0]["content"] == "first queued"
     assert chat.pending_messages[1]["content"] == "second queued"
   finally:
-    _active_procs.pop(chat.id, None)
+    registry.unregister(chat.id, RunnerKind.SUBPROCESS)
 
 
 def test_stale_pending_drains_on_fresh_send(client, db, auth, chat):
@@ -185,7 +189,7 @@ def test_stale_pending_drains_on_fresh_send(client, db, auth, chat):
   mid-turn), a fresh send must queue at the end AND kick off a run
   that drains the queue from the head — not replace the queue with
   the new message."""
-  from app.chat import _starting, _run_generation
+  from app.chat import get_starting
 
   # Seed stale pending (simulating crash recovery).
   chat.pending_messages = [
@@ -216,10 +220,10 @@ def test_stale_pending_drains_on_fresh_send(client, db, auth, chat):
     contents = [m["content"] for m in chat.pending_messages]
     assert contents == ["stale 2", "new send"]
     # Run was scheduled (gen bumped + starting marker set).
-    assert chat.id in _starting
+    assert chat.id in get_starting()
   finally:
-    _starting.discard(chat.id)
-    _run_generation.pop(chat.id, None)
+    registry.discard_starting(chat.id)
+    registry.forget(chat.id)
 
 
 def test_concurrent_queue_appends_dont_lose_messages(db, auth, chat):
@@ -229,7 +233,6 @@ def test_concurrent_queue_appends_dont_lose_messages(db, auth, chat):
   otherwise drop one of the messages."""
   import asyncio
   from app import models
-  from app.chat import _active_procs
   from app.routes.chats_stream import _append_to_pending, _ensure_unique_ts
   from app.database import SessionLocal
   from app.schemas import SendMessage
@@ -237,7 +240,7 @@ def test_concurrent_queue_appends_dont_lose_messages(db, auth, chat):
 
   mock_proc = MagicMock()
   mock_proc.returncode = None
-  _active_procs[chat.id] = mock_proc
+  _register_proc(chat.id, mock_proc)
 
   async def append_one(content):
     # Each task uses its OWN db session, mirroring real request flow
@@ -270,7 +273,7 @@ def test_concurrent_queue_appends_dont_lose_messages(db, auth, chat):
     tss = [m["ts"] for m in chat.pending_messages]
     assert len(set(tss)) == 10, "ts collisions under concurrent append"
   finally:
-    _active_procs.pop(chat.id, None)
+    registry.unregister(chat.id, RunnerKind.SUBPROCESS)
 
 
 def test_concurrent_cancel_and_append_dont_lose_messages(db, auth, chat):
@@ -280,7 +283,6 @@ def test_concurrent_cancel_and_append_dont_lose_messages(db, auth, chat):
   message."""
   import asyncio
   from app import models
-  from app.chat import _active_procs
   from app.routes.chats_stream import _append_to_pending, cancel_pending_message
   from app.database import SessionLocal
   from app.schemas import SendMessage
@@ -295,7 +297,7 @@ def test_concurrent_cancel_and_append_dont_lose_messages(db, auth, chat):
 
   mock_proc = MagicMock()
   mock_proc.returncode = None
-  _active_procs[chat.id] = mock_proc
+  _register_proc(chat.id, mock_proc)
 
   async def do_append():
     s = SessionLocal()
@@ -329,18 +331,17 @@ def test_concurrent_cancel_and_append_dont_lose_messages(db, auth, chat):
     assert "appended" in contents
     assert "cancel me" not in contents
   finally:
-    _active_procs.pop(chat.id, None)
+    registry.unregister(chat.id, RunnerKind.SUBPROCESS)
 
 
 def test_pending_ts_strictly_unique_under_collision(client, db, auth, chat):
   """Two queued sends within the same ms must get distinct ts values
   so DELETE-by-ts targets exactly one entry and React keys stay unique."""
-  from app.chat import _active_procs
   from unittest.mock import MagicMock, patch
 
   mock_proc = MagicMock()
   mock_proc.returncode = None
-  _active_procs[chat.id] = mock_proc
+  _register_proc(chat.id, mock_proc)
 
   try:
     # Force time.time() to return the same value for both POSTs to
@@ -366,7 +367,7 @@ def test_pending_ts_strictly_unique_under_collision(client, db, auth, chat):
     db.refresh(chat)
     assert [m["ts"] for m in chat.pending_messages] == [ts2]
   finally:
-    _active_procs.pop(chat.id, None)
+    registry.unregister(chat.id, RunnerKind.SUBPROCESS)
 
 
 def test_promote_pending_messages(db):
@@ -536,7 +537,7 @@ def test_promote_succeeds_when_starting_is_held_by_current_run(db):
   production."""
   import asyncio
   from app import models
-  from app.chat import _promote_pending_messages, _starting
+  from app.chat import _promote_pending_messages
 
   chat = models.Chat(
     id="starting-held-test",
@@ -549,7 +550,7 @@ def test_promote_succeeds_when_starting_is_held_by_current_run(db):
   db.commit()
 
   # Simulate the in-progress run's _starting claim.
-  _starting.add("starting-held-test")
+  registry._starting.add("starting-held-test")
   try:
     msgs, user, sid = asyncio.run(
       _promote_pending_messages(db, "starting-held-test"),
@@ -560,7 +561,7 @@ def test_promote_succeeds_when_starting_is_held_by_current_run(db):
     db.refresh(chat)
     assert chat.pending_messages == []
   finally:
-    _starting.discard("starting-held-test")
+    registry.discard_starting("starting-held-test")
 
 
 def test_promote_and_append_dont_lose_messages(db):
@@ -569,7 +570,7 @@ def test_promote_and_append_dont_lose_messages(db):
   append's commit is preserved."""
   import asyncio
   from app import models
-  from app.chat import _promote_pending_messages, _starting, _run_generation
+  from app.chat import _promote_pending_messages
   from app.routes.chats_stream import _append_to_pending
   from app.database import SessionLocal
   from app.schemas import SendMessage
@@ -620,8 +621,8 @@ def test_promote_and_append_dont_lose_messages(db):
     # Total entries must equal what we put in (1 seeded + 1 appended).
     assert len(transcript_contents) + len(pending_contents) == 2
   finally:
-    _starting.discard("race-test")
-    _run_generation.pop("race-test", None)
+    registry.discard_starting("race-test")
+    registry.forget("race-test")
 
 
 def test_stop_clears_pending_queue(db):
@@ -636,9 +637,7 @@ def test_stop_clears_pending_queue(db):
   """
   import asyncio
   from app import models
-  from app.chat import (
-    _active_procs, _run_generation, stop_chat,
-  )
+  from app.chat import current_run_generation, stop_chat
   from unittest.mock import MagicMock
 
   chat = models.Chat(
@@ -652,17 +651,16 @@ def test_stop_clears_pending_queue(db):
 
   mock_proc = MagicMock()
   mock_proc.returncode = None
-  _active_procs["stop-clears"] = mock_proc
-  _run_generation["stop-clears"] = 0
+  _register_proc("stop-clears", mock_proc)
 
   try:
     asyncio.run(stop_chat("stop-clears", db=db))
     db.refresh(chat)
     assert chat.pending_messages == []
-    assert _run_generation["stop-clears"] == 1
+    assert current_run_generation("stop-clears") == 1
   finally:
-    _active_procs.pop("stop-clears", None)
-    _run_generation.pop("stop-clears", None)
+    registry.unregister("stop-clears", RunnerKind.SUBPROCESS)
+    registry.forget("stop-clears")
 
 
 def test_stop_chat_for_clears_pending_queue(db):
@@ -672,7 +670,7 @@ def test_stop_chat_for_clears_pending_queue(db):
   """
   import asyncio
   from app import models
-  from app.chat import _run_generation, stop_chat_for
+  from app.chat import stop_chat_for
 
   chat = models.Chat(
     id="stop-for-clears",
@@ -688,7 +686,7 @@ def test_stop_chat_for_clears_pending_queue(db):
     db.refresh(chat)
     assert chat.pending_messages == []
   finally:
-    _run_generation.pop("stop-for-clears", None)
+    registry.forget("stop-for-clears")
 
 
 def test_cancel_pending_message_by_ts(client, db, auth):
@@ -761,17 +759,15 @@ def test_get_chat_returns_pending_messages(client, db, auth):
 
 def test_generation_mismatch_does_not_clear_newer_starting(db):
   """Old run_chat with stale generation must not clear _starting."""
-  from app.chat import (
-    _starting, _run_generation, current_run_generation,
-  )
+  from app.chat import current_run_generation
   chat_id = "gen-race-test"
 
   # Simulate: old run queued at gen 0, then stop bumps to gen 1.
-  _run_generation[chat_id] = 0
-  _starting.add(chat_id)
+  registry._generation[chat_id] = 0
+  registry._starting.add(chat_id)
 
   # Stop bumps generation (simulating stop_chat_for).
-  _run_generation[chat_id] = 1
+  registry._generation[chat_id] = 1
 
   # Old run_chat checks generation — mismatch, should NOT clear
   # _starting because the newer run owns it.
@@ -779,11 +775,11 @@ def test_generation_mismatch_does_not_clear_newer_starting(db):
   if old_gen != current_run_generation(chat_id):
     pass  # would return early in real code
   else:
-    _starting.discard(chat_id)
+    registry.discard_starting(chat_id)
 
   # _starting should still contain chat_id (newer run owns it).
-  assert chat_id in _starting
+  assert chat_id in registry._starting
 
   # Cleanup.
-  _starting.discard(chat_id)
-  _run_generation.pop(chat_id, None)
+  registry.discard_starting(chat_id)
+  registry.forget(chat_id)

@@ -144,6 +144,17 @@ def _result_error_message(result: ResultMessage) -> str:
   return "Claude SDK turn failed."
 
 
+def _should_retry_without_model(error_text: str | None) -> bool:
+  """True when Claude rejected the explicit model selection."""
+  if not error_text:
+    return False
+  text = error_text.lower()
+  return (
+    "selected model" in text
+    and "may not exist or you may not have access" in text
+  )
+
+
 def _format_tool_output(content: Any) -> str:
   """Formats SDK tool-result content for Möbius tool_output events."""
   if content is None:
@@ -184,7 +195,6 @@ async def run_claude_sdk_turn(
   pending_questions: dict,
   notify_pending_question_cb,
   db,
-  active_clients: dict,
   agent_settings: dict | None = None,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
@@ -201,7 +211,6 @@ async def run_claude_sdk_turn(
     notify_pending_question_cb: Callback that persists/pushes question
       notifications.
     db: SQLAlchemy session passed through to the notification callback.
-    active_clients: Shared live-client registry for Stop support.
 
   Returns:
     A dict containing the resulting session ID, final cost, and error.
@@ -325,151 +334,153 @@ async def run_claude_sdk_turn(
       _model, DEFAULT_MODELS["claude"],
     )
     _model = DEFAULT_MODELS["claude"]
-  options_kwargs = {
-    "system_prompt": skill_text,
-    "resume": session_id if session_id is not None else None,
-    "cwd": cwd,
-    "env": base_env,
-    "setting_sources": None,
-    "include_partial_messages": True,
-    "can_use_tool": can_use_tool,
-    "hooks": {
-      "PreToolUse": [
-        HookMatcher(matcher=None, hooks=[keepalive_hook]),
-      ],
-    },
-  }
-  if _model:
-    options_kwargs["model"] = _model
-  if _effort:
-    options_kwargs["effort"] = _effort
-  options = ClaudeAgentOptions(**options_kwargs)
+  async def _run_once(model_override: str | None) -> RunnerResult:
+    nonlocal current_session_id, cost_usd
+    options_kwargs = {
+      "system_prompt": skill_text,
+      "resume": session_id if session_id is not None else None,
+      "cwd": cwd,
+      "env": base_env,
+      "setting_sources": None,
+      "include_partial_messages": True,
+      "can_use_tool": can_use_tool,
+      "hooks": {
+        "PreToolUse": [
+          HookMatcher(matcher=None, hooks=[keepalive_hook]),
+        ],
+      },
+    }
+    if model_override:
+      options_kwargs["model"] = model_override
+    if _effort:
+      options_kwargs["effort"] = _effort
+    options = ClaudeAgentOptions(**options_kwargs)
 
-  client = ClaudeSDKClient(options)
-  active_client = ActiveClaudeClient(client, chat_id=chat_id)
-  active_clients[chat_id] = active_client
-  registry.register(active_client)
+    client = ClaudeSDKClient(options)
+    active_client = ActiveClaudeClient(client, chat_id=chat_id)
+    registry.register(active_client)
 
-  try:
     try:
-      # Bound `connect()` so a broken SDK subprocess (missing CLI
-      # binary, bad env) can't permanently wedge the chat. On
-      # timeout we publish an error + return early; the finally
-      # still pops `_active_clients` and resolves `_finished`.
-      await asyncio.wait_for(client.connect(), timeout=30.0)
-    except asyncio.TimeoutError:
-      bc.publish({
-        "type": "error",
-        "message": "Claude SDK failed to start (connect timeout)",
-      })
+      try:
+        await asyncio.wait_for(client.connect(), timeout=30.0)
+      except asyncio.TimeoutError:
+        bc.publish({
+          "type": "error",
+          "message": "Claude SDK failed to start (connect timeout)",
+        })
+        return {
+          "session_id": current_session_id,
+          "cost_usd": None,
+          "error": "connect timeout",
+        }
+      await client.query(user_message)
+
+      async for sdk_msg in client.receive_response():
+        if isinstance(sdk_msg, SystemMessage):
+          if sdk_msg.subtype == "init":
+            continue
+          continue
+
+        if isinstance(sdk_msg, StreamEvent):
+          current_session_id = sdk_msg.session_id or current_session_id
+          event = sdk_msg.event
+          if event.get("type") != "content_block_delta":
+            continue
+          delta = event.get("delta", {})
+          if delta.get("type") != "text_delta":
+            continue
+          text = delta.get("text")
+          if text:
+            bc.publish({"type": "text", "content": text})
+          continue
+
+        if isinstance(sdk_msg, AssistantMessage):
+          if sdk_msg.session_id:
+            current_session_id = sdk_msg.session_id
+          for block in sdk_msg.content:
+            if not isinstance(block, ToolUseBlock):
+              continue
+            if block.name == "AskUserQuestion":
+              ask_question_tool_use_ids.add(block.id)
+              continue
+            bc.publish({
+              "type": "tool_start",
+              "tool": block.name,
+              "input": "",
+            })
+            summary = summarize_tool_input(block.name, block.input)
+            if not summary:
+              continue
+            bc.publish({
+              "type": "tool_input",
+              "tool": block.name,
+              "input": summary,
+            })
+          continue
+
+        if isinstance(sdk_msg, UserMessage):
+          for block in sdk_msg.content if isinstance(sdk_msg.content, list) else []:
+            if not isinstance(block, ToolResultBlock):
+              continue
+            if block.tool_use_id in ask_question_tool_use_ids:
+              ask_question_tool_use_ids.discard(block.tool_use_id)
+              continue
+            bc.publish({
+              "type": "tool_output",
+              "content": _format_tool_output(block.content),
+            })
+            bc.publish({
+              "type": "tool_end",
+            })
+          continue
+
+        if isinstance(sdk_msg, ResultMessage):
+          current_session_id = sdk_msg.session_id or current_session_id
+          cost_usd = sdk_msg.total_cost_usd
+          return {
+            "session_id": current_session_id,
+            "cost_usd": cost_usd,
+            "usage": None,
+            "error": (
+              _result_error_message(sdk_msg)
+              if sdk_msg.is_error else None
+            ),
+          }
+
+      return {
+        "session_id": current_session_id,
+        "cost_usd": cost_usd,
+        "usage": None,
+        "error": None,
+      }
+    except Exception as exc:
       return {
         "session_id": current_session_id,
         "cost_usd": None,
-        "error": "connect timeout",
+        "usage": None,
+        "error": str(exc),
       }
-    await client.query(user_message)
-
-    async for sdk_msg in client.receive_response():
-      if isinstance(sdk_msg, SystemMessage):
-        if sdk_msg.subtype == "init":
-          continue
-        continue
-
-      if isinstance(sdk_msg, StreamEvent):
-        current_session_id = sdk_msg.session_id or current_session_id
-        event = sdk_msg.event
-        if event.get("type") != "content_block_delta":
-          continue
-        delta = event.get("delta", {})
-        if delta.get("type") != "text_delta":
-          continue
-        text = delta.get("text")
-        if text:
-          bc.publish({"type": "text", "content": text})
-        continue
-
-      if isinstance(sdk_msg, AssistantMessage):
-        if sdk_msg.session_id:
-          current_session_id = sdk_msg.session_id
-        for block in sdk_msg.content:
-          if not isinstance(block, ToolUseBlock):
-            continue
-          if block.name == "AskUserQuestion":
-            ask_question_tool_use_ids.add(block.id)
-            continue
-          bc.publish({
-            "type": "tool_start",
-            "tool": block.name,
-            "input": "",
-          })
-          summary = summarize_tool_input(block.name, block.input)
-          if not summary:
-            continue
-          bc.publish({
-            "type": "tool_input",
-            "tool": block.name,
-            "input": summary,
-          })
-        continue
-
-      if isinstance(sdk_msg, UserMessage):
-        for block in sdk_msg.content if isinstance(sdk_msg.content, list) else []:
-          if not isinstance(block, ToolResultBlock):
-            continue
-          if block.tool_use_id in ask_question_tool_use_ids:
-            ask_question_tool_use_ids.discard(block.tool_use_id)
-            continue
-          bc.publish({
-            "type": "tool_output",
-            "content": _format_tool_output(block.content),
-          })
-          bc.publish({
-            "type": "tool_end",
-          })
-        continue
-
-      if isinstance(sdk_msg, ResultMessage):
-        current_session_id = sdk_msg.session_id or current_session_id
-        cost_usd = sdk_msg.total_cost_usd
-        return {
-          "session_id": current_session_id,
-          "cost_usd": cost_usd,
-          "usage": None,
-          "error": _result_error_message(sdk_msg) if sdk_msg.is_error else None,
-        }
-
-    return {
-      "session_id": current_session_id,
-      "cost_usd": cost_usd,
-      "usage": None,
-      "error": None,
-    }
-  except Exception as exc:
-    return {
-      "session_id": current_session_id,
-      "cost_usd": None,
-      "usage": None,
-      "error": str(exc),
-    }
-  finally:
-    if active_clients.get(chat_id) is active_client:
-      active_clients.pop(chat_id, None)
-    current_handle = registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK)
-    if current_handle is active_client:
-      registry.unregister(chat_id, RunnerKind.CLAUDE_SDK)
-    pending = pending_questions.get(chat_id)
-    if pending is not None and not pending.future.done():
-      pending.future.cancel()
-    if pending is not None:
-      pending_questions.pop(chat_id, None)
-    # Order matters: tear down the SDK subprocess BEFORE resolving the
-    # stop waiter. `ActiveClaudeClient.interrupt()` awaits `_finished`
-    # after signalling the SDK, so stop_chat/stop_chat_for stay blocked
-    # until disconnect() returns. If we resolved `_finished` first, Stop
-    # would unblock while the SDK was still publishing — a late `done`
-    # event from the runner could land after `bc.mark_completed()`,
-    # dropping the terminal event for live SSE subscribers.
-    try:
-      await client.disconnect()
     finally:
-      active_client.mark_finished()
+      current_handle = registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK)
+      if current_handle is active_client:
+        registry.unregister(chat_id, RunnerKind.CLAUDE_SDK)
+      pending = pending_questions.get(chat_id)
+      if pending is not None and not pending.future.done():
+        pending.future.cancel()
+      if pending is not None:
+        pending_questions.pop(chat_id, None)
+      try:
+        await client.disconnect()
+      finally:
+        active_client.mark_finished()
+
+  result = await _run_once(_model)
+  if _model and _should_retry_without_model(result.get("error")):
+    log.warning(
+      "Claude model %r unavailable for chat %s; retrying without explicit model",
+      _model,
+      chat_id,
+    )
+    ask_question_tool_use_ids.clear()
+    return await _run_once(None)
+  return result

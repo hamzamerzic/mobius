@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from app import codex_sdk_runner
+from app.runner_registry import RunnerKind, registry
 
 
 # Mirrors the installed SDK:
@@ -170,37 +171,35 @@ def test_tool_completed_events_emit_output_before_end():
 
 
 def test_steer_into_active_turn_cleans_dead_handle(monkeypatch):
-  active_sessions: dict = {}
   sdk = _fake_sdk(async_codex_cls=object)
 
   async def _scenario() -> bool:
-    active_sessions["chat-1"] = codex_sdk_runner.ActiveCodexTurn(
+    active_turn = codex_sdk_runner.ActiveCodexTurn(
       object(),
       _FakeTurnHandle(
         steer_exc=sdk["InvalidParamsError"](-32602, "turn is not running"),
       ),
       chat_id="chat-1",
     )
+    registry.register(active_turn)
     return await codex_sdk_runner.steer_into_active_turn(
-      "chat-1", active_sessions, "ping",
+      "chat-1", "ping",
     )
 
   monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
   assert asyncio.run(_scenario()) is False
-  assert active_sessions == {}
+  assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None
 
 
 def test_steer_into_active_turn_reraises_real_errors():
-  active_sessions: dict = {}
-
   async def _scenario() -> None:
-    active_sessions["chat-1"] = codex_sdk_runner.ActiveCodexTurn(
+    registry.register(codex_sdk_runner.ActiveCodexTurn(
       object(),
       _FakeTurnHandle(steer_exc=RuntimeError("real failure")),
       chat_id="chat-1",
-    )
+    ))
     await codex_sdk_runner.steer_into_active_turn(
-      "chat-1", active_sessions, "ping",
+      "chat-1", "ping",
     )
 
   with pytest.raises(RuntimeError, match="real failure"):
@@ -314,7 +313,6 @@ def test_run_codex_sdk_turn_resume_mismatch_returns_error(monkeypatch):
       pending_questions={},
       notify_pending_question_cb=lambda *_args, **_kwargs: None,
       db=None,
-      active_sessions={},
     )
   )
 
@@ -366,7 +364,6 @@ def test_run_codex_sdk_turn_resume_skips_skill_lookup(monkeypatch):
   )
 
   bc = _FakeBroadcast()
-  active_sessions = {}
   result = asyncio.run(
     codex_sdk_runner.run_codex_sdk_turn(
       user_message="hello",
@@ -378,7 +375,6 @@ def test_run_codex_sdk_turn_resume_skips_skill_lookup(monkeypatch):
       pending_questions={},
       notify_pending_question_cb=lambda *_args, **_kwargs: None,
       db=None,
-      active_sessions=active_sessions,
     )
   )
 
@@ -392,7 +388,7 @@ def test_run_codex_sdk_turn_resume_skips_skill_lookup(monkeypatch):
     "type": "session_init",
     "session_id": "requested-thread",
   }]
-  assert active_sessions == {}
+  assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None
 
 
 def test_run_codex_sdk_turn_cleans_up_active_session_on_stream_exception(
@@ -444,7 +440,6 @@ def test_run_codex_sdk_turn_cleans_up_active_session_on_stream_exception(
   )
 
   bc = _FakeBroadcast()
-  active_sessions: dict = {}
   result = asyncio.run(
     codex_sdk_runner.run_codex_sdk_turn(
       user_message="hello",
@@ -456,12 +451,11 @@ def test_run_codex_sdk_turn_cleans_up_active_session_on_stream_exception(
       pending_questions={},
       notify_pending_question_cb=lambda *_args, **_kwargs: None,
       db=None,
-      active_sessions=active_sessions,
     )
   )
 
   assert result["error"] == "stream blew up"
-  assert active_sessions == {}
+  assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None
   assert mark_finished_calls == [True]
 
 
@@ -513,7 +507,6 @@ def test_run_codex_sdk_turn_error_notification_will_retry_continues(monkeypatch)
   monkeypatch.setattr(codex_sdk_runner, "_load_agent_settings", lambda _env: {})
 
   bc = _FakeBroadcast()
-  active_sessions: dict = {}
   result = asyncio.run(
     codex_sdk_runner.run_codex_sdk_turn(
       user_message="hello",
@@ -525,7 +518,6 @@ def test_run_codex_sdk_turn_error_notification_will_retry_continues(monkeypatch)
       pending_questions={},
       notify_pending_question_cb=lambda *_args, **_kwargs: None,
       db=None,
-      active_sessions=active_sessions,
     )
   )
 
@@ -539,7 +531,7 @@ def test_run_codex_sdk_turn_error_notification_will_retry_continues(monkeypatch)
     {"type": "session_init", "session_id": "thread-1"},
     {"type": "text", "content": "still running"},
   ]
-  assert active_sessions == {}
+  assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None
 
 
 def test_run_codex_sdk_turn_error_notification_fatal_raises(monkeypatch):
@@ -586,7 +578,6 @@ def test_run_codex_sdk_turn_error_notification_fatal_raises(monkeypatch):
       pending_questions={},
       notify_pending_question_cb=lambda *_args, **_kwargs: None,
       db=None,
-      active_sessions={},
     )
   )
 
@@ -631,7 +622,6 @@ def test_run_codex_sdk_turn_stream_exhaustion_relies_on_sdk_terminal_contract(
       pending_questions={},
       notify_pending_question_cb=lambda *_args, **_kwargs: None,
       db=None,
-      active_sessions={},
     )
   )
 

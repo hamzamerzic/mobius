@@ -31,11 +31,11 @@ if TYPE_CHECKING:
 # fall back cleanly to the provider's own top entry.
 KNOWN_MODELS = {
   "claude": [
-    "claude-opus-4-7-20251215",
-    "claude-opus-4-6-20251015",
-    "claude-opus-4-5-20251001",
-    "claude-sonnet-4-7-20251215",
     "claude-sonnet-4-5-20251001",
+    "claude-sonnet-4-7-20251215",
+    "claude-opus-4-5-20251001",
+    "claude-opus-4-6-20251015",
+    "claude-opus-4-7-20251215",
     "claude-haiku-4-5-20251001",
   ],
   "codex": [

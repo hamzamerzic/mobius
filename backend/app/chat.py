@@ -207,19 +207,6 @@ async def _drain(stream: asyncio.StreamReader) -> None:
     pass
 
 
-# Track active subprocesses per chat ID so we can stop them on demand.
-_active_procs: dict[str, asyncio.subprocess.Process] = {}
-
-# Guards against duplicate agent spawns.  send_message adds the chat_id
-# before creating the background task; run_chat removes it in finally.
-# This closes the TOCTOU gap between is_chat_running and proc registration.
-_starting: set[str] = set()
-
-# Per-run generation counter. Incremented by stop_chat_for so
-# in-flight run_chat tasks for an older generation abort before
-# spawning a subprocess.
-_run_generation: dict[str, int] = {}
-
 # Per-chat asyncio locks serialize read-modify-write on
 # chat.pending_messages. The lock guards three operations that all
 # touch the queue: append (POST /messages), cancel (DELETE /pending),
@@ -271,23 +258,6 @@ def get_pending_question(chat_id: str) -> "PendingQuestion | None":
 def claim_pending_question(chat_id: str) -> "PendingQuestion | None":
   """Atomically removes and returns the pending question for a chat."""
   return _pending_questions.pop(chat_id, None)
-
-
-# Live SDK runtime registries, keyed by chat_id. SDK-backed providers
-# hold their long-lived objects here so stop_chat* and the queue
-# drainer can reach them. Subprocess-backed providers continue to use
-# `_active_procs` (below) — the two coexist during the SDK rollout.
-_active_clients: dict[str, object] = {}     # Claude SDK stop handles (ActiveClaudeClient)
-_active_sessions: dict[str, object] = {}    # Codex SDK stop+steer handles (ActiveCodexTurn)
-
-
-def get_active_clients() -> dict[str, object]:
-  return _active_clients
-
-
-def get_active_sessions() -> dict[str, object]:
-  return _active_sessions
-
 
 class _ChatEventSink:
   """Bridges SDK-runner events to broadcast + DB state.
@@ -437,7 +407,7 @@ def get_queue_lock(chat_id: str) -> asyncio.Lock:
 
 def current_run_generation(chat_id: str) -> int:
   """Returns the current generation for a chat (0 if none)."""
-  return _run_generation.get(chat_id, 0)
+  return registry.current_generation(chat_id)
 
 
 # Chats whose agent_settings_json was changed via PATCH since the
@@ -477,9 +447,7 @@ def bump_run_generation(chat_id: str) -> int:
   `we_own_gen` check fail, so the runner's auto-promote/continuation
   skips writing.
   """
-  next_gen = _run_generation.get(chat_id, 0) + 1
-  _run_generation[chat_id] = next_gen
-  return next_gen
+  return registry.bump_generation(chat_id)
 
 
 def forget_chat(chat_id: str) -> None:
@@ -489,33 +457,72 @@ def forget_chat(chat_id: str) -> None:
   rely on stop_chat_for first. Currently scrubs the run-generation
   entry — extend here if future per-chat state shows up.
   """
-  _run_generation.pop(chat_id, None)
+  registry.forget(chat_id)
 
 
 def get_active_procs() -> dict[str, asyncio.subprocess.Process]:
-  """Accessor for the active-procs dict.  Prefer this over importing
-  `_active_procs` directly so the internal structure can change without
-  breaking debug/status routes and tests."""
-  return _active_procs
+  """Deprecated accessor shim for subprocess handles."""
+  procs: dict[str, asyncio.subprocess.Process] = {}
+  for handle in registry.handles_by_kind(RunnerKind.SUBPROCESS):
+    if isinstance(handle, SubprocessHandle):
+      procs[handle.chat_id] = handle.proc
+  return procs
+
+
+def get_active_clients() -> dict[str, object]:
+  """Deprecated accessor shim for Claude SDK handles."""
+  return {
+    handle.chat_id: handle
+    for handle in registry.handles_by_kind(RunnerKind.CLAUDE_SDK)
+  }
+
+
+def get_active_sessions() -> dict[str, object]:
+  """Deprecated accessor shim for Codex SDK handles."""
+  return {
+    handle.chat_id: handle
+    for handle in registry.handles_by_kind(RunnerKind.CODEX_SDK)
+  }
 
 
 def get_starting() -> set[str]:
-  """Accessor for the starting-set.  See `get_active_procs` for why."""
-  return _starting
+  """Deprecated accessor shim for the starting set."""
+  return registry._starting
+
+
+def _clear_pending_messages(db: Session | None, chat_id: str) -> None:
+  """Clears persisted queued messages for the chat, best-effort."""
+  if db is None:
+    return
+  try:
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    if chat and chat.pending_messages:
+      chat.pending_messages = []
+      db.commit()
+  except Exception:
+    db.rollback()
+
+
+def _cancel_pending_question(chat_id: str) -> None:
+  """Cancels and drops any live AskUserQuestion for the chat."""
+  pending = _pending_questions.get(chat_id)
+  if pending is not None and not pending.future.done():
+    pending.future.cancel()
+  if pending is not None:
+    _pending_questions.pop(chat_id, None)
+
+
+def _finalize_broadcast_if_running(chat_id: str) -> None:
+  """Publishes a terminal done event when the chat broadcast is live."""
+  bc = get_broadcast(chat_id)
+  if bc and bc.running:
+    bc.publish({"type": "done", "cost_usd": 0})
+    bc.mark_completed()
 
 
 def is_chat_running(chat_id: str) -> bool:
   """Returns True if an agent subprocess is running or starting for this chat."""
-  if chat_id in _starting:
-    return True
-  proc = _active_procs.get(chat_id)
-  if proc is not None and proc.returncode is None:
-    return True
-  # SDK-backed turns don't go through `_active_procs` — they register
-  # in `_active_clients` (Claude) / `_active_sessions` (Codex). Check
-  # both explicitly instead of relying on the broadcast-lifecycle
-  # coincidence that today's SDK runners maintain.
-  if chat_id in _active_clients or chat_id in _active_sessions:
+  if registry.is_alive(chat_id):
     return True
   bc = get_broadcast(chat_id)
   return bc is not None and bc.running
@@ -525,126 +532,31 @@ def mark_starting(chat_id: str) -> bool:
   """Atomically marks a chat as starting.  Returns False if already active."""
   if is_chat_running(chat_id):
     return False
-  _starting.add(chat_id)
-  return True
+  return registry.mark_starting(chat_id)
 
 
 def discard_starting(chat_id: str) -> None:
   """Removes a chat_id from the starting set.  Call from send_message's
   error handler if the caller fails before scheduling run_chat — otherwise
   the chat_id leaks and the chat is stuck 'starting' until process restart."""
-  _starting.discard(chat_id)
+  registry.discard_starting(chat_id)
 
 
 async def stop_chat(chat_id: str | None = None, db: Session = None) -> bool:
   """Kills the active subprocess for a chat, bumps its generation, and
   clears its pending queue so a queued continuation cannot auto-start
   after Stop. Session_id is preserved so the next message resumes."""
-  killed = False
-  if chat_id:
-    targets = [chat_id]
-  else:
-    # Global stop must reach chats with NO proc yet (in _starting), or
-    # only a live broadcast (queued continuation between turns), AND
-    # any SDK-backed runs registered in _active_clients (Claude) or
-    # _active_sessions (Codex). Without the SDK registries, an SDK
-    # turn between broadcast lifecycle events would silently escape
-    # a global stop. Mirror is_chat_running()'s coverage exactly.
-    from app.broadcast import _broadcasts
-    targets = list({
-      *_active_procs.keys(),
-      *_starting,
-      *_active_clients.keys(),
-      *_active_sessions.keys(),
-      *(cid for cid, bc in _broadcasts.items() if bc.running),
-    })
+  if chat_id is not None:
+    return await stop_chat_for(chat_id, db=db)
+  from app.broadcast import _broadcasts
+  targets = registry.all_alive_chat_ids() | {
+    cid for cid, bc in _broadcasts.items() if bc.running
+  }
+  stopped_any = False
   for cid in targets:
-    # Bump generation BEFORE killing so the dying run_chat's finally
-    # detects ownership change and skips _promote_pending_messages /
-    # continuation scheduling. Without this, Stop would still drain
-    # the queue and start the next turn — but the frontend already
-    # owns the "collapse queue into one combined follow-up" behavior
-    # (see ChatView.jsx:handleStop), so a backend continuation would
-    # double-fire the queued work. Backend Stop is purely interrupt.
-    _run_generation[cid] = _run_generation.get(cid, 0) + 1
-    # Clear chat.pending_messages here too — the frontend already
-    # snapshots + clears its local mirror before POSTing /chat/stop,
-    # but a fresh client (or a Stop initiated from outside the chat
-    # UI) wouldn't have done that. Authoritative truth on the server
-    # must match: queue is empty post-Stop so the frontend's combined
-    # re-send is the only path back to streaming.
-    if db is not None:
-      try:
-        chat = db.query(models.Chat).filter(models.Chat.id == cid).first()
-        if chat and chat.pending_messages:
-          chat.pending_messages = []
-          db.commit()
-      except Exception:
-        db.rollback()
-    pending = _pending_questions.get(cid)
-    if pending is not None:
-      if not pending.future.done():
-        pending.future.cancel()
-      # Pop the registry entry too — otherwise a stale answer POST
-      # hits claim_pending_question() after Stop, returns 202
-      # "answer_delivered", but no turn resumes and the user's reply
-      # silently vanishes.
-      _pending_questions.pop(cid, None)
-    proc = _active_procs.pop(cid, None)
-    if proc and proc.returncode is None:
-      proc.kill()
-      killed = True
-      bc = get_broadcast(cid)
-      if bc and bc.running:
-        # Emit a terminal `done` so live SSE subscribers see a clean
-        # close instead of `useStreamConnection.js`'s "stream closed
-        # unexpectedly" path. Matches the normal-finish contract.
-        bc.publish({"type": "done", "cost_usd": 0})
-        bc.mark_completed()
-    client = _active_clients.get(cid)
-    if client is not None:
-      try:
-        # Bound the SDK interrupt the same way subprocess.kill is
-        # bounded (2s). A wedged SDK client must not prevent the
-        # rest of the stop sweep from running.
-        await asyncio.wait_for(client.interrupt(), timeout=2.0)
-        killed = True
-      except asyncio.TimeoutError:
-        _get_logger().warning(
-          "stop_chat: Claude SDK interrupt timed out chat_id=%s", cid,
-        )
-      except Exception:
-        _get_logger().exception(
-          "stop_chat: Claude SDK interrupt failed chat_id=%s", cid,
-        )
-      finally:
-        _active_clients.pop(cid, None)
-    session = _active_sessions.get(cid)
-    if session is not None:
-      try:
-        await asyncio.wait_for(session.interrupt(), timeout=2.0)
-        killed = True
-      except asyncio.TimeoutError:
-        _get_logger().warning(
-          "stop_chat: Codex SDK interrupt timed out chat_id=%s", cid,
-        )
-      except Exception:
-        _get_logger().exception(
-          "stop_chat: Codex SDK interrupt failed chat_id=%s", cid,
-        )
-      finally:
-        _active_sessions.pop(cid, None)
-    # Mirror stop_chat_for's broadcast-completion path so SDK-backed
-    # subscribers see a terminal `done` and don't hang in "stream
-    # closed unexpectedly". The subprocess branch above already
-    # emits this inline; we cover the SDK case here (idempotent
-    # against subprocess that already completed bc).
-    bc = get_broadcast(cid)
-    if bc and bc.running:
-      bc.publish({"type": "done", "cost_usd": 0})
-      bc.mark_completed()
-    _starting.discard(cid)
-  return killed
+    if await stop_chat_for(cid, db=db):
+      stopped_any = True
+  return stopped_any
 
 
 async def stop_chat_for(chat_id: str, db: Session = None) -> bool:
@@ -661,101 +573,19 @@ async def stop_chat_for(chat_id: str, db: Session = None) -> bool:
 
   Waits for the process to die with a bounded timeout.
   """
-  gen = _run_generation.get(chat_id, 0) + 1
-  _run_generation[chat_id] = gen
-
-  if db is not None:
-    try:
-      chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
-      if chat and chat.pending_messages:
-        chat.pending_messages = []
-        db.commit()
-    except Exception:
-      db.rollback()
-
-  pending = _pending_questions.get(chat_id)
-  if pending is not None:
-    if not pending.future.done():
-      pending.future.cancel()
-    # Pop the registry entry too (mirrors stop_chat). Without this,
-    # a stale answer POST after Stop hits claim_pending_question(),
-    # returns 202 "answer_delivered", but no turn resumes and the
-    # user's answer silently vanishes.
-    _pending_questions.pop(chat_id, None)
-
-  proc = _active_procs.get(chat_id)
-  if proc and proc.returncode is None:
-    proc.kill()
-    try:
-      await asyncio.wait_for(proc.wait(), timeout=2.0)
-    except asyncio.TimeoutError:
-      # Proc didn't die — keep it tracked so it's not orphaned.
-      return False
-    # Wait succeeded — now safe to remove.
-    _active_procs.pop(chat_id, None)
-
-  # Stop the SDK client if one exists. Any failure here MUST NOT
-  # skip the broadcast-completion + _starting cleanup below — an SSE
-  # client subscribed to bc would otherwise hang forever waiting for
-  # a terminal event. So we log + swallow exceptions and continue,
-  # but track `stopped_cleanly` so the caller (delete_chat) can 409
-  # instead of soft-deleting a chat whose runner is still wedged.
-  stopped_cleanly = True
-  client = _active_clients.get(chat_id)
-  if client is not None:
-    try:
-      # Mirror the subprocess proc.kill+wait_for(2.0) pattern: bound
-      # the SDK interrupt so a wedged client can't hang Stop. We
-      # already pop the registry entry in `finally` regardless, so
-      # the dead handle doesn't linger.
-      await asyncio.wait_for(client.interrupt(), timeout=2.0)
-    except asyncio.TimeoutError:
-      stopped_cleanly = False
-      _get_logger().warning(
-        "stop_chat_for: Claude SDK interrupt timed out chat_id=%s",
-        chat_id,
-      )
-    except Exception:
-      stopped_cleanly = False
-      _get_logger().exception(
-        "stop_chat_for: Claude SDK interrupt failed chat_id=%s", chat_id,
-      )
-    finally:
-      _active_clients.pop(chat_id, None)
-
-  session = _active_sessions.get(chat_id)
-  if session is not None:
-    interrupt_ok = False
-    try:
-      await asyncio.wait_for(session.interrupt(), timeout=2.0)
-      interrupt_ok = True
-    except asyncio.TimeoutError:
-      stopped_cleanly = False
-      _get_logger().warning(
-        "stop_chat_for: Codex SDK interrupt timed out chat_id=%s",
-        chat_id,
-      )
-    except Exception:
-      _get_logger().exception(
-        "stop_chat_for: Codex SDK interrupt failed chat_id=%s", chat_id,
-      )
-      # Interrupt raised — treat as "done trying" and pop the handle
-      # so it doesn't leak. Only the timeout path keeps the entry, so
-      # the runner's own cleanup can pop it when the session truly dies.
-      interrupt_ok = True
-    if interrupt_ok:
-      _active_sessions.pop(chat_id, None)
-
-  bc = get_broadcast(chat_id)
-  if bc and bc.running:
-    # Emit a terminal `done` so live SSE subscribers see a clean close
-    # instead of `useStreamConnection.js`'s "stream closed unexpectedly"
-    # path. Matches the normal-finish contract.
-    bc.publish({"type": "done", "cost_usd": 0})
-    bc.mark_completed()
-
-  _starting.discard(chat_id)
-  return stopped_cleanly
+  bump_run_generation(chat_id)
+  _clear_pending_messages(db, chat_id)
+  _cancel_pending_question(chat_id)
+  all_stopped = True
+  for handle in registry.get_handles(chat_id):
+    ok = await handle.stop(timeout=2.0)
+    if ok:
+      registry.unregister(chat_id, handle.kind)
+    else:
+      all_stopped = False
+  _finalize_broadcast_if_running(chat_id)
+  registry.discard_starting(chat_id)
+  return all_stopped
 
 
 def filter_post_question(event_type: str, suppress_text: bool) -> tuple[bool, bool]:
@@ -913,8 +743,7 @@ def _schedule_continuation(
     # Inside the try so any exception (even from these lines) releases
     # the _starting claim the caller held. Without this, a failure
     # here would leak _starting until process restart.
-    next_gen = current_run_generation(chat_id) + 1
-    _run_generation[chat_id] = next_gen
+    next_gen = bump_run_generation(chat_id)
     bc = create_broadcast(chat_id)  # registered in global registry
     # Build the coroutine BEFORE create_task so the except block can
     # .close() it if scheduling raises — otherwise Python warns
@@ -943,7 +772,7 @@ def _schedule_continuation(
     # Close the orphan coroutine to silence the unawaited-coro warning.
     if coro is not None:
       coro.close()
-    _starting.discard(chat_id)
+    discard_starting(chat_id)
 
 
 async def _close_browser_session(chat_id: str) -> None:
@@ -1003,13 +832,13 @@ async def _drain_and_release(
       _promote_pending_messages_locked(db, chat_id)
     )
     if first_pending is None:
-      _starting.discard(chat_id)
+      discard_starting(chat_id)
       # Chat is fully idle — nothing in flight, nothing queued. Drop
       # the per-chat generation counter so long-running containers
       # don't accumulate one entry per chat-ever-touched. A future
       # send re-creates the entry from 0; Stop semantics still rely
       # on monotonic bumps within a single live run.
-      _run_generation.pop(chat_id, None)
+      forget_chat(chat_id)
     return first_pending, next_messages, next_session_id
 
 
@@ -1041,8 +870,8 @@ async def run_chat(
     # Only clear _starting if we still own this generation.
     # A newer stop_chat_for may have bumped the generation and
     # taken ownership of _starting.
-    if run_gen is None or _run_generation.get(chat_id, 0) == run_gen:
-      _starting.discard(chat_id)
+    if run_gen is None or current_run_generation(chat_id) == run_gen:
+      discard_starting(chat_id)
 
 
 async def _run_chat_impl(
@@ -1058,7 +887,7 @@ async def _run_chat_impl(
   """Inner implementation of run_chat; see wrapper for lifecycle notes."""
   # Check if a newer send superseded this one while we were queued.
   # Do NOT discard _starting here — the newer run owns it.
-  if run_gen is not None and _run_generation.get(chat_id, 0) != run_gen:
+  if run_gen is not None and current_run_generation(chat_id) != run_gen:
     log = _get_logger()
     log.info("run_chat aborted: generation mismatch chat_id=%s", chat_id)
     return
@@ -1238,7 +1067,6 @@ async def _run_chat_impl(
         pending_questions=_pending_questions,
         notify_pending_question_cb=_notify_pending_question,
         db=db,
-        active_sessions=_active_sessions,
         agent_settings=agent_settings,
       )
       new_session_id = runner_result.get("session_id")
@@ -1263,7 +1091,6 @@ async def _run_chat_impl(
       # in the persisted assistant transcript, not just the live wire.
       sink.publish({"type": "error", "message": str(exc)})
       sink.finalize()
-      _active_sessions.pop(chat_id, None)
       set_active_broadcast(None)
       # Mirror the success-path drain. Crucially, still check gen
       # ownership: if a concurrent Stop bumped gen, we must NOT
@@ -1271,7 +1098,7 @@ async def _run_chat_impl(
       # resend them as one combined turn (see AGENTS.md Stop-chat
       # contract). Otherwise we'd double-fire the queue.
       we_own_gen = (
-        run_gen is None or _run_generation.get(chat_id, 0) == run_gen
+        run_gen is None or current_run_generation(chat_id) == run_gen
       )
       try:
         next_user, next_messages, next_session_id = await asyncio.wait_for(
@@ -1281,7 +1108,7 @@ async def _run_chat_impl(
         log.error(
           "queue drain timed out chat_id=%s (codex sdk except)", chat_id,
         )
-        _starting.discard(chat_id)
+        discard_starting(chat_id)
         next_user, next_messages, next_session_id = None, [], None
       if next_user:
         bc.publish({
@@ -1307,10 +1134,9 @@ async def _run_chat_impl(
       # streamed before the failure.
       sink.publish({"type": "error", "message": err})
     sink.finalize()
-    _active_sessions.pop(chat_id, None)
     set_active_broadcast(None)
     we_own_gen = (
-      run_gen is None or _run_generation.get(chat_id, 0) == run_gen
+      run_gen is None or current_run_generation(chat_id) == run_gen
     )
     try:
       next_user, next_messages, next_session_id = await asyncio.wait_for(
@@ -1320,7 +1146,7 @@ async def _run_chat_impl(
       log.error(
         "queue drain timed out chat_id=%s (codex sdk path)", chat_id,
       )
-      _starting.discard(chat_id)
+      discard_starting(chat_id)
       next_user, next_messages, next_session_id = None, [], None
     if next_user:
       bc.publish({
@@ -1372,7 +1198,6 @@ async def _run_chat_impl(
         pending_questions=_pending_questions,
         notify_pending_question_cb=_notify_pending_question,
         db=db,
-        active_clients=_active_clients,
         agent_settings=agent_settings,
       )
       new_session_id = runner_result.get("session_id")
@@ -1397,7 +1222,6 @@ async def _run_chat_impl(
       # in the persisted assistant transcript, not just the live wire.
       sink.publish({"type": "error", "message": str(exc)})
       sink.finalize()
-      _active_clients.pop(chat_id, None)
       set_active_broadcast(None)
       # Mirror the success-path drain. Crucially, still check gen
       # ownership: if a concurrent Stop bumped gen, we must NOT
@@ -1405,7 +1229,7 @@ async def _run_chat_impl(
       # resend them as one combined turn (see AGENTS.md Stop-chat
       # contract). Otherwise we'd double-fire the queue.
       we_own_gen = (
-        run_gen is None or _run_generation.get(chat_id, 0) == run_gen
+        run_gen is None or current_run_generation(chat_id) == run_gen
       )
       try:
         next_user, next_messages, next_session_id = await asyncio.wait_for(
@@ -1415,7 +1239,7 @@ async def _run_chat_impl(
         log.error(
           "queue drain timed out chat_id=%s (claude sdk except)", chat_id,
         )
-        _starting.discard(chat_id)
+        discard_starting(chat_id)
         next_user, next_messages, next_session_id = None, [], None
       if next_user:
         bc.publish({
@@ -1439,10 +1263,9 @@ async def _run_chat_impl(
       # response that streamed before the failure.
       sink.publish({"type": "error", "message": err})
     sink.finalize()
-    _active_clients.pop(chat_id, None)
     set_active_broadcast(None)
     we_own_gen = (
-      run_gen is None or _run_generation.get(chat_id, 0) == run_gen
+      run_gen is None or current_run_generation(chat_id) == run_gen
     )
     try:
       next_user, next_messages, next_session_id = await asyncio.wait_for(
@@ -1452,7 +1275,7 @@ async def _run_chat_impl(
       log.error(
         "queue drain timed out chat_id=%s (sdk path)", chat_id,
       )
-      _starting.discard(chat_id)
+      discard_starting(chat_id)
       next_user, next_messages, next_session_id = None, [], None
     if next_user:
       bc.publish({
@@ -1507,7 +1330,6 @@ async def _run_chat_impl(
       limit=1024 * 1024,
     )
     if chat_id:
-      _active_procs[chat_id] = proc
       registry.register(SubprocessHandle(chat_id=chat_id, proc=proc))
 
     stderr_task = asyncio.ensure_future(_drain(proc.stderr))
@@ -1647,8 +1469,6 @@ async def _run_chat_impl(
 
     finally:
       _finalize_response(db, chat_id, assistant_blocks)
-      if _active_procs.get(chat_id) is proc:
-        _active_procs.pop(chat_id, None)
       current_handle = registry.get_handle(chat_id, RunnerKind.SUBPROCESS)
       if isinstance(current_handle, SubprocessHandle) and current_handle.proc is proc:
         registry.unregister(chat_id, RunnerKind.SUBPROCESS)
@@ -1657,7 +1477,7 @@ async def _run_chat_impl(
       # bumps the generation and clears pending_messages — we must not
       # promote/continue after Stop.
       we_own_gen = (
-        run_gen is None or _run_generation.get(chat_id, 0) == run_gen
+        run_gen is None or current_run_generation(chat_id) == run_gen
       )
       # `_drain_and_release` takes the per-chat queue lock with no
       # internal timeout — if another coroutine holds it (e.g. a
@@ -1675,7 +1495,7 @@ async def _run_chat_impl(
         log.error(
           "queue drain timed out chat_id=%s; completing broadcast", chat_id,
         )
-        _starting.discard(chat_id)
+        discard_starting(chat_id)
         next_user, next_messages, next_session_id = None, [], None
       if next_user:
         bc.publish({
@@ -1701,8 +1521,6 @@ async def _run_chat_impl(
         proc.kill()
 
   except Exception as exc:
-    if proc is not None and _active_procs.get(chat_id) is proc:
-      _active_procs.pop(chat_id, None)
     current_handle = registry.get_handle(chat_id, RunnerKind.SUBPROCESS)
     if isinstance(current_handle, SubprocessHandle) and current_handle.proc is proc:
       registry.unregister(chat_id, RunnerKind.SUBPROCESS)
@@ -1714,7 +1532,7 @@ async def _run_chat_impl(
     # The user's next turn shouldn't be silently dropped because the
     # previous turn crashed (e.g. transient network/CLI issue).
     we_own_gen = (
-      run_gen is None or _run_generation.get(chat_id, 0) == run_gen
+      run_gen is None or current_run_generation(chat_id) == run_gen
     )
     # Same drain-timeout guard as the success path — see comment above.
     try:
@@ -1726,7 +1544,7 @@ async def _run_chat_impl(
         "queue drain timed out (error path) chat_id=%s; completing broadcast",
         chat_id,
       )
-      _starting.discard(chat_id)
+      discard_starting(chat_id)
       next_user, next_messages, next_session_id = None, [], None
     if next_user:
       bc.publish({
