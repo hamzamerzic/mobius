@@ -371,36 +371,6 @@ def forget_chat(chat_id: str) -> None:
   registry.forget(chat_id)
 
 
-def get_active_procs() -> dict[str, asyncio.subprocess.Process]:
-  """Deprecated accessor shim for subprocess handles."""
-  procs: dict[str, asyncio.subprocess.Process] = {}
-  for handle in registry.handles_by_kind(RunnerKind.SUBPROCESS):
-    if isinstance(handle, SubprocessHandle):
-      procs[handle.chat_id] = handle.proc
-  return procs
-
-
-def get_active_clients() -> dict[str, object]:
-  """Deprecated accessor shim for Claude SDK handles."""
-  return {
-    handle.chat_id: handle
-    for handle in registry.handles_by_kind(RunnerKind.CLAUDE_SDK)
-  }
-
-
-def get_active_sessions() -> dict[str, object]:
-  """Deprecated accessor shim for Codex SDK handles."""
-  return {
-    handle.chat_id: handle
-    for handle in registry.handles_by_kind(RunnerKind.CODEX_SDK)
-  }
-
-
-def get_starting() -> set[str]:
-  """Deprecated accessor shim for the starting set."""
-  return registry._starting
-
-
 def _clear_pending_messages(db: Session | None, chat_id: str) -> None:
   """Clears persisted queued messages for the chat, best-effort."""
   if db is None:
@@ -884,7 +854,6 @@ async def _run_chat_impl(
         chat_id=chat_id,
         bc=sink,
         pending_questions=questions._pending,
-        notify_pending_question_cb=questions.notify,
         db=db,
         agent_settings=agent_settings,
       )
@@ -1015,7 +984,6 @@ async def _run_chat_impl(
         skill_text=_read_skill_text(),
         bc=sink,
         pending_questions=questions._pending,
-        notify_pending_question_cb=questions.notify,
         db=db,
         agent_settings=agent_settings,
       )

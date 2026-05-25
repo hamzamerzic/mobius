@@ -189,7 +189,7 @@ def test_stale_pending_drains_on_fresh_send(client, db, auth, chat):
   mid-turn), a fresh send must queue at the end AND kick off a run
   that drains the queue from the head — not replace the queue with
   the new message."""
-  from app.chat import get_starting
+  from app.runner_registry import registry
 
   # Seed stale pending (simulating crash recovery).
   chat.pending_messages = [
@@ -220,7 +220,7 @@ def test_stale_pending_drains_on_fresh_send(client, db, auth, chat):
     contents = [m["content"] for m in chat.pending_messages]
     assert contents == ["stale 2", "new send"]
     # Run was scheduled (gen bumped + starting marker set).
-    assert chat.id in get_starting()
+    assert chat.id in registry.all_alive_chat_ids()
   finally:
     registry.discard_starting(chat.id)
     registry.forget(chat.id)

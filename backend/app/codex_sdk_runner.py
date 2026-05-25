@@ -398,7 +398,6 @@ def _install_request_user_input_handler(
   chat_id: str,
   bc: Any,
   pending_questions: dict,
-  notify_pending_question_cb: Any,
   db: Any,
 ) -> None:
   """Monkey-patches `codex._client._sync._approval_handler` to bridge
@@ -652,7 +651,6 @@ async def run_codex_sdk_turn(
   chat_id: str,
   bc,
   pending_questions: dict,
-  notify_pending_question_cb,
   db,
   agent_settings: dict | None = None,
 ) -> RunnerResult:
@@ -668,10 +666,7 @@ async def run_codex_sdk_turn(
     pending_questions: Shared AskUserQuestion registry owned by
       chat.py — keyed by chat_id. Used by the request_user_input
       bridge to park on a future while the user answers.
-    notify_pending_question_cb: Callback that persists / pushes a
-      question notification. Bridged into the approval_handler so
-      the push fires when the model asks.
-    db: SQLAlchemy session for the notify callback above.
+    db: SQLAlchemy session for runner-side persistence paths.
 
   Returns:
     Dict with `session_id`, `cost_usd`, `usage`, and `error`.
@@ -789,7 +784,6 @@ async def run_codex_sdk_turn(
         chat_id=chat_id,
         bc=bc,
         pending_questions=pending_questions,
-        notify_pending_question_cb=notify_pending_question_cb,
         db=db,
       )
 

@@ -193,7 +193,6 @@ async def run_claude_sdk_turn(
   skill_text: str,
   bc,
   pending_questions: dict,
-  notify_pending_question_cb,
   db,
   agent_settings: dict | None = None,
 ) -> RunnerResult:
@@ -208,9 +207,7 @@ async def run_claude_sdk_turn(
     skill_text: Möbius skill/system prompt text for first turn only.
     bc: Chat broadcast object with a publish(event) method.
     pending_questions: Shared AskUserQuestion registry owned by chat.py.
-    notify_pending_question_cb: Callback that persists/pushes question
-      notifications.
-    db: SQLAlchemy session passed through to the notification callback.
+    db: SQLAlchemy session used by runner-side persistence.
 
   Returns:
     A dict containing the resulting session ID, final cost, and error.
@@ -275,9 +272,7 @@ async def run_claude_sdk_turn(
     # visibility into push success/failure via the bash tool output,
     # avoids the silent-failure-mode the auto-notify path had, and
     # lets the agent decide whether a particular question is worth a
-    # phone buzz. notify_pending_question_cb is kept in the signature
-    # for compatibility with the legacy subprocess path / test seams
-    # but no longer fired here.
+    # phone buzz.
 
     try:
       answers = await future

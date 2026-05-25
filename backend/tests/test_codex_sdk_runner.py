@@ -311,7 +311,6 @@ def test_run_codex_sdk_turn_resume_mismatch_returns_error(monkeypatch):
       chat_id="chat-1",
       bc=bc,
       pending_questions={},
-      notify_pending_question_cb=lambda *_args, **_kwargs: None,
       db=None,
     )
   )
@@ -373,7 +372,6 @@ def test_run_codex_sdk_turn_resume_skips_skill_lookup(monkeypatch):
       chat_id="chat-1",
       bc=bc,
       pending_questions={},
-      notify_pending_question_cb=lambda *_args, **_kwargs: None,
       db=None,
     )
   )
@@ -449,7 +447,6 @@ def test_run_codex_sdk_turn_cleans_up_active_session_on_stream_exception(
       chat_id="chat-1",
       bc=bc,
       pending_questions={},
-      notify_pending_question_cb=lambda *_args, **_kwargs: None,
       db=None,
     )
   )
@@ -516,7 +513,6 @@ def test_run_codex_sdk_turn_error_notification_will_retry_continues(monkeypatch)
       chat_id="chat-1",
       bc=bc,
       pending_questions={},
-      notify_pending_question_cb=lambda *_args, **_kwargs: None,
       db=None,
     )
   )
@@ -576,7 +572,6 @@ def test_run_codex_sdk_turn_error_notification_fatal_raises(monkeypatch):
       chat_id="chat-1",
       bc=_FakeBroadcast(),
       pending_questions={},
-      notify_pending_question_cb=lambda *_args, **_kwargs: None,
       db=None,
     )
   )
@@ -620,7 +615,6 @@ def test_run_codex_sdk_turn_stream_exhaustion_relies_on_sdk_terminal_contract(
       chat_id="chat-1",
       bc=_FakeBroadcast(),
       pending_questions={},
-      notify_pending_question_cb=lambda *_args, **_kwargs: None,
       db=None,
     )
   )

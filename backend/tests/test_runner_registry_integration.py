@@ -178,7 +178,6 @@ def test_claude_runner_registers_then_unregisters_handle():
         skill_text="skill",
         bc=_FakeBroadcast(),
         pending_questions={},
-        notify_pending_question_cb=lambda *_args, **_kwargs: None,
         db=None,
       )
     )
@@ -304,7 +303,6 @@ def test_codex_runner_registers_then_unregisters_handle(monkeypatch):
         chat_id="chat-codex",
         bc=_FakeBroadcast(),
         pending_questions={},
-        notify_pending_question_cb=lambda *_args, **_kwargs: None,
         db=None,
       )
     )
