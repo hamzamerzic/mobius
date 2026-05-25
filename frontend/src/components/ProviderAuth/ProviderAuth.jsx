@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { authQueries } from '../../hooks/queries.js'
@@ -8,21 +8,24 @@ import './ProviderAuth.css'
  * Shared provider auth flow used by SetupWizard and SettingsView.
  *
  * Props:
- *   onDone    — called after successful auth (optional)
- *   compact   — if true, renders inline status row instead of full card
- *   className — additional class on the wrapper (optional)
+ *   authenticated — current auth state, owned by the parent and read
+ *                   from the same `authQueries.provider.claudeStatus`
+ *                   query both consumers already use. Passing it down
+ *                   instead of re-running the query here keeps the
+ *                   "is Claude connected?" fact in one place per
+ *                   render tree.
+ *   onDone        — called after successful auth (optional)
+ *   compact       — if true, renders inline status row instead of full card
+ *   className     — additional class on the wrapper (optional)
  */
-export default function ProviderAuth({ onDone, compact = false, className = '' }) {
+export default function ProviderAuth({ authenticated, onDone, compact = false, className = '' }) {
   const queryClient = useQueryClient()
-  const statusQuery = authQueries.provider.claudeStatus.useQuery()
   const [authUrl, setAuthUrl] = useState('')
   const [authCode, setAuthCode] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [starting, setStarting] = useState(false)
   const [justConnected, setJustConnected] = useState(false)
-  const authenticated = !!statusQuery.data?.authenticated
-  const loading = statusQuery.isLoading
 
   async function startAuth() {
     setError('')
@@ -57,9 +60,16 @@ export default function ProviderAuth({ onDone, compact = false, className = '' }
         setError(data.detail || 'Failed to submit code.')
         return
       }
+      // Force a refetch via fetchQuery so we can check the new
+      // status synchronously here, then invalidate so every other
+      // consumer (SettingsView, SetupWizard's ProviderStep) picks
+      // up the new state on its next render.
+      const next = await queryClient.fetchQuery({
+        queryKey: authQueries.provider.claudeStatus.key,
+        queryFn: authQueries.provider.claudeStatus.fetch,
+      })
       authQueries.provider.claudeStatus.invalidate(queryClient)
-      const next = await statusQuery.refetch()
-      if (!next.data?.authenticated) {
+      if (!next?.authenticated) {
         setError('Authentication failed. Try again.')
       } else {
         setAuthUrl('')
@@ -75,9 +85,12 @@ export default function ProviderAuth({ onDone, compact = false, className = '' }
     }
   }
 
-  if (loading) {
-    return <p className="pa__muted">Checking…</p>
-  }
+  // The "Checking…" placeholder formerly rendered here while the
+  // local statusQuery was loading. After consolidation, the parent
+  // owns the query and is expected to gate the render itself (see
+  // SettingsView's `providerLoaded` guard). Removing the local
+  // gate avoids a render with `authenticated === undefined` from
+  // showing the "Not connected" state for one frame.
 
   // Active auth flow — always show the code input when authUrl is set.
   if (authUrl) {

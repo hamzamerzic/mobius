@@ -9,6 +9,14 @@ import './SetupWizard.css'
 
 export default function SetupWizard({ onDone, initialStep = 'account' }) {
   const [step, setStep] = useState(initialStep)
+  // Hoisted from ProviderStep so ProviderAuth (which is a
+  // grandchild) doesn't need to re-run the same query. The
+  // wizard typically reaches the provider step within seconds
+  // of mount, so the slight overhead of fetching during the
+  // account step is fine — and avoids a layout shift the
+  // first time ProviderStep renders.
+  const claudeStatusQuery = authQueries.provider.claudeStatus.useQuery()
+  const claudeAuthenticated = !!claudeStatusQuery.data?.authenticated
 
   // Persists step synchronously alongside setStep so a refresh in
   // the microsecond gap between setStep and a useEffect flush can't
@@ -78,7 +86,13 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
   }
 
   if (step === 'provider') {
-    return <ProviderStep onSkip={() => goToStep('gemini')} onConnected={() => goToStep('gemini')} />
+    return (
+      <ProviderStep
+        onSkip={() => goToStep('gemini')}
+        onConnected={() => goToStep('gemini')}
+        claudeAuthenticated={claudeAuthenticated}
+      />
+    )
   }
 
   if (step === 'gemini') {
@@ -183,12 +197,11 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
  * ChatGPT-account device-auth toggle lives inside CodexAuth. Either
  * provider connecting advances the wizard.
  */
-function ProviderStep({ onSkip, onConnected }) {
+function ProviderStep({ onSkip, onConnected, claudeAuthenticated }) {
   const [expanded, setExpanded] = useState('codex')
-  const claudeStatusQuery = authQueries.provider.claudeStatus.useQuery()
   const settingsQuery = settingsQueries.owner.useQuery()
   const codexConnected = !!settingsQuery.data?.codex_authenticated
-  const claudeConnected = !!claudeStatusQuery.data?.authenticated
+  const claudeConnected = !!claudeAuthenticated
 
   function toggle(id) {
     setExpanded(prev => prev === id ? null : id)
@@ -225,7 +238,11 @@ function ProviderStep({ onSkip, onConnected }) {
             expanded={expanded === 'claude'}
             onToggleExpand={() => toggle('claude')}
           >
-            <ProviderAuth compact onDone={onConnected} />
+            <ProviderAuth
+              authenticated={claudeAuthenticated}
+              compact
+              onDone={onConnected}
+            />
           </ProviderRow>
         </div>
 
