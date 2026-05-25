@@ -112,8 +112,12 @@ class RunnerRegistry:
     return self._generation.get(chat_id, 0)
 
   def forget(self, chat_id: str) -> None:
-    """Drops the stored generation for a chat."""
+    """Drops ALL registry state for a chat, called at delete time."""
     self._generation.pop(chat_id, None)
+    self._handles.pop((chat_id, RunnerKind.SUBPROCESS), None)
+    self._handles.pop((chat_id, RunnerKind.CLAUDE_SDK), None)
+    self._handles.pop((chat_id, RunnerKind.CODEX_SDK), None)
+    self._starting.discard(chat_id)
 
   def reset_for_tests(self) -> None:
     """Clears all registry state between tests."""
