@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { api, setToken, BASE } from '../../api/client.js'
 import * as setupSession from '../../lib/setupSession.js'
 import { authQueries, settingsQueries } from '../../hooks/queries.js'
@@ -36,6 +36,16 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
   const [geminiKey, setGeminiKey] = useState('')
   const [geminiError, setGeminiError] = useState('')
   const [geminiSaving, setGeminiSaving] = useState(false)
+
+  // Clear the 401-bypass flag on any unmount — completion, nav-away,
+  // tab close. The onDone path also clears it; idempotent. Without
+  // this, closing the browser between account-create and onDone
+  // strands `_inProgress=true` in sessionStorage for the tab's life.
+  useEffect(() => {
+    return () => {
+      setupSession.setInProgress(false)
+    }
+  }, [])
 
   async function handleAccountSubmit(e) {
     e.preventDefault()

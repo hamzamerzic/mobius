@@ -84,6 +84,11 @@ export default function SettingsView({ onThemeChange }) {
       setThemeError(
         'Could not save theme. Check your connection and try again.',
       )
+      // Force the mode query to resync with the server. Covers the
+      // write-succeeded-but-response-lost case: refetching reads
+      // authoritative state, the mirror effect at line 30 picks it
+      // up, and lightMode stops disagreeing with the visible theme.
+      themeQueries.mode.invalidate(queryClient)
       onThemeChange?.()  // reload original theme on error
     } finally {
       setThemeSwitching(false)

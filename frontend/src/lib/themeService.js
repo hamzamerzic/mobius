@@ -163,6 +163,11 @@ export async function toggleTheme(queryClient, currentMode, api) {
   const currentCss = themeRes.ok ? await themeRes.text() : ''
   const meta = parseThemeMeta(currentCss)
 
+  // Pre-toggle bg, captured from the last persisted CSS — the
+  // authoritative rollback target if persistTheme below throws.
+  const oldBgMatch = currentCss.match(/--bg:\s*(#[0-9a-fA-F]{3,8})/)
+  const oldBg = oldBgMatch ? oldBgMatch[1] : meta.colors['--bg']
+
   // Swap structural colors while preserving agent customisations.
   const base = newMode === 'light' ? LIGHT_COLORS : DARK_COLORS
   const swapped = {}
@@ -176,12 +181,19 @@ export async function toggleTheme(queryClient, currentMode, api) {
   const bgMatch = newCss.match(/--bg:\s*(#[0-9a-fA-F]{3,8})/)
   const newBg = bgMatch ? bgMatch[1] : meta.colors['--bg']
 
-  // Apply to DOM first (no round-trip lag for the user), then
-  // persist, then invalidate so iframes pick up the change.
+  // Apply optimistically, then persist. On persist failure the
+  // catch rolls the DOM back to `currentCss` so the <style> block
+  // and server storage stay consistent — otherwise the user sees
+  // the new theme until the next refetch resolves the divergence.
   applyThemeToDom(newCss, newBg)
-  await persistTheme(newCss, newMode, api)
-  themeQueries.invalidate(queryClient)
-  themeQueries.mode.invalidate(queryClient)
+  try {
+    await persistTheme(newCss, newMode, api)
+    themeQueries.invalidate(queryClient)
+    themeQueries.mode.invalidate(queryClient)
+  } catch (err) {
+    applyThemeToDom(currentCss, oldBg)
+    throw err
+  }
 
   return { newMode, newCss, newBg }
 }
