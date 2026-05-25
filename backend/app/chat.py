@@ -22,7 +22,7 @@ from app import auth, chat_queue, models, questions, schemas
 from app.broadcast import ChatBroadcast, create_broadcast, get_broadcast, set_active_broadcast
 from app.config import get_settings
 from app.events import process_event, build_assistant_message, finalize_blocks
-from app.providers import effective_agent_settings, get_provider
+from app.providers import effective_agent_settings, get_provider, get_skill_path
 from app.runner_registry import RunnerKind, registry
 from app.runtime_types import ChatEvent
 
@@ -291,17 +291,14 @@ def _read_skill_text() -> str:
   global _SKILL_TEXT_CACHE
   if _SKILL_TEXT_CACHE is not None:
     return _SKILL_TEXT_CACHE
-  candidates = [
-    Path("/app/skill/agent-skill.md"),
-    Path(__file__).resolve().parents[2] / "skill" / "agent-skill.md",
-  ]
-  for p in candidates:
+  skill_path = get_skill_path()
+  if skill_path is not None:
     try:
-      text = p.read_text(encoding="utf-8")
+      text = skill_path.read_text(encoding="utf-8")
       _SKILL_TEXT_CACHE = text
       return text
     except (OSError, FileNotFoundError):
-      continue
+      pass
   # No skill file found — cache the empty fallback so subsequent calls
   # don't re-stat the filesystem. The empty case is genuinely degraded
   # (SDK runs without a system prompt) and the test suite relies on
