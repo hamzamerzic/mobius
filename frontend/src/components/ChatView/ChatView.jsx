@@ -84,7 +84,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // back via `commitMessages`, so any miss self-heals on next remount.
   const cached = queryClient.getQueryData(chatMessagesQueryKey(chatId))
   const [messages, setMessages] = useState(() => cached?.messages ?? [])
-  const [pendingMessages, setPendingMessages] = useState([])
   const [offset, setOffset] = useState(() => cached?.offset ?? 0)
   const [loading, setLoading] = useState(!cached)
   // When the initial /chats/{id} fetch fails we used to silently
@@ -116,23 +115,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // ref + calling setQueryData once outside the updater is correct.
   const messagesRef = useRef(messages)
   messagesRef.current = messages
-  const pendingMessagesRef = useRef(pendingMessages)
-  pendingMessagesRef.current = pendingMessages
 
-  // Ticket 034 commit 2a: dual-write to usePendingQueue.
-  // Every legacy mutation site below ALSO calls the hook; in dev
-  // mode the assertion right after each site catches drift. Commit
-  // 2b drops the legacy state and reads exclusively from the hook.
+  // Pending queue (the items shown in the queued-tray above the
+  // composer) lives entirely inside usePendingQueue. Every mutation
+  // goes through the hook's named ops; reads use pendingQueue.pendingMessages
+  // for render and pendingQueue.pendingMessagesRef for closure-safe
+  // synchronous access (handleStop's pre-await clear, fetchMessages'
+  // cid preservation).
   const pendingQueue = usePendingQueue()
-  function assertPendingParity(label) {
-    if (!import.meta.env.DEV) return
-    const a = JSON.stringify(pendingQueue.pendingMessagesRef.current)
-    const b = JSON.stringify(pendingMessagesRef.current)
-    if (a !== b) {
-      console.error(`[034 dual-write drift @ ${label}]`, { hook: a, legacy: b })
-      console.assert(false, `pendingQueue drift @ ${label}`)
-    }
-  }
 
   // Single setter that updates local state AND the query cache.
   //
@@ -192,37 +182,17 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   const chatIdStaleRef = useRef(false)
   const hadMessagesRef = useRef((cached?.messages?.length ?? 0) > 0)
   const promotedRef = useRef(false)
-  // True when the CURRENT in-flight turn is bridging a DB partial we
-  // kept on mount (running=true on fetch, last message was assistant).
-  // promoteStreamToMessages reads this to decide REPLACE-vs-APPEND:
-  //   bridge=true  → replace the kept partial (single assistant msg
-  //                  in the transcript; preserves id/ts/answers).
-  //   bridge=false → append a fresh assistant msg (new turn).
-  // Reset on every doSend / onStreamEnd so the next turn starts fresh.
-  const bridgePartialRef = useRef(false)
-
-  // Ticket 034 commit 2a: dual-write to useBridgePartial.
-  // We feed the hook the same data.running + last-message snapshot
-  // the legacy code reads inside the fetch resolution. The hook's
-  // capturedRef makes the gate sticky on first valid input — exactly
-  // what the legacy assignment did inside the .then().
+  // Bridge-partial gating decides whether the next promote REPLACES
+  // the kept DB partial (in-flight turn whose snapshot we mounted
+  // on top of) or APPENDS a fresh assistant message. The captured
+  // ts is sticky on first mount; markBridged() retires the gate
+  // after the first promote so subsequent turns always append.
+  // See hooks/useBridgePartial.js for the ts-based design.
   const [bridgeMountInputs, setBridgeMountInputs] = useState({
     runningAtMount: false,
     lastMsgAtMount: null,
   })
   const bridgeHook = useBridgePartial(bridgeMountInputs)
-  function assertBridgeParity(currentLastMsg, label) {
-    if (!import.meta.env.DEV) return
-    const want = !!bridgePartialRef.current
-    const got = bridgeHook.shouldBridge(currentLastMsg)
-    if (want !== got) {
-      console.error(
-        `[034 dual-write bridge drift @ ${label}]`,
-        { legacy: want, hook: got, currentLastMsg },
-      )
-      console.assert(false, `bridge drift @ ${label}`)
-    }
-  }
 
   // Spacer "active" CSS state — keeps min-height: 0 on the list while
   // the spacer is in play, preventing the elastic-overscroll
@@ -280,7 +250,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     lastUserMsgRef,
     messages,
     messagesRef,
-    pendingMessagesLength: pendingMessages.length,
+    pendingMessagesLength: pendingQueue.pendingMessages.length,
     loadingOlderRef: loadingOlder,
   })
 
@@ -308,25 +278,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         }
       }
       commitMessages(msgs, data.offset || 0)
-      // Sync pending queue from server. Preserve any local cid if we
-      // already had this entry (matched by server ts); otherwise derive
-      // a stable cid from the server ts so QueuedMessages's expanded
-      // state survives re-renders.
-      const localByTs = new Map(
-        (pendingMessagesRef.current || []).map(m => [m.ts, m.cid])
-      )
-      const serverPending = (data.pending_messages || []).map(m => ({
-        ...m,
-        cid: localByTs.get(m.ts) || `s-${m.ts}`,
-        queued: true,
-      }))
-      pendingMessagesRef.current = serverPending
-      setPendingMessages(serverPending)
-      // 034 dual-write
+      // Sync pending queue from server. usePendingQueue.hydrate
+      // preserves the client-side cid for any entry whose ts already
+      // exists locally (so QueuedMessages's expanded state doesn't
+      // remount under a fresh `s-${ts}` key) and stamps a stable
+      // s-prefixed cid on previously-unseen server entries.
       pendingQueue.hydrate(data.pending_messages || [])
-      assertPendingParity('fetchMessages')
     } catch { /* network error — silent, user can retry */ }
-  }, [chatId, commitMessages])
+  }, [chatId, commitMessages, pendingQueue])
 
   const {
     streamItems,
@@ -343,27 +302,15 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       promoteStreamToMessages()
       if (continues) {
         // Backend auto-promoted the head of the pending queue into a
-        // new turn. Mirror that locally: find the entry by ts (the
-        // backend-authoritative id; the runner sends queued_turn_starting
-        // with the promoted ts), append it to messages, and remove from
-        // pendingMessages. Re-arm the spacer so the new user message
-        // anchors at the top of the viewport.
-        const queued = pendingMessagesRef.current
-        const idx = promotedTs != null
-          ? queued.findIndex(m => m.ts === promotedTs)
-          : 0
-        if (idx >= 0 && queued.length > 0) {
-          const first = queued[idx]
-          const rest = queued.filter((_, i) => i !== idx)
-          const { queued: _q, cid: _c, position: _p, ...msg } = first
+        // new turn. Mirror that locally: the hook removes the entry
+        // matching the backend-authoritative ts (from
+        // queued_turn_starting) and returns it; we strip the queue-
+        // only fields and append it to messages so the user msg is
+        // visible alongside the incoming response.
+        const promoted = pendingQueue.promoteByTs(promotedTs)
+        if (promoted) {
+          const { queued: _q, cid: _c, position: _p, ...msg } = promoted
           commitMessages(prev => [...prev, msg])
-          pendingMessagesRef.current = rest
-          setPendingMessages(rest)
-          // 034 dual-write: promote-by-ts mirrors the legacy path.
-          // The hook returns the promoted entry; we ignore it here
-          // because the legacy path already extracted `first` above.
-          pendingQueue.promoteByTs(promotedTs ?? first.ts)
-          assertPendingParity('onStreamEnd.promote')
           promotedRef.current = false
           // Queued continuation is backend-initiated — the user may
           // be reading something else in the chat. Don't yank them
@@ -376,7 +323,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           // send re-arms it. Stop with queued messages does NOT hit
           // this path on the live UI — `handleStop` collapses the
           // queue client-side via doSend(combined, {pin: false}) and
-          // clears pendingMessagesRef before /chat/stop fires, so no
+          // clears the queue before /chat/stop fires, so no
           // queued_turn_starting event reaches us here.
         } else {
           // Server's promoted ts isn't in our local queue (cancel raced
@@ -390,7 +337,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         // Stream ended without continuation. If we have local pending
         // entries, server may have cleared them (auth fail, error) —
         // refetch to reconcile. Skip when pending empty.
-        if (pendingMessagesRef.current.length > 0) {
+        if (pendingQueue.pendingMessagesRef.current.length > 0) {
           fetchMessages({ force: true })
         }
       }
@@ -438,16 +385,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       .filter(i => i.type === 'text')
       .map(i => i.content)
       .join('')
-    const isBridge = bridgePartialRef.current
-    bridgePartialRef.current = false  // one-shot — next turn will append
-    // 034 dual-write: mirror the one-shot mark.
-    const hookIsBridge = bridgeHook.shouldBridge(
+    // Decide REPLACE-vs-APPEND on the live last message and retire
+    // the bridge gate (one-shot — next turn always appends, even if
+    // it streams through the same chat without remount).
+    const isBridge = bridgeHook.shouldBridge(
       messagesRef.current[messagesRef.current.length - 1]
     )
-    if (import.meta.env.DEV && hookIsBridge !== isBridge) {
-      console.error('[034 bridge mismatch @ promote]', { legacy: isBridge, hook: hookIsBridge })
-      console.assert(false, 'promote bridge mismatch')
-    }
     bridgeHook.markBridged()
     commitMessages(prev => {
       const last = prev[prev.length - 1]
@@ -564,19 +507,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           effective: data.effective_agent_settings || {},
           has_assistant_turns: !!data.has_assistant_turns,
         })
-        // Mark that this mount's in-flight turn is bridging a DB
-        // partial. promoteStreamToMessages reads this to decide
-        // whether to REPLACE the kept partial (true) or APPEND a
-        // fresh assistant message (false). Only the very first turn
-        // after mount is a "bridge"; once that turn promotes,
-        // subsequent turns are normal appends.
-        bridgePartialRef.current = !!(
-          data.running && msgs.length > 0
-          && msgs[msgs.length - 1].role === 'assistant'
-        )
-        // 034 dual-write: feed the same data into useBridgePartial.
-        // The hook's internal capturedRef gate replicates the
-        // role/ts check.
+        // Feed the bridge gate with the data.running + last-msg
+        // snapshot. useBridgePartial captures the kept-partial ts
+        // on first valid input and stays sticky from there — only
+        // the very first turn after mount is a "bridge"; subsequent
+        // turns always APPEND (markBridged retires the gate on the
+        // first promote).
         setBridgeMountInputs({
           runningAtMount: !!data.running,
           lastMsgAtMount: msgs.length > 0 ? msgs[msgs.length - 1] : null,
@@ -584,17 +520,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         setLoading(false)
 
         // Hydrate pending queue from backend so a reload mid-queue
-        // doesn't drop the visible "queued" tray. Derive a stable
-        // cid from the server ts so QueuedMessages's expanded state
-        // survives future re-renders.
-        const serverPending = (data.pending_messages || []).map(m => ({
-          ...m, cid: `s-${m.ts}`, queued: true,
-        }))
-        pendingMessagesRef.current = serverPending
-        setPendingMessages(serverPending)
-        // 034 dual-write
+        // doesn't drop the visible "queued" tray. hydrate stamps a
+        // stable s-prefixed cid on each entry so QueuedMessages's
+        // expanded state survives future re-renders.
         pendingQueue.hydrate(data.pending_messages || [])
-        assertPendingParity('initial-fetch.hydrate')
 
         if (data.running) {
           setSending(true)
@@ -755,14 +684,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         : `cid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
       const queuedMsg = { role: 'user', content: text, ts: Date.now(), cid, queued: true }
       if (attachments.length > 0) queuedMsg.attachments = attachments
-      setPendingMessages(prev => {
-        const next = [...prev, { ...queuedMsg, position: prev.length + 1 }]
-        pendingMessagesRef.current = next
-        return next
-      })
-      // 034 dual-write
       pendingQueue.add(queuedMsg)
-      assertPendingParity('doSend.queue.optimistic-add')
       setInput('')
       clearFiles()
       if (inputRef.current) inputRef.current.style.height = 'auto'
@@ -774,31 +696,13 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         )
         if (result?.status === 'queued') {
           // Replace optimistic ts with server's (cid is stable).
-          setPendingMessages(prev => {
-            const next = prev.map(m =>
-              m.cid === queuedMsg.cid
-                ? { ...m, ts: result.ts ?? m.ts, position: result.position }
-                : m
-            )
-            pendingMessagesRef.current = next
-            return next
-          })
-          // 034 dual-write
           pendingQueue.swapOptimisticTs(
             queuedMsg.cid, result.ts ?? queuedMsg.ts, result.position,
           )
-          assertPendingParity('doSend.queue.swap-ts')
         }
         // Race: server said "started" though we expected queued.
         if (result?.status === 'started') {
-          setPendingMessages(prev => {
-            const next = prev.filter(m => m.cid !== queuedMsg.cid)
-            pendingMessagesRef.current = next
-            return next
-          })
-          // 034 dual-write
           pendingQueue.cancelByCid(queuedMsg.cid)
-          assertPendingParity('doSend.queue.race-started')
           onMessageStart?.()
           promotedRef.current = false
           commitMessages(prev => {
@@ -811,22 +715,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           // New visible user msg → pin it to the top of the viewport.
           modeRef.current = { kind: 'PIN_USER_MSG', ts: queuedMsg.ts }
           // This is a NEW turn (not the bridge turn from mount).
-          // Reset so the upcoming promote appends a fresh assistant
-          // instead of replacing whichever message is currently last.
-          bridgePartialRef.current = false
-          // 034 dual-write: same one-shot mark on the hook side.
+          // Retire the bridge gate so the upcoming promote appends a
+          // fresh assistant instead of replacing whichever message
+          // is currently last.
           bridgeHook.markBridged()
         }
       } catch (err) {
         // Roll back optimistic + restore input.
-        setPendingMessages(prev => {
-          const next = prev.filter(m => m.cid !== queuedMsg.cid)
-          pendingMessagesRef.current = next
-          return next
-        })
-        // 034 dual-write
         pendingQueue.cancelByCid(queuedMsg.cid)
-        assertPendingParity('doSend.queue.error-rollback')
         setInput(text)
         commitMessages(prev => [
           ...prev,
@@ -857,8 +753,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       modeRef.current = { kind: 'PIN_USER_MSG', ts: userMsg.ts }
     }
     // Fresh turn — not a bridge from a mounted DB partial.
-    bridgePartialRef.current = false
-    // 034 dual-write
     bridgeHook.markBridged()
 
     try {
@@ -932,13 +826,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
     setSending(true)
     // doSendSilent starts a NEW hidden turn (the answer-followup).
-    // bridgePartialRef may still be true if mount kept a DB partial
+    // The bridge gate may still be live if mount kept a DB partial
     // and the user submitted an answer before that partial's done
     // event arrived. The new turn is NOT a bridge — its promote
     // should append a fresh assistant message, not replace the
-    // question-block message (which already has answers).
-    bridgePartialRef.current = false
-    // 034 dual-write
+    // question-block message (which already has answers), so retire
+    // the gate now.
     bridgeHook.markBridged()
     // Hidden answer is a continuation, NOT a new visible send. The
     // user may be reading somewhere else; don't yank them with a
@@ -967,41 +860,22 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // Cancel a queued message via DELETE. Optimistic remove; reconcile
   // by re-fetching authoritative state on success or on error.
   const handleCancelPending = useCallback(async (ts) => {
-    const optimistic = pendingMessagesRef.current.filter(m => m.ts !== ts)
-    pendingMessagesRef.current = optimistic
-    setPendingMessages(optimistic)
-    // 034 dual-write
     pendingQueue.cancelByTs(ts)
-    assertPendingParity('handleCancelPending.optimistic')
     try {
       const res = await apiFetch(`/chats/${chatId}/pending/${ts}`, {
         method: 'DELETE',
       })
       const data = await res.json()
-      const server = (data.pending_messages || []).map(m => ({
-        ...m, cid: `s-${m.ts}`, queued: true,
-      }))
-      pendingMessagesRef.current = server
-      setPendingMessages(server)
-      // 034 dual-write
       pendingQueue.hydrate(data.pending_messages || [])
-      assertPendingParity('handleCancelPending.server-hydrate')
     } catch {
       // Refetch authoritative state.
       try {
         const res = await apiFetch(`/chats/${chatId}?limit=1`)
         const data = await res.json()
-        const server = (data.pending_messages || []).map(m => ({
-          ...m, cid: `s-${m.ts}`, queued: true,
-        }))
-        pendingMessagesRef.current = server
-        setPendingMessages(server)
-        // 034 dual-write
         pendingQueue.hydrate(data.pending_messages || [])
-        assertPendingParity('handleCancelPending.refetch-hydrate')
       } catch { /* offline; leave optimistic, user can retry */ }
     }
-  }, [chatId])
+  }, [chatId, pendingQueue])
 
   async function handleStop() {
     // Re-entry guard. Without this, two rapid Stop clicks would both
@@ -1026,13 +900,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       // (de-duped by name) and passing them through doSend's opts —
       // data loss on Stop was a real bug (user adds files, agent's
       // mid-turn, user hits Stop, files vanish).
-      const queuedTexts = pendingMessagesRef.current
+      const queuedSnapshot = pendingQueue.pendingMessagesRef.current
+      const queuedTexts = queuedSnapshot
         .map(m => (m.content || '').trim())
         .filter(Boolean)
       const combined = queuedTexts.join('\n')
       const seenNames = new Set()
       const combinedAttachments = []
-      for (const m of pendingMessagesRef.current) {
+      for (const m of queuedSnapshot) {
         for (const a of (m.attachments || [])) {
           if (a && a.name && !seenNames.has(a.name)) {
             seenNames.add(a.name)
@@ -1045,22 +920,18 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       // /chat/stop await. During that await, the SSE stream closes
       // (server kills proc + closes broadcast), which fires the
       // natural onStreamEnd path in useStreamConnection → ChatView's
-      // onStreamEnd handler → if pendingMessagesRef has items it
-      // calls fetchMessages({force:true}) → that fetch can land
-      // BEFORE handleStop continues post-await, overwriting the
-      // just-promoted partial + the soon-to-be-sent combined turn
-      // with stale DB state. Bumping fetchGen NOW makes any such
-      // in-flight fetch get discarded by its gen guard; clearing
-      // pendingMessagesRef NOW also prevents the natural handler
-      // from triggering the fetch at all.
+      // onStreamEnd handler → if the queue has items it calls
+      // fetchMessages({force:true}) → that fetch can land BEFORE
+      // handleStop continues post-await, overwriting the just-
+      // promoted partial + the soon-to-be-sent combined turn with
+      // stale DB state. Bumping fetchGen NOW makes any such in-flight
+      // fetch get discarded by its gen guard; clearing the queue NOW
+      // also prevents the natural handler from triggering the fetch
+      // at all. R1 in _034-design.md spells out the contract —
+      // pendingQueue.clear() updates pendingMessagesRef.current to
+      // [] before this line returns (synchronous).
       fetchGenRef.current += 1
-      pendingMessagesRef.current = []
-      setPendingMessages([])
-      // 034 dual-write — MUST be synchronous (R1 from _034-design.md).
-      // The hook's clear() updates pendingMessagesRef.current to []
-      // before this line returns, matching the legacy contract.
       pendingQueue.clear()
-      assertPendingParity('handleStop.pre-stop-clear')
 
       let stoppedCleanly = true
       try {
@@ -1090,25 +961,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         // Restore the queued messages we optimistically cleared, so
         // the user can hit Stop again or wait + retry without losing
         // their drafts. Don't disconnect — the runner may still be
-        // streaming.
+        // streaming. We have `queuedTexts` + `combinedAttachments`
+        // but their original `ts` ids; safest is just a refetch so
+        // the user sees authoritative server state.
         if (combined) {
-          // Re-hydrate from the snapshot we took at the top.
-          pendingMessagesRef.current = pendingMessagesRef.current
-          // No-op assignment above is intentional documentation. The
-          // real restore: we have `queuedTexts` + `combinedAttachments`
-          // but their original `ts` ids; safest is just a refetch so
-          // the user sees authoritative server state.
           try {
             const res = await apiFetch(`/chats/${chatId}?limit=1`)
             const data = await res.json()
-            const server = (data.pending_messages || []).map(m => ({
-              ...m, cid: `s-${m.ts}`, queued: true,
-            }))
-            pendingMessagesRef.current = server
-            setPendingMessages(server)
-            // 034 dual-write
             pendingQueue.hydrate(data.pending_messages || [])
-            assertPendingParity('handleStop.stop-failed-refetch')
           } catch { /* leave empty; user can resend */ }
         }
         return
@@ -1171,8 +1031,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // above), which is the user's natural reading anchor anyway.
   const streamingDataKey = (() => {
     const last = messages[messages.length - 1]
-    if (import.meta.env.DEV) assertBridgeParity(last, 'streamingDataKey')
-    if (!bridgePartialRef.current) return undefined
+    if (!bridgeHook.shouldBridge(last)) return undefined
     if (!last || last.role !== 'assistant' || last.hidden) return undefined
     return last.id || `${last.role}-${last.ts ?? messages.length - 1}`
   })()
@@ -1234,11 +1093,9 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             // DIFFERENT turns and must BOTH render — otherwise a
             // user's answered-question card would hide whenever the
             // next turn streams.
-            if (import.meta.env.DEV && isLastMsg) {
-              assertBridgeParity(msg, 'render.suppress-last-assistant')
-            }
-            if (bridgePartialRef.current
-                && msg.role === 'assistant' && isLastMsg
+            if (isLastMsg
+                && bridgeHook.shouldBridge(msg)
+                && msg.role === 'assistant'
                 && sending && streamItems.length > 0) {
               return null
             }
@@ -1370,7 +1227,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       <ConnectionStatus error={connectionError} onRetry={retry} />
 
       <div className="chat__foot">
-        <QueuedMessages items={pendingMessages} onCancel={handleCancelPending} />
+        <QueuedMessages items={pendingQueue.pendingMessages} onCancel={handleCancelPending} />
         <ChatInputBar
           input={input}
           onInputChange={setInput}
