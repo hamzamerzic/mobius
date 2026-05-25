@@ -140,16 +140,24 @@
   <script type="module">
     // Token-free init protocol (since 2026-04-27).
     //
-    // The frame HTML is now cacheable across sessions because the
+    // This file is the RECEIVER side. The parent SENDER side lives
+    // in `frontend/src/components/AppCanvas/AppCanvas.jsx` — its
+    // top-of-file comment block has the authoritative payload
+    // shapes. Keep both in sync when changing the protocol.
+    //
+    // The frame HTML is cacheable across sessions because the
     // auth token and theme are NOT baked into the body. Instead the
     // parent shell injects them via postMessage after the iframe
     // loads. Sequence:
     //
-    //   1. iframe finishes loading, this script runs.
-    //   2. iframe posts {type:'moebius:frame-ready', appId} to parent.
-    //   3. parent (AppCanvas.jsx) replies with
-    //      {type:'moebius:frame-init', token, themeCss, bg}.
-    //   4. iframe applies theme, imports module with token, mounts.
+    //   1. iframe finishes loading, this script runs (listener
+    //      registered before iframe.onLoad fires in the parent).
+    //   2. parent (AppCanvas.jsx) posts
+    //      {type:'moebius:frame-init', token, themeCss, bg} on
+    //      its iframe.onLoad handler.
+    //   3. iframe applies theme, imports module with token, mounts.
+    //   4. iframe posts {type:'moebius:frame-mounted', appId} —
+    //      parent hides the loading overlay.
     //   5. parent may later post {type:'moebius:frame-theme', ...}
     //      to update theme without reloading the iframe.
     //

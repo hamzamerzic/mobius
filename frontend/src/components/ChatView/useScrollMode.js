@@ -158,12 +158,31 @@ function _computeSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH) {
 /**
  * Hook that owns the chat scroll subsystem.
  *
- * Returns:
- *   modeRef                — the current ScrollMode (mutable from outside)
- *   gestureWindowUntilRef  — performance.now() timestamp; scrolls
- *                            within this window are user-driven
- *   revealed               — whether to show the scroll container
- *                            (hide-then-reveal gate)
+ * The `modeRef.current` value is a tagged union — every possible
+ * shape:
+ *
+ *   {kind: 'INITIAL'}
+ *     Pre-restore default. applyMode is a no-op in this state.
+ *     Set once on mount before the saved mode is read from
+ *     sessionStorage. Also re-entered when the layout effect sees
+ *     a new chatId (defensive — key={chatId} normally remounts).
+ *
+ *   {kind: 'PIN_USER_MSG', ts: number}
+ *     Pin the user message with the given ts to the top of the
+ *     viewport (PIN_OFFSET=4 px of breathing room). Set on user
+ *     send; applyMode scrolls to `userMsgEl.offsetTop - PIN_OFFSET`.
+ *
+ *   {kind: 'FOLLOW_BOTTOM'}
+ *     Sticky-bottom for streaming. applyMode sets scrollTop =
+ *     scrollHeight (only if content actually overflows). Engaged
+ *     when the user scrolls to within the bottom sentinel; lost
+ *     when the user scrolls up.
+ *
+ *   {kind: 'ANCHOR_AT', key: string, offset: number}
+ *     Anchored at a specific message (`data-key="<key>"`) with
+ *     `offset` pixels above the viewport top. Set when the user
+ *     scrolls to a non-bottom position; degrades to FOLLOW_BOTTOM
+ *     on _validateSavedMode if the anchor message no longer exists.
  *
  * The caller is expected to:
  *   - Mutate `modeRef.current = {...}` on lifecycle events:
@@ -171,8 +190,37 @@ function _computeSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH) {
  *     * Reset to INITIAL / FOLLOW_BOTTOM as needed
  *   - Read `gestureWindowUntilRef.current` in any custom scroll
  *     handlers (e.g., pagination triggers) to gate on user intent
- *   - Apply `revealed` as `style={revealed ? undefined : {visibility: 'hidden'}}`
- *     on the scroll container
+ *   - Apply `revealed` as `style={revealed ? undefined : {visibility:
+ *     'hidden'}}` on the scroll container.
+ *
+ * @param {object} args
+ * @param {string} args.chatId
+ * @param {React.RefObject<HTMLElement>} args.scrollRef
+ *   The `.chat__scroll` container ref.
+ * @param {React.RefObject<HTMLElement>} args.spacerRef
+ *   The dynamic spacer at the bottom of `.chat__list`.
+ * @param {React.RefObject<HTMLElement>} args.lastUserMsgRef
+ *   The most recent visible user message element.
+ * @param {Array<object>} args.messages
+ *   Persisted message list (drives effect re-runs).
+ * @param {React.MutableRefObject<Array<object>>} args.messagesRef
+ *   Synchronous mirror for restore-time anchor validation.
+ * @param {number} args.pendingMessagesLength
+ *   Count of queued messages (drives effect re-runs when the tray
+ *   shows/hides because the tray's margin shrinks the spacer math).
+ * @param {React.MutableRefObject<boolean>} args.loadingOlderRef
+ *   When true, scroll events from pagination shouldn't mutate mode.
+ *
+ * @returns {{
+ *   modeRef: React.MutableRefObject<
+ *     | {kind: 'INITIAL'}
+ *     | {kind: 'PIN_USER_MSG', ts: number}
+ *     | {kind: 'FOLLOW_BOTTOM'}
+ *     | {kind: 'ANCHOR_AT', key: string, offset: number}
+ *   >,
+ *   gestureWindowUntilRef: React.MutableRefObject<number>,
+ *   revealed: boolean,
+ * }}
  */
 export default function useScrollMode({
   chatId,

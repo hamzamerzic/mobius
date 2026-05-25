@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { apiFetch } from '../api/client.js'
+import { api } from '../api/client.js'
 
 /**
  * Subscribes the browser to Web Push notifications after login.
@@ -15,7 +15,7 @@ export default function usePushSubscription() {
         const reg = await navigator.serviceWorker.ready
 
         // Fetch the VAPID public key from the server.
-        const res = await apiFetch('/push/vapid-key')
+        const res = await api.push.vapidKey()
         if (!res.ok) return
         const { publicKey } = await res.json()
 
@@ -33,12 +33,9 @@ export default function usePushSubscription() {
 
         // Send subscription to backend.
         const subJson = sub.toJSON()
-        await apiFetch('/push/subscribe', {
-          method: 'POST',
-          body: JSON.stringify({
-            endpoint: subJson.endpoint,
-            keys: subJson.keys,
-          }),
+        await api.push.subscribe({
+          endpoint: subJson.endpoint,
+          keys: subJson.keys,
         })
       } catch {
         // Permission denied or push not supported — silently ignore.

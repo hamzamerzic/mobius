@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { apiFetch } from '../../api/client.js'
+import { useQueryClient } from '@tanstack/react-query'
+import { api } from '../../api/client.js'
+import { settingsQueries } from '../../hooks/queries.js'
 
 /**
  * Codex device-auth flow. Lifted out of SettingsView so SetupWizard
@@ -12,6 +14,7 @@ import { apiFetch } from '../../api/client.js'
  * personal account, which sends users down the wrong path.
  */
 export default function CodexAuth({ onConnected, showSetupHint = true }) {
+  const queryClient = useQueryClient()
   const [status, setStatus] = useState('idle') // idle | connecting | pending | complete | failed
   const [url, setUrl] = useState('')
   const [code, setCode] = useState('')
@@ -49,7 +52,7 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
     pollGenRef.current += 1
     const myGen = pollGenRef.current
     try {
-      const res = await apiFetch('/auth/provider/codex/login', { method: 'POST' })
+      const res = await api.auth.provider.codex.startLogin()
       if (myGen !== pollGenRef.current) return
       if (!res.ok) {
         const data = await res.json()
@@ -76,7 +79,7 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
       pollRef.current = setInterval(async () => {
         attempts += 1
         try {
-          const r = await apiFetch('/auth/provider/codex/status')
+          const r = await api.auth.provider.codex.status()
           if (pollGen !== pollGenRef.current) return
           // Surface non-OK responses instead of trying to parse them.
           // A 401 here would otherwise trip the global apiFetch handler
@@ -95,6 +98,7 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
             setStatus('complete')
             setUrl('')
             setCode('')
+            settingsQueries.owner.invalidate(queryClient)
             onConnected?.()
           } else if (s.status === 'failed') {
             stopPolling()

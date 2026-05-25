@@ -99,6 +99,38 @@ def _is_safe_import_url(url: str) -> bool:
   return url.startswith("https://") or url.startswith("http://")
 
 
+# =============================================================
+# SILENT CSS-VARIABLE AUGMENT (debugger pointer)
+# =============================================================
+# `_ensure_core_vars` (below) appends a `:root { ... }` block to
+# any theme that omits one of the variables listed in `_CORE_VARS`.
+# The augmentation is SILENT — there is no log line, no header
+# comment in the original theme, and `GET /api/theme` still
+# returns the agent-authored source. What gets shipped to the
+# browser is `<style>{augmented_css}</style>` injected by
+# `inject_theme_into_html` below.
+#
+# Why this matters for debugging: a partial theme "works" not
+# because it's complete, but because the server filled the gap.
+# If a debugger looks at `theme.css` and sees only --bg / --text
+# defined, the shell's surfaces are STILL rendering correctly
+# because `--surface`, `--border`, etc. were silently injected
+# at HTML-render time. To inspect what the browser actually
+# received, look at the `<style>` block in the served HTML (or
+# DevTools → Sources → the inline style tag), not at `theme.css`.
+#
+# Variables augmented when missing (full list lives in
+# `_CORE_VARS`):
+#   --bg, --surface, --surface2, --text, --muted,
+#   --accent, --accent-hover, --accent-dim,
+#   --border, --border-light, --danger, --green,
+#   --font, --mono
+#
+# This is the ONLY structural enforcement applied to agent-
+# authored themes. Other patterns (blur, translucent fills,
+# overlays, focus rules) are intentionally NOT rewritten — the
+# right lever for those is the agent's seed/experience file, not
+# server-side mutation.
 _CORE_VARS = {
   # Variables the shell relies on. If the agent's theme omits any,
   # we inject the default value so the shell never falls back to an

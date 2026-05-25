@@ -1,8 +1,47 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { apiFetch, BASE } from '../../api/client.js'
-import { appTokenQueryKey, themeQueryKey } from '../../hooks/queries.js'
+import { api } from '../../api/client.js'
+import { appQueries, themeQueryKey } from '../../hooks/queries.js'
 import './AppCanvas.css'
+
+// =================================================================
+// AppCanvas ↔ iframe postMessage protocol
+// =================================================================
+// This file is the PARENT (sender). The RECEIVER side lives in
+// `frontend/public/app-frame.html` (the inline <script type="module">
+// near the bottom). Both sides must move together — adding a message
+// type, renaming a field, or changing payload shape requires editing
+// both files in the same PR.
+//
+// Three message types, all gated on `e.origin === window.location.origin`:
+//
+//   1. {type: 'moebius:frame-init', token, themeCss, bg}    parent → frame
+//      Fired by `sendInit()` below — on iframe.onLoad AND whenever the
+//      token query resolves (covers the case where the iframe loaded
+//      before the token was ready). Idempotent — the frame's own
+//      `initialized` flag dedups. Parent MUST NOT dedup: a real iframe
+//      reload (DOM reparenting, browser forced reload) resets the
+//      iframe flag but not parent state, and the re-init must fire or
+//      the iframe sits at its 10s loading-timeout.
+//
+//   2. {type: 'moebius:frame-mounted', appId}              frame → parent
+//      Fired by the frame AFTER `createRoot.render()` returns. Parent
+//      hides the loading overlay only on this signal — `iframe.onLoad`
+//      is too early (document loaded ≠ React rendered).
+//
+//   3. {type: 'moebius:frame-theme', themeCss, bg}         parent → frame
+//      Fired when the active theme changes (SSE `theme_updated` event
+//      bubbles through useTheme into the React Query cache, this
+//      component's `theme` value updates, and we postMessage the new
+//      CSS so the iframe refreshes without remounting — preserves
+//      in-app state).
+//
+// Why token-free frame URL: `GET /api/apps/{id}/frame?v={version}` is
+// unauthenticated and served `Cache-Control: immutable`. Token arrives
+// via postMessage so the SW + browser cache can keep the HTML across
+// sessions. See `mobius/CLAUDE.md` "App iframe LRU cache + postMessage
+// protocol" for the broader context.
+// =================================================================
 
 // `version` is bumped by Shell when an `app_updated` event arrives
 // for this app, busting the iframe cache and forcing a fresh frame
@@ -16,20 +55,7 @@ import './AppCanvas.css'
 // across React remounts — a 5-minute staleTime is well within the
 // server-side validity window.
 export default function AppCanvas({ appId, version = 0, appName }) {
-  const { data: token } = useQuery({
-    queryKey: appTokenQueryKey(appId),
-    enabled: !!appId,
-    queryFn: async () => {
-      const res = await apiFetch('/auth/app-token', {
-        method: 'POST',
-        body: JSON.stringify({ app_id: appId }),
-      })
-      if (!res.ok) throw new Error(`app-token ${res.status}`)
-      const data = await res.json()
-      return data.token
-    },
-    staleTime: 5 * 60_000,
-  })
+  const { data: token } = appQueries.token.useQuery(appId)
 
   // Read the cached theme so we can hand it to the iframe via
   // postMessage on its ready signal. useTheme in Shell handles the
@@ -136,7 +162,7 @@ export default function AppCanvas({ appId, version = 0, appName }) {
 
   // Token NOT in URL anymore — sent via postMessage above. Frame URL
   // is stable per (appId, version), enabling the SW frame cache.
-  const src = `${BASE}/api/apps/${appId}/frame?v=${version}`
+  const src = api.apps.frameUrl(appId, version)
 
   // The iframe key intentionally OMITS `token` — the token may
   // refresh (after staleTime) but the iframe should keep its in-app

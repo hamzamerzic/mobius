@@ -25,8 +25,70 @@ const SYSTEM_EVENTS = new Set([
  * Hook that manages an SSE connection to /api/chats/{chatId}/stream.
  *
  * Text tokens are buffered and released character-by-character via
- * requestAnimationFrame for a smooth typewriter effect.  Tool events
+ * requestAnimationFrame for a smooth typewriter effect. Tool events
  * and non-text events are applied immediately.
+ *
+ * SSE event vocabulary — what the backend producers (see
+ * `backend/app/chat.py` + runners) send, and how this hook handles
+ * each. Adding a new event type requires editing BOTH the backend
+ * emitter AND the dispatch switch below in this file.
+ *
+ *   text                  Streamed assistant token chunk
+ *                         { content }. Buffered + drained by rAF.
+ *   tool_start            Tool invocation began
+ *                         { tool, input? }. Appends a tool block
+ *                         with status='running'.
+ *   tool_input            Backfill summary (assistant block arrived
+ *                         after start). { input }.
+ *   tool_output           Tool finished, here's its result
+ *                         { content }. Attaches to running block.
+ *   tool_end              Marks the running tool done (status flip).
+ *   question              AskUserQuestion fired
+ *                         { questions: [...] }. Renders a card.
+ *   queued_turn_starting  Backend about to promote a queued message
+ *                         { ts }. Notifies caller via callback.
+ *   catch_up_done         Replay burst finished; live events follow.
+ *   error                 { message }. Surfaced inline.
+ *   done                  Turn complete; SSE closes.
+ *
+ * System events (theme_updated, app_updated, shell_rebuilding,
+ * shell_rebuilt, shell_rebuild_failed) listed in the `SYSTEM_EVENTS`
+ * set above are forwarded to `onSystemEvent` instead of touching
+ * `streamItems` — they aren't chat content.
+ *
+ * @param {string} chatId
+ * @param {object} callbacks
+ * @param {(info?: {continues: boolean, promotedTs: number|null}) => void} [callbacks.onStreamEnd]
+ *   Fired one rAF after the `done` event so React commits before the
+ *   caller promotes streamItems to messages.
+ * @param {(event: object) => void} [callbacks.onSystemEvent]
+ *   Fired for non-chat SSE events (theme/app/shell). Not buffered.
+ * @param {(opts?: {force?: boolean}) => void} [callbacks.onNeedsRefresh]
+ *   Fired when the stream returns 204 outside the post-send race
+ *   window — caller should refetch persisted DB state.
+ * @param {(ts: number|null) => void} [callbacks.onQueuedTurnStarting]
+ *   Fired when the backend is about to promote a queued message; `ts`
+ *   identifies which pending entry was promoted.
+ *
+ * @returns {{
+ *   streamItems: Array<
+ *     | {type: 'text', content: string}
+ *     | {type: 'tool', tool: string, input: string, output: string,
+ *        status: 'running' | 'done'}
+ *     | {type: 'question', questions: Array<object>}
+ *     | {type: 'error', content: string}
+ *   >,
+ *   latestItemsRef: React.MutableRefObject<Array<object>>,
+ *   isStreaming: boolean,
+ *   connectionError: string | null,
+ *   sendMessage: (text: string, attachments?: Array<object>,
+ *                 opts?: {hidden?: boolean, queueOnly?: boolean,
+ *                         answers?: object}) => Promise<object>,
+ *   connectToStream: () => void,
+ *   retry: () => void,
+ *   disconnect: (opts?: {clearStreaming?: boolean}) => void,
+ *   clearStreamItems: () => void,
+ * }}
  */
 export default function useStreamConnection(chatId, {
   onStreamEnd,

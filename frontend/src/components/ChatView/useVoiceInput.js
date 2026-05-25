@@ -17,8 +17,24 @@ import { useState, useRef, useEffect } from 'react'
  * of silence). listeningRef stays true across restart gaps so the onChange
  * guard blocks Chrome's textarea direct-fill throughout.
  *
- * @param {{ onTranscript: (text: string) => void, inputRef: React.RefObject }} options
- * @returns {{ listening: boolean, listeningRef: React.RefObject, startVoice: () => void, stopVoice: () => void, toggleVoice: () => void }}
+ * @param {object} options
+ * @param {(text: string) => void} options.onTranscript
+ *   Called with the concatenated final+interim transcript on every
+ *   onresult event. Caller writes this into the composer textarea.
+ * @param {React.RefObject<HTMLTextAreaElement>} options.inputRef
+ *   The composer textarea — used for auto-height resize on transcript
+ *   growth and to seed voiceFinalRef with the current value on start.
+ *
+ * @returns {{
+ *   listening: boolean,
+ *   listeningRef: React.MutableRefObject<boolean>,
+ *   startVoice: () => void,
+ *   stopVoice: () => void,
+ *   toggleVoice: () => void,
+ * }}
+ *   `listeningRef` is the synchronous mirror of `listening`; gate any
+ *   `onChange` handlers on it to block Chrome's OS dictation layer
+ *   from racing with `onresult` mid-session.
  */
 export default function useVoiceInput({ onTranscript, inputRef }) {
   const [listening, setListening] = useState(false)
