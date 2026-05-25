@@ -29,21 +29,19 @@ export function clearToken() {
 
 // Wipes persisted client state on logout / token expiry: the
 // TanStack Query cache (IndexedDB) AND the SW Cache Storage
-// entries. The SW currently caches `mobius-vendor-*`,
-// `mobius-assets-*`, `mobius-proxy-*`, and `mobius-esm-*` —
-// nothing per-owner anymore (app frame/module moved to HTTP
-// ETag revalidation, no SW cache entry, see sw.js), but the wipe
-// still matters because:
-//   - the TanStack Query cache (IDB) holds owner-scoped chat/app
-//     lists that a subsequent owner on a shared device must not see;
-//   - cached `mobius-proxy-*` responses may include owner-fetched
-//     remote assets that look benign but expose visited URLs;
-//   - bumping past a stale SW that still has the retired
-//     `mobius-apps-*` cache (pre-v6 instances) needs the activate
-//     purge to land, and an explicit wipe forces it on logout
-//     rather than waiting for the next navigation.
-// Returns a promise so callers can `await` it before reloading the
-// page (otherwise the browser would abort the in-flight delete).
+// entries. Two cache-name prefixes need clearing now:
+//   - `mobius-*` — runtime caches registered in src/sw.js
+//     (`mobius-vendor`, `mobius-esm`, `mobius-proxy`) plus any
+//     pre-vite-plugin-pwa legacy names that lingered.
+//   - `workbox-*` — precache entries injected by vite-plugin-pwa
+//     (`workbox-precache-v2-<scope>`) plus the workbox-runtime
+//     bucket. These hold the shell bundle, manifest, and icons —
+//     not owner-scoped data but worth purging so the next owner
+//     on a shared device gets a clean install on next visit.
+// The TanStack Query cache (IDB) holds owner-scoped chat/app
+// lists; that's the primary privacy reason for the wipe. Returns
+// a promise so callers can `await` it before reloading the page
+// (otherwise the browser would abort the in-flight delete).
 export function clearQueryCache() {
   return Promise.all([
     idbDel('mobius-query-cache').catch(() => {}),
@@ -55,7 +53,9 @@ async function wipeSwCaches() {
   if (typeof caches === 'undefined') return
   const keys = await caches.keys()
   await Promise.all(
-    keys.filter(k => k.startsWith('mobius-')).map(k => caches.delete(k))
+    keys
+      .filter(k => k.startsWith('mobius-') || k.startsWith('workbox-'))
+      .map(k => caches.delete(k))
   )
 }
 

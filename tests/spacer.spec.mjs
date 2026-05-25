@@ -944,15 +944,21 @@ test.describe('Scroll edge cases', () => {
     // Send second message.
     await sendMessage(page, 'Second message')
 
-    const m = await measure(page)
-    // The second user message should be visible near the top
-    // (the send path scrolls to show the new user message).
     const userMsgs = await page.evaluate(() => {
       const msgs = document.querySelectorAll('.chat__text--user')
       return [...msgs].map(el => el.textContent.trim())
     })
     expect(userMsgs).toContain('Second message')
-    expect(m.userVisualTop).toBeLessThan(50)
+
+    // Poll for the PIN_USER_MSG to settle. A single measure() races
+    // React's layout effect under heavy parallel suite load and
+    // flaked once in CI; the condition itself is stable but takes
+    // 1-2 RAFs after the new user message commits to be in place.
+    // Poll keeps the assertion tight without an arbitrary sleep.
+    await expect.poll(
+      async () => (await measure(page)).userVisualTop,
+      { timeout: 2000, intervals: [50, 100, 200] },
+    ).toBeLessThan(50)
   })
 
   test('27. Viewport resize cycles do not engage auto-follow on streaming chat', async ({ page }) => {

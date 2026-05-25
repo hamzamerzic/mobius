@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -784,6 +785,23 @@ async def _run_chat_impl(
   if vp_w and vp_h:
     base_env["VIEWPORT_WIDTH"] = str(vp_w)
     base_env["VIEWPORT_HEIGHT"] = str(vp_h)
+  # Per-chat persistent Chrome profile for agent-browser. Default
+  # (no AGENT_BROWSER_PROFILE) spins up a fresh ephemeral profile per
+  # invocation — no SW registered, no warm cache, no localStorage
+  # from prior agent screenshots in this chat. That means the agent's
+  # "I checked the app and it renders" is a fresh-Chromium path that
+  # never reproduces the partner's persistent-PWA-cache state.
+  # Pointing the profile at /data/agent-browser-profiles/chat-<id>
+  # gives the agent a stable cache to warm against across screenshots
+  # within one chat (faster startup, repeated previews skip the SW
+  # register + bundle fetch). PER-CHAT keying is load-bearing: two
+  # parallel agent chats both launching Chrome against a shared dir
+  # would race on the profile lock. The dir is created on first
+  # agent-browser invocation by the CLI itself; we just point at it.
+  chat_id_safe = re.sub(r"[^A-Za-z0-9_-]", "_", chat_id or "default")
+  base_env["AGENT_BROWSER_PROFILE"] = (
+    f"/data/agent-browser-profiles/chat-{chat_id_safe}"
+  )
 
   # Get the provider first — needed for auth check.
   provider = get_provider(provider_id)

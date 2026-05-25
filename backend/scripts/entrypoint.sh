@@ -10,7 +10,15 @@ trap cleanup TERM INT
 # Ensure /data and key subdirectories exist and are writable by mobius.
 # Railway (and similar platforms) mount a fresh volume at /data owned by
 # root — the dirs from the Dockerfile are replaced by the empty mount.
-mkdir -p /data/db /data/apps /data/compiled /data/shared /data/shell /data/logs /data/cron-logs /data/cli-auth
+mkdir -p /data/db /data/apps /data/compiled /data/shared /data/shell /data/logs /data/cron-logs /data/cli-auth /data/agent-browser-profiles
+
+# /data/agent-browser-profiles holds PER-CHAT Chrome user-data dirs
+# (chat-<chat_id>/...) for agent-browser. The path is set per-chat by
+# `app.chat._build_subprocess_env` so the agent's repeated screenshots
+# within one chat reuse cached SW + assets + warm bundle (faster + a
+# closer match to the partner's persistent PWA state). Per-chat
+# isolation avoids the lock conflict that would happen if two parallel
+# agent chats both tried to launch Chrome against a shared dir.
 if ! chown -R mobius:mobius /data 2>/dev/null; then
   echo "WARNING: chown -R mobius:mobius /data failed (likely a managed-volume platform like Railway)." >&2
   echo "WARNING: Falling back to chmod 1777 /data + 777 on subdirs so the mobius user can traverse" >&2
