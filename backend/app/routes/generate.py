@@ -21,6 +21,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.deps import get_current_owner
 from app.path_utils import validate_path_within_base
+from app.resource_access import get_active_chat_or_404
 
 log = logging.getLogger(__name__)
 
@@ -135,12 +136,7 @@ async def generate_image(
       detail="No Gemini API key configured. Add one in Settings.",
     )
 
-  chat = db.query(models.Chat).filter(
-    models.Chat.id == chat_id,
-    models.Chat.deleted_at.is_(None),
-  ).first()
-  if not chat:
-    raise HTTPException(status_code=404, detail="Chat not found.")
+  chat = get_active_chat_or_404(db, chat_id)
 
   api_key = decrypt_api_key(owner.gemini_api_key_enc)
   image_bytes, model_used = await _call_gemini(

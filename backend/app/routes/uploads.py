@@ -18,6 +18,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.deps import get_current_owner, get_current_owner_or_app
 from app.path_utils import validate_path_within_base
+from app.resource_access import get_active_chat_or_404
 
 router = APIRouter(prefix="/api/chats", tags=["uploads"])
 
@@ -80,12 +81,7 @@ async def upload_files(
   db: Session = Depends(get_db),
 ):
   """Saves uploaded files to /data/chats/{id}/uploads/ and records metadata."""
-  chat = db.query(models.Chat).filter(
-    models.Chat.id == chat_id,
-    models.Chat.deleted_at.is_(None),
-  ).first()
-  if not chat:
-    raise HTTPException(status_code=404, detail="Chat not found.")
+  chat = get_active_chat_or_404(db, chat_id)
 
   settings = get_settings()
   upload_dir = _resolve_upload_dir(settings.data_dir, chat_id)
@@ -125,12 +121,7 @@ def list_uploads(
   db: Session = Depends(get_db),
 ):
   """Returns the list of uploaded files for a chat."""
-  chat = db.query(models.Chat).filter(
-    models.Chat.id == chat_id,
-    models.Chat.deleted_at.is_(None),
-  ).first()
-  if not chat:
-    raise HTTPException(status_code=404, detail="Chat not found.")
+  chat = get_active_chat_or_404(db, chat_id)
   return chat.uploads or []
 
 
@@ -142,12 +133,7 @@ def delete_upload(
   db: Session = Depends(get_db),
 ):
   """Removes an uploaded file from disk and from the chat's upload list."""
-  chat = db.query(models.Chat).filter(
-    models.Chat.id == chat_id,
-    models.Chat.deleted_at.is_(None),
-  ).first()
-  if not chat:
-    raise HTTPException(status_code=404, detail="Chat not found.")
+  chat = get_active_chat_or_404(db, chat_id)
 
   settings = get_settings()
   upload_dir = pathlib.Path(settings.data_dir) / "chats" / chat_id / "uploads"
@@ -190,6 +176,11 @@ def serve_upload(
   # Detect MIME from the stored metadata if available; fall back to
   # letting FileResponse infer it. Force attachment for non-image types
   # to prevent a stored-XSS vector if a malicious file slips through.
+  #
+  # Lookup intentionally bypasses get_active_chat_or_404 — a missing
+  # or soft-deleted chat here degrades to "no stored MIME" instead of
+  # 404'ing a file the filesystem still has. The serve endpoint's
+  # 404 belongs to the file existence check above.
   stored_mime = None
   chat = db.query(models.Chat).filter(
     models.Chat.id == chat_id,

@@ -47,6 +47,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from app.providers import get_skill_path
 from app.runtime_types import RunnerResult
 from app.runner_registry import RunnerKind, registry
 
@@ -110,15 +111,6 @@ class ActiveCodexTurn:
     """Resolves the stop waiter once the runner is fully drained."""
     if not self._finished.done():
       self._finished.set_result(None)
-
-
-def _skill_path() -> Path | None:
-  """Returns the Möbius skill path, or None when unavailable."""
-  candidates = [
-    Path("/app/skill/agent-skill.md"),
-    Path(__file__).parent.parent.parent / "skill" / "agent-skill.md",
-  ]
-  return next((path for path in candidates if path.exists()), None)
 
 
 def _data_dir_from_env(base_env: dict[str, str]) -> Path:
@@ -733,7 +725,7 @@ async def run_codex_sdk_turn(
 
   base_instructions: str | None = None
   if session_id is None:
-    skill = _skill_path()
+    skill = get_skill_path()
     if skill is not None:
       try:
         base_instructions = skill.read_text(encoding="utf-8")

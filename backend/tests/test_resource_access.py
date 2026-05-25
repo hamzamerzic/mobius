@@ -1,0 +1,58 @@
+"""Unit tests for `app.resource_access.get_active_chat_or_404`.
+
+Three behaviors locked in: 404 on missing, 404 on soft-deleted,
+returns row on active. The helper centralizes a query pattern that
+five route files used to copy; the tests guard the contract against
+silent drift if the soft-delete column ever changes.
+"""
+
+from datetime import UTC, datetime
+
+import pytest
+from fastapi import HTTPException
+
+from app import models
+from app.resource_access import get_active_chat_or_404
+
+
+def test_returns_active_chat(db):
+  """An active (non-soft-deleted) chat row is returned."""
+  chat = models.Chat(id="alive", title="hi", messages=[])
+  db.add(chat)
+  db.commit()
+  result = get_active_chat_or_404(db, "alive")
+  assert result.id == "alive"
+
+
+def test_raises_404_on_missing_chat(db):
+  """Nonexistent id raises HTTPException(404)."""
+  with pytest.raises(HTTPException) as exc:
+    get_active_chat_or_404(db, "nope")
+  assert exc.value.status_code == 404
+
+
+def test_raises_404_on_soft_deleted_chat(db):
+  """A chat with `deleted_at` set is treated as not found. This is
+  the load-bearing behavior — the helper exists to make sure no
+  caller forgets the filter."""
+  chat = models.Chat(
+    id="dead", title="gone", messages=[], deleted_at=datetime.now(UTC),
+  )
+  db.add(chat)
+  db.commit()
+  with pytest.raises(HTTPException) as exc:
+    get_active_chat_or_404(db, "dead")
+  assert exc.value.status_code == 404
+
+
+def test_returns_same_row_callers_can_mutate(db):
+  """The returned row is the live SQLAlchemy object — callers can
+  mutate it and commit, which several route handlers do."""
+  chat = models.Chat(id="mut", title="orig", messages=[])
+  db.add(chat)
+  db.commit()
+  result = get_active_chat_or_404(db, "mut")
+  result.title = "renamed"
+  db.commit()
+  refetched = get_active_chat_or_404(db, "mut")
+  assert refetched.title == "renamed"

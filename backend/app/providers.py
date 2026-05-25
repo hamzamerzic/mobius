@@ -175,8 +175,16 @@ def effective_agent_settings(
   return merged
 
 
-def _skill_path() -> Path | None:
-  """Returns the path to the agent skill file, or None if not found."""
+def get_skill_path() -> Path | None:
+  """Resolves the agent skill file location. Single source of truth.
+
+  Both the subprocess fallback path in this module and the Codex SDK
+  runner (`codex_sdk_runner.py`) call this. The path is independent
+  of `data_dir` — the skill is part of the deployment, not per-instance
+  state, so resolution checks the baked container path first and falls
+  back to the in-repo path for local development. Returns None if
+  neither exists (callers handle skill-less startup gracefully).
+  """
   candidates = [
     Path("/app/skill/agent-skill.md"),
     Path(__file__).parent.parent.parent / "skill" / "agent-skill.md",
@@ -275,7 +283,7 @@ class ClaudeProvider(BaseProvider):
     if session_id:
       cmd += ["--resume", session_id]
     else:
-      skill = _skill_path()
+      skill = get_skill_path()
       if skill:
         cmd += ["--system-prompt-file", str(skill)]
 
@@ -551,7 +559,7 @@ class CodexProvider(BaseProvider):
     # file (same race rationale as the prompt) and pass it as
     # --base-instructions so codex uses it for the thread.
     if not session_id:
-      skill = _skill_path()
+      skill = get_skill_path()
       if skill:
         instructions_file = chat_dir / f"codex-instructions-{run_id}.txt"
         try:

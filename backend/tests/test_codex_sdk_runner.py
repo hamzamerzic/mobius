@@ -359,8 +359,8 @@ def test_run_codex_sdk_turn_resume_skips_skill_lookup(monkeypatch):
   monkeypatch.setattr(codex_sdk_runner, "_load_agent_settings", lambda _env: {})
   monkeypatch.setattr(
     codex_sdk_runner,
-    "_skill_path",
-    lambda: pytest.fail("_skill_path() should not run on resume"),
+    "get_skill_path",
+    lambda: pytest.fail("get_skill_path() should not run on resume"),
   )
 
   bc = _FakeBroadcast()

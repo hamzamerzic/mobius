@@ -20,6 +20,7 @@ from app.chat import (
 )
 from app.database import get_db
 from app.deps import get_current_owner
+from app.resource_access import get_active_chat_or_404
 from app.schemas import ChatPatch
 
 log = logging.getLogger(__name__)
@@ -146,12 +147,7 @@ def update_chat(
   db: Session = Depends(get_db),
 ):
   """Updates a chat's title and/or messages."""
-  chat = db.query(models.Chat).filter(
-    models.Chat.id == chat_id,
-    models.Chat.deleted_at.is_(None),
-  ).first()
-  if not chat:
-    raise HTTPException(status_code=404, detail="Chat not found.")
+  chat = get_active_chat_or_404(db, chat_id)
   if body.title is not None:
     chat.title = body.title
   if body.messages is not None:
@@ -191,12 +187,7 @@ async def patch_chat(
   from app.chat import get_queue_lock
 
   async with get_queue_lock(chat_id):
-    chat = db.query(models.Chat).filter(
-      models.Chat.id == chat_id,
-      models.Chat.deleted_at.is_(None),
-    ).first()
-    if not chat:
-      raise HTTPException(status_code=404, detail="Chat not found.")
+    chat = get_active_chat_or_404(db, chat_id)
 
     if body.clear_agent_settings:
       chat.agent_settings_json = None
@@ -298,12 +289,7 @@ def get_chat(
   messages have higher indices. The response includes `offset` (the index
   of the first message in this page) and `total` (total message count).
   """
-  chat = db.query(models.Chat).filter(
-    models.Chat.id == chat_id,
-    models.Chat.deleted_at.is_(None),
-  ).first()
-  if not chat:
-    raise HTTPException(status_code=404, detail="Chat not found.")
+  chat = get_active_chat_or_404(db, chat_id)
   all_msgs = chat.messages or []
   total = len(all_msgs)
   if before is not None:
@@ -416,12 +402,7 @@ async def save_question_answers(
   """Saves the user's answers into the last question block."""
   from sqlalchemy.orm.attributes import flag_modified
 
-  chat = db.query(models.Chat).filter(
-    models.Chat.id == chat_id,
-    models.Chat.deleted_at.is_(None),
-  ).first()
-  if not chat:
-    raise HTTPException(status_code=404, detail="Chat not found.")
+  chat = get_active_chat_or_404(db, chat_id)
   msgs = list(chat.messages or [])
   for msg in reversed(msgs):
     if msg.get("role") != "assistant":

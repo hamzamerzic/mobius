@@ -24,6 +24,7 @@ from app.chat import (
 from app.config import get_settings
 from app.database import get_db
 from app.deps import get_current_owner
+from app.resource_access import get_active_chat_or_404
 
 router = APIRouter(prefix="/api/chats", tags=["chats"])
 
@@ -206,12 +207,7 @@ async def send_message(
 ):
   """Saves the user message, starts the agent as a background task,
   and returns 202 immediately.  The client streams via GET /stream."""
-  chat = db.query(models.Chat).filter(
-    models.Chat.id == chat_id,
-    models.Chat.deleted_at.is_(None),
-  ).first()
-  if not chat:
-    raise HTTPException(status_code=404, detail="Chat not found.")
+  chat = get_active_chat_or_404(db, chat_id)
 
   # Atomic answer persistence: when the user is submitting a hidden
   # answer to an AskUserQuestion (body.hidden=true with body.answers),
@@ -425,12 +421,7 @@ async def cancel_pending_message(
   drift (e.g. the backend promoted a message into the active turn
   between the user clicking X and the DELETE landing).
   """
-  chat = db.query(models.Chat).filter(
-    models.Chat.id == chat_id,
-    models.Chat.deleted_at.is_(None),
-  ).first()
-  if not chat:
-    raise HTTPException(status_code=404, detail="Chat not found.")
+  chat = get_active_chat_or_404(db, chat_id)
 
   # Same per-chat lock as POST queue append + promote. Without it, a
   # DELETE that races a concurrent POST/promote can read a stale
