@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useLayoutEffect, useRef } from 'react'
 
 /**
  * Hook that decides whether the next persisted-message fetch should
@@ -54,14 +54,22 @@ export default function useBridgePartial({ runningAtMount, lastMsgAtMount }) {
   const capturedRef = useRef(false)
   const bridgedRef = useRef(false)
 
-  if (!capturedRef.current
-      && runningAtMount
-      && lastMsgAtMount
-      && lastMsgAtMount.role === 'assistant'
-      && lastMsgAtMount.ts != null) {
+  // Capture the partial-to-bridge AFTER render commits (not in the
+  // render body). React's rules forbid render-phase side effects;
+  // useLayoutEffect runs synchronously after commit but before
+  // paint, so the captured value is ready before any callback
+  // (onStreamEnd, promoteStreamToMessages) reads `shouldBridge`.
+  // The capturedRef one-shot ensures subsequent renders with the
+  // same or new inputs don't re-arm.
+  useLayoutEffect(() => {
+    if (capturedRef.current) return
+    if (!runningAtMount) return
+    if (!lastMsgAtMount) return
+    if (lastMsgAtMount.role !== 'assistant') return
+    if (lastMsgAtMount.ts == null) return
     capturedRef.current = true
     keptPartialTsRef.current = lastMsgAtMount.ts
-  }
+  }, [runningAtMount, lastMsgAtMount])
 
   function shouldBridge(currentLastMsg) {
     if (bridgedRef.current) return false
