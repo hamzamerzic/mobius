@@ -76,7 +76,7 @@ const SYSTEM_EVENTS = new Set([
  *     | {type: 'tool', tool: string, input: string, output: string,
  *        status: 'running' | 'done'}
  *     | {type: 'question', questions: Array<object>}
- *     | {type: 'error', content: string}
+ *     | {type: 'error', message: string}
  *   >,
  *   latestItemsRef: React.MutableRefObject<Array<object>>,
  *   isStreaming: boolean,

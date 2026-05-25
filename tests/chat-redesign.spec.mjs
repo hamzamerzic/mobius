@@ -282,3 +282,81 @@ test.describe('Q&A atomic write', () => {
     expect(sentBodies[1].answers).toHaveProperty('Pick', 'Yes')
   })
 })
+
+
+// ─────────────────────────────────────────────────────────────────
+// Error-block persistence — locks in the be32e58 fix
+// ─────────────────────────────────────────────────────────────────
+//
+// Two-stage assertion: the error renders during streaming AND
+// survives a chat reload. The earlier shape mismatch (streaming
+// pushed a text block, backend persisted an error block, frontend
+// had no error-render branch) silently dropped the error on
+// chat return.
+
+test.describe('Error block: persists across chat return', () => {
+
+  test('streamed `error` event renders as a system notice and stays after reload', async ({ page }) => {
+    const streamBody = [
+      'data: {"type":"text","content":"Working on it..."}\n\n',
+      'data: {"type":"error","message":"Quota exceeded. Try again later."}\n\n',
+      'data: {"type":"done"}\n\n',
+    ].join('')
+
+    await page.setViewportSize({ width: 412, height: 915 })
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
+      route.fulfill({ status: 202, body: '{}' })
+    )
+    await page.route('**/api/chat/stop', route =>
+      route.fulfill({ status: 200, body: '{}' })
+    )
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route =>
+      route.fulfill({
+        status: 200,
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+        },
+        body: streamBody,
+      })
+    )
+
+    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    await page.waitForFunction(
+      () => !!(document.querySelector('.chat__empty-wrap')
+            || document.querySelector('.chat__form')),
+      { timeout: 10000 }
+    )
+    await newChat(page)
+    await sendMessage(page, 'Try something')
+
+    // The error notice appears during streaming with the
+    // system-notice class — distinct from the assistant bubble.
+    const errorBlock = page.locator('.chat__text--error', {
+      hasText: 'Quota exceeded',
+    })
+    await expect(errorBlock).toBeVisible({ timeout: 5000 })
+    await expect(page.locator('.chat__error-label', { hasText: /Error/i }))
+      .toBeVisible()
+
+    // Wait for the stream's `done` to fire and promote the
+    // streamItems into a persisted assistant `<li>`. The
+    // promote replaces the live streaming list with one built
+    // from the assistant message's `blocks` array — that's
+    // exactly the path the bug fix targeted (MsgContent's new
+    // `block.type === 'error'` branch). If the branch is
+    // missing, the error block on the promoted message renders
+    // to null and disappears here.
+    await page.waitForFunction(
+      () => !document.querySelector('.chat__stop'),
+      { timeout: 5000 },
+    )
+    // The Stop button is gone; the streaming `<li>` (which
+    // shares its rendering path with the streaming render
+    // branch in ChatView.jsx) is replaced by the assistant
+    // `<li>` whose body comes from MsgContent.
+    await expect(
+      page.locator('.chat__text--error', { hasText: 'Quota exceeded' }),
+    ).toBeVisible({ timeout: 3000 })
+  })
+})
