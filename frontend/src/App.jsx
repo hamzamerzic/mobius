@@ -4,7 +4,8 @@ import { useIsRestoring } from '@tanstack/react-query'
 import SetupWizard from './components/SetupWizard/SetupWizard.jsx'
 import LoginForm from './components/LoginForm/LoginForm.jsx'
 import Shell from './components/Shell/Shell.jsx'
-import { getToken, setSetupInProgress } from './api/client.js'
+import { getToken } from './api/client.js'
+import * as setupSession from './lib/setupSession.js'
 import { setupQueries } from './hooks/queries.js'
 import { queryClient, persistOptions } from './queryClient.js'
 
@@ -14,22 +15,6 @@ export default function App() {
       <AppRoot />
     </PersistQueryClientProvider>
   )
-}
-
-// localStorage key written by SetupWizard while the user is mid-flow
-// (after account creation, before final onDone). Kept in App.jsx so the
-// resume check happens BEFORE the token fast path commits us to Shell.
-const SETUP_STEP_KEY = 'setup-step'
-
-function readSetupStep() {
-  try {
-    const v = localStorage.getItem(SETUP_STEP_KEY)
-    return (v === 'provider' || v === 'gemini') ? v : null
-  } catch { return null }
-}
-
-function clearSetupStep() {
-  try { localStorage.removeItem(SETUP_STEP_KEY) } catch {}
 }
 
 function AppRoot() {
@@ -44,7 +29,7 @@ function AppRoot() {
   // instead of dropping them into a Shell with no AI configured.
   // Read BEFORE the token fast path so we don't briefly mount Shell.
   const hasToken = !!getToken()
-  const resumeStep = hasToken ? readSetupStep() : null
+  const resumeStep = hasToken ? setupSession.getResumeStep() : null
   const initialStatus = resumeStep ? 'setup' : (hasToken ? 'shell' : 'loading')
   const [status, setStatus] = useState(initialStatus)
   const setupStatusQuery = setupQueries.status.useQuery({ enabled: !hasToken })
@@ -81,8 +66,8 @@ function AppRoot() {
     <SetupWizard
       initialStep={initialSetupStep}
       onDone={() => {
-        clearSetupStep()
-        setSetupInProgress(false)
+        setupSession.clearResumeStep()
+        setupSession.setInProgress(false)
         setStatus('shell')
       }}
     />

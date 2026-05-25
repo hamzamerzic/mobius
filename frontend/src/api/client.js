@@ -4,6 +4,7 @@
  * /api/chats work regardless of deployment prefix (e.g. /proxy/8001/).
  */
 import { del as idbDel } from 'idb-keyval'
+import * as setupSession from '../lib/setupSession.js'
 
 export const BASE = (import.meta.env.BASE_URL || '/').replace(/\/$/, '')
 
@@ -22,9 +23,11 @@ export function setToken(token) {
 export function clearToken() {
   try { localStorage.removeItem('token') } catch {}
   // Setup-wizard resume state assumes an active token. If the token
-  // is gone (logout / expiry), clear the resume key so the user
-  // doesn't get bounced back into the wizard after they re-login.
-  try { localStorage.removeItem('setup-step') } catch {}
+  // is gone (logout / expiry), clear the resume key + in-progress
+  // flag so the user doesn't get bounced back into the wizard after
+  // they re-login.
+  setupSession.clearResumeStep()
+  setupSession.setInProgress(false)
 }
 
 // Wipes persisted client state on logout / token expiry: the
@@ -59,9 +62,6 @@ async function wipeSwCaches() {
   )
 }
 
-let _setupInProgress = false
-export function setSetupInProgress(v) { _setupInProgress = v }
-
 export async function apiFetch(path, options = {}) {
   const token = getToken()
   const headers = {
@@ -72,7 +72,7 @@ export async function apiFetch(path, options = {}) {
 
   const res = await fetch(`${BASE}/api${path}`, { ...options, headers })
 
-  if (res.status === 401 && !_setupInProgress) {
+  if (res.status === 401 && !setupSession.isInProgress()) {
     clearToken()
     try { sessionStorage.setItem('auth_expired', '1') } catch {}
     // Await the cache wipe before reloading. Without this, the page

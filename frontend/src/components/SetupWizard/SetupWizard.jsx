@@ -1,29 +1,21 @@
 import { useState } from 'react'
-import { api, setToken, setSetupInProgress, BASE } from '../../api/client.js'
+import { api, setToken, BASE } from '../../api/client.js'
+import * as setupSession from '../../lib/setupSession.js'
 import { authQueries, settingsQueries } from '../../hooks/queries.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
 import './SetupWizard.css'
 
-// localStorage key for resuming setup mid-wizard. If the user creates
-// an account but closes the tab before finishing the provider /
-// Gemini steps, the next visit would otherwise land them in Shell
-// with no AI configured — silently broken. AppRoot reads this key
-// and routes back into the wizard at the right step.
-const SETUP_STEP_KEY = 'setup-step'
-
 export default function SetupWizard({ onDone, initialStep = 'account' }) {
   const [step, setStep] = useState(initialStep)
 
-  // Writes to localStorage synchronously alongside setStep so a refresh
-  // in the microsecond gap between setStep and a useEffect flush can't
-  // lose the resume position. Only persist past 'account' — that step
-  // has no token yet, so there's nothing to resume to.
+  // Persists step synchronously alongside setStep so a refresh in
+  // the microsecond gap between setStep and a useEffect flush can't
+  // lose the resume position. saveStep is a no-op for 'account'
+  // because there's no token yet — see setupSession.js.
   function goToStep(next) {
-    if (next !== 'account') {
-      try { localStorage.setItem(SETUP_STEP_KEY, next) } catch {}
-    }
+    setupSession.saveStep(next)
     setStep(next)
   }
   const [username, setUsername] = useState('')
@@ -54,7 +46,7 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
       }
       const data = await res.json()
       setToken(data.access_token)
-      setSetupInProgress(true)
+      setupSession.setInProgress(true)
       goToStep('provider')
     } catch {
       setError('Network error. Is the backend running?')
