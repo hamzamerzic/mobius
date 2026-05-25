@@ -89,6 +89,10 @@ class RunnerRegistry:
     """Returns the union of starting and registered chat ids."""
     return self._starting | {cid for cid, _ in self._handles}
 
+  def starting_chat_ids(self) -> set[str]:
+    """Returns a snapshot of chat ids reserved in the starting set."""
+    return set(self._starting)
+
   def handles_by_kind(self, kind: RunnerKind) -> list[RunnerHandle]:
     """Returns all registered handles for a runner kind."""
     return [
@@ -110,6 +114,12 @@ class RunnerRegistry:
   def forget(self, chat_id: str) -> None:
     """Drops the stored generation for a chat."""
     self._generation.pop(chat_id, None)
+
+  def reset_for_tests(self) -> None:
+    """Clears all registry state between tests."""
+    self._starting.clear()
+    self._handles.clear()
+    self._generation.clear()
 
 
 registry = RunnerRegistry()

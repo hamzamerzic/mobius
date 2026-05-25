@@ -63,7 +63,7 @@ def debug_status(
     "active_procs": active,
     "active_sdk_clients": sdk_clients,
     "active_sdk_sessions": sdk_sessions,
-    "starting": list(registry._starting),
+    "starting": list(registry.starting_chat_ids()),
     "broadcasts": broadcasts,
   }
 

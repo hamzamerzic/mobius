@@ -90,6 +90,21 @@ def test_generation_helpers_and_forget():
   assert registry.current_generation("chat-1") == 0
 
 
+def test_public_starting_accessor_and_reset_for_tests():
+  registry = RunnerRegistry()
+  registry.mark_starting("chat-1")
+  registry.bump_generation("chat-1")
+  registry.register(_FakeHandle("chat-2", RunnerKind.SUBPROCESS, "proc"))
+
+  assert registry.starting_chat_ids() == {"chat-1"}
+
+  registry.reset_for_tests()
+
+  assert registry.starting_chat_ids() == set()
+  assert registry.all_alive_chat_ids() == set()
+  assert registry.current_generation("chat-1") == 0
+
+
 def test_mark_starting_register_clears_starting():
   registry = RunnerRegistry()
 

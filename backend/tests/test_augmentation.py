@@ -551,7 +551,7 @@ def test_promote_succeeds_when_starting_is_held_by_current_run(db):
   db.commit()
 
   # Simulate the in-progress run's _starting claim.
-  registry._starting.add("starting-held-test")
+  registry.mark_starting("starting-held-test")
   try:
     msgs, user, sid = asyncio.run(
       _promote_pending_messages(db, "starting-held-test"),
@@ -764,11 +764,10 @@ def test_generation_mismatch_does_not_clear_newer_starting(db):
   chat_id = "gen-race-test"
 
   # Simulate: old run queued at gen 0, then stop bumps to gen 1.
-  registry._generation[chat_id] = 0
-  registry._starting.add(chat_id)
+  assert registry.mark_starting(chat_id) is True
 
   # Stop bumps generation (simulating stop_chat_for).
-  registry._generation[chat_id] = 1
+  assert registry.bump_generation(chat_id) == 1
 
   # Old run_chat checks generation — mismatch, should NOT clear
   # _starting because the newer run owns it.
@@ -779,7 +778,7 @@ def test_generation_mismatch_does_not_clear_newer_starting(db):
     registry.discard_starting(chat_id)
 
   # _starting should still contain chat_id (newer run owns it).
-  assert chat_id in registry._starting
+  assert chat_id in registry.starting_chat_ids()
 
   # Cleanup.
   registry.discard_starting(chat_id)

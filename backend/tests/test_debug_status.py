@@ -25,7 +25,7 @@ def test_debug_status_shape_matches_golden(client, auth):
   registry.register(SubprocessHandle(chat_id="chat-subproc", proc=proc))
   registry.register(_Handle("chat-sdk-claude", RunnerKind.CLAUDE_SDK))
   registry.register(_Handle("chat-sdk-codex", RunnerKind.CODEX_SDK))
-  registry._starting.add("chat-starting")
+  registry.mark_starting("chat-starting")
 
   r = client.get("/api/debug/status", headers=auth)
 

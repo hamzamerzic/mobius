@@ -20,7 +20,6 @@ class _ObservingHandle:
 
 def test_stop_chat_for_bumps_generation_before_handle_stop():
   seen: list[int] = []
-  registry._generation["chat-bump-order"] = 0
   registry.register(_ObservingHandle("chat-bump-order", seen))
 
   stopped = asyncio.run(chat_mod.stop_chat_for("chat-bump-order"))
