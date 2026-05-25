@@ -1,3 +1,6 @@
+import { DARK_COLORS, LIGHT_COLORS, parseThemeMeta, buildThemeCss } from '../theme.js'
+import { themeQueries } from '../hooks/queries.js'
+
 /**
  * Owns the theme lifecycle: read, transform, apply (DOM + body bg
  * + meta theme-color), persist (storage API), notify (server SSE),
@@ -106,4 +109,79 @@ export async function persistTheme(css, mode, api) {
     api.storage.shared.putThemeMode(mode),
   ])
   api.notify.send({ type: 'theme_updated' }).catch(() => {})
+}
+
+// Structural color vars swapped on a light/dark toggle. Accent
+// colors and any agent-set custom vars are preserved via the
+// existing meta.colors spread so a user's "purple accent" survives
+// a theme toggle.
+const STRUCTURAL_KEYS = [
+  '--bg',
+  '--surface',
+  '--surface2',
+  '--border',
+  '--border-light',
+  '--text',
+  '--muted',
+]
+
+/**
+ * Toggle between dark and light: fetch the current CSS, swap
+ * structural color vars for the opposite mode, apply to the DOM,
+ * persist to storage, then invalidate the React Query cache so
+ * AppCanvas can postMessage the new theme to live iframes.
+ *
+ * Returns `{ newMode, newCss, newBg }` so the caller (SettingsView)
+ * can update its optimistic UI state without re-deriving them.
+ *
+ * Throws on persist failure so the caller can run its rollback
+ * (flip lightMode back, surface an error).
+ *
+ * CRITICAL — cache invalidation contract:
+ *   Both `themeQueries.invalidate` AND `themeQueries.mode.invalidate`
+ *   MUST fire after persistTheme. The first is what AppCanvas.jsx
+ *   subscribes to (useQuery({ queryKey: themeQueryKey, ... })) and
+ *   its useEffect on [theme?.css, theme?.bg] is what fires the
+ *   `moebius:frame-theme` postMessage to live iframes. The second
+ *   is what SettingsView reads to seed `lightMode` after navigation
+ *   away and back. Forgetting either silently breaks one consumer:
+ *   iframes stale-theme until next mount, OR the dark-mode toggle
+ *   flips back to the persisted value after a settings re-open.
+ *
+ * CRITICAL — bg extraction:
+ *   `newBg` is extracted from the BUILT CSS via regex, not from
+ *   the parsed `meta.colors['--bg']` of the input. Mode swap
+ *   replaces --bg, so the old meta value is stale. Passing the
+ *   stale value to applyThemeToDom would leave body.background +
+ *   meta theme-color pointing at the previous mode's color even
+ *   though the <style> block reflects the new mode.
+ */
+export async function toggleTheme(queryClient, currentMode, api) {
+  const newMode = currentMode === 'dark' ? 'light' : 'dark'
+
+  const themeRes = await api.storage.shared.getThemeCss()
+  const currentCss = themeRes.ok ? await themeRes.text() : ''
+  const meta = parseThemeMeta(currentCss)
+
+  // Swap structural colors while preserving agent customisations.
+  const base = newMode === 'light' ? LIGHT_COLORS : DARK_COLORS
+  const swapped = {}
+  for (const k of STRUCTURAL_KEYS) {
+    if (base[k]) swapped[k] = base[k]
+  }
+  const colors = { ...meta.colors, ...swapped }
+  const newCss = buildThemeCss(colors, meta, newMode)
+
+  // Extract NEW bg from the built CSS, not from old meta.
+  const bgMatch = newCss.match(/--bg:\s*(#[0-9a-fA-F]{3,8})/)
+  const newBg = bgMatch ? bgMatch[1] : meta.colors['--bg']
+
+  // Apply to DOM first (no round-trip lag for the user), then
+  // persist, then invalidate so iframes pick up the change.
+  applyThemeToDom(newCss, newBg)
+  await persistTheme(newCss, newMode, api)
+  themeQueries.invalidate(queryClient)
+  themeQueries.mode.invalidate(queryClient)
+
+  return { newMode, newCss, newBg }
 }

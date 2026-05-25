@@ -2,8 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { authQueries, settingsQueries, themeQueries } from '../../hooks/queries.js'
-import { DARK_COLORS, LIGHT_COLORS, parseThemeMeta, buildThemeCss } from '../../theme.js'
-import { applyThemeToDom, persistTheme } from '../../lib/themeService.js'
+import * as themeService from '../../lib/themeService.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
@@ -64,40 +63,15 @@ export default function SettingsView({ onThemeChange }) {
     setThemeSwitching(true)
     setThemeError('')
 
+    // Delegate the full apply/persist/invalidate dance to
+    // themeService — SettingsView keeps only the optimistic UI
+    // state (setLightMode + setThemeError) and the
+    // catch-rollback. themeService.toggleTheme invalidates both
+    // theme queries; AppCanvas's useEffect picks that up and
+    // postMessages `moebius:frame-theme` to live iframes.
     try {
-      const themeRes = await api.storage.shared.getThemeCss()
-      const currentCss = themeRes.ok ? await themeRes.text() : ''
-      const meta = parseThemeMeta(currentCss)
-
-      // Swap structural colors for the new mode while preserving agent
-      // customizations (accents, custom vars, etc.).
-      const base = newMode ? LIGHT_COLORS : DARK_COLORS
-      const structuralKeys = ['--bg', '--surface', '--surface2', '--border', '--border-light', '--text', '--muted']
-      const swapped = {}
-      for (const k of structuralKeys) { if (base[k]) swapped[k] = base[k] }
-      const colors = { ...meta.colors, ...swapped }
-      const mode = newMode ? 'light' : 'dark'
-      const newCss = buildThemeCss(colors, meta, mode)
-
-      // Extract bg from the NEW css (not from old meta) — toggling
-      // mode swaps --bg so meta.bg is stale.
-      const bgMatch = newCss.match(/--bg:\s*(#[0-9a-fA-F]{3,8})/)
-      const newBg = bgMatch ? bgMatch[1] : meta.colors['--bg']
-
-      // Apply immediately to the DOM — no round-trip delay. Single
-      // entry point in themeService keeps SettingsView free of
-      // direct getElementById / body.style / meta-tag mutations.
-      applyThemeToDom(newCss, newBg)
-
-      // Persist in background.
-      await persistTheme(newCss, mode, api)
-
-      // Invalidate the theme query so AppCanvas picks up the change
-      // and sends moebius:frame-theme to iframes. The /notify POST
-      // only reaches active chat broadcasts — when no agent is
-      // running, iframes would never get the update without this.
-      themeQueries.mode.invalidate(queryClient)
-      themeQueries.invalidate(queryClient)
+      const currentMode = newMode ? 'dark' : 'light'  // opposite of newMode
+      await themeService.toggleTheme(queryClient, currentMode, api)
       onThemeChange?.()
     } catch {
       setLightMode(!newMode)

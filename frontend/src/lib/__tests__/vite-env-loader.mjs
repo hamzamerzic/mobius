@@ -1,0 +1,33 @@
+// Node ESM loader hook that substitutes Vite's `import.meta.env`
+// for modules under test. Without this, api/client.js (and
+// anything that transitively imports it) crashes under node:test
+// because `import.meta.env` is a Vite-specific construct that
+// only exists in the dev/build pipeline.
+//
+// Used by themeService.toggleTheme.test.js (themeService imports
+// themeQueries from hooks/queries.js → api/client.js).
+//
+// Usage:
+//   node --loader=./src/lib/__tests__/vite-env-loader.mjs --test ...
+
+import { readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
+
+export async function load(url, context, nextLoad) {
+  // Only intercept project sources — leave node_modules alone.
+  if (url.startsWith('file://') && url.includes('/src/') && url.endsWith('.js')) {
+    const path = fileURLToPath(url)
+    const raw = await readFile(path, 'utf8')
+    const patched = raw
+      .replace(/import\.meta\.env\.BASE_URL/g, "'/'")
+      .replace(/import\.meta\.env\.MODE/g, "'test'")
+      .replace(/import\.meta\.env\.DEV/g, 'false')
+      .replace(/import\.meta\.env\.PROD/g, 'false')
+    return {
+      format: 'module',
+      source: patched,
+      shortCircuit: true,
+    }
+  }
+  return nextLoad(url, context)
+}
