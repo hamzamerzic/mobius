@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from app.runtime_types import RunnerResult
+from app.runner_registry import RunnerKind, registry
 
 log = logging.getLogger("moebius.chat")
 
@@ -64,7 +65,9 @@ class ActiveCodexTurn:
   Same shape as Claude's `ActiveClaudeClient`.
   """
 
-  def __init__(self, thread: Any, turn: Any):
+  def __init__(self, thread: Any, turn: Any, chat_id: str):
+    self.chat_id = chat_id
+    self.kind = RunnerKind.CODEX_SDK
     self.thread = thread
     self.turn = turn
     self._finished: asyncio.Future[None] = (
@@ -84,6 +87,24 @@ class ActiveCodexTurn:
         "codex active_turn._finished never resolved within 5s; runner is wedged"
       )
       return
+
+  async def stop(self, timeout: float = 2.0) -> bool:
+    """Interrupts the active turn and waits up to `timeout` seconds."""
+    try:
+      await asyncio.wait_for(self.interrupt(), timeout=timeout)
+      return True
+    except asyncio.CancelledError:
+      raise
+    except asyncio.TimeoutError:
+      log.warning(
+        "Codex SDK stop timed out chat_id=%s", self.chat_id,
+      )
+      return False
+    except Exception:
+      log.exception(
+        "Codex SDK stop failed chat_id=%s", self.chat_id,
+      )
+      return False
 
   def mark_finished(self) -> None:
     """Resolves the stop waiter once the runner is fully drained."""
@@ -850,8 +871,9 @@ async def run_codex_sdk_turn(
         model=model,
         effort=effort,
       )
-      active_turn = ActiveCodexTurn(thread, turn)
+      active_turn = ActiveCodexTurn(thread, turn, chat_id=chat_id)
       active_sessions[chat_id] = active_turn
+      registry.register(active_turn)
 
       async for notification in turn.stream():
         payload = notification.payload
@@ -953,6 +975,9 @@ async def run_codex_sdk_turn(
     if isinstance(current, ActiveCodexTurn) and current.turn is turn:
       active_sessions.pop(chat_id, None)
       current.mark_finished()
+    current_handle = registry.get_handle(chat_id, RunnerKind.CODEX_SDK)
+    if isinstance(current_handle, ActiveCodexTurn) and current_handle.turn is turn:
+      registry.unregister(chat_id, RunnerKind.CODEX_SDK)
 
 
 async def steer_into_active_turn(

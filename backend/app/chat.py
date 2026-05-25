@@ -11,6 +11,7 @@ import logging
 import os
 import time
 import weakref
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from app.config import get_settings
 from app.events import process_event, build_assistant_message, finalize_blocks
 from app.providers import effective_agent_settings, get_provider
 from app.push import notify_owner
+from app.runner_registry import RunnerKind, registry
 from app.runtime_types import ChatEvent
 
 
@@ -118,6 +120,35 @@ def _notify_pending_question(db: Session, chat_id: str, event: dict):
     log.exception(
       "notify_pending_question failed chat_id=%s", chat_id,
     )
+
+
+@dataclass
+class SubprocessHandle:
+  """Registry handle for one subprocess-backed chat turn."""
+
+  chat_id: str
+  proc: asyncio.subprocess.Process
+  kind: RunnerKind = RunnerKind.SUBPROCESS
+
+  async def stop(self, timeout: float = 2.0) -> bool:
+    """Stops the subprocess and waits up to `timeout` seconds."""
+    try:
+      if self.proc.returncode is None:
+        self.proc.kill()
+      await asyncio.wait_for(self.proc.wait(), timeout=timeout)
+      return True
+    except asyncio.CancelledError:
+      raise
+    except asyncio.TimeoutError:
+      _get_logger().warning(
+        "Subprocess stop timed out chat_id=%s", self.chat_id,
+      )
+      return False
+    except Exception:
+      _get_logger().exception(
+        "Subprocess stop failed chat_id=%s", self.chat_id,
+      )
+      return False
 
 
 def _update_last_assistant_message(db: Session, chat_id: str, message: dict) -> bool:
@@ -1477,6 +1508,7 @@ async def _run_chat_impl(
     )
     if chat_id:
       _active_procs[chat_id] = proc
+      registry.register(SubprocessHandle(chat_id=chat_id, proc=proc))
 
     stderr_task = asyncio.ensure_future(_drain(proc.stderr))
     # Ordered blocks list — preserves interleaved text/tool order.
@@ -1617,6 +1649,9 @@ async def _run_chat_impl(
       _finalize_response(db, chat_id, assistant_blocks)
       if _active_procs.get(chat_id) is proc:
         _active_procs.pop(chat_id, None)
+      current_handle = registry.get_handle(chat_id, RunnerKind.SUBPROCESS)
+      if isinstance(current_handle, SubprocessHandle) and current_handle.proc is proc:
+        registry.unregister(chat_id, RunnerKind.SUBPROCESS)
       set_active_broadcast(None)
       # Only drain the queue if we still own this generation. A Stop
       # bumps the generation and clears pending_messages — we must not
@@ -1668,6 +1703,9 @@ async def _run_chat_impl(
   except Exception as exc:
     if proc is not None and _active_procs.get(chat_id) is proc:
       _active_procs.pop(chat_id, None)
+    current_handle = registry.get_handle(chat_id, RunnerKind.SUBPROCESS)
+    if isinstance(current_handle, SubprocessHandle) and current_handle.proc is proc:
+      registry.unregister(chat_id, RunnerKind.SUBPROCESS)
     log.exception("run_chat failed chat_id=%s: %s", chat_id, exc)
     _finalize_response(db, chat_id, assistant_blocks)
     bc.publish({"type": "error", "message": str(exc)})

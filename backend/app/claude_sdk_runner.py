@@ -66,6 +66,7 @@ from claude_agent_sdk.types import (
 )
 
 from app.pending_questions import PendingQuestion
+from app.runner_registry import RunnerKind, registry
 from app.runtime_types import RunnerResult
 from app.tool_summaries import summarize_tool_input
 
@@ -81,7 +82,9 @@ class ActiveClaudeClient:
   closed the broadcast for live SSE subscribers.
   """
 
-  def __init__(self, client: ClaudeSDKClient):
+  def __init__(self, client: ClaudeSDKClient, chat_id: str):
+    self.chat_id = chat_id
+    self.kind = RunnerKind.CLAUDE_SDK
     self._client = client
     self._finished: asyncio.Future[None] = (
       asyncio.get_running_loop().create_future()
@@ -105,6 +108,24 @@ class ActiveClaudeClient:
         "ActiveClaudeClient._finished never resolved within 5s; "
         "runner is wedged",
       )
+
+  async def stop(self, timeout: float = 2.0) -> bool:
+    """Interrupts the SDK run and waits up to `timeout` seconds."""
+    try:
+      await asyncio.wait_for(self.interrupt(), timeout=timeout)
+      return True
+    except asyncio.CancelledError:
+      raise
+    except asyncio.TimeoutError:
+      log.warning(
+        "Claude SDK stop timed out chat_id=%s", self.chat_id,
+      )
+      return False
+    except Exception:
+      log.exception(
+        "Claude SDK stop failed chat_id=%s", self.chat_id,
+      )
+      return False
 
   def mark_finished(self) -> None:
     """Resolves the stop waiter once the runner is fully drained."""
@@ -325,8 +346,9 @@ async def run_claude_sdk_turn(
   options = ClaudeAgentOptions(**options_kwargs)
 
   client = ClaudeSDKClient(options)
-  active_client = ActiveClaudeClient(client)
+  active_client = ActiveClaudeClient(client, chat_id=chat_id)
   active_clients[chat_id] = active_client
+  registry.register(active_client)
 
   try:
     try:
@@ -432,6 +454,9 @@ async def run_claude_sdk_turn(
   finally:
     if active_clients.get(chat_id) is active_client:
       active_clients.pop(chat_id, None)
+    current_handle = registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK)
+    if current_handle is active_client:
+      registry.unregister(chat_id, RunnerKind.CLAUDE_SDK)
     pending = pending_questions.get(chat_id)
     if pending is not None and not pending.future.done():
       pending.future.cancel()

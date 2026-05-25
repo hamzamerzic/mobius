@@ -179,6 +179,7 @@ def test_steer_into_active_turn_cleans_dead_handle(monkeypatch):
       _FakeTurnHandle(
         steer_exc=sdk["InvalidParamsError"](-32602, "turn is not running"),
       ),
+      chat_id="chat-1",
     )
     return await codex_sdk_runner.steer_into_active_turn(
       "chat-1", active_sessions, "ping",
@@ -196,6 +197,7 @@ def test_steer_into_active_turn_reraises_real_errors():
     active_sessions["chat-1"] = codex_sdk_runner.ActiveCodexTurn(
       object(),
       _FakeTurnHandle(steer_exc=RuntimeError("real failure")),
+      chat_id="chat-1",
     )
     await codex_sdk_runner.steer_into_active_turn(
       "chat-1", active_sessions, "ping",
@@ -208,7 +210,9 @@ def test_steer_into_active_turn_reraises_real_errors():
 def test_active_codex_turn_interrupt_waits_for_runner_finish():
   async def _scenario() -> None:
     turn = _FakeTurnHandle()
-    active_turn = codex_sdk_runner.ActiveCodexTurn(object(), turn)
+    active_turn = codex_sdk_runner.ActiveCodexTurn(
+      object(), turn, chat_id="chat-1"
+    )
     task = asyncio.create_task(active_turn.interrupt())
     await asyncio.sleep(0)
     assert turn.interrupt_calls == 1
@@ -222,7 +226,9 @@ def test_active_codex_turn_interrupt_waits_for_runner_finish():
 def test_active_codex_turn_interrupt_logs_and_still_waits(caplog):
   async def _scenario() -> None:
     turn = _FakeTurnHandle(interrupt_exc=RuntimeError("interrupt failed"))
-    active_turn = codex_sdk_runner.ActiveCodexTurn(object(), turn)
+    active_turn = codex_sdk_runner.ActiveCodexTurn(
+      object(), turn, chat_id="chat-1"
+    )
     task = asyncio.create_task(active_turn.interrupt())
     await asyncio.sleep(0)
     assert turn.interrupt_calls == 1
@@ -240,7 +246,9 @@ def test_active_codex_turn_interrupt_times_out_if_runner_never_finishes(caplog):
   turn = _FakeTurnHandle()
 
   async def _scenario() -> float:
-    active_turn = codex_sdk_runner.ActiveCodexTurn(object(), turn)
+    active_turn = codex_sdk_runner.ActiveCodexTurn(
+      object(), turn, chat_id="chat-1"
+    )
     start = asyncio.get_running_loop().time()
     await asyncio.wait_for(active_turn.interrupt(), timeout=5.5)
     return asyncio.get_running_loop().time() - start
