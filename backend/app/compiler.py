@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 from app.config import get_settings
+from app.runtime_libs import RUNTIME_LIBS
 
 _ESBUILD_TIMEOUT_SECS = 30
 
@@ -68,13 +69,7 @@ async def compile_jsx(app_id: int, jsx_source: str) -> str:
         "--format=esm",
         "--jsx=automatic",
         "--platform=browser",
-        "--external:react",
-        "--external:react/jsx-runtime",
-        "--external:react-dom",
-        "--external:recharts",
-        "--external:date-fns",
-        "--external:three",
-        "--external:three/addons/*",
+        *[f"--external:{lib}" for lib in RUNTIME_LIBS],
         f"--outfile={out_path}",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

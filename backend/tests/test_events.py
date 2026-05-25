@@ -1,6 +1,14 @@
 """Tests for event processing (events.py)."""
 
-from app.events import process_event, build_assistant_message, finalize_blocks
+from typing import get_args
+
+from app.chat import _ChatEventSink
+from app.events import (
+  EventType,
+  build_assistant_message,
+  finalize_blocks,
+  process_event,
+)
 
 
 def test_text_event_creates_block():
@@ -173,3 +181,8 @@ def test_process_error_event_coalesces_duplicates():
   assert error_blocks[0]["message"] == "second"
   # Text block preserved.
   assert any(b.get("type") == "text" for b in blocks)
+
+
+def test_immediate_save_types_are_event_types():
+  """_IMMEDIATE_SAVE_TYPES stays a subset of the exported vocabulary."""
+  assert _ChatEventSink._IMMEDIATE_SAVE_TYPES <= set(get_args(EventType))

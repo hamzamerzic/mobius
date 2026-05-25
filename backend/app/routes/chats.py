@@ -20,6 +20,7 @@ from app.chat import (
 )
 from app.database import get_db
 from app.deps import get_current_owner
+from app.schemas import ChatPatch
 
 log = logging.getLogger(__name__)
 
@@ -64,24 +65,6 @@ def _coerce_agent_settings(raw) -> dict:
     except (ValueError, TypeError):
       return {}
   return {}
-
-
-class ChatPatch(BaseModel):
-  # Partial-update payload from the `/` slash picker. Sending `None`
-  # for `agent_settings_json` clears the override (reverts the chat to
-  # the global default); sending a dict merges into the existing one.
-  # Keys: `model`, `effort`, ... see providers.effective_agent_settings
-  # for the full list. Values are merged as-is — if the SDK rejects a
-  # bogus value, the SDK's error message is the right UX, not a
-  # server-side guardrail that prevents agent experimentation.
-  agent_settings_json: dict | None = None
-  # When True, treat agent_settings_json=None as an explicit clear.
-  clear_agent_settings: bool = False
-  # When set, switches the chat's provider (claude/codex). The handler
-  # ALSO mirrors the new value onto `owner.provider` so future new
-  # chats inherit it — this is what makes "default = last selected"
-  # work without a settings-page toggle.
-  provider: str | None = None
 
 
 @router.get("")

@@ -273,6 +273,8 @@ class _ChatEventSink:
   """
 
   _SAVE_INTERVAL_SECS = 1.0
+  # Subset of app.events.EventType that forces a sync DB commit so the
+  # user does not reconnect into a stale transcript mid-turn.
   _IMMEDIATE_SAVE_TYPES = frozenset(
     {"tool_start", "tool_end", "error", "question"}
   )

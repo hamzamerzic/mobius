@@ -404,24 +404,10 @@ export default function MyApp({ appId, token }) {
 
 ### Available libraries
 
-<!-- runtime-libs list duplicated from compiler.py — consolidation
-tracked in pm ticket 027. Don't fix the duplication here. -->
-
-The `app-frame.html` import map provides these for bare-specifier
-imports, so they load fast and cache across apps. `three` is
-self-hosted at `/vendor/three/` (no esm.sh waterfall):
-
-```jsx
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
-import { LineChart, BarChart, PieChart, AreaChart, ComposedChart,
-  ScatterChart, RadarChart, RadialBarChart, Line, Bar, Pie, Area,
-  Scatter, Radar, RadialBar, XAxis, YAxis, ZAxis, Tooltip,
-  CartesianGrid, Legend, ResponsiveContainer, Cell, LabelList, Brush,
-  PolarGrid, PolarAngleAxis, PolarRadiusAxis } from 'recharts'
-import { format, parseISO, addDays, differenceInDays } from 'date-fns'
-import * as THREE from 'three'
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
-```
+The canonical bare-specifier runtime-lib manifest lives at
+`backend/app/runtime_libs.py`. The `app-frame.html` import map
+provides those libraries so they load fast and cache across apps.
+`three` is self-hosted at `/vendor/three/` (no esm.sh waterfall).
 
 **Any other library is fair game via runtime dynamic import from esm.sh:**
 

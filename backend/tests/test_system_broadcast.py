@@ -16,6 +16,7 @@
 import asyncio
 
 import pytest
+from pydantic import ValidationError
 
 from app import broadcast as bc_mod
 from app import chat as chat_mod
@@ -25,6 +26,7 @@ from app.broadcast import (
   SystemBroadcast,
   get_system_broadcast,
 )
+from app.routes.notify import NotifyBody
 
 
 # --- Bug 3: question save-before-publish ------------------------------
@@ -184,3 +186,13 @@ async def test_notify_endpoint_reaches_system_broadcast(client, auth):
     assert event["appId"] == "36"
   finally:
     sb.unsubscribe(q)
+
+
+def test_notify_body_type_validator_rejects_unknown():
+  """NotifyBody rejects unknown system-event types."""
+  try:
+    NotifyBody(type="bogus")
+  except ValidationError:
+    pass
+  else:
+    raise AssertionError("Expected ValidationError for bogus event type")

@@ -19,6 +19,8 @@ from sqlalchemy.exc import OperationalError
 
 from app.config import get_settings
 from app.database import Base, engine, run_migrations
+from app import models
+from app.providers import PROVIDER_NAMES
 from app.push import init_vapid
 from app.routes import (
   ai_router, apps_router, auth_router,
@@ -46,9 +48,22 @@ def _init_db():
         raise
 
 
+def _assert_provider_defaults() -> None:
+  """Validate SQLAlchemy provider defaults against the registry."""
+  owner_default = models.Owner.provider.default.arg
+  chat_default = models.Chat.provider.default.arg
+  assert owner_default in PROVIDER_NAMES, (
+    "models.Owner.provider default must be in providers.PROVIDER_NAMES"
+  )
+  assert chat_default in PROVIDER_NAMES, (
+    "models.Chat.provider default must be in providers.PROVIDER_NAMES"
+  )
+
+
 @asynccontextmanager
 async def lifespan(app):
   import asyncio as _asyncio
+  _assert_provider_defaults()
   _init_db()
   init_vapid()
   # Seed a Hello World app on first boot (no-op if apps already exist).

@@ -4,7 +4,6 @@
 from pathlib import Path
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import models
@@ -12,13 +11,9 @@ from app.auth import encrypt_api_key
 from app.config import get_settings as get_app_settings
 from app.database import get_db
 from app.deps import get_current_owner
+from app.schemas import SettingsUpdate
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
-
-
-class SettingsUpdate(BaseModel):
-  gemini_api_key: str | None = None
-  provider: str | None = None
 
 
 @router.get("")
@@ -47,7 +42,7 @@ def update_settings(
       owner.gemini_api_key_enc = None
     else:
       owner.gemini_api_key_enc = encrypt_api_key(body.gemini_api_key)
-  if body.provider is not None and body.provider in ("claude", "codex"):
+  if body.provider is not None:
     owner.provider = body.provider
   db.commit()
   return {"ok": True}

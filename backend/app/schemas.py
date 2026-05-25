@@ -2,7 +2,9 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+from app.providers import PROVIDER_NAMES
 
 
 class SetupRequest(BaseModel):
@@ -79,6 +81,22 @@ class ChatStopRequest(BaseModel):
   chat_id: str = ""
 
 
+class ChatPatch(BaseModel):
+  """Partial-update payload for chat runtime settings."""
+
+  agent_settings_json: dict | None = None
+  clear_agent_settings: bool = False
+  provider: str | None = None
+
+  @field_validator("provider")
+  @classmethod
+  def validate_provider(cls, value: str | None) -> str | None:
+    """Reject unknown provider IDs at request-deserialize time."""
+    if value is not None and value not in PROVIDER_NAMES:
+      raise ValueError(f"unknown provider: {value}")
+    return value
+
+
 class SendMessage(BaseModel):
   content: str
   attachments: list[dict] | None = None
@@ -124,6 +142,21 @@ class NotificationSendRequest(BaseModel):
   # with just {title, body}. Apps should pass 'app' + their id.
   source_type: str = "agent"
   source_id: str | None = None
+
+
+class SettingsUpdate(BaseModel):
+  """Owner-level settings updates."""
+
+  gemini_api_key: str | None = None
+  provider: str | None = None
+
+  @field_validator("provider")
+  @classmethod
+  def validate_provider(cls, value: str | None) -> str | None:
+    """Reject unknown provider IDs at request-deserialize time."""
+    if value is not None and value not in PROVIDER_NAMES:
+      raise ValueError(f"unknown provider: {value}")
+    return value
 
 
 class NotificationOut(BaseModel):

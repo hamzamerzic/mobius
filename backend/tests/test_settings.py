@@ -1,4 +1,7 @@
+from pydantic import ValidationError
+
 from app.auth import encrypt_api_key, decrypt_api_key
+from app.schemas import SettingsUpdate
 
 
 def test_encrypt_decrypt_roundtrip():
@@ -73,8 +76,19 @@ def test_set_provider(client, auth):
   assert r.json()["provider"] == "claude"
 
 
-def test_set_invalid_provider_ignored(client, auth):
-  """POST /api/settings with invalid provider is silently ignored."""
-  client.post("/api/settings", json={"provider": "invalid"}, headers=auth)
+def test_set_invalid_provider_rejected(client, auth):
+  """POST /api/settings with invalid provider is rejected at the schema."""
+  r = client.post("/api/settings", json={"provider": "invalid"}, headers=auth)
+  assert r.status_code == 422
   r = client.get("/api/settings", headers=auth)
   assert r.json()["provider"] == "claude"
+
+
+def test_settings_update_provider_validator_rejects_unknown():
+  """SettingsUpdate rejects unknown provider IDs."""
+  try:
+    SettingsUpdate(provider="bogus")
+  except ValidationError:
+    pass
+  else:
+    raise AssertionError("Expected ValidationError for bogus provider")

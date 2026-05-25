@@ -5,6 +5,31 @@ assistant message structure.  No I/O — extracted from chat.py for
 testability and clarity.
 """
 
+from typing import Literal
+
+
+EventType = Literal[
+  "text",
+  "tool_start",
+  "tool_input",
+  "tool_output",
+  "tool_end",
+  "question",
+  "queued_turn_starting",
+  "catch_up_done",
+  "error",
+  "done",
+  "session_init",
+]
+
+SYSTEM_EVENT_TYPES: frozenset[str] = frozenset({
+  "theme_updated",
+  "app_updated",
+  "shell_rebuilding",
+  "shell_rebuilt",
+  "shell_rebuild_failed",
+})
+
 
 def process_event(event: dict, assistant_blocks: list) -> bool:
   """Accumulates a parsed event into the assistant blocks list.

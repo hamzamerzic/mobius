@@ -13,7 +13,7 @@ import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from app.tool_summaries import summarize_tool_input
 
@@ -732,6 +732,9 @@ PROVIDERS: dict[str, BaseProvider] = {
   "claude": ClaudeProvider(),
   "codex": CodexProvider(),
 }
+
+ProviderName = Literal["claude", "codex"]
+PROVIDER_NAMES: frozenset[str] = frozenset(PROVIDERS)
 
 # The default provider when none is configured.
 DEFAULT_PROVIDER = "claude"

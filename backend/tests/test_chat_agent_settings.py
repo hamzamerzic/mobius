@@ -16,7 +16,10 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+from pydantic import ValidationError
+
 from app.providers import effective_agent_settings
+from app.schemas import ChatPatch
 
 
 def _write_global_settings(payload: dict) -> None:
@@ -184,9 +187,8 @@ def test_patch_chat_switches_provider_but_does_not_mirror_yet(
   assert owner_after.provider == "claude"
 
 
-def test_patch_chat_provider_ignores_unknown_value(client, auth, chat, db):
-  """Bogus provider strings are silently ignored — no mirror, no
-  crash, existing chat.provider untouched."""
+def test_patch_chat_provider_rejects_unknown_value(client, auth, chat, db):
+  """Bogus provider strings are rejected before the handler runs."""
   from app import models
 
   r = client.patch(
@@ -194,10 +196,20 @@ def test_patch_chat_provider_ignores_unknown_value(client, auth, chat, db):
     headers=auth,
     json={"provider": "gemini-pro"},
   )
-  assert r.status_code == 200
+  assert r.status_code == 422
   db.expire_all()
   owner = db.query(models.Owner).first()
   assert owner.provider == "claude"  # untouched
+
+
+def test_chat_patch_provider_validator_rejects_unknown():
+  """ChatPatch rejects unknown provider IDs."""
+  try:
+    ChatPatch(provider="bogus")
+  except ValidationError:
+    pass
+  else:
+    raise AssertionError("Expected ValidationError for bogus provider")
 
 
 def test_patch_chat_provider_and_model_in_same_request(
@@ -278,5 +290,4 @@ def test_run_chat_passes_merged_settings_into_claude_sdk(
   settings = captured["agent_settings"]
   assert settings["model"] == "claude-opus-4-5"
   assert settings["effort"] == "medium"
-
 

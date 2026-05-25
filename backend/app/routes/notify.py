@@ -14,9 +14,9 @@ import asyncio
 import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from app import models
 from app.broadcast import (
@@ -25,6 +25,7 @@ from app.broadcast import (
   get_system_broadcast,
 )
 from app.deps import get_current_owner
+from app.events import SYSTEM_EVENT_TYPES
 
 router = APIRouter(tags=["notify"])
 log = logging.getLogger(__name__)
@@ -33,19 +34,18 @@ log = logging.getLogger(__name__)
 # chats_stream so proxies behave consistently.
 _KEEPALIVE_INTERVAL = 30
 
-ALLOWED_EVENT_TYPES = {
-  "theme_updated",
-  "app_updated",
-  "shell_rebuilding",
-  "shell_rebuilt",
-  "shell_rebuild_failed",
-}
-
-
 class NotifyBody(BaseModel):
   type: str
   appId: str | None = None
   error: str | None = None
+
+  @field_validator("type")
+  @classmethod
+  def validate_type(cls, value: str) -> str:
+    """Reject unknown system-event types at request-deserialize time."""
+    if value not in SYSTEM_EVENT_TYPES:
+      raise ValueError(f"unknown event type: {value}")
+    return value
 
 
 @router.post("/api/notify", status_code=204)
@@ -58,9 +58,6 @@ def notify(
   Requires a valid JWT.  If no broadcast is active (no agent running),
   the event is silently dropped — nobody is listening.
   """
-  if body.type not in ALLOWED_EVENT_TYPES:
-    raise HTTPException(422, f"unknown event type: {body.type}")
-
   event: dict = {"type": body.type}
   if body.appId is not None:
     event["appId"] = body.appId
