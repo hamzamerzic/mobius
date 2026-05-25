@@ -821,6 +821,52 @@ test.describe('Scroll edge cases', () => {
     expect(gapFromBottom).toBeGreaterThan(50)
   })
 
+  test('25. Auto-follow stays glued tightly (regression on test 18 threshold)', async ({ page }) => {
+    // Test 18 asserts gap < 200 — wide enough to let the broken RO pass
+    // (5 small chunks drift ~150px without re-applying FOLLOW_BOTTOM).
+    // This is the SAME setup + content volume; the only difference is
+    // a TIGHT assertion (<= 5). Demonstrates the regression directly
+    // without invoking the 204-refresh path that heavier injection
+    // accidentally triggers.
+    await setup(page)
+    await newChat(page)
+    await sendMessage(page, 'Autoscroll tight test')
+
+    await injectContent(page, 'Filling viewport with lots of text. ', 150)
+    const before = await measure(page)
+    expect(before.listH).toBeGreaterThan(before.clientH)
+
+    // Engage FOLLOW_BOTTOM via real gesture (test 18's exact pattern).
+    await page.evaluate(() => {
+      const s = document.querySelector('.chat__scroll')
+      if (s) s.scrollTop = s.scrollHeight
+    })
+    await page.evaluate(() => new Promise(r => setTimeout(r, 150)))
+    await page.evaluate(() => {
+      const s = document.querySelector('.chat__scroll')
+      if (!s) return
+      s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+      s.scrollTop = Math.max(0, s.scrollTop - 1)
+      s.scrollTop = s.scrollHeight
+    })
+    await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
+
+    const atBottom = await measure(page)
+    expect(atBottom.scrollH - atBottom.scrollTop - atBottom.clientH)
+      .toBeLessThanOrEqual(5)
+
+    // Five small chunks (test 18's exact volume) — auto-follow MUST
+    // keep us within a few px of the bottom, not 200px adrift.
+    for (let i = 0; i < 5; i++) {
+      await injectContent(page, `Streaming chunk ${i + 1}. More text here. `, 5)
+    }
+
+    const after = await measure(page)
+    expect(after.error).toBeUndefined()
+    const afterGap = after.scrollH - after.scrollTop - after.clientH
+    expect(afterGap).toBeLessThanOrEqual(10)
+  })
+
   test('24. Auto-follow re-engages when user scrolls back to bottom', async ({ page }) => {
     await setup(page)
     await newChat(page)

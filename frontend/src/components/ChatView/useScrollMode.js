@@ -28,11 +28,13 @@
 import { useState, useRef, useLayoutEffect } from 'react'
 
 
-// Hide-then-reveal safety cap. Lazy renderers (KaTeX, highlight.js)
-// typically settle inside this window; live streaming never does,
-// so a longer cap was just guaranteed flicker. 250ms is enough for
-// the first React commit + layout + applyMode.
-const REVEAL_CAP_MS = 250
+// Hide-then-reveal safety cap. Code-block-heavy chats with KaTeX and
+// highlight.js settle in the 500-1200ms range; a too-tight cap would
+// reveal before ANCHOR_AT-restored scroll positions get re-anchored to
+// the post-settle target offsets. Live streaming never reaches the
+// 50ms quiet window anyway, so the cap is mostly about giving lazy
+// renderers room to land before the chat becomes visible.
+const REVEAL_CAP_MS = 1500
 
 // User gesture window — scroll events fired within this window of a
 // pointerdown/wheel/touchstart/keydown are treated as user-driven.
@@ -348,26 +350,44 @@ export default function useScrollMode({
     // streaming) doesn't strand the chat hidden.
     let revealTimer = 0
     const requestRevealOnQuiet = () => {
-      if (revealed) return
+      if (revealed || revealedOnce) return
       clearTimeout(revealTimer)
       revealTimer = setTimeout(() => {
         if (scrollRef.current === scrollEl) syncLayout()
+        revealedOnce = true
         setRevealed(true)
       }, 50)
     }
 
-    // ResizeObserver — re-runs spacer sizing on content size
-    // changes. Does NOT re-apply the scroll mode: that would re-pin
-    // scrollTop on every tool-block height change / lazy-renderer
-    // settle and cause visible mid-stream scroll jitter (the bug
-    // the user reported in May 2026). The mode's scroll position
-    // is established on explicit transitions; the spacer keeps it
-    // achievable as content evolves.
+    // ResizeObserver — re-runs spacer sizing on content size changes.
+    // Re-applies content-tracking modes:
+    //   FOLLOW_BOTTOM — every firing, so streaming keeps the user
+    //                   glued to the tail.
+    //   ANCHOR_AT     — only during the reveal window (before the
+    //                   chat becomes visible). Lazy renderers (KaTeX,
+    //                   highlight.js, markdown re-wrap) settle in the
+    //                   first ~1s and shift the anchor's offsetTop;
+    //                   re-anchoring keeps the saved position accurate
+    //                   on chat restore. After reveal, re-applying
+    //                   ANCHOR_AT would cause the May 2026 mid-stream
+    //                   jitter so we stop.
+    //   PIN_USER_MSG  — never re-applied; same jitter risk.
+    //
+    // `revealedOnce` mirrors `revealed` at effect-start so re-runs of
+    // this effect on an already-revealed chat (messages change, etc.)
+    // don't re-enter the during-reveal branch and cause mid-stream
+    // jitter.
+    let revealedOnce = revealed
     const ro = new ResizeObserver(() => {
       if (scrollEl.clientHeight > fullViewHRef.current) {
         fullViewHRef.current = scrollEl.clientHeight
       }
       sizeSpacer()
+      const k = modeRef.current.kind
+      if (k === 'FOLLOW_BOTTOM'
+          || (k === 'ANCHOR_AT' && !revealedOnce)) {
+        applyMode(scrollEl, modeRef.current)
+      }
       requestRevealOnQuiet()  // each RO firing pushes the reveal back
     })
     ro.observe(listEl)
@@ -444,7 +464,10 @@ export default function useScrollMode({
     let safetyReveal = 0
     if (!revealed) {
       requestRevealOnQuiet()
-      safetyReveal = setTimeout(() => setRevealed(true), REVEAL_CAP_MS)
+      safetyReveal = setTimeout(() => {
+        revealedOnce = true
+        setRevealed(true)
+      }, REVEAL_CAP_MS)
     }
 
     return () => {

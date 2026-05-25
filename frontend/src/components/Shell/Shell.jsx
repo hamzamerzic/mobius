@@ -7,6 +7,7 @@ import SettingsView from '../SettingsView/SettingsView.jsx'
 import { api, BASE } from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
 import useNavigation from '../../hooks/useNavigation.js'
+import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import useTheme from '../../hooks/useTheme.js'
 import { appQueries, chatQueries } from '../../hooks/queries.js'
 import './Shell.css'
@@ -144,6 +145,14 @@ export default function Shell() {
       setTimeout(() => setToast(null), 8000)
     }
   }, [activeAppId, activeView, drawerOpen, activeChatId, loadTheme, refreshApps])
+
+  // Shell-level SSE subscription for system events. Stays open for
+  // the lifetime of the Shell so theme/app/shell-rebuild updates
+  // reach handleSystemEvent regardless of which view the user is on.
+  // The active chat's SSE stream still forwards the same events for
+  // in-chat catch-up coherence — handlers are idempotent (theme
+  // reload, refreshApps, version bump) so the duplicate is harmless.
+  useSystemEventStream(handleSystemEvent)
 
   // Listen for postMessage events from mini-app iframes:
   //   moebius:app-error — route crash report to the chat that built the app

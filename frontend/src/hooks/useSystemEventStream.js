@@ -1,0 +1,105 @@
+import { useEffect, useRef } from 'react'
+import { BASE, getToken } from '../api/client.js'
+
+/**
+ * Persistent SSE subscription to /api/events/system. Lives on the
+ * Shell so system events (theme_updated, app_updated,
+ * shell_rebuild_*) reach the listener even when the user is on the
+ * canvas / settings / a different chat than the one whose agent
+ * emitted the event.
+ *
+ * Why a separate stream from useStreamConnection: that hook is
+ * scoped to a single chat's broadcast. Per-chat broadcasts close
+ * 30s after the agent finishes, and many events (especially the
+ * file-watcher's app_updated debounce) fire AFTER the chat is
+ * already done — leaving nowhere for the event to land. The
+ * shell-level stream stays open for the lifetime of the Shell.
+ *
+ * EventSource isn't used because it can't send custom Authorization
+ * headers; we use fetch + ReadableStream, mirroring the pattern in
+ * useStreamConnection.
+ *
+ * The same event types are still forwarded via chat broadcasts for
+ * in-chat catch-up coherence. Handlers should be idempotent (theme
+ * reload, refreshApps, version bump) so duplicates are harmless.
+ */
+export default function useSystemEventStream(onEvent) {
+  // Mirror onEvent in a ref so the long-lived effect can call the
+  // latest handler without re-running the connection setup whenever
+  // the callback identity changes.
+  const onEventRef = useRef(onEvent)
+  useEffect(() => { onEventRef.current = onEvent }, [onEvent])
+
+  useEffect(() => {
+    let cancelled = false
+    let controller = null
+    let backoffMs = 1000
+
+    async function connect() {
+      if (cancelled) return
+      const token = getToken()
+      if (!token) {
+        // No token — nothing to authenticate with. Retry once the
+        // user logs in (the effect re-runs because Shell remounts
+        // on the auth boundary).
+        return
+      }
+      controller = new AbortController()
+      try {
+        const res = await fetch(`${BASE}/api/events/system`, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
+        })
+        if (!res.ok || !res.body) {
+          throw new Error(`system stream status ${res.status}`)
+        }
+        backoffMs = 1000  // Reset on a successful connect.
+
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        // Standard SSE parser: events are terminated by a blank line;
+        // each event is one or more `data: ` prefixed lines (we only
+        // emit single-line events from the backend).
+        while (!cancelled) {
+          const { value, done } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          let nl
+          while ((nl = buffer.indexOf('\n\n')) !== -1) {
+            const block = buffer.slice(0, nl)
+            buffer = buffer.slice(nl + 2)
+            for (const line of block.split('\n')) {
+              if (!line.startsWith('data: ')) continue
+              try {
+                const ev = JSON.parse(line.slice(6))
+                if (ev && ev.type && ev.type !== 'system_stream_open') {
+                  onEventRef.current?.(ev)
+                }
+              } catch { /* malformed — skip */ }
+            }
+          }
+        }
+      } catch (err) {
+        if (cancelled || err.name === 'AbortError') return
+      } finally {
+        controller = null
+      }
+      // Reconnect with capped exponential backoff. The shell-level
+      // stream is supposed to live as long as the Shell — any drop
+      // (network blip, server restart) should self-heal.
+      if (!cancelled) {
+        await new Promise(r => setTimeout(r, backoffMs))
+        backoffMs = Math.min(backoffMs * 2, 30_000)
+        connect()
+      }
+    }
+
+    connect()
+
+    return () => {
+      cancelled = true
+      controller?.abort()
+    }
+  }, [])
+}

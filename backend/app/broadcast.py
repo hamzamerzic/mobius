@@ -147,3 +147,64 @@ def create_broadcast(chat_id: str) -> "ChatBroadcast":
 def remove_broadcast(chat_id: str):
   """Removes a broadcast immediately."""
   _broadcasts.pop(chat_id, None)
+
+
+class SystemBroadcast:
+  """Process-lifetime event bus for shell-level system events
+  (theme_updated, app_updated, shell_rebuild_*).
+
+  Why this exists separately from ChatBroadcast: shell-level state
+  (which app version is current, which theme is active) needs to
+  reach the Shell regardless of which view the user is currently on.
+  ChatBroadcasts are scoped to a single chat session — when the user
+  is on the canvas (mini-app), settings, or a different chat than
+  the one whose agent emitted the update, the per-chat broadcast
+  has no shell-side subscriber and the event is dropped. Result: the
+  iframe URL never bumps version, the SW serves the stale bundle,
+  the user sees a spinner that never resolves.
+
+  No catch-up: subscribers see only live events. Past system events
+  are reconciled by polling the underlying state (GET /api/apps/,
+  GET /api/theme) — there's no per-event-log replay because system
+  events are notifications about state changes, not the state itself.
+  """
+
+  def __init__(self):
+    self.subscribers: list[asyncio.Queue] = []
+
+  def publish(self, event: dict) -> None:
+    """Push an event to every live subscriber. Failures (queue full,
+    closed) are logged + dropped — the publisher is the file watcher
+    or the agent's POST /api/notify, neither of which can usefully
+    block on a stuck subscriber."""
+    for q in self.subscribers:
+      try:
+        q.put_nowait(event)
+      except asyncio.QueueFull:
+        log.warning(
+          "system subscriber queue full, dropping %s",
+          event.get("type", "?"),
+        )
+
+  def subscribe(self) -> asyncio.Queue:
+    """Returns a queue that receives live events. The caller MUST
+    call unsubscribe() in a finally block — a leaked queue keeps
+    the subscriber list growing and silently consumes events that
+    no one will read."""
+    q: asyncio.Queue = asyncio.Queue(maxsize=256)
+    self.subscribers.append(q)
+    return q
+
+  def unsubscribe(self, q: asyncio.Queue) -> None:
+    try:
+      self.subscribers.remove(q)
+    except ValueError:
+      pass
+
+
+_system_broadcast = SystemBroadcast()
+
+
+def get_system_broadcast() -> SystemBroadcast:
+  """Returns the process-wide system broadcast singleton."""
+  return _system_broadcast

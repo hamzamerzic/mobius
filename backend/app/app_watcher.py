@@ -144,10 +144,18 @@ class _JsxHandler(FileSystemEventHandler):
       log.info(
         "auto-recompiled app id=%s name=%s", app.id, app.name,
       )
-      # Best-effort broadcast notification so any running chat reloads
-      # the iframe.  No-op if no chat is active.
+      # Always publish to the SystemBroadcast — that channel reaches
+      # the Shell regardless of which view the user is on (chat /
+      # canvas / settings). Per-chat broadcasts are best-effort: they
+      # close shortly after each turn, so by the time the watcher
+      # debounce fires for a JSX rewrite the broadcast may already
+      # be gone. SystemBroadcast is process-lifetime and is what the
+      # iframe-version-bump in Shell.jsx actually listens to.
+      from app.broadcast import get_system_broadcast
+      event = {"type": "app_updated", "appId": str(app.id)}
+      get_system_broadcast().publish(event)
       for bc in get_all_active_broadcasts():
-        bc.publish({"type": "app_updated", "appId": str(app.id)})
+        bc.publish(event)
     except Exception:
       # Watcher must keep running across any single-event failure.
       log.exception("auto-recompile unexpected error for %s", path)

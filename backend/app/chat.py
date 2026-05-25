@@ -289,23 +289,46 @@ class _ChatEventSink:
   def publish(self, event: dict) -> None:
     event_type = event.get("type")
 
-    # Broadcast every other event.
+    # Accumulate the event into assistant_blocks and decide whether a
+    # save is due (immediate for save-triggering types, throttled
+    # otherwise).
+    accumulated = process_event(event, self.assistant_blocks)
+    needs_save = accumulated and self.chat_id and (
+      event_type in self._IMMEDIATE_SAVE_TYPES
+      or time.monotonic() - self._last_save >= self._SAVE_INTERVAL_SECS
+    )
+
+    # AskUserQuestion is the one event that MUST persist before the
+    # broadcast: the frontend renders the question card the moment the
+    # broadcast lands, and a fast user Submit races the DB write
+    # otherwise. _apply_answers_to_last_question (chats_stream.py)
+    # iterates chat.messages looking for the latest assistant
+    # message's question block — if the runner hasn't written it yet,
+    # the lookup silently returns False, the SDK future resolves
+    # without persisted answers, and the answer disappears on the
+    # next runner writeback (which has no block.answers to carry over).
+    if needs_save and event_type == "question":
+      self._last_save = time.monotonic()
+      _update_last_assistant_message(
+        self.db, self.chat_id,
+        build_assistant_message(self.assistant_blocks),
+      )
+
     self.bc.publish(event)
 
     # done: capture cost.
     if event_type == "done":
       self.cost_usd = event.get("cost_usd")
 
-    # Accumulate + maybe save.
-    if process_event(event, self.assistant_blocks) and self.chat_id:
-      now = time.monotonic()
-      if (event_type in self._IMMEDIATE_SAVE_TYPES
-          or now - self._last_save >= self._SAVE_INTERVAL_SECS):
-        self._last_save = now
-        _update_last_assistant_message(
-          self.db, self.chat_id,
-          build_assistant_message(self.assistant_blocks),
-        )
+    # All other event types save AFTER broadcast — preserves streaming
+    # latency for text events (most don't trigger save anyway due to
+    # the 1s throttle).
+    if needs_save and event_type != "question":
+      self._last_save = time.monotonic()
+      _update_last_assistant_message(
+        self.db, self.chat_id,
+        build_assistant_message(self.assistant_blocks),
+      )
 
   def finalize(self) -> None:
     """Write the final assistant message snapshot to the DB."""
