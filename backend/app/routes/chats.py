@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app import models
+from app import models, questions
 from app.config import get_settings
 from app.chat import (
   bump_run_generation,
@@ -365,6 +365,7 @@ async def delete_chat(
     db.commit()
   # Drop in-memory per-chat state so a deleted chat doesn't leave a
   # stale `_run_generation` entry on long-running containers.
+  questions.cancel(chat_id)
   forget_chat(chat_id)
 
 
