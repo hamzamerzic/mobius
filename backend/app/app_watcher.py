@@ -3,9 +3,9 @@
 Watches `/data/apps/*/index.jsx`.  When a JSX file changes, looks up
 the app by its directory name in the DB, re-reads the source from
 disk, recompiles via `compile_jsx`, and persists the new source +
-`compiled_path`.  Publishes `app_updated` to active broadcasts so a
-running chat picks up the change without a manual `register_app.py`
-roundtrip.
+`compiled_path`.  Publishes `app_updated` to the SystemBroadcast so
+the Shell (which subscribes via /api/events/system) picks up the
+change without a manual `register_app.py` roundtrip.
 
 Debounced (1s) to coalesce rapid saves during multi-line edits.
 
@@ -29,7 +29,6 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from app import models
-from app.broadcast import get_all_active_broadcasts
 from app.compiler import compile_jsx
 from app.config import get_settings
 from app.database import SessionLocal
@@ -144,18 +143,20 @@ class _JsxHandler(FileSystemEventHandler):
       log.info(
         "auto-recompiled app id=%s name=%s", app.id, app.name,
       )
-      # Always publish to the SystemBroadcast — that channel reaches
+      # Publish to the SystemBroadcast only. That channel reaches
       # the Shell regardless of which view the user is on (chat /
-      # canvas / settings). Per-chat broadcasts are best-effort: they
-      # close shortly after each turn, so by the time the watcher
-      # debounce fires for a JSX rewrite the broadcast may already
-      # be gone. SystemBroadcast is process-lifetime and is what the
-      # iframe-version-bump in Shell.jsx actually listens to.
+      # canvas / settings) via the persistent
+      # /api/events/system subscription installed by
+      # frontend/src/hooks/useSystemEventStream.js. Shell.jsx wires
+      # the same `app_updated` handler into both that hook and the
+      # per-chat stream (frontend/src/components/ChatView/useStreamConnection.js
+      # treats `app_updated` as a SYSTEM_EVENT and forwards to the
+      # same callback) — so an extra fan-out to every active
+      # ChatBroadcast (the v1 design preserved this as "intentional")
+      # was redundant, not load-bearing. Ticket 033 removed it.
       from app.broadcast import get_system_broadcast
       event = {"type": "app_updated", "appId": str(app.id)}
       get_system_broadcast().publish(event)
-      for bc in get_all_active_broadcasts():
-        bc.publish(event)
     except Exception:
       # Watcher must keep running across any single-event failure.
       log.exception("auto-recompile unexpected error for %s", path)

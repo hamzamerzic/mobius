@@ -12,8 +12,7 @@ from py_vapid import Vapid
 from pywebpush import webpush, WebPushException
 from sqlalchemy.orm import Session
 
-from app import models
-from app.broadcast import get_broadcast
+from app import models, presence
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -157,8 +156,11 @@ def notify_owner(
       pass
     return notification_id
 
-  bc = get_broadcast(source_id) if source_id else None
-  if bc and bc.subscribers:
+  # Skip push when a live SSE subscriber is already watching the
+  # source chat — the in-tab UX surfaces the event there. presence
+  # owns this contract so we don't have to reach across modules
+  # into broadcast internals.
+  if source_id and presence.has_watchers(source_id):
     return notification_id
 
   payload = {

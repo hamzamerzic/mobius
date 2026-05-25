@@ -43,6 +43,10 @@ class ChatBroadcast:
   def __init__(self, chat_id: str):
     self.chat_id = chat_id
     self.event_log: list[dict] = []
+    # The public watcher-presence contract is `app.presence.has_watchers`
+    # — do NOT read this list from outside `broadcast.py` except for
+    # observability (currently `routes/debug.py`'s subscriber_count
+    # field, which is an inline read, not a presence check).
     self.subscribers: list[asyncio.Queue] = []
     self.running = True
     self.completed_at: Optional[float] = None
