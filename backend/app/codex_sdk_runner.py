@@ -47,6 +47,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from app.runtime_types import RunnerResult
 
 log = logging.getLogger("moebius.chat")
 
@@ -642,7 +643,7 @@ async def run_codex_sdk_turn(
   db,
   active_sessions: dict,
   agent_settings: dict | None = None,
-) -> dict:
+) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
   Args:

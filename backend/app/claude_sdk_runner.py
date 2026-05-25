@@ -66,6 +66,7 @@ from claude_agent_sdk.types import (
 )
 
 from app.pending_questions import PendingQuestion
+from app.runtime_types import RunnerResult
 from app.tool_summaries import summarize_tool_input
 
 
@@ -164,7 +165,7 @@ async def run_claude_sdk_turn(
   db,
   active_clients: dict,
   agent_settings: dict | None = None,
-) -> dict:
+) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
   Args:
@@ -411,18 +412,21 @@ async def run_claude_sdk_turn(
         return {
           "session_id": current_session_id,
           "cost_usd": cost_usd,
+          "usage": None,
           "error": _result_error_message(sdk_msg) if sdk_msg.is_error else None,
         }
 
     return {
       "session_id": current_session_id,
       "cost_usd": cost_usd,
+      "usage": None,
       "error": None,
     }
   except Exception as exc:
     return {
       "session_id": current_session_id,
       "cost_usd": None,
+      "usage": None,
       "error": str(exc),
     }
   finally:

@@ -13,9 +13,13 @@ import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal
 
+from app.runtime_types import ChatEvent
 from app.tool_summaries import summarize_tool_input
+
+if TYPE_CHECKING:
+  from app.schemas import AgentSettingsOverride
 
 
 # Known models per provider, with the top entry treated as the
@@ -120,7 +124,7 @@ def initial_chat_defaults(data_dir: str, provider: str) -> dict:
 
 def effective_agent_settings(
   data_dir: str,
-  chat_overrides: dict | None = None,
+  chat_overrides: "AgentSettingsOverride | dict[str, Any] | None" = None,
   provider: str | None = None,
 ) -> dict:
   """Merges per-chat overrides on top of the global defaults, with
@@ -142,6 +146,12 @@ def effective_agent_settings(
   the key here without a migration.
   """
   prov = provider or "claude"
+  if chat_overrides is None:
+    overrides = None
+  elif hasattr(chat_overrides, "model_dump"):
+    overrides = chat_overrides.model_dump()
+  else:
+    overrides = dict(chat_overrides)
   merged = {
     "model": DEFAULT_MODELS.get(prov, DEFAULT_MODELS["claude"]),
     "effort": DEFAULT_EFFORT,
@@ -157,8 +167,8 @@ def effective_agent_settings(
   # Per-chat overrides are authoritative — the user explicitly
   # picked them for THIS chat, so they trump the cross-provider
   # check.
-  if chat_overrides:
-    for k, v in chat_overrides.items():
+  if overrides:
+    for k, v in overrides.items():
       if v is None:
         continue
       merged[k] = v
@@ -220,8 +230,8 @@ class BaseProvider:
     """
     raise NotImplementedError
 
-  def parse_line(self, line: str) -> Optional[dict]:
-    """Parses one stdout line into an SSE event dict, or None."""
+  def parse_line(self, line: str) -> list[ChatEvent]:
+    """Parses one stdout line into zero or more SSE events."""
     raise NotImplementedError
 
 
@@ -416,7 +426,7 @@ class ClaudeProvider(BaseProvider):
       "cost_usd": event.get("total_cost_usd", 0),
     }
 
-  def parse_line(self, line: str) -> list[dict]:
+  def parse_line(self, line: str) -> list[ChatEvent]:
     """Parse one line of Claude CLI JSON output into agent events.
 
     The Claude CLI emits several event shapes on stdout:
@@ -425,30 +435,39 @@ class ClaudeProvider(BaseProvider):
       - {"type": "user", ...} → tool results
       - {"type": "result", ...} → session ID and final cost/usage
 
-    Returns a list of normalized dicts, a single dict, or None.
+    Returns a list of normalized events. Unknown lines return `[]`.
     """
     try:
       event = json.loads(line)
     except json.JSONDecodeError:
-      return None
+      return []
 
     event_type = event.get("type")
 
     if event_type == "system":
       if event.get("subtype") == "init" and event.get("session_id"):
-        return {"type": "session_init", "session_id": event["session_id"]}
-      return None
+        return [{
+          "type": "session_init",
+          "session_id": event["session_id"],
+        }]
+      return []
 
     if event_type == "stream_event":
-      return self._parse_stream_event(event)
+      parsed = self._parse_stream_event(event)
     elif event_type == "assistant":
-      return self._parse_tool_event(event)
+      parsed = self._parse_tool_event(event)
     elif event_type == "user":
-      return self._parse_user_event(event)
+      parsed = self._parse_user_event(event)
     elif event_type == "result":
-      return self._parse_result_event(event)
+      parsed = self._parse_result_event(event)
+    else:
+      parsed = None
 
-    return None
+    if parsed is None:
+      return []
+    if isinstance(parsed, list):
+      return parsed
+    return [parsed]
 
 
 class CodexProvider(BaseProvider):
@@ -563,11 +582,11 @@ class CodexProvider(BaseProvider):
       return raw_cmd[len(prefix):-1]
     return raw_cmd
 
-  def parse_line(self, line: str) -> list[dict] | dict | None:
+  def parse_line(self, line: str) -> list[ChatEvent]:
     try:
       event = json.loads(line)
     except json.JSONDecodeError:
-      return None
+      return []
 
     # The runner script (scripts/codex_appserver_runner.py) translates
     # codex app-server JSON-RPC into clean Möbius events: session_init,
@@ -579,7 +598,7 @@ class CodexProvider(BaseProvider):
       "session_init", "text", "tool_start", "tool_input",
       "tool_output", "tool_end", "done", "error",
     ):
-      return event
+      return [event]
 
     # Legacy fallback below: if for any reason raw `codex exec --json`
     # output (or raw JSON-RPC notifications) leaks through to us, the
@@ -599,47 +618,47 @@ class CodexProvider(BaseProvider):
         thread = event.get("thread") or {}
         tid = thread.get("id")
       if tid:
-        return {"type": "session_init", "session_id": tid}
-      return None
+        return [{"type": "session_init", "session_id": tid}]
+      return []
 
     # App-server streaming delta — the headline feature.
     if etype == "item.agentMessage.delta":
       delta = event.get("delta", "")
       if delta:
-        return {"type": "text", "content": delta}
-      return None
+        return [{"type": "text", "content": delta}]
+      return []
 
     if etype == "turn.started":
-      return None
+      return []
 
     if etype == "item.started":
       item = event.get("item", {})
       itype = item.get("type")
       if itype == "command_execution":
-        return {
+        return [{
           "type": "tool_start",
           "tool": "Bash",
           "input": self._extract_command(item.get("command", "")),
-        }
+        }]
       if itype == "file_change":
         changes = item.get("changes", [])
         path = changes[0].get("path", "") if changes else ""
-        return {"type": "tool_start", "tool": "Edit", "input": path}
+        return [{"type": "tool_start", "tool": "Edit", "input": path}]
       if itype == "mcp_tool_call":
         server = item.get("server", "")
         tool = item.get("tool", "")
-        return {
+        return [{
           "type": "tool_start",
           "tool": f"{server}:{tool}" if server else tool,
           "input": "",
-        }
+        }]
       if itype == "web_search":
-        return {
+        return [{
           "type": "tool_start",
           "tool": "WebSearch",
           "input": item.get("query", ""),
-        }
-      return None
+        }]
+      return []
 
     if etype == "item.completed":
       item = event.get("item", {})
@@ -650,14 +669,14 @@ class CodexProvider(BaseProvider):
       if itype == "agent_message":  # exec mode
         text = item.get("text", "")
         if text:
-          return {"type": "text", "content": text}
-        return None
+          return [{"type": "text", "content": text}]
+        return []
       if itype == "agentMessage":  # app-server: deltas already sent
-        return None
+        return []
       # App-server uses userMessage for the echo of the user's input —
       # we don't display that (chat.py already saved it).
       if itype == "userMessage":
-        return None
+        return []
       if itype == "command_execution":
         output = item.get("aggregated_output", "").strip()
         results = []
@@ -713,18 +732,18 @@ class CodexProvider(BaseProvider):
           results.append({"type": "tool_output", "content": str(result)})
         results.append({"type": "tool_end"})
         return results
-      return None
+      return []
 
     if etype == "turn.completed":
-      return {"type": "done", "cost_usd": 0}
+      return [{"type": "done", "cost_usd": 0}]
 
     if etype == "error":
-      return {
+      return [{
         "type": "error",
         "message": event.get("message", "Codex error"),
-      }
+      }]
 
-    return None
+    return []
 
 
 # Registry of available providers, keyed by ID.

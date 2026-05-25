@@ -1,8 +1,9 @@
 """Pydantic request and response schemas."""
 
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from app.providers import PROVIDER_NAMES
 
@@ -81,10 +82,19 @@ class ChatStopRequest(BaseModel):
   chat_id: str = ""
 
 
+class AgentSettingsOverride(BaseModel):
+  """Per-chat agent settings override with pass-through extras."""
+
+  model_config = ConfigDict(extra="allow")
+
+  model: str | None = None
+  effort: Literal["low", "medium", "high", "xhigh"] | None = None
+
+
 class ChatPatch(BaseModel):
   """Partial-update payload for chat runtime settings."""
 
-  agent_settings_json: dict | None = None
+  agent_settings_json: AgentSettingsOverride | None = None
   clear_agent_settings: bool = False
   provider: str | None = None
 

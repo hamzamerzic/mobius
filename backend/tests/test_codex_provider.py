@@ -9,7 +9,8 @@ provider = CodexProvider()
 def test_thread_started_emits_session_init():
   line = '{"type":"thread.started","thread_id":"abc-123"}'
   result = provider.parse_line(line)
-  assert result == {"type": "session_init", "session_id": "abc-123"}
+  assert isinstance(result, list)
+  assert result == [{"type": "session_init", "session_id": "abc-123"}]
 
 
 def test_agent_message_emits_text():
@@ -18,7 +19,7 @@ def test_agent_message_emits_text():
     "item": {"id": "item_0", "type": "agent_message", "text": "Hello"},
   })
   result = provider.parse_line(line)
-  assert result == {"type": "text", "content": "Hello"}
+  assert result == [{"type": "text", "content": "Hello"}]
 
 
 def test_command_started_emits_tool_start():
@@ -32,11 +33,11 @@ def test_command_started_emits_tool_start():
     },
   })
   result = provider.parse_line(line)
-  assert result == {
+  assert result == [{
     "type": "tool_start",
     "tool": "Bash",
     "input": "echo hi",
-  }
+  }]
 
 
 def test_command_completed_emits_tool_output_and_end():
@@ -64,19 +65,19 @@ def test_turn_completed_emits_done():
     },
   })
   result = provider.parse_line(line)
-  assert result["type"] == "done"
-  assert result["cost_usd"] == 0
+  assert result[0]["type"] == "done"
+  assert result[0]["cost_usd"] == 0
 
 
 def test_turn_started_returns_none():
   line = '{"type":"turn.started"}'
   result = provider.parse_line(line)
-  assert result is None
+  assert result == []
 
 
 def test_invalid_json_returns_none():
   result = provider.parse_line("not json")
-  assert result is None
+  assert result == []
 
 
 # ── translator tests (codex_appserver module) ──────────────────────

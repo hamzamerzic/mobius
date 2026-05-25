@@ -53,7 +53,8 @@ def test_ask_user_question_suppresses_tool_start():
     "input": {},
   })
   result = provider.parse_line(line)
-  assert result is None
+  assert isinstance(result, list)
+  assert result == []
 
 
 def test_normal_tool_emits_tool_start():
@@ -64,8 +65,9 @@ def test_normal_tool_emits_tool_start():
     "input": {},
   })
   result = provider.parse_line(line)
-  assert result["type"] == "tool_start"
-  assert result["tool"] == "Bash"
+  assert isinstance(result, list)
+  assert result[0]["type"] == "tool_start"
+  assert result[0]["tool"] == "Bash"
 
 
 def test_normal_tool_emits_tool_input():
@@ -157,7 +159,8 @@ def test_partial_ask_user_question_empty_questions_skipped():
     "input": {"questions": []},
   }])
   result = provider.parse_line(line)
-  assert result is None or result == []
+  assert isinstance(result, list)
+  assert result == []
 
   # Questions present but question text missing.
   line = _assistant_event([{
@@ -167,7 +170,8 @@ def test_partial_ask_user_question_empty_questions_skipped():
     "input": {"questions": [{"options": [{"label": "A"}]}]},
   }])
   result = provider.parse_line(line)
-  assert result is None or result == []
+  assert isinstance(result, list)
+  assert result == []
 
   # No input at all (earliest partial).
   line = _assistant_event([{
@@ -177,7 +181,8 @@ def test_partial_ask_user_question_empty_questions_skipped():
     "input": {},
   }])
   result = provider.parse_line(line)
-  assert result is None or result == []
+  assert isinstance(result, list)
+  assert result == []
 
 
 def test_complete_ask_user_question_still_emits():

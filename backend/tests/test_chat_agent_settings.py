@@ -19,7 +19,7 @@ from unittest.mock import patch
 from pydantic import ValidationError
 
 from app.providers import effective_agent_settings
-from app.schemas import ChatPatch
+from app.schemas import AgentSettingsOverride, ChatPatch
 
 
 def _write_global_settings(payload: dict) -> None:
@@ -212,6 +212,15 @@ def test_chat_patch_provider_validator_rejects_unknown():
     raise AssertionError("Expected ValidationError for bogus provider")
 
 
+def test_agent_settings_override_allows_unknown_keys():
+  override = AgentSettingsOverride(
+    model="claude-opus-4-7-20251215",
+    sandbox_mode="workspace-write",
+  )
+  assert override.model == "claude-opus-4-7-20251215"
+  assert override.model_dump()["sandbox_mode"] == "workspace-write"
+
+
 def test_patch_chat_provider_and_model_in_same_request(
   client, auth, chat, monkeypatch,
 ):
@@ -290,4 +299,3 @@ def test_run_chat_passes_merged_settings_into_claude_sdk(
   settings = captured["agent_settings"]
   assert settings["model"] == "claude-opus-4-5"
   assert settings["effort"] == "medium"
-

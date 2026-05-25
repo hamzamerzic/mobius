@@ -1484,14 +1484,10 @@ async def _run_chat_impl(
             continue
 
           parsed = provider.parse_line(line)
-          if parsed is None:
+          if not parsed:
             log.debug("skipped: %.200s", line)
             continue
-
-          # parse_line may return a single dict or a list.
-          events = (
-            parsed if isinstance(parsed, list) else [parsed]
-          )
+          events = parsed
 
           # Capture session_id from provider-normalized event.
           if not session_captured:

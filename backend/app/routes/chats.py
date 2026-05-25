@@ -202,7 +202,7 @@ async def patch_chat(
       chat.agent_settings_json = None
     elif body.agent_settings_json is not None:
       existing = _coerce_agent_settings(chat.agent_settings_json)
-      for k, v in body.agent_settings_json.items():
+      for k, v in body.agent_settings_json.model_dump(exclude_unset=True).items():
         if v is None:
           existing.pop(k, None)
         else:
