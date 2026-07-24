@@ -1305,6 +1305,75 @@ test.describe('Drawer close paths converge through handleBack', () => {
     await expect(page.locator('.drawer-overlay')).toHaveCSS('pointer-events', 'none')
   })
 
+  test('22f. Reduced motion releases the scrim in the committed close layout', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await setup(page, { width: 426, height: 860 })
+    await openDrawer(page)
+
+    const committedClose = page.evaluate(() => new Promise((resolve) => {
+      const drawer = document.querySelector('.drawer')
+      const overlay = document.querySelector('.drawer-overlay')
+      const observer = new MutationObserver(() => {
+        if (drawer.classList.contains('drawer--open')) return
+        observer.disconnect()
+        resolve({
+          blocking: overlay.classList.contains('drawer-overlay--blocking'),
+          pointerEvents: getComputedStyle(overlay).pointerEvents,
+          transitionProperty: getComputedStyle(drawer).transitionProperty,
+        })
+      })
+      observer.observe(drawer, { attributes: true, attributeFilter: ['class'] })
+      observer.observe(overlay, { attributes: true, attributeFilter: ['class'] })
+    }))
+
+    await page.locator('.drawer-overlay').dispatchEvent('pointerdown', {
+      button: 0,
+      isPrimary: true,
+      pointerId: 8,
+      pointerType: 'touch',
+    })
+
+    expect(await committedClose).toEqual({
+      blocking: false,
+      pointerEvents: 'none',
+      transitionProperty: 'none',
+    })
+  })
+
+  test('22g. Desktop drawer resize follows pointer delta and settles lost capture', async ({ page }) => {
+    await setup(page, { width: 1280, height: 800 })
+    const drawer = page.locator('.drawer--persistent')
+    const handle = page.getByRole('separator', { name: 'Resize navigation drawer' })
+    await expect(handle).toBeVisible()
+
+    const startWidth = await drawer.evaluate((element) => {
+      element.style.left = '40px'
+      return element.getBoundingClientRect().width
+    })
+    const box = await handle.boundingBox()
+    expect(box).not.toBeNull()
+
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(box.x + box.width / 2 + 48, box.y + box.height / 2)
+    const released = await handle.evaluate((element) => {
+      for (let pointerId = 1; pointerId <= 5; pointerId += 1) {
+        if (!element.hasPointerCapture(pointerId)) continue
+        element.releasePointerCapture(pointerId)
+        return true
+      }
+      return false
+    })
+    expect(released).toBe(true)
+
+    await expect(drawer).not.toHaveClass(/drawer--resizing/)
+    expect(await drawer.evaluate(element => element.getBoundingClientRect().width))
+      .toBe(startWidth + 48)
+    expect(await page.evaluate(() => localStorage.getItem('mobius:desktop-sidebar-width:v1')))
+      .toBe(String(startWidth + 48))
+    await page.mouse.up()
+  })
+
   test('23. Brand toggle close does not navigate, even from a deep view', async ({ page }) => {
     // Same regression as test 22 but via the existing mobile brand toggle.
     // Test 9 covers the basic case from a non-default view; this test keeps

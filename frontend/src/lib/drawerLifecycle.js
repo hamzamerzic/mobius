@@ -1,12 +1,67 @@
 // Drawer lifecycle helpers keep imperative swipe styling subordinate to the
 // shell's authoritative open/closed state.
 
-// Longer than Drawer.css's 100ms close transition. This is only
-// a fallback for reduced-motion / interrupted transitions where transitionend
-// does not fire; the normal path releases on the real transform event.
-export const DRAWER_CLOSE_FALLBACK_MS = 180
+// Extra time beyond the browser's computed transition. This is only a watchdog
+// for interrupted transitions where transitionend does not fire; the normal
+// path releases on the real transform event. A zero-duration transition needs
+// no watchdog (notably prefers-reduced-motion).
+export const DRAWER_CLOSE_WATCHDOG_BUFFER_MS = 80
 export const DRAWER_SWIPE_THRESHOLD_PX = 10
 export const DRAWER_SWIPE_DOMINANCE = 1.15
+
+function cssTimeMs(value) {
+  const text = String(value || '').trim()
+  const numeric = Number.parseFloat(text)
+  if (!Number.isFinite(numeric)) return 0
+  return text.endsWith('ms') ? numeric : numeric * 1000
+}
+
+/**
+ * Return a last-resort close watchdog derived from the panel's computed style.
+ *
+ * CSS transition lists repeat shorter property/duration/delay lists, so index
+ * each value modulo its own list length. `all` also owns the transform. The
+ * real transitionend remains authoritative; this only prevents a stranded
+ * modal scrim if the browser cancels or omits that event.
+ */
+export function drawerCloseWatchdogMs(style) {
+  const properties = String(style?.transitionProperty || '').split(',').map(v => v.trim())
+  const durations = String(style?.transitionDuration || '').split(',').map(cssTimeMs)
+  const delays = String(style?.transitionDelay || '').split(',').map(cssTimeMs)
+  const count = Math.max(properties.length, durations.length, delays.length)
+  let longest = 0
+
+  for (let index = 0; index < count; index += 1) {
+    const property = properties[index % properties.length]
+    if (property !== 'transform' && property !== 'all') continue
+    const duration = durations[index % durations.length]
+    const delay = delays[index % delays.length]
+    longest = Math.max(longest, Math.max(0, duration + delay))
+  }
+
+  return longest > 0
+    ? Math.ceil(longest + DRAWER_CLOSE_WATCHDOG_BUFFER_MS)
+    : 0
+}
+
+/**
+ * Resize from the gesture's starting geometry rather than an absolute screen
+ * coordinate. `edgeDirection` is 1 for a right-edge handle and -1 for a
+ * left-edge handle, so future insets or opposite-side navigation stay correct.
+ */
+export function drawerWidthFromPointerDelta({
+  startWidth,
+  startX,
+  currentX,
+  edgeDirection = 1,
+}) {
+  const width = Number(startWidth)
+  const origin = Number(startX)
+  const current = Number(currentX)
+  const direction = Number(edgeDirection) < 0 ? -1 : 1
+  if (![width, origin, current].every(Number.isFinite)) return width
+  return width + ((current - origin) * direction)
+}
 
 /** True only when the current displacement is decisively sideways. */
 export function isHorizontalDrawerSwipe(dx, dy) {
