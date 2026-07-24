@@ -238,13 +238,14 @@ def enforce_browser_profile_quota(
   inactive_days: int | None = None,
   active_profile_names: set[str] | None = None,
 ) -> dict:
-  """Prune caches, then enough inactive profiles to honor the byte budget.
+  """Prune caches, then inactive chat profiles to honor the byte budget.
 
   ``inactive_days`` is a preferred retention window, not permission for the
-  profile tree to grow past ``max_bytes``. Deleted, missing, and expired chat
-  profiles yield first. If those cannot restore the low-water mark, the oldest
-  remaining inactive profiles yield too; live browser and chat sessions never
-  do.
+  ordinary per-chat tree to grow past ``max_bytes``. Deleted, missing, and
+  expired chat profiles yield first. If those cannot restore the low-water
+  mark, the oldest remaining inactive chat profiles yield too. Live sessions
+  never do, and deliberately named sessions retain their full inactivity grace.
+  Any protected overage is reported rather than mislabelled as reclaimed.
   """
   root = Path(data_dir) / "agent-browser-profiles"
   now = now or datetime.now(UTC).replace(tzinfo=None)
@@ -291,8 +292,9 @@ def enforce_browser_profile_quota(
       )
       if chat_id is None:
         # Named/legacy profiles are included in the byte budget and cache
-        # pruning. Their durable state gets the preferred inactivity grace,
-        # then joins the pressure fallback if the hard budget still cannot hold.
+        # pruning, but their durable state receives the full inactivity grace.
+        # Named sessions are deliberately long-lived; unlike ordinary chat
+        # profiles, a recent one never joins the pressure fallback.
         retire_first = not active and age_seconds >= cutoff_seconds
       else:
         retire_first = not active and (
@@ -324,7 +326,14 @@ def enforce_browser_profile_quota(
       key=lambda profile: profile["activity"],
     )
     profile_candidates = sorted(
-      (profile for profile in profiles if not profile["active"]),
+      (
+        profile for profile in profiles
+        if not profile["active"]
+        and (
+          profile["chat_id"] is not None
+          or profile["retire_first"]
+        )
+      ),
       key=lambda profile: (
         not profile["retire_first"],
         profile["activity"],

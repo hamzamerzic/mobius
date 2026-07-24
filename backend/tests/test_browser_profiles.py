@@ -515,6 +515,40 @@ def test_quota_never_prunes_live_named_profile(tmp_path):
   assert result["reclaimed_bytes"] == 0
 
 
+def test_quota_preserves_recent_inactive_named_profile_under_pressure(tmp_path):
+  profile = _named_profile(
+    tmp_path, "reflection", cache_bytes=0, durable_bytes=20,
+  )
+  now = datetime.now(UTC).replace(tzinfo=None)
+
+  result = enforce_browser_profile_quota(
+    tmp_path, {}, set(), now=now, max_bytes=10, low_water_bytes=0,
+    inactive_days=30, active_profile_names=set(),
+  )
+
+  assert profile.exists()
+  assert result["profiles_pruned"] == 0
+  assert result["bytes_after"] == 20
+  assert result["over_quota_bytes"] == 10
+
+
+def test_quota_prunes_named_profile_after_its_full_grace(tmp_path):
+  profile = _named_profile(
+    tmp_path, "reflection", cache_bytes=0, durable_bytes=20,
+  )
+  now = datetime.now(UTC).replace(tzinfo=None) + timedelta(days=31)
+
+  result = enforce_browser_profile_quota(
+    tmp_path, {}, set(), now=now, max_bytes=10, low_water_bytes=0,
+    inactive_days=30, active_profile_names=set(),
+  )
+
+  assert not profile.exists()
+  assert result["profiles_pruned"] == 1
+  assert result["bytes_after"] == 0
+  assert result["over_quota_bytes"] == 0
+
+
 def test_quota_ignores_symlinked_profile_directory(tmp_path):
   root = tmp_path / "agent-browser-profiles"
   root.mkdir()
