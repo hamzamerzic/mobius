@@ -37,6 +37,9 @@ _status = {
   "profile_count": 0,
   "bytes_before": 0,
   "bytes_after": 0,
+  "max_bytes": 0,
+  "low_water_bytes": 0,
+  "over_quota_bytes": 0,
   "reclaimed_bytes": 0,
   "cache_dirs_pruned": 0,
   "profiles_pruned": 0,
@@ -95,7 +98,10 @@ def _tree_bytes(path: Path) -> int:
     for root, _dirs, files in os.walk(path):
       for name in files:
         try:
-          total += (Path(root) / name).stat().st_size
+          candidate = Path(root) / name
+          if candidate.is_symlink():
+            continue
+          total += candidate.stat().st_size
         except OSError:
           pass
   except OSError:
@@ -232,7 +238,14 @@ def enforce_browser_profile_quota(
   inactive_days: int | None = None,
   active_profile_names: set[str] | None = None,
 ) -> dict:
-  """Prune regenerable caches, then oldest inactive profiles, at high water."""
+  """Prune caches, then enough inactive profiles to honor the byte budget.
+
+  ``inactive_days`` is a preferred retention window, not permission for the
+  profile tree to grow past ``max_bytes``. Deleted, missing, and expired chat
+  profiles yield first. If those cannot restore the low-water mark, the oldest
+  remaining inactive profiles yield too; live browser and chat sessions never
+  do.
+  """
   root = Path(data_dir) / "agent-browser-profiles"
   now = now or datetime.now(UTC).replace(tzinfo=None)
   default_max_bytes, default_low_water_bytes = default_browser_profile_quota()
@@ -278,10 +291,11 @@ def enforce_browser_profile_quota(
       )
       if chat_id is None:
         # Named/legacy profiles are included in the byte budget and cache
-        # pruning, but their durable state receives the full inactivity grace.
-        eligible = not active and age_seconds >= cutoff_seconds
+        # pruning. Their durable state gets the preferred inactivity grace,
+        # then joins the pressure fallback if the hard budget still cannot hold.
+        retire_first = not active and age_seconds >= cutoff_seconds
       else:
-        eligible = not active and (
+        retire_first = not active and (
           chat is None
           or chat.get("deleted_at") is not None
           or age_seconds >= cutoff_seconds
@@ -290,16 +304,17 @@ def enforce_browser_profile_quota(
         "path": path,
         "chat_id": chat_id,
         "activity": activity,
-        "eligible": eligible,
+        "retire_first": retire_first,
         "active": active,
         "size": _tree_bytes(path),
       })
 
   bytes_before = sum(profile["size"] for profile in profiles)
   total = bytes_before
+  pressure_triggered = total > max_bytes
   cache_dirs_pruned = 0
   profiles_pruned = 0
-  if total > max_bytes:
+  if pressure_triggered:
     # Chromium caches are disposable even for recently used chats. Prune them
     # from every CLOSED profile before considering deletion of any durable
     # profile state. Active profiles are excluded because Chromium may have
@@ -309,8 +324,11 @@ def enforce_browser_profile_quota(
       key=lambda profile: profile["activity"],
     )
     profile_candidates = sorted(
-      (profile for profile in profiles if profile["eligible"]),
-      key=lambda profile: profile["activity"],
+      (profile for profile in profiles if not profile["active"]),
+      key=lambda profile: (
+        not profile["retire_first"],
+        profile["activity"],
+      ),
     )
     for profile in cache_candidates:
       for rel in _CACHE_PATHS:
@@ -325,7 +343,7 @@ def enforce_browser_profile_quota(
       if total <= low_water_bytes:
         break
 
-    if total > max_bytes:
+    if total > low_water_bytes:
       for profile in profile_candidates:
         if not profile["path"].exists():
           continue
@@ -345,6 +363,9 @@ def enforce_browser_profile_quota(
     ),
     "bytes_before": bytes_before,
     "bytes_after": total,
+    "max_bytes": max_bytes,
+    "low_water_bytes": low_water_bytes,
+    "over_quota_bytes": max(0, total - max_bytes),
     "reclaimed_bytes": max(0, bytes_before - total),
     "cache_dirs_pruned": cache_dirs_pruned,
     "profiles_pruned": profiles_pruned,
