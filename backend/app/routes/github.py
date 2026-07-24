@@ -1367,6 +1367,13 @@ def _reconcile_stack_landing(rows: list[dict]) -> tuple[str, str]:
     raise ContributionSubmitError(
       "The earlier landing stopped before changing upstream. The stack is open again."
     )
+  if actual is None:
+    raise ContributionSubmitError(
+      "GitHub has not yet confirmed whether the saved landing completed. "
+      "The recovery journal is still intact; check again shortly.",
+      status_code=503,
+      code="landing_unconfirmed",
+    )
   raise ContributionSubmitError(
     f"Upstream {target_branch} changed while the earlier landing was unresolved. "
     "Nothing was overwritten; refresh the stack before trying again."
@@ -2559,6 +2566,7 @@ def _push_stack_tip_with_lease(
   """Atomically advance one unchanged upstream ref to a proven stack tip."""
   remote = f"https://github.com/{upstream_repo}.git"
   last_error = ""
+  last_actual = expected_base
   for attempt in range(_PUSH_RETRIES):
     proc = _git(
       repo,
@@ -2576,13 +2584,25 @@ def _push_stack_tip_with_lease(
     # that this compare-and-swap succeeded, while every other value remains a
     # safe failure. This mirrors submission's lost-response reconciliation and
     # prevents the ledger from reopening a stack that is already live.
-    if _upstream_branch_sha(repo, upstream_repo, target_branch) == landed_sha:
+    last_actual = _upstream_branch_sha(repo, upstream_repo, target_branch)
+    if last_actual == landed_sha:
       return
     if not _is_transient_push_error(last_error):
       break
     if attempt + 1 < _PUSH_RETRIES:
       time.sleep(_PUSH_RETRY_BASE_SECONDS * (2 ** attempt))
-  if "stale info" in last_error.lower() or "fetch first" in last_error.lower():
+  if last_actual is None:
+    raise ContributionSubmitError(
+      "GitHub did not confirm whether the atomic landing completed. The "
+      "recovery journal is still intact; check again shortly.",
+      status_code=503,
+      code="landing_unconfirmed",
+    )
+  if (
+    last_actual != expected_base
+    or "stale info" in last_error.lower()
+    or "fetch first" in last_error.lower()
+  ):
     raise ContributionSubmitError(
       f"Upstream {target_branch} moved while this stack was landing. Nothing "
       "was overwritten; refresh the stack and run CI again."
@@ -3733,10 +3753,18 @@ async def land_contribution_stack(
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
       db.close()
-      snapshots = _mark_stack_land_failure(rows, exc.message)
+      snapshots = (
+        _stack_record_snapshots(rows)
+        if exc.code == "landing_unconfirmed"
+        else _mark_stack_land_failure(rows, exc.message)
+      )
     raise HTTPException(
       status_code=exc.status_code,
-      detail={"message": exc.message, "records": snapshots},
+      detail={
+        "message": exc.message,
+        "records": snapshots,
+        **({"code": exc.code} if exc.code else {}),
+      },
     ) from exc
   except Exception as exc:
     log.exception("Contribution stack landing failed for app %s", app_id)

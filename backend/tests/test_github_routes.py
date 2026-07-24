@@ -3373,6 +3373,29 @@ def test_land_contribution_stack_restores_open_records_on_preflight_failure(
     for record in response.json()["detail"]["records"]
   )
 
+  # Once the irreversible push has started, an unreadable upstream ref is not
+  # proof of failure. Keep the journal claimed so a later request can reconcile
+  # the accepted push instead of reopening the stack and risking a duplicate.
+  monkeypatch.setattr(
+    "app.routes.github._land_reviewed_stack",
+    lambda rows: (_ for _ in ()).throw(ContributionSubmitError(
+      "Landing result is not confirmed.",
+      status_code=503,
+      code="landing_unconfirmed",
+    )),
+  )
+  uncertain = client.post(
+    f"/api/github/contributions/{app_id}/land-stack",
+    headers={"Authorization": f"Bearer {owner_token}"},
+    json={"record_ids": ids},
+  )
+
+  assert uncertain.status_code == 503
+  assert uncertain.json()["detail"]["code"] == "landing_unconfirmed"
+  assert [record["status"] for record in uncertain.json()["detail"]["records"]] == [
+    "landing", "landing",
+  ]
+
 
 def test_stack_landing_requires_every_pr_check_to_be_green(monkeypatch, tmp_path):
   from app.routes.github import ContributionSubmitError, _assert_pr_checks_green
@@ -3513,6 +3536,36 @@ def test_stack_tip_push_reconciles_a_lost_success_response(monkeypatch, tmp_path
     "api", "repos/mobius-os/app-demo/git/ref/heads/main",
     "--jq", ".object.sha",
   )]
+
+
+def test_stack_tip_push_keeps_journal_when_result_cannot_be_read(
+  monkeypatch, tmp_path,
+):
+  from app.routes.github import ContributionSubmitError, _push_stack_tip_with_lease
+
+  monkeypatch.setattr("app.routes.github._PUSH_RETRIES", 1)
+  monkeypatch.setattr(
+    "app.routes.github._git",
+    lambda repo, *args, check=True: _cp(
+      "", returncode=1, stderr="remote end hung up unexpectedly",
+    ),
+  )
+  monkeypatch.setattr(
+    "app.routes.github._upstream_branch_sha",
+    lambda *args, **kwargs: None,
+  )
+
+  with pytest.raises(ContributionSubmitError) as caught:
+    _push_stack_tip_with_lease(
+      tmp_path,
+      upstream_repo="mobius-os/app-demo",
+      target_branch="main",
+      expected_base="b" * 40,
+      landed_sha="c" * 40,
+    )
+
+  assert caught.value.status_code == 503
+  assert caught.value.code == "landing_unconfirmed"
 
 
 def test_submit_contribution_rejects_branch_diff_mismatch(
