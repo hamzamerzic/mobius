@@ -1234,10 +1234,10 @@ async def _record_run_metrics(
   """
   if not chat_id or not run_token:
     return
-  # A provider can legitimately omit usage (and Codex currently omits cost).
-  # With no accounting signal there is nothing to record; avoiding a no-op
-  # actor round-trip also preserves the runner's connection-release contract.
-  if usage is None and cost_usd in (None, 0):
+  # A provider can legitimately omit any one signal (Codex currently omits
+  # cost). An explicit zero cost and the provider session/thread identity are
+  # still measured facts; only a wholly empty result is a true no-op.
+  if usage is None and cost_usd is None and provider_session_id is None:
     return
   try:
     await _await_ack(get_writer().submit(RecordRunMetrics(
