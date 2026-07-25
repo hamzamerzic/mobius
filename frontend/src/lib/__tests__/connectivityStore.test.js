@@ -68,7 +68,7 @@ function harness(fetchImpl) {
     fetchImpl,
     ...timers,
   })
-  return { store, windowTarget, documentTarget, timers }
+  return { store, windowTarget, documentTarget, navigatorTarget, timers }
 }
 
 test('all subscribers share one monitor and the last unsubscribe removes it', async () => {
@@ -140,6 +140,21 @@ test('a live mutation response repairs a stale offline verdict immediately', asy
   h.store.reportReachable()
   assert.equal(h.store.getSnapshot(), true)
   assert.equal(notifications, 2)
+  stop()
+})
+
+test('a live mutation response outranks an older in-flight failed probe', async () => {
+  let settleProbe
+  const h = harness(() => new Promise((resolve) => { settleProbe = resolve }))
+  h.navigatorTarget.onLine = false
+  const stop = h.store.subscribe(() => {})
+
+  h.store.reportReachable()
+  settleProbe({ ok: false })
+  await flushMicrotasks()
+
+  assert.equal(h.store.getSnapshot(), true)
+  assert.equal(h.timers.timeoutCount(), 0)
   stop()
 })
 
