@@ -52,7 +52,7 @@ function navRoute(view, chatId, appId, paneId, extra = null) {
 }
 
 function isRestorableRoute(route) {
-  return route && ['chat', 'canvas', 'settings'].includes(route.view)
+  return route && ['chat', 'canvas', 'settings', 'notifications'].includes(route.view)
 }
 
 function sameRoute(a, b) {
@@ -92,6 +92,10 @@ export const deepLink = (() => {
         }
       }
       if (chat) return { view: 'chat', chatId: chat, intent }
+      // In-scope takeover-view form: /shell/?view=notifications — the target a
+      // push notification uses to land on the notifications page. Only known
+      // views resolve; anything else falls through to null (fail closed).
+      if (params.get('view') === 'notifications') return { view: 'notifications' }
     } catch { /* no query — fall through */ }
     return null
   }
@@ -198,20 +202,25 @@ export default function useNavigation({
     restored,
     storedChatId: safeStoredChatId(),
   }))
-  // Settings is the ONLY view state navigation owns globally (§1). It is the
-  // full-workspace TAKEOVER overlay used in single mode (and when the builder
-  // flag is off); in builder mode Settings is a pane TAB instead, so the overlay
-  // stays closed and the tab drives the surface. `settingsOpen` therefore means
-  // strictly "the takeover overlay is up" — NOT "the focused content is Settings"
-  // (a builder tab is that without the overlay). The render tells the two apart
-  // via this flag alone, never via `activeView` (design: structural separation).
+  // The takeover surface is the ONLY view state navigation owns globally (§1).
+  // `takeover` holds which takeover-class view ('settings' | 'notifications')
+  // owns the full-workspace TAKEOVER overlay used in single mode (and when the
+  // builder flag is off); in builder mode each is a pane TAB instead, so the
+  // overlay stays closed (null) and the tab drives the surface. Non-null
+  // therefore means strictly "the takeover overlay is up" — NOT "the focused
+  // content is that view" (a builder tab is the latter without the overlay).
+  // The render tells the two apart via this state alone, never via
+  // `activeView` (design: structural separation). ONE slot, not two booleans:
+  // the takeover surfaces are mutually exclusive by construction.
   //
-  // A reload/return-to-settings opens the overlay ONLY when Settings is NOT a
-  // builder tab; in builder mode the persisted blob restores the Settings tab and
-  // the boot effect re-opens it, so the overlay must start closed.
-  const [settingsOpen, setSettingsOpen] = useState(
-    initialNav.view === 'settings'
-    && !(paneModel.BUILDER_SETTINGS_ENABLED && workspace.viewMode === 'panes'),
+  // A reload/return-to-takeover opens the overlay ONLY when the view is NOT a
+  // builder tab; in builder mode the persisted blob restores the tab and the
+  // boot effect re-opens it, so the overlay must start closed.
+  const [takeover, setTakeover] = useState(
+    (initialNav.view === 'settings' || initialNav.view === 'notifications')
+    && !(paneModel.BUILDER_SETTINGS_ENABLED && workspace.viewMode === 'panes')
+      ? initialNav.view
+      : null,
   )
   // Visual visibility is intentionally separate from history ownership.
   // An explicit tap/swipe close can start the panel transition immediately
@@ -232,9 +241,9 @@ export default function useNavigation({
   // (finding 2): Settings is context-independent — a single overlay + a builder
   // tab, each shown only in its own world, NEVER destructively converted between
   // them (INV 6/7).
-  const overlayShowing = settingsOpen
+  const overlayShowing = takeover != null
     && (workspace.viewMode === 'single' || !paneModel.BUILDER_SETTINGS_ENABLED)
-  const activeView = overlayShowing ? 'settings' : contentRoute.view
+  const activeView = overlayShowing ? takeover : contentRoute.view
   const activeChatId = contentRoute.chatId
   const activeAppId = contentRoute.appId
 
@@ -270,30 +279,30 @@ export default function useNavigation({
   activeViewRef.current = activeView
   const activeAppIdRef = useRef(activeAppId)
   activeAppIdRef.current = activeAppId
-  const settingsOpenRef = useRef(settingsOpen)
-  settingsOpenRef.current = settingsOpen
+  const takeoverRef = useRef(takeover)
+  takeoverRef.current = takeover
   // Logical/history ownership — never mirror drawerVisible during render.
   // Every history transition advances this ref synchronously at its owning
   // boundary; coupling it back to the visual state made an early close render
   // turn the subsequent drawer-sentinel Back into ordinary navigation.
   const drawerOpenRef = useRef(false)
-  // The PAINTED Settings takeover for a given workspace snapshot — the render-time
+  // The PAINTED takeover for a given workspace snapshot — the render-time
   // `overlayShowing` above, generalized to any `ws` and read from the ref for the
   // async callbacks below. The takeover only PAINTS where the world is single (or
   // the builder-Settings flag is off); in builder it is SUSPENDED and the tree
   // paints (deriveContentVisibility gates it off). Nav bookkeeping that decides
-  // "what is actually visible" must consult THIS, never the raw `settingsOpen`
-  // flag — else a suspended takeover in builder rejects the visible app's nav
-  // pushes/pops and records/restores Settings for Back instead of the surface the
-  // user was really looking at (finding M1).
+  // "what is actually visible" must consult THIS, never the raw `takeover`
+  // slot — else a suspended takeover in builder rejects the visible app's nav
+  // pushes/pops and records/restores the takeover for Back instead of the surface
+  // the user was really looking at (finding M1).
   const overlayShowingForWs = useCallback(
-    (ws) => settingsOpenRef.current
+    (ws) => takeoverRef.current != null
       && (ws.viewMode === 'single' || !paneModel.BUILDER_SETTINGS_ENABLED),
     [],
   )
   // The committed set of visible pane ids (excludes phone-deck-hidden panes).
   // `isVisibleApp` reads this; Settings-open covered panes are excluded by the
-  // separate settingsOpenRef check, not by this set.
+  // separate takeoverRef check, not by this set.
   const visiblePaneIdsRef = useRef(visiblePaneIds)
   visiblePaneIdsRef.current = visiblePaneIds
   // Non-authoritative: the last non-null active chat id, used ONLY to resolve
@@ -495,12 +504,12 @@ export default function useNavigation({
     // activeContentRoute is the one world-aware projection (two-worlds design).
     const ws = workspaceStateRef.current.ws
     const content = paneModel.activeContentRoute(ws)
-    // Record Settings ONLY when the takeover actually PAINTS in this world (the
-    // painted overlay, not the raw flag): in builder the takeover is suspended and
-    // the tree is what shows, so snapshotting 'settings' there would make Back
-    // record/restore Settings instead of the builder surface the user saw (M1). It
-    // still retains the focused content ids + pane hint (contract §2.2.1).
-    const view = overlayShowingForWs(ws) ? 'settings' : content.view
+    // Record the takeover view ONLY when it actually PAINTS in this world (the
+    // painted overlay, not the raw slot): in builder the takeover is suspended and
+    // the tree is what shows, so snapshotting it there would make Back
+    // record/restore the takeover instead of the builder surface the user saw
+    // (M1). It still retains the focused content ids + pane hint (contract §2.2.1).
+    const view = overlayShowingForWs(ws) ? takeoverRef.current : content.view
     return navRoute(view, content.chatId, content.appId, content.paneId)
   }, [workspaceStateRef, overlayShowingForWs])
 
@@ -780,38 +789,44 @@ export default function useNavigation({
   //   - single mode / flag off → today's full-screen takeover overlay.
   // Refs advance synchronously alongside the setState so a second nav in the same
   // React batch snapshots the correct overlay flag (mirrors navTo's own pattern).
-  const applySettingsDestination = useCallback((paneId) => {
+  const applyTakeoverDestination = useCallback((view, paneId) => {
     const ws = workspaceStateRef.current.ws
     if (paneModel.BUILDER_SETTINGS_ENABLED && ws.viewMode === 'panes') {
       const targetPaneId = (typeof paneId === 'string' && ws.panes[paneId])
         ? paneId
         : ws.focusedPaneId
-      setSettingsOpen(false)
-      settingsOpenRef.current = false
+      setTakeover(null)
+      takeoverRef.current = null
       dispatchWorkspace({
-        type: 'OPEN_TAB', paneId: targetPaneId, tab: tabModel.settingsTab(), activate: true,
+        type: 'OPEN_TAB',
+        paneId: targetPaneId,
+        tab: view === 'notifications'
+          ? tabModel.notificationsTab()
+          : tabModel.settingsTab(),
+        activate: true,
       })
     } else {
-      setSettingsOpen(true)
-      settingsOpenRef.current = true
+      // The ONE slot swaps atomically: opening one takeover replaces any other.
+      setTakeover(view)
+      takeoverRef.current = view
     }
   }, [dispatchWorkspace, workspaceStateRef])
 
   // ── The ONE navigation decision point (two-worlds design) ──────────────────
-  // applySettingsDestination generalized to ALL destinations. Every path that
+  // applyTakeoverDestination generalized to ALL destinations. Every path that
   // APPLIES a chat/app/settings destination — navTo, restoreRoute, boot/deep-link,
   // no-history opens, app-history restoration — funnels here, so the single-vs-
   // builder branch lives in EXACTLY ONE place and no caller can accidentally
   // OPEN_TAB into the pane tree while in single mode (design risk 4: nav bypasses).
   // It only APPLIES the destination; history construction stays in navTo/restoreRoute.
-  //   Settings → applySettingsDestination (single/off = takeover overlay, builder = tab).
+  //   Takeover views → applyTakeoverDestination (single/off = overlay, builder = tab).
   //   Chat/app:
   //     single  → SET_SINGLE_SCREEN (the pane tree is NEVER touched; slot only).
   //     builder → OPEN_TAB in the hinted/focused pane (today's behavior).
   // `item` null/absent in single mode sets the empty/home screen. Returns nothing.
   const applyModeDestination = useCallback((route, { preserveSettings = false } = {}) => {
-    if (!route || route.view === 'settings') {
-      applySettingsDestination(route?.paneId)
+    if (!route || route.view === 'settings' || route.view === 'notifications') {
+      applyTakeoverDestination(route?.view ?? 'settings', route?.paneId)
       return
     }
     const ws = workspaceStateRef.current.ws
@@ -825,8 +840,8 @@ export default function useNavigation({
     // or async 404-repair never yanks the owner out of the Settings view they are
     // reading — the repaired surface is simply there when they close Settings.
     if (!preserveSettings) {
-      setSettingsOpen(false)
-      settingsOpenRef.current = false
+      setTakeover(null)
+      takeoverRef.current = null
     }
     if (mode === 'single') {
       const item = route.view === 'canvas'
@@ -842,11 +857,11 @@ export default function useNavigation({
       ? tabModel.makeTab('app', route.appId)
       : tabModel.makeTab('chat', route.chatId)
     dispatchWorkspace({ type: 'OPEN_TAB', paneId: targetPaneId, tab, activate: true })
-  }, [applySettingsDestination, dispatchWorkspace, workspaceStateRef])
+  }, [applyTakeoverDestination, dispatchWorkspace, workspaceStateRef])
 
-  // Settings is context-independent across a world toggle (two-worlds design):
-  // the SINGLE world owns the takeover overlay (`settingsOpen`, painted only in
-  // single mode), the BUILDER world owns its own Settings TAB in the pane tree.
+  // Takeover surfaces are context-independent across a world toggle (two-worlds
+  // design): the SINGLE world owns the takeover overlay (`takeover`, painted only
+  // in single mode), the BUILDER world owns its own tab in the pane tree.
   // Toggling worlds changes which is VISIBLE — it does NOT destructively convert one
   // into the other or CLOSE a builder Settings tab (the old conversion permanently
   // destroyed an unfocused Settings-only pane on exit). A stray Settings tab in
@@ -860,9 +875,9 @@ export default function useNavigation({
   // this alongside it so the foregrounded item is actually visible, exactly as a
   // user-initiated open would leave Settings. A no-op when no takeover is open.
   const dismissSettings = useCallback(() => {
-    if (!settingsOpenRef.current) return
-    setSettingsOpen(false)
-    settingsOpenRef.current = false
+    if (takeoverRef.current == null) return
+    setTakeover(null)
+    takeoverRef.current = null
   }, [])
 
   function navTo(view, opts = {}) {
@@ -880,10 +895,10 @@ export default function useNavigation({
     let nextRoute
     let openTab = null
 
-    if (view === 'settings') {
-      // The destination is a Settings route; its paneId is the focused pane hint
+    if (view === 'settings' || view === 'notifications') {
+      // The destination is a takeover route; its paneId is the focused pane hint
       // behind the overlay.
-      nextRoute = navRoute('settings', previousRoute.chatId, previousRoute.appId, targetPaneId)
+      nextRoute = navRoute(view, previousRoute.chatId, previousRoute.appId, targetPaneId)
     } else if (view === 'canvas') {
       const appId = 'appId' in opts ? opts.appId : activeAppIdRef.current
       const tab = tabModel.makeTab('app', appId)
@@ -948,11 +963,11 @@ export default function useNavigation({
   const restoreRoute = useCallback((route) => {
     if (!isRestorableRoute(route)) return
     navigationEpochRef.current += 1
-    if (route.view === 'settings') {
+    if (route.view === 'settings' || route.view === 'notifications') {
       // Same mode-conditional destination as a fresh nav: builder restores the
-      // Settings tab into the route's pane hint (dedup follows a moved tab),
+      // takeover tab into the route's pane hint (dedup follows a moved tab),
       // single/flag-off restores the takeover overlay.
-      applySettingsDestination(route.paneId)
+      applyTakeoverDestination(route.view, route.paneId)
       return
     }
     const ws = workspaceStateRef.current.ws
@@ -969,8 +984,8 @@ export default function useNavigation({
     if (tombstoneKey && tombstonedRouteRef.current.has(tombstoneKey)) {
       if (single) dispatchWorkspace({ type: 'SET_SINGLE_SCREEN', item: null })
       else dispatchWorkspace({ type: 'FOCUS', paneId })
-      setSettingsOpen(false)
-      settingsOpenRef.current = false
+      setTakeover(null)
+      takeoverRef.current = null
       return
     }
     // Resolve the concrete destination (homeSeed → freshest active chat at
@@ -1006,9 +1021,9 @@ export default function useNavigation({
         dispatchWorkspace({ type: 'FOCUS', paneId })
       }
     }
-    setSettingsOpen(false)
-    settingsOpenRef.current = false
-  }, [applyModeDestination, applySettingsDestination, dispatchWorkspace, workspaceStateRef])
+    setTakeover(null)
+    takeoverRef.current = null
+  }, [applyModeDestination, applyTakeoverDestination, dispatchWorkspace, workspaceStateRef])
 
   useEffect(() => {
     let bootPaneId = workspaceStateRef.current.ws.focusedPaneId
@@ -1060,17 +1075,17 @@ export default function useNavigation({
       } else if (!blobValid && initialNav.chatId != null) {
         openBootTab(tabModel.makeTab('chat', initialNav.chatId))
       } else if (
-        initialNav.view === 'settings'
+        (initialNav.view === 'settings' || initialNav.view === 'notifications')
         && paneModel.BUILDER_SETTINGS_ENABLED
         && workspaceStateRef.current.ws.viewMode === 'panes'
       ) {
-        // Reload/return-to-settings in builder mode: make the Settings tab the
+        // Reload/return-to-takeover in builder mode: make the takeover tab the
         // focused surface. Idempotent when a valid blob already restored it
         // (OPEN_TAB dedups); NECESSARY when the blob was absent/invalid, where the
-        // flat seed carries no Settings tab and the overlay flag started closed —
-        // without this, builder return-to-settings would show nothing. Single /
-        // flag-off return keeps the initial overlay flag instead.
-        applySettingsDestination(bootPaneId)
+        // flat seed carries no takeover tab and the overlay slot started closed —
+        // without this, builder return-to-takeover would show nothing. Single /
+        // flag-off return keeps the initial overlay slot instead.
+        applyTakeoverDestination(initialNav.view, bootPaneId)
         bootPaneId = workspaceStateRef.current.ws.focusedPaneId
       }
 
@@ -1560,17 +1575,24 @@ export default function useNavigation({
     activeChatId,
     drawerOpen: drawerVisible,
     // Strictly "the full-workspace takeover overlay is up" — NOT "focused content
-    // is Settings" (a builder tab is the latter without the overlay). The render
-    // gates pane suppression on THIS, never on activeView, so builder Settings
-    // never hides sibling panes (design: the named risk, made structural).
-    settingsOverlayOpen: overlayShowing,
+    // is a takeover view" (a builder tab is the latter without the overlay). The
+    // render gates pane suppression on THIS, never on activeView, so a builder
+    // takeover tab never hides sibling panes (design: the named risk, made
+    // structural). `takeoverOverlayOpen` is the any-takeover flag pane/iframe
+    // suppression reads; `takeoverView` names which surface owns the slot (raw,
+    // survives suspension in builder).
+    takeoverOverlayOpen: overlayShowing,
+    takeoverView: takeover,
+    settingsOverlayOpen: overlayShowing && takeover === 'settings',
+    notificationsOverlayOpen: overlayShowing && takeover === 'notifications',
     // The RAW suspended overlay intent (finding F3), NOT gated by the committed
-    // world. Settings is context-independent across a world toggle (INV 6/7): the
-    // takeover is SUSPENDED (overlayShowing false) in builder but `settingsOpen`
-    // survives, so Shell mounts SettingsView on THIS and only PAINTS it on the
-    // effective-gated flag — the component stays mounted-hidden across world flips
-    // (mount-identity rule, like the slot chat), never torn down mid-flip.
-    settingsOpenRaw: settingsOpen,
+    // world. Takeovers are context-independent across a world toggle (INV 6/7):
+    // the takeover is SUSPENDED (overlayShowing false) in builder but the slot
+    // survives, so Shell mounts each view on ITS raw flag and only PAINTS it on
+    // the effective-gated flag — the component stays mounted-hidden across world
+    // flips (mount-identity rule, like the slot chat), never torn down mid-flip.
+    settingsOpenRaw: takeover === 'settings',
+    notificationsOpenRaw: takeover === 'notifications',
     openDrawer,
     closeDrawer,
     navTo,

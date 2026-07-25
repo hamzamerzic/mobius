@@ -279,7 +279,8 @@ export default function Shell() {
     activeView,
     activeAppId,
     activeChatId,
-    drawerOpen, settingsOverlayOpen, settingsOpenRaw, openDrawer, closeDrawer,
+    drawerOpen, takeoverOverlayOpen, takeoverView, settingsOpenRaw,
+    notificationsOpenRaw, openDrawer, closeDrawer,
     navTo, tabRevealRevision, applyModeDestination, dismissSettings,
     backFiredRef, drawerPushedRef, navStackRef, navigationEpochRef,
     activeViewRef, activeChatIdRef, activeAppIdRef,
@@ -342,12 +343,13 @@ export default function Shell() {
   }, [navigationOpen, persistentDrawer])
 
   // The COMMITTED-mode-gated overlay flag from the nav adapter — the DERIVATION
-  // INPUT to deriveContentVisibility only (finding F3). It counts the takeover
-  // wherever the COMMITTED world is single; deriveContentVisibility re-gates it by
-  // the EFFECTIVE mode and returns `settingsOverlay`, which every PAINT gate reads.
-  // The render never uses `activeView === 'settings'` for pane suppression (that
-  // would hide every pane behind a builder Settings tab — the named risk).
-  const settingsActive = settingsOverlayOpen
+  // INPUT to deriveContentVisibility only (finding F3). It counts any takeover
+  // (Settings or Notifications) wherever the COMMITTED world is single;
+  // deriveContentVisibility re-gates it by the EFFECTIVE mode and returns
+  // `takeoverOverlay`, which every PAINT gate reads. The render never uses
+  // `activeView === 'settings'` for pane suppression (that would hide every pane
+  // behind a builder takeover tab — the named risk).
+  const takeoverActive = takeoverOverlayOpen
   // Builder mode is the tiled 'panes' view-mode (only meaningful when splits can
   // exist). The logo itself is the persistent mode indicator and gesture surface;
   // there is deliberately no separate header control.
@@ -492,13 +494,17 @@ export default function Shell() {
   }, [immersiveActive])
   // HONEST EXIT DESTINATION (M2): the exit-plan classifier needs to know what the
   // SINGLE world will actually paint on completion, not just the slot the tree
-  // seeds. A suspended single-world takeover (settingsOpenRaw) paints Settings over
-  // the slot; a retained immersive request (immersiveAppId) solos the holder over
-  // the viewport. Mirrored into refs so the toggle callback (stable identity, no
-  // dep churn) and the undo keydown handler (deps [dispatchWorkspace, mode]) both
-  // read the LIVE values without a stale closure or re-registering their listeners.
-  const settingsDestinationRef = useRef(settingsOpenRaw)
-  settingsDestinationRef.current = settingsOpenRaw
+  // seeds. A suspended single-world takeover (takeoverView raw) paints that surface
+  // over the slot; a retained immersive request (immersiveAppId) solos the holder
+  // over the viewport. The classifier takes the destination TAB KEY (or null).
+  // Mirrored into refs so the toggle callback (stable identity, no dep churn) and
+  // the undo keydown handler (deps [dispatchWorkspace, mode]) both read the LIVE
+  // values without a stale closure or re-registering their listeners.
+  const takeoverDestinationKey = takeoverView === 'notifications'
+    ? tabModel.NOTIFICATIONS_TAB_KEY
+    : (takeoverView === 'settings' ? tabModel.SETTINGS_TAB_KEY : null)
+  const takeoverDestinationRef = useRef(takeoverDestinationKey)
+  takeoverDestinationRef.current = takeoverDestinationKey
   const immersiveHolderRef = useRef(immersiveAppId)
   immersiveHolderRef.current = immersiveAppId
 
@@ -512,11 +518,11 @@ export default function Shell() {
     if (!t?.presentation) return
     const live = transitionSignature({
       workspace, projection, contentRect,
-      settingsDestination: settingsOpenRaw,
+      takeoverDestination: takeoverDestinationKey,
       immersiveHolderId: immersiveAppId,
     })
     if (live !== t.presentation.snapshotSignature) mode.cancelBeat()
-  }, [workspace, projection, contentRect, settingsOpenRaw, immersiveAppId, modeState, mode])
+  }, [workspace, projection, contentRect, takeoverDestinationKey, immersiveAppId, modeState, mode])
 
   // The single derivation of what content the render paints and where (design
   // §2/§4/§5). Pure + memoized so the immersive-solo and Settings-overlay
@@ -524,7 +530,7 @@ export default function Shell() {
   // every dependent flag together.
   const contentVisibility = useMemo(
     () => deriveContentVisibility({
-      workspace, projection, settingsOverlayOpen: settingsActive,
+      workspace, projection, takeoverOverlayOpen: takeoverActive,
       immersiveActive, immersiveAppId,
       viewMode: effectiveViewMode, // 'panes' during a single-mode drag preview
       // World-reveal exit: paint the mounted destination beneath the deal (adds its
@@ -532,17 +538,19 @@ export default function Shell() {
       exitUnderlayKey: modeUnderlayKey,
       focusedPaneView: focusedPaneViewId != null,
     }),
-    [workspace, projection, settingsActive, immersiveActive, immersiveAppId,
+    [workspace, projection, takeoverActive, immersiveActive, immersiveAppId,
       effectiveViewMode, modeUnderlayKey, focusedPaneViewId],
   )
   const { multiPane, single, focusedActiveKey, fullBleedKey, visibleAppIds } = contentVisibility
-  // The EFFECTIVE-mode-gated Settings takeover flag (finding F3): true only when the
-  // takeover actually PAINTS — false in builder AND during a single-mode drag
-  // preview / exit beat (effectiveViewMode 'panes'). Every PAINT gate below reads
-  // THIS, not the committed-gated `settingsActive` (which is only the derivation
-  // INPUT now), so those transient windows paint the tiled world with Settings
-  // suspended exactly as the derived flags assume. MOUNT keys off `settingsOpenRaw`.
-  const settingsOverlay = contentVisibility.settingsOverlay
+  // The EFFECTIVE-mode-gated takeover flag (finding F3): true only when a takeover
+  // actually PAINTS — false in builder AND during a single-mode drag preview /
+  // exit beat (effectiveViewMode 'panes'). Suppression gates below read THIS
+  // (any-takeover); the per-view paint gates further split it by takeoverView.
+  // Neither reads the committed-gated `takeoverActive` (derivation INPUT only),
+  // so those transient windows paint the tiled world with the takeover suspended
+  // exactly as the derived flags assume. MOUNT keys off the raw per-view flags.
+  const takeoverOverlay = contentVisibility.takeoverOverlay
+  const settingsOverlay = takeoverOverlay && takeoverView === 'settings'
   const workspaceChromeActive = contentVisibility.chromeActive
   // (v2: multiPaneRef / visibleLeavesRef are gone — handleToggleViewMode now builds
   // the whole latched plan from the live projection via deriveExit/EnterPlan, and the
@@ -1192,7 +1200,7 @@ export default function Shell() {
   // the Settings tab active. Gated on the effective `settingsOverlay` (finding F3),
   // so a single-mode drag preview / exit beat can paint a stray Settings tab as a
   // pane. (Blind to a BACKGROUND Settings tab — not painted.)
-  const settingsVisibleAsTab = !settingsOverlay
+  const settingsVisibleAsTab = !takeoverOverlay
     && projection.visibleLeaves.some(id => workspace.panes[id]?.activeTabKey === SETTINGS_KEY)
   // MOUNT (finding F3): keyed off the RAW suspended overlay intent, NOT the
   // committed/effective PAINT flag, so SettingsView stays mounted-hidden across a
@@ -1221,14 +1229,14 @@ export default function Shell() {
   // tests (design §2 M13, finding D-iii).
   const visibleChatIds = useMemo(() => {
     const set = new Set()
-    if (settingsOverlay) return set
+    if (takeoverOverlay) return set
     for (const paneId of projection.visibleLeaves) {
       const pane = workspace.panes[paneId]
       const active = pane?.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)
       if (active && active.kind === 'chat') set.add(String(active.id))
     }
     return set
-  }, [settingsOverlay, workspace, projection])
+  }, [takeoverOverlay, workspace, projection])
   const visibleChatIdsRef = useRef(visibleChatIds)
   useEffect(() => { visibleChatIdsRef.current = visibleChatIds }, [visibleChatIds])
   // The flat, chatId-sorted set of visible CHAT panes to mount as PaneChatViews
@@ -1273,7 +1281,7 @@ export default function Shell() {
   // without a remount (two-worlds design).
   const visibleChatKeys = useMemo(() => {
     const set = new Set()
-    if (settingsOverlay) return set
+    if (takeoverOverlay) return set
     if (single) {
       if (fullBleedKey && fullBleedKey.startsWith('chat:')) set.add(fullBleedKey)
       return set
@@ -1286,7 +1294,7 @@ export default function Shell() {
     // World-reveal exit: paint the (tree-absent) underlay chat beneath the deal.
     if (modeUnderlayKey && modeUnderlayKey.startsWith('chat:')) set.add(modeUnderlayKey)
     return set
-  }, [single, settingsOverlay, fullBleedKey, projection, workspace, modeUnderlayKey])
+  }, [single, takeoverOverlay, fullBleedKey, projection, workspace, modeUnderlayKey])
 
   // Last chat that reached a stable painted frame in each visible pane. On a
   // chat-tab change, keep that outgoing ChatView mounted as an inert cover while
@@ -1577,12 +1585,12 @@ export default function Shell() {
         workspace: settled, projection, contentRect,
         // M2: reveal to Settings / classify immersive instant, not the slot the
         // takeover or immersive-solo covers at completion.
-        settingsDestination: settingsDestinationRef.current,
+        takeoverDestination: takeoverDestinationRef.current,
         immersiveHolderId: immersiveHolderRef.current,
       })
       : deriveEnterPlan({
         workspace: settled, projection, contentRect,
-        settingsDestination: settingsDestinationRef.current,
+        takeoverDestination: takeoverDestinationRef.current,
         immersiveHolderId: immersiveHolderRef.current,
       })
     // The honest `cause` ('hold'|'swipe'|'keyboard') threads from the caller;
@@ -1661,14 +1669,14 @@ export default function Shell() {
               workspace: undoSlot.ws,
               projection: paneModel.projectLayout(undoSlot.ws, scene.mode, scene.contentRect),
               contentRect: scene.contentRect,
-              settingsDestination: settingsDestinationRef.current,
+              takeoverDestination: takeoverDestinationRef.current,
               immersiveHolderId: immersiveHolderRef.current,
             })
             : deriveExitPlan({
               workspace: wsState.ws, projection: scene.projection, contentRect: scene.contentRect,
               // M2: same honest-destination classification for an undo that exits
               // builder — Settings/immersive still own the single world it lands in.
-              settingsDestination: settingsDestinationRef.current,
+              takeoverDestination: takeoverDestinationRef.current,
               immersiveHolderId: immersiveHolderRef.current,
             })
           mode.undo({ restoredMode, presentation })
@@ -3727,7 +3735,7 @@ export default function Shell() {
           const fullBleed = !underlay && !paned && paneActiveKey === fullBleedKey
           const motion = isActiveLayer ? wrapperMotion(paneActiveKey) : null
           const tabPanel = role !== 'held' && paned
-          const handoffClass = !settingsOverlay && role !== 'active'
+          const handoffClass = !takeoverOverlay && role !== 'active'
             ? ` shell__chat-view--${role}`
             : ''
           const posStyle = paned ? { top: paned.y, left: paned.x, width: paned.w, height: paned.h } : null
@@ -3750,8 +3758,8 @@ export default function Shell() {
               style={motion ? { ...(posStyle || {}), ...motion.vars } : (posStyle || undefined)}
               // Inert while covered/handing-off OR while participating in / underlying
               // the exit beat (INV 9 inert beat).
-              inert={settingsOverlay || role !== 'active' || (modeBeatActive && (!!motion || underlay))}
-              aria-hidden={settingsOverlay || role !== 'active' ? 'true' : undefined}
+              inert={takeoverOverlay || role !== 'active' || (modeBeatActive && (!!motion || underlay))}
+              aria-hidden={takeoverOverlay || role !== 'active' ? 'true' : undefined}
               onPointerDownCapture={paned && role === 'active' && !modeBeatActive
                 ? () => dispatchWorkspace({ type: 'FOCUS', paneId })
                 : undefined}

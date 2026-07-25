@@ -184,6 +184,16 @@ function sanitizeTab(raw) {
       ? tabModel.settingsTab()
       : null
   }
+  // Notifications: the same takeover-class contract as Settings — same flag,
+  // same canonical-id-only acceptance, same flag-off scrub.
+  if (raw.kind === 'notifications') {
+    return (
+      BUILDER_SETTINGS_ENABLED
+      && String(raw.id) === tabModel.NOTIFICATIONS_ID
+    )
+      ? tabModel.notificationsTab()
+      : null
+  }
   if (raw.kind !== 'chat' && raw.kind !== 'app') return null
   if (raw.kind === 'app' && !Number.isFinite(Number(raw.id))) return null
   return tabModel.makeTab(raw.kind, raw.id)
@@ -534,17 +544,19 @@ export function setSingleScreen(ws, slot) {
 }
 
 // The concrete chat/app item the FOCUSED builder pane is showing, as a slot value.
-// Settings never occupies the single-world slot; when Settings is active, fall
-// back to the most recently positioned concrete tab in that same pane. Otherwise
-// the first-ever builder→single toggle from the common Settings flow paints an
-// empty shell even though the owner's chat is still directly underneath it.
+// Takeover-class tabs (Settings, Notifications) never occupy the single-world
+// slot; when one is active, fall back to the most recently positioned concrete
+// chat/app tab in that same pane. Otherwise the first-ever builder→single toggle
+// from the common Settings flow paints an empty shell even though the owner's
+// chat is still directly underneath it.
 export function focusedSlotSeed(ws) {
   const pane = ws.panes[ws.focusedPaneId]
   const key = pane?.activeTabKey
   if (!pane || !key) return null
+  const isConcrete = (t) => t.kind === 'chat' || t.kind === 'app'
   const activeTab = pane.tabs.find(t => tabModel.tabKey(t) === key)
-  const tab = activeTab?.kind === 'settings'
-    ? [...pane.tabs].reverse().find(candidate => candidate.kind !== 'settings')
+  const tab = activeTab && !isConcrete(activeTab)
+    ? [...pane.tabs].reverse().find(isConcrete)
     : activeTab
   if (!tab) return null
   if (tab.kind === 'app') return { kind: 'app', id: String(tab.id) }
@@ -617,6 +629,9 @@ export function focusedContentRoute(ws) {
       // apart via the SEPARATE settingsOverlayOpen flag, never via this route
       // (design: the overlay must not be conflated with focused-content-is-Settings).
       if (tab.kind === 'settings') return { view: 'settings', chatId: null, appId: null, paneId }
+      if (tab.kind === 'notifications') {
+        return { view: 'notifications', chatId: null, appId: null, paneId }
+      }
       const { view, opts } = tabModel.tabNavTarget(tab)
       if (view === 'canvas') return { view: 'canvas', chatId: null, appId: opts.appId, paneId }
       return { view: 'chat', chatId: opts.chatId, appId: null, paneId }
@@ -1181,7 +1196,9 @@ export function flattenRollbackPriority(ws) {
     const activeTab = focused.tabs.find(tab => tabModel.tabKey(tab) === active)
     if (activeTab) out.push(activeTab)
   }
-  return out.filter(tab => !tabModel.isSettingsTab(tab))
+  return out.filter(
+    tab => !tabModel.isSettingsTab(tab) && !tabModel.isNotificationsTab(tab),
+  )
 }
 
 // ── Projection: the tree → renderable geometry (design §4) ──────────────────
