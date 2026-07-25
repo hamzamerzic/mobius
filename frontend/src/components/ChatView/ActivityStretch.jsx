@@ -197,8 +197,14 @@ function GroupedActivityStretch({
     chatId,
     `${surfaceKey}:activity:${stretchKey}`,
   )
+  const [helperOpen, setHelperOpen] = useDisclosureState(
+    chatId,
+    `${surfaceKey}:helper-activity:${stretchKey}`,
+  )
   const headerRef = useRef(null)
+  const activityBodyRef = useRef(null)
   const timelineRef = useRef(null)
+  const activityBodyId = useId()
   const timelineId = useId()
   const [detailEntries, setDetailEntries] = useState(null)
   const [detailError, setDetailError] = useState(false)
@@ -214,42 +220,6 @@ function GroupedActivityStretch({
     setDetailEntries(null)
     setDetailError(false)
   }, [detailKey])
-
-  useEffect(() => {
-    if (!userOpen || !detailRef || detailEntries || detailError) return undefined
-    const controller = new AbortController()
-    let current = true
-    apiFetch(activityDetailUrl(chatId, {
-      message_index: detailMessageIndex,
-      start: detailStart,
-      end: detailEnd,
-    }), {
-      signal: controller.signal,
-    })
-      .then(res => jsonOrThrow(res, 'Activity detail failed'))
-      .then(data => {
-        if (!current) return
-        setDetailEntries(Array.isArray(data.entries) ? data.entries : [])
-      })
-      .catch(error => {
-        if (!current || error?.name === 'AbortError') return
-        setDetailError(true)
-      })
-    return () => {
-      current = false
-      controller.abort()
-    }
-  }, [
-    chatId,
-    detailAttempt,
-    detailEntries,
-    detailError,
-    detailEnd,
-    detailKey,
-    detailMessageIndex,
-    detailStart,
-    userOpen,
-  ])
 
   const lastItem = entries[entries.length - 1]?.item
   const liveThinkingTail = live && lastItem?.type === 'thinking'
@@ -338,6 +308,56 @@ function GroupedActivityStretch({
   // The user's toggle is the ONLY open/close signal — no force-open (see the
   // header comment). While collapsed, the header status carries liveness.
   const open = userOpen
+  const hasSubagents = subagentHelpers.length > 0
+  const timelineOpen = open && (!hasSubagents || helperOpen)
+
+  // Delegation has two honest levels: the broad summary reveals its named
+  // helpers, then a helper reveals the underlying activity. An ordinary
+  // stretch keeps its original one-level summary → timeline disclosure.
+  const toggleSummary = () => {
+    preserveTogglePosition(headerRef.current, activityBodyRef.current)
+    setUserOpen(o => !o)
+  }
+  const toggleHelper = trigger => {
+    preserveTogglePosition(trigger, timelineRef.current)
+    setHelperOpen(o => !o)
+  }
+
+  useEffect(() => {
+    if (!timelineOpen || !detailRef || detailEntries || detailError) return undefined
+    const controller = new AbortController()
+    let current = true
+    apiFetch(activityDetailUrl(chatId, {
+      message_index: detailMessageIndex,
+      start: detailStart,
+      end: detailEnd,
+    }), {
+      signal: controller.signal,
+    })
+      .then(res => jsonOrThrow(res, 'Activity detail failed'))
+      .then(data => {
+        if (!current) return
+        setDetailEntries(Array.isArray(data.entries) ? data.entries : [])
+      })
+      .catch(error => {
+        if (!current || error?.name === 'AbortError') return
+        setDetailError(true)
+      })
+    return () => {
+      current = false
+      controller.abort()
+    }
+  }, [
+    chatId,
+    detailAttempt,
+    detailEntries,
+    detailError,
+    detailEnd,
+    detailKey,
+    detailMessageIndex,
+    detailStart,
+    timelineOpen,
+  ])
 
   // The step count and failure detail ride in the accessible name only (the
   // visible line stays a calm activity summary); the one-second clock is not in
@@ -367,75 +387,86 @@ function GroupedActivityStretch({
         interactive
         open={open}
         ariaLabel={`${text}${stepNote}${stateNote}`}
-        controlsId={timelineId}
+        controlsId={activityBodyId}
         // Togglable at any time, running or not: with default-collapse there is
         // no forced-open state for a tap to fight, so the user can peek into a
         // live run and close it again.
-        onToggle={() => {
-          preserveTogglePosition(headerRef.current, timelineRef.current)
-          setUserOpen(o => !o)
-        }}
+        onToggle={toggleSummary}
         // A delegating turn's helper rollup ("2 running · 1 done"); the header
         // owns it so it reads without expanding the line.
         count={subagentCount}
       />
-      {/* Helper rows for a delegating turn, ALWAYS visible (not gated on the
-          disclosure) so live subagent progress reads without expanding. The
-          raw Task ToolBlock — its output + inspection — stays in the timeline
-          below. One SubagentChips per Task/Agent tool block that has helpers. */}
-      {subagentTools.map((tool, i) => (
-        <SubagentChips
-          key={tool.tool_use_id ?? `subagent-${i}`}
-          subagent={tool.subagent}
-        />
-      ))}
-      <div ref={timelineRef} id={timelineId} className="chat__activity-timeline" hidden={!open}>
-        {open && detailRef && !timelineEntries && !detailError && (
-          <span className="chat__reasoning-load" role="status" aria-live="polite">
-            Loading activity…
-          </span>
-        )}
-        {open && detailError && (
-          <div className="chat__lazy-status">
+      <div
+        ref={activityBodyRef}
+        id={activityBodyId}
+        className="chat__activity-body"
+        hidden={!open}
+      >
+        {hasSubagents && subagentTools.map((tool, i) => (
+          <SubagentChips
+            key={tool.tool_use_id ?? `subagent-${i}`}
+            subagent={tool.subagent}
+            open={helperOpen}
+            controlsId={timelineId}
+            onToggle={toggleHelper}
+          />
+        ))}
+        <div
+          ref={timelineRef}
+          id={timelineId}
+          className={
+            'chat__activity-timeline'
+            + (hasSubagents ? ' chat__activity-timeline--subagent' : '')
+          }
+          hidden={hasSubagents && !helperOpen}
+        >
+          {timelineOpen && detailRef && !timelineEntries && !detailError && (
             <span className="chat__reasoning-load" role="status" aria-live="polite">
-              Activity details unavailable.
+              Loading activity…
             </span>
-            <button
-              type="button"
-              className="chat__lazy-retry"
-              onClick={() => {
-                setDetailError(false)
-                setDetailAttempt(attempt => attempt + 1)
-              }}
-            >
-              Retry
-            </button>
-          </div>
-        )}
-        {open && timelineEntries?.map(({ item, idx }) => {
-          if (item.type === 'thinking') {
-            const key = assistantBlockKey(item, idx)
+          )}
+          {timelineOpen && detailError && (
+            <div className="chat__lazy-status">
+              <span className="chat__reasoning-load" role="status" aria-live="polite">
+                Activity details unavailable.
+              </span>
+              <button
+                type="button"
+                className="chat__lazy-retry"
+                onClick={() => {
+                  setDetailError(false)
+                  setDetailAttempt(attempt => attempt + 1)
+                }}
+              >
+                Retry
+              </button>
+            </div>
+          )}
+          {timelineOpen && timelineEntries?.map(({ item, idx }) => {
+            if (item.type === 'thinking') {
+              const key = assistantBlockKey(item, idx)
+              return (
+                <TimelineThought
+                  key={key}
+                  label={thoughtDurationLabel(item.duration_ms)}
+                  thought={item}
+                  chatId={chatId}
+                  disclosureKey={`${surfaceKey}:thought:${key}`}
+                />
+              )
+            }
+            // chatId + the block's tool_use_id let ToolBlock lazily fetch a
+            // truncated large output on expand (GET /tool-output/{tool_use_id}).
             return (
-              <TimelineThought
-                key={key}
-                label={thoughtDurationLabel(item.duration_ms)}
-                thought={item}
+              <ToolBlock
+                key={assistantBlockKey(item, idx)}
+                t={item}
                 chatId={chatId}
-                disclosureKey={`${surfaceKey}:thought:${key}`}
+                disclosureKey={`${surfaceKey}:tool:${assistantBlockKey(item, idx)}`}
               />
             )
-          }
-          // chatId + the block's tool_use_id let ToolBlock lazily fetch a
-          // truncated large output on expand (GET /tool-output/{tool_use_id}).
-          return (
-            <ToolBlock
-              key={assistantBlockKey(item, idx)}
-              t={item}
-              chatId={chatId}
-              disclosureKey={`${surfaceKey}:tool:${assistantBlockKey(item, idx)}`}
-            />
-          )
-        })}
+          })}
+        </div>
       </div>
     </div>
   )
@@ -449,7 +480,15 @@ export default function ActivityStretch({
   detailRef = null,
   summaryToolCount = null,
 }) {
-  if (entries.length === 1 && !detailRef) {
+  const loneItem = entries[0]?.item
+  const loneHasHelpers = loneItem?.type === 'tool'
+    && loneItem.subagent
+    && typeof loneItem.subagent === 'object'
+    && Object.keys(loneItem.subagent).length > 0
+  // A lone ordinary activity needs no redundant parent. A lone delegation does:
+  // its broad background-work rollup is context, while the named helper row is
+  // the meaningful disclosure affordance that reveals the tool detail below.
+  if (entries.length === 1 && !detailRef && !loneHasHelpers) {
     return (
       <SingleActivity
         entry={entries[0]}

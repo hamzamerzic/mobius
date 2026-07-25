@@ -76,7 +76,12 @@ function StatusDot({ status }) {
   return <span className={`chat__subagent-dot ${cls}`} aria-hidden="true" />
 }
 
-export default function SubagentChips({ subagent }) {
+export default function SubagentChips({
+  subagent,
+  open = false,
+  controlsId,
+  onToggle,
+}) {
   // Guard each helper value: a malformed persisted block (e.g. {t1: null}) must
   // not crash the whole chat render when a row dereferences helper.description.
   const helpers = subagent && typeof subagent === 'object'
@@ -103,18 +108,34 @@ export default function SubagentChips({ subagent }) {
         const name = helperName(helper.description)
         const sub = subLine(helper)
         const isRunning = helper.status === 'running'
+        const status = isRunning
+          ? 'in progress'
+          : helper.status === 'done'
+            ? 'done'
+            : 'failed'
         const ms = elapsedMs(helper, now)
         const elapsed = ms != null ? elapsedLabel(ms) : null
+        const Row = onToggle ? 'button' : 'div'
         return (
-          <div
+          <Row
             key={taskId}
+            type={onToggle ? 'button' : undefined}
             className={
               'chat__subagent'
+              + (onToggle ? ' chat__subagent--interactive' : '')
               + (isRunning ? ' chat__subagent--running' : '')
               + (helper.status === 'failed' || helper.status === 'killed'
                   || helper.status === 'stopped'
                   ? ' chat__subagent--failed' : '')
             }
+            onClick={onToggle
+              ? event => onToggle(event.currentTarget)
+              : undefined}
+            aria-expanded={onToggle ? open : undefined}
+            aria-controls={onToggle ? controlsId : undefined}
+            aria-label={onToggle
+              ? `${name}, ${status}. ${open ? 'Hide' : 'Show'} activity details`
+              : undefined}
           >
             <StatusDot status={helper.status} />
             <span className="chat__subagent-body">
@@ -132,7 +153,7 @@ export default function SubagentChips({ subagent }) {
               {sub && <span className="chat__subagent-sub">{sub}</span>}
             </span>
             {elapsed && <span className="chat__subagent-elapsed">{elapsed}</span>}
-          </div>
+          </Row>
         )
       })}
     </div>
