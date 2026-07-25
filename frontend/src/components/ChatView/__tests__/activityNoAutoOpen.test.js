@@ -31,14 +31,13 @@ test('the stretch restores saved user state and open is exactly userOpen', () =>
   assert.doesNotMatch(body, /defaultOpen/, 'no defaultOpen escape hatch')
 })
 
-test('the only open-state write is the user toggle, guarded by preserveTogglePosition', () => {
-  // Exactly one setter call site: the header onClick.
+test('the summary is the only open-state write and preserves position', () => {
   assert.equal((src.match(/setUserOpen\(/g) || []).length, 1,
     'setUserOpen is called from exactly one place')
-  // preserveTogglePosition runs BEFORE the state mutation on every toggle path —
-  // the scroll anchor is captured before the height changes.
   assert.match(src, /preserveTogglePosition\(headerRef\.current, timelineRef\.current\)\s*setUserOpen\(o => !o\)/,
-    'the toggle preserves the anchor before flipping open state')
+    'the summary toggle preserves its anchor before flipping open state')
+  assert.doesNotMatch(src, /setHelperOpen|toggleHelper/,
+    'helper status rows do not create a second disclosure state')
 })
 
 test('background detail loading cannot derive or write open state', () => {
@@ -47,7 +46,7 @@ test('background detail loading cannot derive or write open state', () => {
   assert.match(
     body,
     /if \(!userOpen \|\| !detailRef \|\| detailEntries \|\| detailError\) return undefined/,
-    'the compact transcript stays closed and network-free until the user opens it',
+    'lazy detail stays network-free until the activity summary is open',
   )
   assert.doesNotMatch(
     body.slice(0, body.indexOf('onToggle={() =>')),

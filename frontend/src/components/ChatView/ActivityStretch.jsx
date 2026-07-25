@@ -379,17 +379,21 @@ function GroupedActivityStretch({
         // owns it so it reads without expanding the line.
         count={subagentCount}
       />
-      {/* Helper rows for a delegating turn, ALWAYS visible (not gated on the
-          disclosure) so live subagent progress reads without expanding. The
-          raw Task ToolBlock — its output + inspection — stays in the timeline
-          below. One SubagentChips per Task/Agent tool block that has helpers. */}
-      {subagentTools.map((tool, i) => (
-        <SubagentChips
-          key={tool.tool_use_id ?? `subagent-${i}`}
-          subagent={tool.subagent}
-        />
-      ))}
-      <div ref={timelineRef} id={timelineId} className="chat__activity-timeline" hidden={!open}>
+      <div
+        ref={timelineRef}
+        id={timelineId}
+        className="chat__activity-timeline"
+        hidden={!open}
+      >
+        {/* Helper rows are status within this whole-turn disclosure. The
+            transcript does not map activity entries to individual helpers, so
+            the rows deliberately do not claim helper-specific controls. */}
+        {subagentTools.map((tool, i) => (
+          <SubagentChips
+            key={tool.tool_use_id ?? `subagent-${i}`}
+            subagent={tool.subagent}
+          />
+        ))}
         {open && detailRef && !timelineEntries && !detailError && (
           <span className="chat__reasoning-load" role="status" aria-live="polite">
             Loading activity…
@@ -449,7 +453,14 @@ export default function ActivityStretch({
   detailRef = null,
   summaryToolCount = null,
 }) {
-  if (entries.length === 1 && !detailRef) {
+  const loneItem = entries[0]?.item
+  const loneHasHelpers = loneItem?.type === 'tool'
+    && loneItem.subagent
+    && typeof loneItem.subagent === 'object'
+    && Object.keys(loneItem.subagent).length > 0
+  // A lone ordinary activity needs no redundant parent. A lone delegation does:
+  // its broad background-work rollup is context for the named helper rows.
+  if (entries.length === 1 && !detailRef && !loneHasHelpers) {
     return (
       <SingleActivity
         entry={entries[0]}
