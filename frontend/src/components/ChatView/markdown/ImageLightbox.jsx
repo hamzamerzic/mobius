@@ -239,10 +239,11 @@ export default function ImageLightbox({
       } else if (event.touches.length === 1 && panRef.current && transformRef.current.scale > 1) {
         event.preventDefault()
         const touch = event.touches[0]
+        const pan = panRef.current
         setTransform((current) => clampImageTransform({
           ...current,
-          x: touch.clientX - panRef.current.x,
-          y: touch.clientY - panRef.current.y,
+          x: touch.clientX - pan.x,
+          y: touch.clientY - pan.y,
         }, metrics()))
       }
     }
