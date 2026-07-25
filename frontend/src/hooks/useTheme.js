@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { themeQueries } from './queries.js'
 import { applyThemeToDom } from '../lib/themeService.js'
@@ -71,7 +71,15 @@ export default function useTheme() {
     try { if (data.bg) localStorage.setItem('mobius-theme-bg', data.bg) } catch {}
   }, [data])
 
-  return {
-    loadTheme: () => themeQueries.invalidate(queryClient),
-  }
+  // Stable identity, for the same reason the panes get a ref-backed navTo:
+  // `loadTheme` is a dependency of Shell's handleSystemEvent, which is itself a
+  // prop of every chat pane. A per-render closure here churns both, so the pane
+  // comparator can never bail out and one chat's run event still rerenders every
+  // visible transcript — the stable navTo alone does not get there.
+  const loadTheme = useCallback(
+    () => themeQueries.invalidate(queryClient),
+    [queryClient],
+  )
+
+  return { loadTheme }
 }

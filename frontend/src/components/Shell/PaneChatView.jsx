@@ -2,6 +2,7 @@ import { memo, useCallback, useMemo } from 'react'
 import ChatView from '../ChatView/ChatView.jsx'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import { builtAppsSignature, derivedBuiltApps } from './builtAppState.js'
+import { samePaneChatProps } from './paneChatProps.js'
 
 // Per-chat binding for a tiled pane (design §2, M13). The single-mount ChatView
 // in Shell closes every callback over the ONE global `activeChatId`; a second
@@ -109,21 +110,6 @@ function PaneChatView({
       />
     </ErrorBoundary>
   )
-}
-
-function samePaneChatProps(previous, next) {
-  for (const key of Object.keys(previous)) {
-    if (key === 'apps') continue
-    if (!Object.is(previous[key], next[key])) return false
-  }
-  for (const key of Object.keys(next)) {
-    if (!(key in previous)) return false
-  }
-  // App-list refetches commonly replace rows unrelated to this chat. Avoid
-  // rerendering its large transcript unless its own built-app projection
-  // actually changed.
-  return builtAppsSignature(previous.apps, previous.chatId)
-    === builtAppsSignature(next.apps, next.chatId)
 }
 
 export default memo(PaneChatView, samePaneChatProps)
