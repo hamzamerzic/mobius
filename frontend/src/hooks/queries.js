@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { api } from '../api/client.js'
 import { appTokenRefreshInterval } from '../lib/appToken.js'
 
@@ -389,6 +389,69 @@ export const ownerQueries = {
     fetch: fetchWalkthrough,
     useQuery: useWalkthroughQuery,
     invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: walkthroughKey }),
+  },
+}
+
+// ── Notifications (bell badge + page) ────────────────────────────────────────
+// No polling anywhere: the `notification_created` system-SSE event invalidates
+// the unread count (Shell.handleSystemEvent), and the SSE reconnect hook
+// reconciles anything missed while disconnected — the same posture as apps.
+const notificationsListKey = ['notifications', 'list']
+const notificationsUnreadKey = ['notifications', 'unread-count']
+const NOTIFICATIONS_PAGE_SIZE = 30
+
+async function fetchNotificationsPage({ pageParam = null } = {}) {
+  const res = await api.notifications.list({
+    before: pageParam || undefined,
+    limit: NOTIFICATIONS_PAGE_SIZE,
+  })
+  const data = await jsonOrThrow(res, 'notifications fetch failed:')
+  return Array.isArray(data) ? data : []
+}
+
+function useNotificationsListQuery({ enabled = true } = {}) {
+  return useInfiniteQuery({
+    queryKey: notificationsListKey,
+    queryFn: fetchNotificationsPage,
+    initialPageParam: null,
+    // A short page means the history is exhausted; a full page's last row id
+    // is the `before` cursor for the next one.
+    getNextPageParam: (lastPage) => (
+      lastPage.length === NOTIFICATIONS_PAGE_SIZE
+        ? lastPage[lastPage.length - 1].id
+        : undefined
+    ),
+    enabled,
+  })
+}
+
+async function fetchUnreadCount() {
+  const res = await api.notifications.unreadCount()
+  const data = await jsonOrThrow(res, 'unread count fetch failed:')
+  return typeof data?.count === 'number' ? data.count : 0
+}
+
+function useUnreadCountQuery({ enabled = true } = {}) {
+  return useQuery({
+    queryKey: notificationsUnreadKey,
+    queryFn: fetchUnreadCount,
+    enabled,
+    staleTime: 60_000,
+  })
+}
+
+export const notificationQueries = {
+  list: {
+    key: notificationsListKey,
+    fetch: fetchNotificationsPage,
+    useQuery: useNotificationsListQuery,
+    invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: notificationsListKey }),
+  },
+  unreadCount: {
+    key: notificationsUnreadKey,
+    fetch: fetchUnreadCount,
+    useQuery: useUnreadCountQuery,
+    invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: notificationsUnreadKey }),
   },
 }
 
