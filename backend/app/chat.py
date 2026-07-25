@@ -79,7 +79,6 @@ from app.events import (
   undo_question_scrub,
 )
 from app.providers import effective_agent_settings, get_provider, get_skill_path
-from app.memory_observability import record_memory_checkpoint
 from app.runner_registry import registry
 from app.runtime_types import ChatEvent
 
@@ -4425,12 +4424,6 @@ async def run_chat(
   # (which `_run_chat_impl` doesn't catch) leaves the marker set for
   # reconciliation rather than silently wiping it — the safe default.
   disposition = chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
-  record_memory_checkpoint(
-    "turn_start",
-    chat_id=chat_id,
-    provider_id=provider_id,
-    run_generation=run_gen,
-  )
   try:
     disposition = await _run_chat_impl(
       messages, chat_id=chat_id, session_id=session_id,
@@ -4549,16 +4542,6 @@ async def run_chat(
         )
     except Exception:
       _get_logger().debug("chat-note guarantee skipped", exc_info=True)
-    # One terminal sample after provider teardown, browser cleanup, queue
-    # transition, and the settled-chat publisher. Comparing it with turn_start
-    # exposes memory that a completed turn failed to release without polling
-    # continuously during ordinary operation.
-    record_memory_checkpoint(
-      "turn_end",
-      chat_id=chat_id,
-      provider_id=provider_id,
-      disposition=disposition.value,
-    )
 
 
 def _chat_note_mtime(data_dir: str, chat_id: str) -> float:
