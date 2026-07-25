@@ -103,7 +103,7 @@ def test_later_boot_migrates_only_unmodified_graph_aware_base_skill(
 def test_controlled_skills_have_fix_forward_migrations():
   module = _load("init_skills")
 
-  assert module.SEED_VERSION == "19"
+  assert module.SEED_VERSION == "20"
   assert module._UNMODIFIED_MIGRATIONS["images.md"] == {
     "248ea31e13d2d2d84a5acfca13526aa8ebfa3d90e9ee4bf55cfb72d47937f7d1",
   }
@@ -130,6 +130,7 @@ def test_controlled_skills_have_fix_forward_migrations():
     "9525b36b945c2a0b4cb02806081bb674f38e865b6e1c3961226112e1dbbc16ec",
     "a0648921b9c9ea2423e8abd52aa57e71e7bebfa1736073fcf3bfcaec3749ad19",
     "5db160b2d796d54ec320119cbdbbb2860a78cfd703cfe37667626d23abc8e4d9",
+    "bf58243aeb1779eb0a94d5404a99c2132e55d60542cbb555fc50bc5cf65349fe",
   }
   assert (
     "6e6e82e02287e8bb38195fb021ea25cee2dc4e27da1a6ce1e2a0143fb1d82d87"

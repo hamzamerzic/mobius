@@ -34,7 +34,7 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
 VERSION_FILE = SKILLS / ".seed-version"
-SEED_VERSION = "19"  # v19: compact app discovery and bounded visual checks
+SEED_VERSION = "20"  # v20: ground browser selectors in observed DOM
 # Update only byte-for-byte baked copies; an owner/agent-edited file is never
 # touched. A set preserves every known unmodified predecessor when one skill
 # needs more than one fix-forward migration over its lifetime.
@@ -89,6 +89,8 @@ _UNMODIFIED_MIGRATIONS = {
     "a0648921b9c9ea2423e8abd52aa57e71e7bebfa1736073fcf3bfcaec3749ad19",
     # v18 baked copy: avoid measured textbox and opaque-frame wait failures.
     "5db160b2d796d54ec320119cbdbbb2860a78cfd703cfe37667626d23abc8e4d9",
+    # v19 baked copy: replace speculative selector examples with grounding.
+    "bf58243aeb1779eb0a94d5404a99c2132e55d60542cbb555fc50bc5cf65349fe",
   },
 }
 

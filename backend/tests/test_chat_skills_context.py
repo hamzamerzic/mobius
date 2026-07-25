@@ -153,3 +153,15 @@ def test_owned_app_skill_summaries_expose_complete_initial_read_sets():
   assert len(visual) <= 300
   assert "building-apps-quickstart.md" in visual
   assert "theming.md" in visual
+
+
+def test_visual_testing_selector_guidance_requires_observed_evidence():
+  repo = Path(__file__).resolve().parents[2]
+  visual = (
+    repo / "backend" / "scripts" / "seed-skills" / "visual-testing.md"
+  ).read_text(encoding="utf-8")
+
+  assert "verified in the current DOM or source" in visual
+  assert "an accessible name, not evidence" in visual
+  assert 'button[aria-label="..."]' not in visual
+  assert '[data-testid="..."]' not in visual
