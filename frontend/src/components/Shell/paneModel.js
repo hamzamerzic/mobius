@@ -626,7 +626,7 @@ export function focusedContentRoute(ws) {
       // Settings carries no chat/app id — the focused pane simply shows the
       // Settings surface. The derived `activeView` reads 'settings' whether that
       // is a builder tab (here) OR the global overlay; the render tells them
-      // apart via the SEPARATE settingsOverlayOpen flag, never via this route
+      // apart via the SEPARATE takeover-overlay flag, never via this route
       // (design: the overlay must not be conflated with focused-content-is-Settings).
       if (tab.kind === 'settings') return { view: 'settings', chatId: null, appId: null, paneId }
       if (tab.kind === 'notifications') {

@@ -2,10 +2,11 @@
 //
 // The renderer positions a flat, never-reparented set of content wrappers into
 // pane rectangles. WHICH wrapper is painted, WHERE, and whether the pane chrome
-// shows are all functions of the projection plus two overlay states — Settings
-// and immersive. This module is that function, pulled out of Shell.jsx so the
-// two overlay branches (especially immersive-solo, which had no multi-pane
-// coverage) are unit-testable without a DOM.
+// shows are all functions of the projection plus two overlay states — the
+// takeover (Settings/Notifications) and immersive. This module is that
+// function, pulled out of Shell.jsx so the two overlay branches (especially
+// immersive-solo, which had no multi-pane coverage) are unit-testable without
+// a DOM.
 //
 // Immersive solos its pane over the WHOLE workspace (design §4/§9): the chrome
 // is hidden, the holder app is painted full-bleed over the entire content box,
