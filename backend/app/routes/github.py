@@ -1246,6 +1246,11 @@ def _claim_stack_landing(
   except ContributionSubmitError as exc:
     raise HTTPException(status_code=409, detail=exc.message) from exc
   statuses = {item["record"].get("status") for item in validated}
+  by_id = {row["record"]["id"]: row for row in rows}
+  ordered = [
+    {**by_id[item["record"]["id"]], "stack": item["stack"]}
+    for item in validated
+  ]
   if statuses == {"merged"}:
     targets = {
       (
@@ -1265,17 +1270,70 @@ def _claim_stack_landing(
         status_code=409,
         detail="This pull request stack is already settled.",
       )
-    by_id = {row["record"]["id"]: row for row in rows}
-    return [
-      {**by_id[item["record"]["id"]], "stack": item["stack"]}
-      for item in validated
-    ], "merged"
-  if statuses == {"landing"}:
-    by_id = {row["record"]["id"]: row for row in rows}
-    return [
-      {**by_id[item["record"]["id"]], "stack": item["stack"]}
-      for item in validated
-    ], "recover"
+    return ordered, "merged"
+  if statuses.issubset({"landing", "merged"}) and "landing" in statuses:
+    # Marking a successful multi-record landing is intentionally idempotent but
+    # cannot be one filesystem transaction. A process exit between record
+    # writes leaves a truthful merged/landing mix; keep reconciling the shared
+    # pre-push journal instead of stranding the stack.
+    return ordered, "recover"
+  if statuses.issubset({"open", "landing"}) and "landing" in statuses:
+    # The same partial-write window exists while first claiming the stack or
+    # reopening it after a proven pre-push failure. Complete the saved claim,
+    # then let upstream-ref reconciliation decide whether to settle or reopen.
+    # The journal values must still match the reviewed chain exactly.
+    target_branch = validated[0]["stack"]["base_branch"]
+    expected_base = str(
+      (validated[0]["record"].get("plan") or {}).get("base_sha") or ""
+    )
+    landed_sha = str(
+      (validated[-1]["record"].get("plan") or {}).get("head_sha") or ""
+    )
+    expected_journal = (target_branch, expected_base, landed_sha)
+    if (
+      not _GIT_SHA.match(expected_base)
+      or not _GIT_SHA.match(landed_sha)
+      or any(
+        item["record"].get("status") == "landing"
+        and (
+          str(item["record"].get("land_target_branch") or ""),
+          str(item["record"].get("land_expected_base_sha") or ""),
+          str(item["record"].get("land_head_sha") or ""),
+        ) != expected_journal
+        for item in validated
+      )
+    ):
+      raise HTTPException(
+        status_code=409,
+        detail=(
+          "This stack has a partial landing journal that no longer matches "
+          "the reviewed chain. Refresh Contribute before trying again."
+        ),
+      )
+    started_at = next(
+      (
+        str(item["record"].get("land_started_at"))
+        for item in validated
+        if item["record"].get("land_started_at")
+      ),
+      _now_iso(),
+    )
+    now = _now_iso()
+    repaired = []
+    for row in ordered:
+      record = {
+        **row["record"],
+        "status": "landing",
+        "land_started_at": started_at,
+        "land_target_branch": target_branch,
+        "land_expected_base_sha": expected_base,
+        "land_head_sha": landed_sha,
+        "updated_at": now,
+      }
+      record.pop("last_land_error", None)
+      _write_record(row["record_path"], record)
+      repaired.append({**row, "record": record})
+    return repaired, "recover"
   if statuses != {"open"}:
     raise HTTPException(
       status_code=409,
@@ -1285,8 +1343,7 @@ def _claim_stack_landing(
       ),
     )
 
-  by_id = {row["record"]["id"]: row for row in rows}
-  ordered = []
+  claimed = []
   now = _now_iso()
   target_branch = validated[0]["stack"]["base_branch"]
   expected_base = str((validated[0]["record"].get("plan") or {}).get("base_sha") or "")
@@ -1296,10 +1353,9 @@ def _claim_stack_landing(
       status_code=409,
       detail="This stack has no complete reviewed landing journal. Prepare it again.",
     )
-  for item in validated:
-    row = by_id[item["record"]["id"]]
+  for row in ordered:
     record = {
-      **item["record"],
+      **row["record"],
       "status": "landing",
       "land_started_at": now,
       "land_target_branch": target_branch,
@@ -1309,8 +1365,8 @@ def _claim_stack_landing(
     }
     record.pop("last_land_error", None)
     _write_record(row["record_path"], record)
-    ordered.append({**row, "record": record, "stack": item["stack"]})
-  return ordered, "new"
+    claimed.append({**row, "record": record})
+  return claimed, "new"
 
 
 def _landing_journal(rows: list[dict]) -> tuple[str, str, str]:
@@ -1346,7 +1402,7 @@ def _reconcile_stack_landing(rows: list[dict]) -> tuple[str, str]:
     target = str(currents[0].get("last_land_target_branch") or "")
     head = str(currents[0].get("last_land_head_sha") or "")
     return _validate_branch(target), head
-  if any(current.get("status") != "landing" for current in currents):
+  if any(current.get("status") not in {"landing", "merged"} for current in currents):
     raise ContributionSubmitError(
       "This landing changed while it was being recovered. Refresh Contribute."
     )

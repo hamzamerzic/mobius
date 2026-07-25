@@ -3322,6 +3322,55 @@ def test_land_contribution_stack_marks_every_layer_merged(
     "merged", "merged",
   ]
 
+  storage = (
+    Path(get_settings().data_dir) / "apps" / str(app_id) / "contributions"
+  )
+  reconcile_statuses = []
+
+  def fake_reconcile(rows):
+    reconcile_statuses.append([row["record"]["status"] for row in rows])
+    return "main", top_head
+
+  monkeypatch.setattr(
+    "app.routes.github._reconcile_stack_landing", fake_reconcile,
+  )
+
+  # A process exit while recording success can leave one durable layer merged
+  # and its sibling still landing. The next identical request reconciles the
+  # shared journal and finishes the record writes without another push.
+  first = json.loads((storage / f"{record_ids[0]}.json").read_text())
+  second = json.loads((storage / f"{record_ids[1]}.json").read_text())
+  second["status"] = "landing"
+  atomic_write(storage / f"{record_ids[1]}.json", json.dumps(second))
+  mixed_success = client.post(
+    f"/api/github/contributions/{app_id}/land-stack",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={"record_ids": record_ids},
+  )
+  assert mixed_success.status_code == 200, mixed_success.text
+  assert reconcile_statuses[-1] == ["merged", "landing"]
+  assert [record["status"] for record in mixed_success.json()["records"]] == [
+    "merged", "merged",
+  ]
+
+  # A process exit during the initial claim (or while reopening a proven
+  # pre-push failure) leaves open/landing. Complete the exact saved journal
+  # first, then reconcile upstream just like an all-landing retry.
+  first["status"] = "open"
+  second["status"] = "landing"
+  atomic_write(storage / f"{record_ids[0]}.json", json.dumps(first))
+  atomic_write(storage / f"{record_ids[1]}.json", json.dumps(second))
+  mixed_claim = client.post(
+    f"/api/github/contributions/{app_id}/land-stack",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={"record_ids": record_ids},
+  )
+  assert mixed_claim.status_code == 200, mixed_claim.text
+  assert reconcile_statuses[-1] == ["landing", "landing"]
+  assert [record["status"] for record in mixed_claim.json()["records"]] == [
+    "merged", "merged",
+  ]
+
 
 def test_land_contribution_stack_restores_open_records_on_preflight_failure(
   client, owner_token, monkeypatch,
