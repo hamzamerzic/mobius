@@ -4430,8 +4430,8 @@ def _is_cli_slash_command(text: str) -> bool:
   without turning path-like prose such as `/data/apps/x is broken` into
   a command-shaped prompt.
   """
-  first = (text or "").lstrip("\n").split(None, 1)[0].strip()
-  return first in {"/goal"}
+  words = (text or "").lstrip("\n").split(None, 1)
+  return bool(words) and words[0].strip() in {"/goal"}
 
 
 async def run_chat(
