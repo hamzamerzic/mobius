@@ -193,9 +193,16 @@ def _switch_request_fingerprint(provider_id: str, settings_patch: dict) -> str:
 
 
 def _visible_in_owner_drawer(chat: models.Chat) -> bool:
+  settings = _coerce_agent_settings(chat.agent_settings_json)
+  # An explicit ``drawer_hidden`` bit overrides the default rule in either
+  # direction. Autopilot follow-up chats are ordinary owner chats that use it to
+  # stay out of the drawer except while an escalation is waiting on the owner, so
+  # routine self-resolving rounds never clutter the chat list.
+  hidden = settings.get("drawer_hidden")
+  if hidden is not None:
+    return not bool(hidden)
   if chat.created_by_app_id is None:
     return True
-  settings = _coerce_agent_settings(chat.agent_settings_json)
   return settings.get("owner_visible") is True
 
 
