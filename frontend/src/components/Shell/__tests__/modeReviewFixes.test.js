@@ -17,7 +17,6 @@ const nav = readFileSync(new URL('../../../hooks/useNavigation.js', import.meta.
 const controller = readFileSync(new URL('../useModeController.js', import.meta.url), 'utf8')
 const gesture = readFileSync(new URL('../useLogoModeGesture.js', import.meta.url), 'utf8')
 const brand = readFileSync(new URL('../ShellBrand.jsx', import.meta.url), 'utf8')
-const halo = readFileSync(new URL('../useLivingHalo.js', import.meta.url), 'utf8')
 const paneSrc = readFileSync(new URL('../paneModel.js', import.meta.url), 'utf8')
 
 // A minimal v2 exit plan for the reducer's behavioral cases (a plan arms a beat).
@@ -287,10 +286,9 @@ test('finding F13: cause threads from the gesture/keyboard, never a hardcoded ho
   assert.match(brand, /onToggleMode\('keyboard'\)/)
 })
 
-// -- Finding 13: reduced motion is reactive (controller + halo) ----------------
-test('finding 13: reduced-motion changes settle a live beat and stop the halo rAF', () => {
+// -- Finding 13: reduced motion is reactive -----------------------------------
+test('finding 13: reduced-motion changes settle a live beat; the brand has no perpetual rAF', () => {
   assert.match(controller, /matchMedia\('\(prefers-reduced-motion: reduce\)'\)/)
   assert.match(controller, /if \(t && t\.phase !== 'drag-preview'\) dispatch\(\{ type: 'complete', id: t\.id \}\)/)
-  assert.match(halo, /const \[reduced, setReduced\] = useState\(prefersReducedMotion\)/)
-  assert.match(halo, /\}, \[haloRef, active, reduced\]\)/)
+  assert.doesNotMatch(brand, /requestAnimationFrame|useLivingHalo|logo-halo/)
 })

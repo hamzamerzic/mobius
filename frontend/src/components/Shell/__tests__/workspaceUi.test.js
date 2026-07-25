@@ -259,7 +259,6 @@ test('keyboard pane focus is visible but stays off for mouse and touch', () => {
 const logoGestureSrc = readFileSync(new URL('../useLogoModeGesture.js', import.meta.url), 'utf8')
 const shellCss = readFileSync(new URL('../Shell.css', import.meta.url), 'utf8')
 const drawerCss = readFileSync(new URL('../../Drawer/Drawer.css', import.meta.url), 'utf8')
-const livingHaloSrc = readFileSync(new URL('../useLivingHalo.js', import.meta.url), 'utf8')
 
 test('the docked sidebar offsets only direct shell layout rows', () => {
   // Pane strips reuse .shell__tabstrip inside .shell__content. A descendant
@@ -379,7 +378,7 @@ test('ShellBrand isolates gesture state and wires the brand ref + Shift+Enter', 
   assert.match(shellBrand, /keyboardModeClickRef\.current && e\.detail === 0/)
 })
 
-test('the logo mark IS the indicator (CHARGE): compress on hold + spring/snap + 180° twist + tint + living halo', () => {
+test('the logo mark IS the indicator (CHARGE): compress on hold + spring/snap + 180° twist + tint + static shared halo', () => {
   const brand = shellCss.match(/\.shell__brand\s*\{[\s\S]*?\}/)?.[0] || ''
   assert.match(brand, /touch-action:\s*pan-y pinch-zoom/)
   assert.match(brand, /-webkit-touch-callout:\s*none/)
@@ -412,33 +411,25 @@ test('the logo mark IS the indicator (CHARGE): compress on hold + spring/snap + 
   assert.match(shellCss, /@keyframes shell-logo-beat-release-b\s*\{[\s\S]*?scale:\s*0\.84[\s\S]*?scale:\s*1/)
   // Item 5 + round 4 item 1: logo rotate rides --mode-total (the plan's own totalMs)
   // so the twist settles with the panes — for a world reveal, at the end of the
-  // pane beat. Halo bloom + wordmark tint keep pace.
+  // pane beat. The wordmark tint keeps pace.
   assert.match(shellCss, /\.shell--builder-entering \.shell__logo\s*\{[\s\S]*?rotate var\(--mode-total, 260ms\) cubic-bezier\(0\.2, 1, 0\.32, 1\)/)
   assert.match(shellCss, /\.shell--builder-exiting \.shell__logo\s*\{[\s\S]*?rotate var\(--mode-total, 220ms\) cubic-bezier\(0\.25, 0\.8, 0\.25, 1\)/)
-  assert.match(shellCss, /\.shell--builder-entering \.shell__logo-halo\s*\{\s*transition: opacity 160ms var\(--ease-mode-arrive\) 60ms/)
-  assert.match(shellCss, /\.shell--builder-exiting \.shell__logo-halo\s*\{\s*transition: opacity 100ms var\(--ease-mode-chrome\)/)
   assert.match(shellCss, /\.shell--builder-entering \.shell__wordmark \{ transition-duration: 220ms; \}/)
   assert.match(shellCss, /\.shell--builder-exiting \.shell__wordmark \{ transition-duration: 140ms; \}/)
-  // The LIVING HALO: a radial-gradient element behind the mark, driven by the rAF
-  // vars, lit only in builder mode, per-theme base alpha via --halo-alpha.
-  // Anchor to the BASE rule (newline-prefixed), not the beat-scoped
-  // `.shell--builder-* .shell__logo-halo` overrides added by polish item 5.
-  const halo = shellCss.match(/\n\.shell__logo-halo\s*\{[\s\S]*?\}/)?.[0] || ''
-  assert.match(halo, /radial-gradient/)
-  assert.match(halo, /var\(--halo-alpha, 0\.5\)/)
-  assert.match(halo, /translate:\s*0 0/)
-  assert.match(halo, /scale:\s*1/)
-  assert.doesNotMatch(halo, /transition:/,
-    'stable halo drift must not restart an opacity transition every frame')
-  assert.match(shellCss, /\.shell__brand--builder \.shell__logo-halo\s*\{[\s\S]*?opacity:\s*var\(--halo-opacity, 0\.85\)/)
-  // Per-theme alpha token: keyed off the APP theme (data-theme), NOT the OS
-  // prefers-color-scheme (V2) — a dark app theme under a light OS gets the dark
-  // value. Dark is the default (base .shell), light is the explicit override.
-  assert.match(shellCss, /\.shell \{ --halo-alpha: 0\.4; \}/)
-  assert.match(shellCss, /:root\[data-theme="light"\] \.shell \{ --halo-alpha: 0\.5; \}/)
-  assert.doesNotMatch(shellCss, /@media \(prefers-color-scheme: dark\)[\s\S]*?--halo-alpha/)
-  // Reduced motion: twist + compression/release snap immediately, spring/snap is
-  // skipped (haptic still fires in JS), and the halo is static (no rAF).
+  // Builder mode gets a faint static halo shared by the logo and wordmark.
+  // Both shadows live on the existing leaves and have no animation/transition.
+  const builderLogo = shellCss.match(/\.shell__brand--builder \.shell__logo\s*\{[\s\S]*?\}/)?.[0] || ''
+  const builderWordmark = shellCss.match(/\.shell__brand--builder \.shell__wordmark\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(builderLogo, /filter:\s*drop-shadow\(/)
+  assert.match(builderLogo, /var\(--accent\) 26%/)
+  assert.match(builderWordmark, /text-shadow:/)
+  assert.match(builderWordmark, /var\(--accent\) 30%/)
+  assert.doesNotMatch(`${builderLogo}\n${builderWordmark}`, /animation:|transition:/)
+  assert.doesNotMatch(shellCss, /\.shell__brand::after/)
+  assert.doesNotMatch(shellCss, /shell__logo-halo|halo-opacity|halo-alpha/)
+  assert.doesNotMatch(shellBrand, /useLivingHalo|requestAnimationFrame|logo-halo/)
+  // Reduced motion: twist + compression/release snap immediately and spring/snap
+  // is skipped (haptic still fires in JS).
   assert.match(shellCss, /\.shell__logo \{ transition: none; \}/)
   // The ignite/snap AND the hold's descriptor-owned beat-release are all disabled
   // under reduced motion (round 4 item 1 — belt-and-braces; is-beat-held is not even
@@ -485,34 +476,12 @@ test('logo pointer provenance EXPIRES so a keyboard context menu reaches the nat
   assert.match(shellBrand, /if \(splitsEnabled\) logoGesture\.onKeyDown\(\)/)
 })
 
-test('the living halo lifecycle: lit only in builder mode, one allocation-free rAF, paused on hidden, static under reduced motion', () => {
-  // Gated on `active` (builder mode) — nothing runs when inactive, and the effect
-  // re-runs on active flip so it turns ON at ignite and OFF (cleanup) at snap.
-  assert.match(livingHaloSrc, /if \(!el \|\| !active\) return undefined/)
-  // The effect re-runs on active flip AND on a reduced-motion preference change
-  // (finding 13): the halo subscribes to the media query so enabling reduce
-  // mid-session settles the static halo instead of leaving the rAF running.
-  assert.match(livingHaloSrc, /\}, \[haloRef, active, reduced\]\)/)
-  assert.match(livingHaloSrc, /matchMedia\('\(prefers-reduced-motion: reduce\)'\)/)
-  assert.match(livingHaloSrc, /mq\.addEventListener\?\.\('change', onChange\)/)
-  // Reduced motion: settle static CSS vars, NO rAF at all.
-  assert.match(livingHaloSrc, /if \(reduced\) \{[\s\S]*?el\.style\.scale = '1'[\s\S]*?clearHaloStyles\(el\)/)
-  // One reused frame object → zero per-frame allocation; the drift comes from the
-  // pure haloFrame (tested in logoHoldMachine.test.js).
-  assert.match(livingHaloSrc, /const frame = \{\} \/\/ reused every tick/)
-  assert.match(livingHaloSrc, /haloFrame\(performance\.now\(\), frame\)/)
-  // Pauses on a hidden tab (cancel the rAF), resumes on visible.
-  assert.match(livingHaloSrc, /document\.visibilityState === 'hidden'/)
-  assert.match(livingHaloSrc, /cancelAnimationFrame\(raf\)/)
-  // Cleanup kills the loop instantly (the snap) + drops the visibility listener.
-  assert.match(livingHaloSrc, /return \(\) => \{[\s\S]*?cancelAnimationFrame\(raf\)[\s\S]*?removeEventListener\('visibilitychange'/)
-  // The isolated brand lights a leaf ref only in builder mode AND when no beat is
-  // live (haloActive = builderModeActive && !modeState.transition), so the halo's
-  // rAF never competes with the deal animation (exit-design v2 §Background isolation).
-  assert.match(shellBrand, /useLivingHalo\(\{ haloRef, active: splitsEnabled && haloActive \}\)/)
-  assert.match(shell, /haloActive=\{builderModeActive && !modeState\.transition\}/)
-  assert.match(shellBrand, /<span ref=\{haloRef\} className="shell__logo-halo" aria-hidden/)
-  assert.match(livingHaloSrc, /clearHaloStyles\(el\)/)
+test('the Builder brand indicator is static and has no perpetual frame loop', () => {
+  assert.doesNotMatch(shellBrand, /useLivingHalo|haloRef|logo-halo|requestAnimationFrame/)
+  assert.doesNotMatch(shell, /haloActive=/)
+  assert.doesNotMatch(shellCss, /shell__logo-halo|@keyframes [^{]*halo/)
+  assert.match(shellCss, /\.shell__brand--builder \.shell__logo\s*\{[\s\S]*?filter:\s*drop-shadow/)
+  assert.match(shellCss, /\.shell__brand--builder \.shell__wordmark\s*\{[\s\S]*?text-shadow:/)
 })
 
 test('entry assembles over a stationary Standard surface, compositor-only, instant under reduced motion (v3)', () => {

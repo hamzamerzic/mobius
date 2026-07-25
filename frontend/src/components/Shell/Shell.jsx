@@ -28,7 +28,7 @@ import {
 } from '../../hooks/queries.js'
 import { appVersionKey } from '../../lib/appVersion.js'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
-import { bumpChatRunSignal } from '../../lib/chatRunSignal.js'
+import { bumpChatRunSignal, chatRunSignal } from '../../lib/chatRunSignal.js'
 import { clearAppFrameStorage, clearCachedAppToken } from '../../lib/appFrameStorage.js'
 import {
   APP_LRU_STORAGE_KEY, mergeAppLru, parseStoredAppLru, requestAppCodeWarm,
@@ -553,6 +553,10 @@ export default function Shell() {
   // so their identity never churns and the listener never re-registers.
   const navToRef = useRef(navTo)
   navToRef.current = navTo
+  // PaneChatView is memoized, so do not defeat its per-chat run-signal boundary
+  // with the per-render navTo identity. Pane handlers call through this stable
+  // facade and still reach the latest navigation implementation via the ref.
+  const stablePaneNavTo = useCallback((view, opts) => navToRef.current(view, opts), [])
   // Reconcile in-memory route hints after every workspace transition (design
   // §5.1.3). navStackRef is stable, so recreating this closure each render is
   // behaviourally identical. reconcileRoutePanes points each hint at the pane
@@ -3488,10 +3492,6 @@ export default function Shell() {
           splitsEnabled={paneModel.WORKSPACE_SPLITS_ENABLED}
           navigationOpen={navigationOpen}
           builderModeActive={builderModeActive}
-          // The LIVING HALO runs only once a beat has settled: pause it during ANY
-          // transition (entry, exit, or a drag preview) so it adds no per-frame style
-          // writes while panes are animating (exit-design v2 §Background isolation).
-          haloActive={builderModeActive && !modeState.transition}
           // The live descriptor drives the logo's hold→completion spring (round 4
           // item 1): a hold-owned animated beat holds the mark compressed and releases
           // it as the beat completes, instead of an immediate ignite/snap.
@@ -3766,7 +3766,9 @@ export default function Shell() {
               // keeps every visible chat pane doing work.
               visible={chatPanesVisible && role !== 'held' && visibleChatKeys.has(`chat:${chatId}`)}
                 paneContentHeight={paned ? paned.h : null}
-                chatRunSignals={chatRunSignals}
+                // Select before the memo boundary. Passing the replacement Map
+                // would rerender every visible chat pane for another chat's run.
+                externalRunSignal={chatRunSignal(chatRunSignals, chatId)}
                 composerRequest={role === 'active' ? composerRequest : null}
                 onComposerRequestHandled={role === 'active'
                   ? handleComposerRequestHandled
@@ -3779,7 +3781,7 @@ export default function Shell() {
                 acknowledgeAppPreview={handleAppPreviewSeen}
                 refreshChats={refreshChats}
                 loadTheme={loadTheme}
-                navTo={navTo}
+                navTo={stablePaneNavTo}
                 onInternalNav={handleChatInternalNav}
                 onChatMissing={handlePaneChatMissing}
                 onFirstMessage={handlePaneChatFirstMessage}

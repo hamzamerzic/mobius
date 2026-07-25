@@ -236,6 +236,12 @@ Start with `inputs/resource-snapshot.json`, the bounded
 - **Use trends and thresholds.** Compare the cheap pulse with recent history.
   Inspect the deep inventory only when `deep_scan.ran` and note whether it was
   complete. One large category is a lead, not permission to delete it.
+- **Attribute memory before acting.** The snapshot's `memory` block separates
+  Möbius server PSS, container working set/reclaimable cache, and aggregate
+  owner categories such as browsers, agents, installed services, and frontend
+  tools. Compare `trend.memory` across comparable nights. A single active-work
+  spike is context, not a leak; surface memory only when an owner-specific rise
+  persists, swap/pressure appears, or a recorded review trigger fires.
 - **Make review cadence adaptive.** Every resource area has a next review and
   an early trigger. A new or unstable leak may be checked tomorrow. After a
   programmatic cap has held through several observations, stretch the cadence
