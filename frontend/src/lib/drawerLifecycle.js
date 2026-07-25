@@ -28,11 +28,14 @@ export function drawerCloseWatchdogMs(style) {
   const properties = String(style?.transitionProperty || '').split(',').map(v => v.trim())
   const durations = String(style?.transitionDuration || '').split(',').map(cssTimeMs)
   const delays = String(style?.transitionDelay || '').split(',').map(cssTimeMs)
-  const count = Math.max(properties.length, durations.length, delays.length)
   let longest = 0
 
-  for (let index = 0; index < count; index += 1) {
-    const property = properties[index % properties.length]
+  // transition-property defines how many transitions exist. CSS repeats a
+  // shorter duration/delay list to that length and truncates surplus values;
+  // treating a surplus duration as another `transform` could strand the scrim
+  // behind a watchdog the browser itself never scheduled.
+  for (let index = 0; index < properties.length; index += 1) {
+    const property = properties[index]
     if (property !== 'transform' && property !== 'all') continue
     const duration = durations[index % durations.length]
     const delay = delays[index % delays.length]

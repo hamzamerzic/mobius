@@ -50,6 +50,12 @@ test('close watchdog follows the computed transform transition', () => {
     transitionDuration: '50ms, 0.25s',
     transitionDelay: '0s, 20ms',
   }), 270 + DRAWER_CLOSE_WATCHDOG_BUFFER_MS)
+
+  assert.equal(drawerCloseWatchdogMs({
+    transitionProperty: 'transform',
+    transitionDuration: '100ms, 5s',
+    transitionDelay: '0s',
+  }), 100 + DRAWER_CLOSE_WATCHDOG_BUFFER_MS)
 })
 
 test('close watchdog releases immediately when transform motion is disabled', () => {
