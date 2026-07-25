@@ -307,6 +307,65 @@ def test_resume_resets_round_limit_and_close_out(db):
   assert autopilot.get_row(db, 1, "rec").enabled is False
 
 
+def test_visible_in_owner_drawer_honors_explicit_flag():
+  from app.routes.chats import _visible_in_owner_drawer
+
+  # An ordinary owner chat (no creating app) is visible by default...
+  owner_chat = models.Chat(
+    id="c-owner", title="t", messages=[], pending_messages=[],
+  )
+  assert _visible_in_owner_drawer(owner_chat) is True
+  # ...but an explicit drawer_hidden bit overrides in either direction.
+  owner_chat.agent_settings_json = {"drawer_hidden": True}
+  assert _visible_in_owner_drawer(owner_chat) is False
+  owner_chat.agent_settings_json = {"drawer_hidden": False}
+  assert _visible_in_owner_drawer(owner_chat) is True
+
+
+def test_followup_chat_hidden_until_escalation(db):
+  from app.routes.chats import _visible_in_owner_drawer
+
+  autopilot.stamp_grant(db, 1, "rec", head_sha="abc")
+  chat_id = autopilot.ensure_followup_chat(
+    db, 1, "rec", title="Autopilot: fix thing", provider="claude",
+  )
+  assert chat_id
+
+  def _chat():
+    db.expire_all()
+    return db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+
+  # A routine round is kept out of the owner's chat list.
+  assert _visible_in_owner_drawer(_chat()) is False
+
+  # Escalation is the one moment it needs the owner → surface it.
+  assert autopilot.escalate(db, 1, "rec") is True
+  assert _visible_in_owner_drawer(_chat()) is True
+
+  # Resuming hands control back to autopilot → tuck it away again.
+  autopilot.set_enabled(db, 1, "rec", True)
+  assert _visible_in_owner_drawer(_chat()) is False
+
+
+def test_followup_chat_hidden_on_close_out(db):
+  from app.routes.chats import _visible_in_owner_drawer
+
+  autopilot.stamp_grant(db, 1, "rec", head_sha="abc")
+  chat_id = autopilot.ensure_followup_chat(
+    db, 1, "rec", title="Autopilot: fix thing", provider="claude",
+  )
+  autopilot.escalate(db, 1, "rec")
+
+  def _chat():
+    db.expire_all()
+    return db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+
+  assert _visible_in_owner_drawer(_chat()) is True
+  # PR merged/closed: terminal cleanup hides the chat for good.
+  autopilot.close_out(db, 1, "rec")
+  assert _visible_in_owner_drawer(_chat()) is False
+
+
 def test_round_log_capped(db):
   autopilot.stamp_grant(db, 1, "rec", head_sha="abc")
   for i in range(40):
