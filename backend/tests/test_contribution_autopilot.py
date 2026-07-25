@@ -366,6 +366,46 @@ def test_followup_chat_hidden_on_close_out(db):
   assert _visible_in_owner_drawer(_chat()) is False
 
 
+def test_failed_surfacing_leaves_escalation_retryable(db):
+  """A crash while surfacing must not consume the one-shot escalate latch.
+
+  ``escalate`` wins exactly once (its UPDATE is gated on ``enabled``), and the
+  caller only notifies the owner when it wins. If surfacing the chat committed
+  separately, a failure between the two commits would leave the record
+  escalated, the chat hidden, and the owner never told — with no retry able to
+  repair it. Staging both in one transaction makes the failure recoverable.
+  """
+  from app.routes.chats import _visible_in_owner_drawer
+
+  autopilot.stamp_grant(db, 1, "rec", head_sha="abc")
+  chat_id = autopilot.ensure_followup_chat(
+    db, 1, "rec", title="Autopilot: fix thing", provider="claude",
+  )
+
+  def _chat():
+    db.expire_all()
+    return db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+
+  boom = RuntimeError("database is locked")
+  original = autopilot.stage_followup_drawer_hidden
+  autopilot.stage_followup_drawer_hidden = lambda *a, **k: (_ for _ in ()).throw(boom)
+  try:
+    with pytest.raises(RuntimeError):
+      autopilot.escalate(db, 1, "rec")
+    db.rollback()
+  finally:
+    autopilot.stage_followup_drawer_hidden = original
+
+  # Nothing was consumed: the grant is still live and the chat still tucked away.
+  db.expire_all()
+  assert autopilot.get_row(db, 1, "rec").enabled is True
+  assert _visible_in_owner_drawer(_chat()) is False
+
+  # The retry that the cron pass makes next wins and surfaces the chat.
+  assert autopilot.escalate(db, 1, "rec") is True
+  assert _visible_in_owner_drawer(_chat()) is True
+
+
 def test_round_log_capped(db):
   autopilot.stamp_grant(db, 1, "rec", head_sha="abc")
   for i in range(40):

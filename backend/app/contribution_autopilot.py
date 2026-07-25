@@ -585,11 +585,16 @@ def escalate(db: Session, app_id: int, record_id: str) -> bool:
       updated_at=now_naive_utc(),
     )
   )
-  db.commit()
   won = result.rowcount == 1
   if won:
     # The one moment an autopilot chat needs the owner: surface it in the drawer.
-    set_followup_drawer_hidden(db, get_row(db, app_id, record_id), False)
+    # Staged into THIS transaction on purpose. The UPDATE above is gated on
+    # ``enabled.is_(True)``, so it wins exactly once and no retry can ever
+    # re-run it; surfacing the chat in a second transaction would let a crash or
+    # a locked commit in between leave the record escalated but the chat hidden,
+    # with nothing able to repair it.
+    stage_followup_drawer_hidden(db, get_row(db, app_id, record_id), False)
+  db.commit()
   return won
 
 
@@ -686,16 +691,20 @@ async def set_ledger_attention(
 # ─────────────────────────── chat spawn ─────────────────────────────
 
 
-def set_followup_drawer_hidden(
+def stage_followup_drawer_hidden(
   db: Session, row: "models.ContributionAutopilot | None", hidden: bool,
 ) -> None:
-  """Show or hide the record's follow-up chat in the owner drawer.
+  """Stage the drawer visibility flip without committing.
 
   Autopilot chats are ordinary owner chats that stay hidden from the drawer
   except while an escalation is waiting on the owner. This flips the explicit
   ``drawer_hidden`` bit that ``_visible_in_owner_drawer`` honors, so routine
   self-resolving rounds never clutter the chat list. Best-effort: a missing row
   or chat just means there is nothing to toggle.
+
+  Callers that own a wider transaction stage the flip inside it so the
+  visibility can never disagree with the state change that motivated it;
+  ``set_followup_drawer_hidden`` is the standalone commit-it-now variant.
   """
   if row is None or not row.followup_chat_id:
     return
@@ -712,6 +721,13 @@ def set_followup_drawer_hidden(
   settings["drawer_hidden"] = bool(hidden)
   # Reassign the whole dict so SQLAlchemy tracks the JSON column mutation.
   chat.agent_settings_json = settings
+
+
+def set_followup_drawer_hidden(
+  db: Session, row: "models.ContributionAutopilot | None", hidden: bool,
+) -> None:
+  """Show or hide the record's follow-up chat in the owner drawer, committed."""
+  stage_followup_drawer_hidden(db, row, hidden)
   db.commit()
 
 
