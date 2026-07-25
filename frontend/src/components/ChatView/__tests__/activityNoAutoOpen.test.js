@@ -31,15 +31,13 @@ test('the stretch restores saved user state and open is exactly userOpen', () =>
   assert.doesNotMatch(body, /defaultOpen/, 'no defaultOpen escape hatch')
 })
 
-test('summary and helper open state change only through guarded user toggles', () => {
+test('the summary is the only open-state write and preserves position', () => {
   assert.equal((src.match(/setUserOpen\(/g) || []).length, 1,
     'setUserOpen is called from exactly one place')
-  assert.equal((src.match(/setHelperOpen\(/g) || []).length, 1,
-    'setHelperOpen is called from exactly one place')
-  assert.match(src, /const toggleSummary = \(\) => \{\s*preserveTogglePosition\(headerRef\.current, activityBodyRef\.current\)\s*setUserOpen\(o => !o\)/,
+  assert.match(src, /preserveTogglePosition\(headerRef\.current, timelineRef\.current\)\s*setUserOpen\(o => !o\)/,
     'the summary toggle preserves its anchor before flipping open state')
-  assert.match(src, /const toggleHelper = trigger => \{\s*preserveTogglePosition\(trigger, timelineRef\.current\)\s*setHelperOpen\(o => !o\)/,
-    'the helper toggle preserves its anchor before flipping open state')
+  assert.doesNotMatch(src, /setHelperOpen|toggleHelper/,
+    'helper status rows do not create a second disclosure state')
 })
 
 test('background detail loading cannot derive or write open state', () => {
@@ -47,11 +45,11 @@ test('background detail loading cannot derive or write open state', () => {
     'historical activity detail is fetched only after the user opens it')
   assert.match(
     body,
-    /if \(!timelineOpen \|\| !detailRef \|\| detailEntries \|\| detailError\) return undefined/,
-    'lazy detail stays network-free until the correct disclosure level is open',
+    /if \(!userOpen \|\| !detailRef \|\| detailEntries \|\| detailError\) return undefined/,
+    'lazy detail stays network-free until the activity summary is open',
   )
   assert.doesNotMatch(
-    body.slice(0, body.indexOf('const toggleSummary = () =>')),
+    body.slice(0, body.indexOf('onToggle={() =>')),
     /setUserOpen\(/,
     'loading/reset effects never write the disclosure state',
   )

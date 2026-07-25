@@ -94,30 +94,22 @@ test('a single self-contained activity discloses directly without a redundant pa
   assert.match(activityStretch, /<ToolBlock[\s\S]*key=\{assistantBlockKey\(item, idx\)\}/)
 })
 
-test('a delegating stretch nests summary, named helper, then activity detail', () => {
+test('a delegating stretch keeps helper status and activity under one honest disclosure', () => {
   const subagentChips = readFileSync(new URL('../SubagentChips.jsx', import.meta.url), 'utf8')
-  const subagentCss = readFileSync(new URL('../SubagentChips.css', import.meta.url), 'utf8')
 
-  assert.match(activityStretch, /const hasSubagents = subagentHelpers\.length > 0/)
   assert.match(activityStretch, /const loneHasHelpers = loneItem\?\.type === 'tool'/,
-    'even a one-tool delegation renders through the helper-owned disclosure')
-  assert.match(activityStretch, /controlsId=\{activityBodyId\}/,
+    'even a one-tool delegation renders through the activity summary')
+  assert.match(activityStretch, /controlsId=\{timelineId\}/,
     'the broad rollup controls the complete nested activity body')
-  assert.match(activityStretch, /id=\{activityBodyId\}[\s\S]*hidden=\{!open\}/,
+  assert.match(activityStretch, /id=\{timelineId\}[\s\S]*hidden=\{!open\}/,
     'named helpers and their activity stay inside the broad summary disclosure')
   assert.match(activityStretch,
-    /<SubagentChips[\s\S]*open=\{helperOpen\}[\s\S]*controlsId=\{timelineId\}[\s\S]*onToggle=\{toggleHelper\}/,
-    'the named helper owns the second disclosure level')
-  assert.match(activityStretch, /const timelineOpen = open && \(!hasSubagents \|\| helperOpen\)/,
-    'delegated activity appears only when both disclosure levels are open')
-  assert.match(subagentChips, /const Row = onToggle \? 'button' : 'div'/,
-    'an actionable helper is a native keyboard-accessible button')
-  assert.match(subagentChips, /aria-expanded=\{onToggle \? open : undefined\}/)
-  assert.match(subagentChips, /aria-controls=\{onToggle \? controlsId : undefined\}/)
-  assert.match(subagentCss, /\.chat__subagent--interactive:focus-visible\s*\{/,
-    'the new disclosure affordance keeps a visible keyboard focus boundary')
-  assert.match(chatCss, /\.chat__activity-timeline--subagent\s*\{[^}]*margin-inline-start:\s*39px/s,
-    'the detailed rail is visibly nested beneath the helper label')
+    /<SubagentChips[\s\S]*subagent=\{tool\.subagent\}/,
+    'helper status rows render inside the activity body')
+  assert.doesNotMatch(activityStretch, /helperOpen|toggleHelper/,
+    'the transcript has no helper-specific activity mapping, so it has no fake per-helper disclosure')
+  assert.doesNotMatch(subagentChips, /aria-expanded|aria-controls|onToggle/,
+    'helper rows remain honest noninteractive status')
 })
 
 test('lazy tool details keep top-level touch targets and compact nested rows', () => {

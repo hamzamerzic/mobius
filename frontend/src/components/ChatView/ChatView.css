@@ -1333,13 +1333,6 @@
   border-inline-start: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
 }
 
-/* A delegating stretch has one extra level: summary → named helper → activity.
-   Move the activity rail beneath the helper label rather than letting it align
-   with the helper's status dot, which would flatten those two levels again. */
-.chat__activity-timeline--subagent {
-  margin-inline-start: 39px;
-}
-
 /* Shared screen-reader status utility for transcript-local interactions such
    as clipboard confirmation. Keep it in ChatView rather than borrowing the
    Shell brand's scoped helper. */
