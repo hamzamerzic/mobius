@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import { renderHook } from './react-hook-shim.mjs'
 import useOffscreenNudge, {
   isElementOffscreen,
+  isIntersectionOffscreen,
 } from '../useOffscreenNudge.js'
 
 
@@ -29,6 +30,21 @@ test('targets entirely above or below the chat viewport are offscreen', () => {
   const viewport = elementAt(100, 500)
   assert.equal(isElementOffscreen(viewport, elementAt(20, 100)), true)
   assert.equal(isElementOffscreen(viewport, elementAt(500, 700)), true)
+})
+
+test('observer delivery requires positive visible area', () => {
+  assert.equal(isIntersectionOffscreen({
+    isIntersecting: true,
+    intersectionRatio: 0,
+  }), true, 'edge adjacency has no visible pixels')
+  assert.equal(isIntersectionOffscreen({
+    isIntersecting: true,
+    intersectionRatio: 0.01,
+  }), false)
+  assert.equal(isIntersectionOffscreen({
+    isIntersecting: false,
+    intersectionRatio: 0,
+  }), true)
 })
 
 test('mount computes committed geometry before observer delivery', () => {

@@ -14,6 +14,14 @@ export function isElementOffscreen(scrollEl, element) {
 }
 
 
+export function isIntersectionOffscreen(entry) {
+  if (!entry) return false
+  // Edge-adjacent rectangles count as intersecting even when they share zero
+  // pixels. Keep observer delivery aligned with the synchronous geometry path.
+  return !entry.isIntersecting || entry.intersectionRatio <= 0
+}
+
+
 // `findElement` is a fresh closure every render (it reads the live scroll
 // ref), so keep it out of the dependency list. Rebinding on every streamed
 // token would replace the observer continuously; callers instead provide the
@@ -48,7 +56,7 @@ export default function useOffscreenNudge(
 
     if (typeof IntersectionObserver === 'undefined') return undefined
     const observer = new IntersectionObserver(entries => {
-      setOffscreen(!entries[0]?.isIntersecting)
+      setOffscreen(isIntersectionOffscreen(entries[0]))
     }, { root: scrollEl, threshold: 0 })
     observer.observe(element)
     return () => observer.disconnect()
