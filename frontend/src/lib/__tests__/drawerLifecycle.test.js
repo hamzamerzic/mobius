@@ -2,7 +2,9 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  DRAWER_CLOSE_FALLBACK_MS,
+  DRAWER_CLOSE_WATCHDOG_BUFFER_MS,
+  drawerCloseWatchdogMs,
+  drawerWidthFromPointerDelta,
   isGeneratedTouchClick,
   isHorizontalDrawerSwipe,
   shouldSuppressDrawerSwipeClick,
@@ -36,8 +38,59 @@ test('drawer cleanup is safe before the panel ref mounts', () => {
   assert.doesNotThrow(() => clearDrawerGestureStyles(null))
 })
 
-test('close fallback outlasts the 100ms panel transition', () => {
-  assert.ok(DRAWER_CLOSE_FALLBACK_MS > 100)
+test('close watchdog follows the computed transform transition', () => {
+  assert.equal(drawerCloseWatchdogMs({
+    transitionProperty: 'transform',
+    transitionDuration: '100ms',
+    transitionDelay: '0s',
+  }), 100 + DRAWER_CLOSE_WATCHDOG_BUFFER_MS)
+
+  assert.equal(drawerCloseWatchdogMs({
+    transitionProperty: 'opacity, transform',
+    transitionDuration: '50ms, 0.25s',
+    transitionDelay: '0s, 20ms',
+  }), 270 + DRAWER_CLOSE_WATCHDOG_BUFFER_MS)
+
+  assert.equal(drawerCloseWatchdogMs({
+    transitionProperty: 'transform',
+    transitionDuration: '100ms, 5s',
+    transitionDelay: '0s',
+  }), 100 + DRAWER_CLOSE_WATCHDOG_BUFFER_MS)
+})
+
+test('close watchdog releases immediately when transform motion is disabled', () => {
+  assert.equal(drawerCloseWatchdogMs({
+    transitionProperty: 'transform',
+    transitionDuration: '0s',
+    transitionDelay: '0s',
+  }), 0)
+  // Chromium's reduced-motion rule computes as `none` plus a nominal 1ms
+  // duration. The absent property wins: there is no transform transition to
+  // wait for.
+  assert.equal(drawerCloseWatchdogMs({
+    transitionProperty: 'none',
+    transitionDuration: '0.001s',
+    transitionDelay: '0s',
+  }), 0)
+  assert.equal(drawerCloseWatchdogMs({
+    transitionProperty: 'opacity',
+    transitionDuration: '500ms',
+    transitionDelay: '0s',
+  }), 0)
+})
+
+test('drawer resize follows pointer delta from either panel edge', () => {
+  assert.equal(drawerWidthFromPointerDelta({
+    startWidth: 320,
+    startX: 400,
+    currentX: 448,
+  }), 368)
+  assert.equal(drawerWidthFromPointerDelta({
+    startWidth: 320,
+    startX: 1000,
+    currentX: 952,
+    edgeDirection: -1,
+  }), 368)
 })
 
 test('drawer swipe classification rejects vertical and ambiguous movement', () => {
