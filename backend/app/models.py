@@ -743,6 +743,10 @@ class Notification(Base):
   actions = Column(JSON, nullable=True)
   sent_at = Column(DateTime, default=lambda: datetime.now(UTC))
   clicked_at = Column(DateTime, nullable=True)
+  # Seen via the in-app notifications page (bulk-stamped by read-all).
+  # Distinct from clicked_at, which records a tap on the OS push itself —
+  # bulk-marking THAT would fabricate click data.
+  read_at = Column(DateTime, nullable=True)
 
 
 class ToolOutput(Base):

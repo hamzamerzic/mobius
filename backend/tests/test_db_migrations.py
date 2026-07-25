@@ -366,3 +366,46 @@ def test_fresh_owner_schema_has_auto_resume_default():
   assert restart.default is not None
   assert restart.server_default is not None
   assert str(restart.server_default.arg).lower() == "true"
+
+
+def test_run_migrations_adds_read_at_and_backfills_notifications(tmp_path):
+  """Pre-feature notification history must not arrive as a full unread badge.
+
+  Old-schema notifications table (no read_at) → run_migrations adds the
+  column and stamps existing rows read_at = sent_at, in one transaction.
+  Idempotent across reruns.
+  """
+  db_path = tmp_path / "legacy-notifications.db"
+  eng = create_engine(f"sqlite:///{db_path}")
+  with eng.connect() as conn:
+    # Production migrations are gated on the pre-existing apps table.
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(255))"
+    ))
+    conn.execute(text(
+      "CREATE TABLE notifications ("
+      "id VARCHAR(64) PRIMARY KEY, "
+      "owner_id INTEGER NOT NULL, "
+      "source_type VARCHAR(16) NOT NULL, "
+      "title VARCHAR(256) NOT NULL, "
+      "sent_at DATETIME, "
+      "clicked_at DATETIME"
+      ")"
+    ))
+    conn.execute(text(
+      "INSERT INTO notifications (id, owner_id, source_type, title, sent_at) "
+      "VALUES ('n-legacy', 1, 'agent', 'Old', '2026-01-02 03:04:05')"
+    ))
+    conn.commit()
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  inspector = inspect(eng)
+  cols = {c["name"] for c in inspector.get_columns("notifications")}
+  assert "read_at" in cols
+  with eng.connect() as conn:
+    read_at = conn.execute(text(
+      "SELECT read_at FROM notifications WHERE id = 'n-legacy'"
+    )).scalar_one()
+  assert str(read_at) == "2026-01-02 03:04:05"

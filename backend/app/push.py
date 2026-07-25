@@ -146,6 +146,22 @@ def notify_owner(
   the in-tab UX already shows the event. The notification row is
   saved either way so history is consistent. Returns the
   notification id.
+
+  THE producer seam for owner notifications — any subsystem that wants a
+  row in the notifications page calls this and nothing else. One call =
+  one history row + a `notification_created` badge nudge on the system
+  bus + a (possibly suppressed) Web Push. Callers never touch the
+  broadcast or push machinery directly; a transient system-bus event
+  that should ALSO persist in the bell gets a one-line call here at its
+  publish site. Contract:
+    - source_type (<=16 chars): 'system' (platform), 'agent' (chat
+      agents; the /send default), 'app' + source_id=str(app_id) (also
+      lights the drawer activity dot). New subsystems add a short
+      stable slug.
+    - target: in-scope deep-link only — '/shell/?app=<id>',
+      '/shell/?chat=<id>', or '/shell/?view=notifications' (legacy
+      '/app/:id' and '/chat/:id' still parse). Clients treat it as
+      UNTRUSTED and fail closed on anything else.
   """
   notification_id = str(uuid.uuid4())
   notif = models.Notification(
@@ -199,6 +215,18 @@ def notify_owner(
     get_system_broadcast().publish({
       "type": "app_activity", "appId": str(activity_app_id),
     })
+
+  # Replay-free nudge so a live shell's bell badge refetches immediately;
+  # an SSE-reconnect refetch recovers any missed event. Deliberately BEFORE
+  # the push-suppression early returns below: the bell is the in-app surface
+  # those suppressions defer to, so a quiet-maintenance or watched-source
+  # notification must still update the badge. Payload carries no title/body —
+  # the bus is not a content channel. NOT in SYSTEM_EVENT_TYPES: agents must
+  # not be able to spoof badge nudges via POST /api/notify.
+  from app.broadcast import get_system_broadcast
+  get_system_broadcast().publish({
+    "type": "notification_created", "id": notification_id,
+  })
 
   # Skip push when a live SSE subscriber is already watching the
   # source chat — the in-tab UX surfaces the event there. presence

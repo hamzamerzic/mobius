@@ -614,5 +614,9 @@ class NotificationOut(BaseModel):
   actions: list | None
   sent_at: datetime
   clicked_at: datetime | None
+  # Null = not yet seen via the notifications page (counts toward the bell
+  # badge). Owner-only surfaces return this schema, so it never reaches
+  # app-scoped tokens.
+  read_at: datetime | None
 
   model_config = {"from_attributes": True}
