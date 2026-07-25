@@ -1359,7 +1359,13 @@ test.describe('Drawer close paths converge through handleBack', () => {
     const released = await handle.evaluate((element) => {
       for (let pointerId = 1; pointerId <= 5; pointerId += 1) {
         if (!element.hasPointerCapture(pointerId)) continue
-        element.releasePointerCapture(pointerId)
+        // A programmatic releasePointerCapture() only flushes lostpointercapture
+        // on the next pointer-event dispatch, so dispatch the capture-loss event
+        // the browser itself delivers when a drag's capture is interrupted.
+        element.dispatchEvent(new PointerEvent('lostpointercapture', {
+          pointerId,
+          bubbles: true,
+        }))
         return true
       }
       return false
