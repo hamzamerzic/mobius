@@ -1715,7 +1715,11 @@ async def sweep_wedged_run_markers(db: Session) -> list[str]:
   try:
     cutoff = datetime.now(UTC).replace(tzinfo=None) - _WEDGED_RUN_MIN_AGE
     stale = (
-      db.query(models.Chat)
+      # The watchdog needs only identity. A long-running chat can have a
+      # multi-megabyte transcript; hydrating it every minute while merely
+      # checking registry/broadcast state repeats the same allocator problem
+      # the idle-pending projection below avoids.
+      db.query(models.Chat.id)
       .filter(models.Chat.run_status == "running")
       .filter(models.Chat.deleted_at.is_(None))
       .filter(models.Chat.run_started_at.isnot(None))
@@ -1725,16 +1729,17 @@ async def sweep_wedged_run_markers(db: Session) -> list[str]:
   except Exception:
     log.exception("sweep_wedged_run_markers: query failed")
     return swept
-  for chat in stale:
-    if registry.is_alive(chat.id):
+  for row in stale:
+    chat_id = row.id
+    if registry.is_alive(chat_id):
       continue
-    bc = get_broadcast(chat.id)
+    bc = get_broadcast(chat_id)
     if bc is not None and bc.running:
       # Still streaming, in terminal cleanup, or a legitimately-long live turn.
       continue
     run = (
       db.query(models.ChatRun)
-      .filter(models.ChatRun.chat_id == chat.id)
+      .filter(models.ChatRun.chat_id == chat_id)
       .filter(models.ChatRun.status == "running")
       .order_by(models.ChatRun.started_at.desc())
       .first()
@@ -1745,22 +1750,22 @@ async def sweep_wedged_run_markers(db: Session) -> list[str]:
       continue
     try:
       async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
-        async with chat_queue.get_lock(chat.id):
-          if registry.is_alive(chat.id):
+        async with chat_queue.get_lock(chat_id):
+          if registry.is_alive(chat_id):
             continue
           # Identity-keyed on the wedged run's token: a fresh turn that raced in
           # owns a different token, so the actor no-ops instead of wiping it.
           # Strict variant so a failed ack RAISES — a marker we couldn't clear
           # must not be reported as swept (reconciliation repairs it on boot).
           await _clear_run_status_strict(
-            chat.id, run.id, terminal_status="interrupted",
+            chat_id, run.id, terminal_status="interrupted",
           )
-      _finalize_broadcast_if_running(chat.id)
-      swept.append(chat.id)
+      _finalize_broadcast_if_running(chat_id)
+      swept.append(chat_id)
     except (Exception, asyncio.TimeoutError):
       log.warning(
         "sweep_wedged_run_markers: clear failed chat_id=%s "
-        "(reconciliation will repair)", chat.id, exc_info=True,
+        "(reconciliation will repair)", chat_id, exc_info=True,
       )
   if swept:
     log.info(
@@ -1792,8 +1797,14 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
   if draining:
     return started
   try:
+    # Queue watchdog projection only. Selecting the Chat entity here hydrates
+    # every transcript JSON blob once per minute merely to discover that almost
+    # every pending queue is empty. On a mature instance that produced a
+    # ~204 MiB allocation spike and left ~169 MiB in CPython/glibc arenas after
+    # the rows were released. The queue is the candidate index; load one full
+    # Chat only after its projected pending head proves old enough to recover.
     candidates = (
-      db.query(models.Chat)
+      db.query(models.Chat.id, models.Chat.pending_messages)
       .filter(models.Chat.run_status.is_(None))
       .filter(models.Chat.deleted_at.is_(None))
       .all()
@@ -1803,8 +1814,9 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
     return started
 
   now_ms = int(time.time() * 1000)
-  for chat in candidates:
-    pending = list(chat.pending_messages or [])
+  for candidate in candidates:
+    chat_id = candidate.id
+    pending = list(candidate.pending_messages or [])
     if not _pending_head_is_stale(pending, now_ms):
       continue
     # A limit-parked queue is NOT abandoned work: LIMIT_PARKED preserves
@@ -1813,59 +1825,66 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
     # sweep_reset_parks (when the chat policy is enabled) or the user's own
     # next send. The park row outlives run_status, so run_status IS NULL alone
     # cannot distinguish "crashed drain" from "parked on purpose".
-    if _parked_until_for_chat(db, chat.id) is not None:
+    if _parked_until_for_chat(db, chat_id) is not None:
       continue
-    if _restart_manual_hold_for_chat(db, chat.id):
+    if _restart_manual_hold_for_chat(db, chat_id):
       continue
     claimed = False
     try:
       async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
-        async with chat_queue.get_transition_lock(chat.id):
-          async with chat_queue.get_lock(chat.id):
-            db.expire(chat)
+        async with chat_queue.get_transition_lock(chat_id):
+          async with chat_queue.get_lock(chat_id):
+            # Re-read the one real candidate under the transition/queue locks.
+            # The projected row above is deliberately only a cheap hint.
+            chat = db.query(models.Chat).filter(
+              models.Chat.id == chat_id,
+              models.Chat.deleted_at.is_(None),
+            ).first()
+            if chat is None:
+              continue
             pending = list(chat.pending_messages or [])
             if (
               chat.run_status is not None
               or not _pending_head_is_stale(pending, now_ms)
-              or _parked_until_for_chat(db, chat.id) is not None
-              or _restart_manual_hold_for_chat(db, chat.id)
-              or not mark_starting(chat.id)
+              or _parked_until_for_chat(db, chat_id) is not None
+              or _restart_manual_hold_for_chat(db, chat_id)
+              or not mark_starting(chat_id)
             ):
               continue
             claimed = True
             run_token = alloc_run_token()
             messages, next_user, session_id = (
               await chat_queue.promote_pending_messages_locked(
-                db, chat.id, run_token,
+                db, chat_id, run_token,
               )
             )
             if next_user is None:
-              discard_starting(chat.id)
+              discard_starting(chat_id)
               claimed = False
               continue
             get_system_broadcast().publish({
               "type": "chat_run_started",
-              "chatId": chat.id,
+              "chatId": chat_id,
             })
             if _schedule_continuation(
-              chat_id=chat.id,
+              chat_id=chat_id,
               messages=messages,
               session_id=session_id,
               provider_id=chat.provider,
               next_user=next_user,
               run_token=run_token,
             ):
-              started.append(chat.id)
+              started.append(chat_id)
             claimed = False
     except asyncio.CancelledError:
       if claimed:
-        discard_starting(chat.id)
+        discard_starting(chat_id)
       raise
     except Exception:
       if claimed:
-        discard_starting(chat.id)
+        discard_starting(chat_id)
       log.warning(
-        "idle-pending sweep failed chat_id=%s", chat.id, exc_info=True,
+        "idle-pending sweep failed chat_id=%s", chat_id, exc_info=True,
       )
   if started:
     log.info(
