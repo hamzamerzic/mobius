@@ -12,7 +12,6 @@ import {
   movedBeyondSlop,
   decidePointerMove,
   runHoldCompletion,
-  haloFrame,
 } from '../logoHoldMachine.js'
 
 // ── Hold threshold ──────────────────────────────────────────────────────────
@@ -107,23 +106,4 @@ test('runHoldCompletion is a graceful no-op where the Vibration API is absent (i
     vibrate: undefined, reducedMotion: false, entering: true, startFlourish: () => { flourishes += 1 },
   }))
   assert.equal(flourishes, 1, 'the spring still plays without haptics')
-})
-
-// ── Living halo drift (pure, allocation-free) ───────────────────────────────
-
-test('haloFrame drifts within bounds, reuses its out object, and never repeats', () => {
-  const out = {}
-  const r = haloFrame(1234, out)
-  assert.equal(r, out, 'writes into the SAME object (no per-frame allocation)')
-  // Sample a spread of times; every field stays in a sane, subtle range.
-  for (const t of [0, 500, 1500, 9000, 123456]) {
-    const f = haloFrame(t, out)
-    assert.ok(f.scale > 0.9 && f.scale < 1.1, `scale in range @${t}`)
-    assert.ok(Math.abs(f.x) <= 4 && Math.abs(f.y) <= 4, `offset small @${t}`)
-    assert.ok(f.opacity > 0.6 && f.opacity <= 1, `opacity in range @${t}`)
-  }
-  // Irrational-ratio sines: two far-apart times are not identical (no loop).
-  const a = haloFrame(1000, {})
-  const b = haloFrame(1000 + 60000, {})
-  assert.notDeepEqual(a, b, 'the glow does not visibly loop')
 })
