@@ -23,6 +23,7 @@ import { getOnlineSnapshot } from '../../lib/connectivityStore.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
+import useOffscreenNudge from './hooks/useOffscreenNudge.js'
 import ChatInputBar from './ChatInputBar.jsx'
 import { hasSendablePayload } from './composerSubmission.js'
 import AgentContextInspector from './AgentContextInspector.jsx'
@@ -223,44 +224,6 @@ function readInitialComposer(chatId) {
 // composer) don't hand ChatView a fresh array each render and re-fire its
 // list-keyed effects.
 const NO_BUILT_APPS = []
-
-// One offscreen-visibility observer for a sticky footer nudge, used twice (the
-// pending-question card and the resume card). Returns whether the found card is
-// currently scrolled OUT of the scroll container's viewport, so the caller can
-// show a "tap to jump to it" chip.
-//
-// `findCard` is a fresh closure every render (it reads scrollRef.current, a
-// ref, so even a stale one queries live DOM), so it is deliberately kept OUT of
-// the reactive dep array and read through a ref. The observer rebinds only on
-// `active` flips and the explicit `rebindDeps` — the rendering-surface signals
-// that can move the card's DOM node — exactly as the two hand-written effects
-// did. Listing `findCard` in the deps would recreate the observer on every
-// streaming re-render (a per-token IntersectionObserver thrash); the card's DOM
-// node is stable across those, so it must not.
-function useOffscreenNudge(scrollRef, active, findCard, rebindDeps) {
-  const [offscreen, setOffscreen] = useState(false)
-  const findCardRef = useRef(findCard)
-  findCardRef.current = findCard
-  useEffect(() => {
-    if (!active) {
-      setOffscreen(false)
-      return undefined
-    }
-    const scrollEl = scrollRef.current
-    const card = findCardRef.current()
-    if (!scrollEl || !card || typeof IntersectionObserver === 'undefined') {
-      setOffscreen(false)
-      return undefined
-    }
-    const io = new IntersectionObserver(entries => {
-      setOffscreen(!entries[0]?.isIntersecting)
-    }, { root: scrollEl, threshold: 0 })
-    io.observe(card)
-    return () => io.disconnect()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, scrollRef, ...rebindDeps])
-  return offscreen
-}
 
 export default function ChatView({
   chatId,
