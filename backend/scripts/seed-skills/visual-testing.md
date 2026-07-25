@@ -66,7 +66,7 @@ by that snapshot is preferable to a 25-second timeout.
 
 Two gotchas every session:
 
-- **`@eN` refs are ephemeral** — regenerated on every `snapshot`, invalidated by any DOM change. Re-snapshot before targeting by `@ref` after any mutation. For repeated targets prefer stable selectors (`button[aria-label="..."]`, `[data-testid="..."]`). `:has-text()` silently no-ops.
+- **`@eN` refs are ephemeral** — regenerated on every `snapshot`, invalidated by any DOM change. Re-snapshot before targeting by `@ref` after any mutation. For repeated targets, use a selector only when its matching DOM attribute or structure is verified in the current DOM or source; otherwise re-snapshot and use a fresh ref. A quoted control name in a snapshot is an accessible name, not evidence that a matching DOM attribute exists. `:has-text()` silently no-ops.
 - **`✓ Done` only confirms dispatch, not state change** — the CLI returns it the instant the command reaches Chromium, not after the UI changed. Verify with `snapshot` or a screenshot after any click meant to transition UI.
 - **Keep screenshots purposeful** — retain the first useful render, a materially changed or error state, and the final evidence. A loader, drawer transition, or near-identical recapture is not a partner-visible milestone.
 

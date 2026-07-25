@@ -3,7 +3,7 @@
 Advanced extension for Möbius mini-apps. Read it alongside
 `building-apps-quickstart.md` and `visual-testing.md` when work needs packaging,
 services/fetching, privileged storage, embedded agents, device capabilities,
-immersive mode, or navigation.
+immersive mode, navigation, or app deletion/recovery.
 
 This file contains only the advanced contract and deltas from the base
 workflow. For an ordinary local create or straightforward update, the
@@ -214,8 +214,8 @@ imports `index.jsx`):
 ### Deleting an app — reversible for 7 days
 
 ```bash
-curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/apps/" | python3 -m json.tool   # find the id
-curl -s -X DELETE -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/apps/<id>"
+python "$SCRIPTS_DIR/list_apps.py" --name "<exact display name>"
+python "$SCRIPTS_DIR/delete_app.py" <id> --confirm
 ```
 
 Delete is a **soft delete**: the app is tombstoned and its saved data is kept for
@@ -223,9 +223,10 @@ Delete is a **soft delete**: the app is tombstoned and its saved data is kept fo
 (or, for a store app, just reinstall it) — see `recovery.md`. Before deleting:
 verify the app exists, tell the partner which one (name, id, description), and
 ask for confirmation ("Delete [name]? You can recover it for 7 days."), then
-delete. Record creates and deletions in this chat's note (`chats/$CHAT_ID/index.md`)
-in the same turn (the id is your recovery handle); updates skip the note unless
-they revealed something non-obvious.
+delete. Exact-name lookup can return several apps; choose by numeric ID and
+never by list position. The delete helper returns the recovery receipt. Record
+creates and deletions in this chat's note (`chats/$CHAT_ID/index.md`) in the
+same turn; updates skip the note unless they revealed something non-obvious.
 
 ---
 

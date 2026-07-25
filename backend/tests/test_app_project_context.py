@@ -79,3 +79,67 @@ def test_non_app_chat_has_no_context(db):
   block, env = _build_app_context(db, chat.id, _DATA_DIR)
   assert block is None
   assert env == {}
+
+
+def test_build_chat_with_one_linked_app_gets_exact_identity(db):
+  chat = models.Chat(id="builder-one", title="build", messages=[])
+  db.add(chat)
+  db.commit()
+  app = models.App(
+    name="Duplicate name", description="", jsx_source="",
+    slug="duplicate-name-2", source_dir="/data/apps/duplicate-name-2",
+    chat_id=chat.id,
+  )
+  db.add(app)
+  db.commit()
+  db.refresh(app)
+
+  block, env = _build_app_context(db, chat.id, _DATA_DIR)
+
+  assert block is not None
+  assert "App names are not unique" in block
+  assert f'"app_id":{app.id}' in block
+  assert env["APP_ID"] == str(app.id)
+  assert env["APP_SOURCE_DIR"] == "/data/apps/duplicate-name-2"
+  assert env["APP_STORAGE_DIR"].endswith(f"/apps/{app.id}")
+  assert env["CHAT_APPS_JSON"] in block
+
+
+def test_build_chat_with_multiple_apps_never_guesses_one_app(db):
+  chat = models.Chat(id="builder-many", title="build", messages=[])
+  db.add(chat)
+  db.commit()
+  apps = [
+    models.App(
+      name="Same", description="", jsx_source="", slug=f"same-{index}",
+      source_dir=f"/data/apps/same-{index}", chat_id=chat.id,
+    )
+    for index in (1, 2)
+  ]
+  db.add_all(apps)
+  db.commit()
+
+  block, env = _build_app_context(db, chat.id, _DATA_DIR)
+
+  assert block is not None
+  assert env.keys() == {"CHAT_APPS_JSON"}
+  assert all(f'"app_id":{app.id}' in block for app in apps)
+
+
+def test_deleted_linked_app_is_not_injected(db):
+  from datetime import UTC, datetime
+
+  chat = models.Chat(id="builder-deleted", title="build", messages=[])
+  db.add(chat)
+  db.commit()
+  db.add(models.App(
+    name="Gone", description="", jsx_source="", slug="gone",
+    source_dir="/data/apps/gone", chat_id=chat.id,
+    deleted_at=datetime.now(UTC).replace(tzinfo=None),
+  ))
+  db.commit()
+
+  block, env = _build_app_context(db, chat.id, _DATA_DIR)
+
+  assert block is None
+  assert env == {}
