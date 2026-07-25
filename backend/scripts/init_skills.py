@@ -34,7 +34,7 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
 VERSION_FILE = SKILLS / ".seed-version"
-SEED_VERSION = "19"  # v19: compact app discovery and bounded visual checks
+SEED_VERSION = "21"  # v21: carry exact app and generated-image handles
 # Update only byte-for-byte baked copies; an owner/agent-edited file is never
 # touched. A set preserves every known unmodified predecessor when one skill
 # needs more than one fix-forward migration over its lifetime.
@@ -57,6 +57,8 @@ _UNMODIFIED_MIGRATIONS = {
   },
   "images.md": {
     "248ea31e13d2d2d84a5acfca13526aa8ebfa3d90e9ee4bf55cfb72d47937f7d1",
+    # v20 baked copy: publish the exact generated image, never newest-by-time.
+    "29039a6fc5c9281794247eda5d0bbf66e969a1a260e9ed56c69ee6e1cd175f7c",
   },
   "building-apps.md": {
     "4126b40d209c422184e0135f611bb9f4197ea280fa27e63cd71c806f8b5ebd79",
@@ -64,6 +66,8 @@ _UNMODIFIED_MIGRATIONS = {
     "563dcd7bfa1ff7cbad074d98462eb9755a010a15bf340c7f594fc7f6825a6a86",
     # v17 baked copy: replace watcher publication with explicit apply.
     "a8591f03bd5fb6eb0cfcd811d6d6d4309657f2f4e9e8e11ded4cbefbd77facfd",
+    # v20 baked copy: delete by exact id and retain its recovery receipt.
+    "5a6bafaa654071c4af5a5c7a201e23e4b0294c392ccb2b9afd7c2b18e17ff3fe",
   },
   "building-apps-quickstart.md": {
     "7d8af2664b37a69b88e48c2a28140c15556202c3c7ce30d77816c203d1959fcb",
@@ -73,6 +77,8 @@ _UNMODIFIED_MIGRATIONS = {
     "85a4b5ce5b47c81fa53bec90d530adfe433c0d2f7f31363427b6c792bd332e05",
     # v18 baked copy: co-read completion policy and use compact app discovery.
     "02fda2ea04f3c0ce808ef0db4b1fe4e893924bd019a5bf102a46749ef9142510",
+    # v20 baked copy: retain the apply receipt's numeric id across the flow.
+    "68c84158a9255ab53686968ed4ec8f594c460483bec0e90dcfa472682c1d9b70",
   },
   "resolving-app-git.md": {
     # v17 baked copy: resolution is an explicit installer replay.
@@ -89,6 +95,8 @@ _UNMODIFIED_MIGRATIONS = {
     "a0648921b9c9ea2423e8abd52aa57e71e7bebfa1736073fcf3bfcaec3749ad19",
     # v18 baked copy: avoid measured textbox and opaque-frame wait failures.
     "5db160b2d796d54ec320119cbdbbb2860a78cfd703cfe37667626d23abc8e4d9",
+    # v19 baked copy: replace speculative selector examples with grounding.
+    "bf58243aeb1779eb0a94d5404a99c2132e55d60542cbb555fc50bc5cf65349fe",
   },
 }
 

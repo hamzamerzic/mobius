@@ -147,9 +147,11 @@ python "$SCRIPTS_DIR/apply_app.py" /data/apps/<slug>
 ```
 
 The helper validates the manifest and complete source tree, compiles and
-commits that exact revision, returns the app JSON (including its numeric ID),
-and opens the live preview beside the owning chat. Do not send a separate
-`open_item`.
+commits that exact revision, returns a compact receipt with `app_id`,
+`preview_path`, and `open_path`, and opens the live preview beside the owning
+chat. Reuse that numeric ID for preview, storage, notifications, and later
+actions; do not list apps again after a successful apply. Do not send a
+separate `open_item`.
 
 Afterward, edit source files normally and run the same command once the change
 is coherent enough to preview. A failed apply keeps the prior version live and

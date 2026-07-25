@@ -13,6 +13,23 @@ def _usage() -> None:
   print("Usage: apply_app.py <source-dir>", file=sys.stderr)
 
 
+def _receipt(result: dict) -> dict:
+  app = result.get("app")
+  if not isinstance(app, dict) or not isinstance(app.get("id"), int):
+    raise ValueError("App apply response did not include a numeric app id.")
+  app_id = app["id"]
+  return {
+    "mode": result.get("mode"),
+    "app_id": app_id,
+    "name": app.get("name"),
+    "slug": app.get("slug"),
+    "source_dir": app.get("source_dir"),
+    "chat_id": app.get("chat_id"),
+    "preview_path": f"/app/{app_id}",
+    "open_path": f"/shell/?app={app_id}",
+  }
+
+
 def main() -> None:
   if len(sys.argv) != 2:
     _usage()
@@ -62,7 +79,12 @@ def main() -> None:
   except urllib.error.URLError as exc:
     print(f"App apply failed: {exc.reason}", file=sys.stderr)
     raise SystemExit(1) from exc
-  print(json.dumps(result, ensure_ascii=False))
+  try:
+    receipt = _receipt(result)
+  except ValueError as exc:
+    print(f"App apply failed: {exc}", file=sys.stderr)
+    raise SystemExit(1) from exc
+  print(json.dumps(receipt, ensure_ascii=False, separators=(",", ":")))
 
 
 if __name__ == "__main__":
