@@ -7,8 +7,9 @@ from datetime import UTC, datetime
 from app import chat as chat_mod
 from app import models
 from app.chat_writer import cid_of
-from app.database import SessionLocal
+from app.database import SessionLocal, engine
 from app.runner_registry import registry
+from sqlalchemy import event
 
 
 def _seed_pending(
@@ -118,6 +119,45 @@ def test_idle_pending_sweep_respects_age_gate(monkeypatch):
   assert status is None
   assert [cid_of(row) for row in pending] == [f"cid-{chat_id}"]
   assert not registry.is_alive(chat_id)
+
+
+def test_idle_pending_sweep_candidate_query_does_not_load_transcripts(
+  monkeypatch,
+):
+  chat_id = "idle-empty-large-transcript"
+  db = SessionLocal()
+  try:
+    db.add(models.Chat(
+      id=chat_id,
+      title="large but idle",
+      provider="codex",
+      messages=[{"role": "assistant", "content": "x" * 1_000_000}],
+      pending_messages=[],
+      run_status=None,
+    ))
+    db.commit()
+  finally:
+    db.close()
+
+  statements = []
+
+  def capture(_conn, _cursor, statement, _parameters, _context, _many):
+    if "FROM chats" in statement and "chats.run_status IS NULL" in statement:
+      statements.append(statement)
+
+  event.listen(engine, "before_cursor_execute", capture)
+  try:
+    swept, scheduled = _sweep(monkeypatch)
+  finally:
+    event.remove(engine, "before_cursor_execute", capture)
+
+  assert swept == []
+  assert scheduled == []
+  assert len(statements) == 1
+  projection = statements[0].split("FROM chats", 1)[0]
+  assert "chats.id" in projection
+  assert "chats.pending_messages" in projection
+  assert "chats.messages" not in projection
 
 
 def _park_latest_run(chat_id: str, *, minutes_out: float) -> None:

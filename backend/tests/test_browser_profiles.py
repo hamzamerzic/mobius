@@ -383,6 +383,103 @@ def test_quota_prunes_recent_closed_cache_before_old_durable_profile(tmp_path):
   assert result["profiles_pruned"] == 0
 
 
+def test_quota_retires_oldest_recent_profile_when_grace_exceeds_budget(
+  tmp_path,
+):
+  older = "55555555-5555-5555-5555-555555555555"
+  newer = "66666666-6666-6666-6666-666666666666"
+  older_profile = _profile(
+    tmp_path, older, cache_bytes=0, durable_bytes=40,
+  )
+  newer_profile = _profile(
+    tmp_path, newer, cache_bytes=0, durable_bytes=70,
+  )
+  now = datetime.now(UTC).replace(tzinfo=None)
+
+  result = enforce_browser_profile_quota(
+    tmp_path,
+    {
+      older: {"activity_at": now - timedelta(days=2),
+              "deleted_at": None, "run_status": None},
+      newer: {"activity_at": now - timedelta(days=1),
+              "deleted_at": None, "run_status": None},
+    },
+    set(),
+    now=now,
+    max_bytes=100,
+    low_water_bytes=70,
+    inactive_days=30,
+  )
+
+  assert not older_profile.exists()
+  assert newer_profile.exists()
+  assert result["profiles_pruned"] == 1
+  assert result["bytes_after"] == 70
+  assert result["over_quota_bytes"] == 0
+
+
+def test_triggered_quota_finishes_at_low_water_after_partial_cache_reclaim(
+  tmp_path,
+):
+  older = "88888888-8888-8888-8888-888888888888"
+  newer = "99999999-9999-9999-9999-999999999999"
+  older_profile = _profile(
+    tmp_path, older, cache_bytes=20, durable_bytes=30,
+  )
+  newer_profile = _profile(
+    tmp_path, newer, cache_bytes=0, durable_bytes=60,
+  )
+  now = datetime.now(UTC).replace(tzinfo=None)
+
+  result = enforce_browser_profile_quota(
+    tmp_path,
+    {
+      older: {"activity_at": now - timedelta(days=2),
+              "deleted_at": None, "run_status": None},
+      newer: {"activity_at": now - timedelta(days=1),
+              "deleted_at": None, "run_status": None},
+    },
+    set(),
+    now=now,
+    max_bytes=100,
+    low_water_bytes=70,
+    inactive_days=30,
+  )
+
+  # Cache pruning lowers 110 to 90, below the high-water ceiling but above the
+  # low-water target. The already-triggered sweep completes the cycle instead
+  # of leaving the next small write to retrigger it.
+  assert not older_profile.exists()
+  assert newer_profile.exists()
+  assert result["cache_dirs_pruned"] == 2
+  assert result["profiles_pruned"] == 1
+  assert result["bytes_after"] == 60
+
+
+def test_quota_reports_when_live_profiles_alone_exceed_the_budget(tmp_path):
+  live = "77777777-7777-7777-7777-777777777777"
+  profile = _profile(tmp_path, live, cache_bytes=80, durable_bytes=20)
+  now = datetime.now(UTC).replace(tzinfo=None)
+
+  result = enforce_browser_profile_quota(
+    tmp_path,
+    {live: {"activity_at": now, "deleted_at": None,
+            "run_status": "running"}},
+    {live},
+    now=now,
+    max_bytes=50,
+    low_water_bytes=25,
+    inactive_days=30,
+  )
+
+  assert profile.exists()
+  assert result["reclaimed_bytes"] == 0
+  assert result["bytes_after"] == 100
+  assert result["max_bytes"] == 50
+  assert result["low_water_bytes"] == 25
+  assert result["over_quota_bytes"] == 50
+
+
 def test_quota_counts_and_prunes_cache_from_closed_named_profile(tmp_path):
   profile = _named_profile(
     tmp_path, "reflection", cache_bytes=100, durable_bytes=20,
@@ -418,6 +515,40 @@ def test_quota_never_prunes_live_named_profile(tmp_path):
   assert result["reclaimed_bytes"] == 0
 
 
+def test_quota_preserves_recent_inactive_named_profile_under_pressure(tmp_path):
+  profile = _named_profile(
+    tmp_path, "reflection", cache_bytes=0, durable_bytes=20,
+  )
+  now = datetime.now(UTC).replace(tzinfo=None)
+
+  result = enforce_browser_profile_quota(
+    tmp_path, {}, set(), now=now, max_bytes=10, low_water_bytes=0,
+    inactive_days=30, active_profile_names=set(),
+  )
+
+  assert profile.exists()
+  assert result["profiles_pruned"] == 0
+  assert result["bytes_after"] == 20
+  assert result["over_quota_bytes"] == 10
+
+
+def test_quota_prunes_named_profile_after_its_full_grace(tmp_path):
+  profile = _named_profile(
+    tmp_path, "reflection", cache_bytes=0, durable_bytes=20,
+  )
+  now = datetime.now(UTC).replace(tzinfo=None) + timedelta(days=31)
+
+  result = enforce_browser_profile_quota(
+    tmp_path, {}, set(), now=now, max_bytes=10, low_water_bytes=0,
+    inactive_days=30, active_profile_names=set(),
+  )
+
+  assert not profile.exists()
+  assert result["profiles_pruned"] == 1
+  assert result["bytes_after"] == 0
+  assert result["over_quota_bytes"] == 0
+
+
 def test_quota_ignores_symlinked_profile_directory(tmp_path):
   root = tmp_path / "agent-browser-profiles"
   root.mkdir()
@@ -451,10 +582,33 @@ def test_quota_ignores_symlinked_cache_directory(tmp_path):
 
   result = enforce_browser_profile_quota(
     tmp_path, {}, set(), max_bytes=1, low_water_bytes=0,
-    inactive_days=30, active_profile_names=set(),
+    inactive_days=30, active_profile_names={"reflection"},
   )
 
   assert outside_cache.exists()
   assert (outside_cache / "cache.bin").exists()
   assert (default / "Cache").is_symlink()
   assert result["cache_dirs_pruned"] == 0
+  assert result["over_quota_bytes"] == 19
+
+
+def test_quota_does_not_count_or_reclaim_symlinked_file_targets(tmp_path):
+  profile = tmp_path / "agent-browser-profiles" / "reflection"
+  durable = profile / "Default" / "IndexedDB"
+  durable.mkdir(parents=True)
+  (durable / "state.bin").write_bytes(b"d" * 20)
+  outside = tmp_path / "outside.bin"
+  outside.write_bytes(b"x" * 100)
+  (durable / "outside.bin").symlink_to(outside)
+
+  result = enforce_browser_profile_quota(
+    tmp_path, {}, set(), max_bytes=10, low_water_bytes=0,
+    inactive_days=30, active_profile_names={"reflection"},
+  )
+
+  assert outside.read_bytes() == b"x" * 100
+  assert (durable / "outside.bin").is_symlink()
+  assert result["bytes_before"] == 20
+  assert result["bytes_after"] == 20
+  assert result["reclaimed_bytes"] == 0
+  assert result["over_quota_bytes"] == 10

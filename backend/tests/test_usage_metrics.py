@@ -140,3 +140,135 @@ def test_codex_counter_reset_uses_labelled_latest_call_fallback():
   assert usage["calculation"] == "last_call_fallback"
   assert usage["input_tokens"] == 80
   assert usage["total_tokens"] == 100
+
+
+def test_codex_partial_counter_rollback_uses_latest_call_fallback():
+  first = {
+    "last": {
+      "inputTokens": 200,
+      "cachedInputTokens": 100,
+      "outputTokens": 100,
+      "reasoningOutputTokens": 50,
+      "totalTokens": 300,
+    },
+    "total": {
+      "inputTokens": 1_000,
+      "cachedInputTokens": 400,
+      "outputTokens": 100,
+      "reasoningOutputTokens": 50,
+      "totalTokens": 1_100,
+    },
+  }
+  final = {
+    "last": {
+      "inputTokens": 80,
+      "cachedInputTokens": 40,
+      "outputTokens": 20,
+      "reasoningOutputTokens": 10,
+      "totalTokens": 100,
+    },
+    # Still above the inferred 800-token baseline, but below the first
+    # cumulative total. Treating this as a delta would silently report only 50
+    # tokens even though the latest call alone used 100.
+    "total": {
+      "inputTokens": 820,
+      "cachedInputTokens": 350,
+      "outputTokens": 90,
+      "reasoningOutputTokens": 40,
+      "totalTokens": 850,
+    },
+  }
+
+  usage = normalize_codex_usage(first, final)
+
+  assert usage is not None
+  assert usage["calculation"] == "last_call_fallback"
+  assert usage["input_tokens"] == 80
+  assert usage["total_tokens"] == 100
+
+
+def test_codex_impossible_initial_total_uses_latest_call_fallback():
+  first = {
+    "last": {
+      "inputTokens": 100,
+      "cachedInputTokens": 50,
+      "outputTokens": 20,
+      "reasoningOutputTokens": 10,
+      "totalTokens": 120,
+    },
+    # A cumulative total cannot be smaller than the call it contains.
+    "total": {
+      "inputTokens": 80,
+      "cachedInputTokens": 40,
+      "outputTokens": 10,
+      "reasoningOutputTokens": 5,
+      "totalTokens": 90,
+    },
+  }
+  final = {
+    "last": {
+      "inputTokens": 60,
+      "cachedInputTokens": 30,
+      "outputTokens": 20,
+      "reasoningOutputTokens": 10,
+      "totalTokens": 80,
+    },
+    "total": {
+      "inputTokens": 140,
+      "cachedInputTokens": 70,
+      "outputTokens": 30,
+      "reasoningOutputTokens": 15,
+      "totalTokens": 170,
+    },
+  }
+
+  usage = normalize_codex_usage(first, final)
+
+  assert usage is not None
+  assert usage["calculation"] == "last_call_fallback"
+  assert usage["input_tokens"] == 60
+  assert usage["total_tokens"] == 80
+
+
+def test_codex_impossible_final_total_uses_latest_call_fallback():
+  first = {
+    "last": {
+      "inputTokens": 20,
+      "cachedInputTokens": 10,
+      "outputTokens": 10,
+      "reasoningOutputTokens": 5,
+      "totalTokens": 30,
+    },
+    "total": {
+      "inputTokens": 100,
+      "cachedInputTokens": 50,
+      "outputTokens": 40,
+      "reasoningOutputTokens": 20,
+      "totalTokens": 140,
+    },
+  }
+  final = {
+    # The cumulative snapshot moved forward from the first notification, but
+    # it still cannot be smaller than the latest call it claims to contain.
+    "last": {
+      "inputTokens": 180,
+      "cachedInputTokens": 90,
+      "outputTokens": 60,
+      "reasoningOutputTokens": 30,
+      "totalTokens": 240,
+    },
+    "total": {
+      "inputTokens": 160,
+      "cachedInputTokens": 80,
+      "outputTokens": 50,
+      "reasoningOutputTokens": 25,
+      "totalTokens": 210,
+    },
+  }
+
+  usage = normalize_codex_usage(first, final)
+
+  assert usage is not None
+  assert usage["calculation"] == "last_call_fallback"
+  assert usage["input_tokens"] == 180
+  assert usage["total_tokens"] == 240

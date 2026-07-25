@@ -176,6 +176,13 @@ async def test_agent_turn_returns_connection_while_provider_is_running(
     chat_mod, "get_provider", lambda _provider_id: _Provider(provider_name),
   )
   monkeypatch.setattr(chat_mod, "_complete_turn", fake_complete_turn)
+  # This test intentionally bypasses the normal durable run claim. Isolate
+  # its connection-ownership assertion from the post-provider accounting
+  # write, which is covered by the chat-run metrics tests.
+  async def fake_record_run_metrics(**_kwargs):
+    return None
+
+  monkeypatch.setattr(chat_mod, "_record_run_metrics", fake_record_run_metrics)
   if provider_id == "codex":
     from app import codex_sdk_runner
     monkeypatch.setattr(codex_sdk_runner, "run_codex_sdk_turn", fake_runner)

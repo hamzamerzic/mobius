@@ -138,12 +138,20 @@ def normalize_codex_usage(
   first_last = _codex_breakdown(_member(first_usage, "last"))
   baseline = _subtract_counts(first_total, first_last)
   final_total = _codex_breakdown(_member(final_usage, "total"))
+  final_last = _codex_breakdown(_member(final_usage, "last"))
 
-  # A cumulative provider counter should never go backwards. If an SDK/server
-  # reset makes it do so, the only honest bounded fallback is the latest call;
+  # A cumulative provider counter must contain its own latest call and never
+  # move backwards between notifications. If an SDK/server reset violates
+  # either invariant, the only honest bounded fallback is the latest call;
   # retain the calculation label so benchmark consumers can exclude it.
-  if any(final_total[field] < baseline[field] for field in _CODEX_FIELDS):
-    turn = _codex_breakdown(_member(final_usage, "last"))
+  counter_reset = any(
+    first_total[field] < first_last[field]
+    or final_total[field] < first_total[field]
+    or final_total[field] < final_last[field]
+    for field in _CODEX_FIELDS
+  )
+  if counter_reset:
+    turn = final_last
     calculation = "last_call_fallback"
   else:
     turn = _subtract_counts(final_total, baseline)

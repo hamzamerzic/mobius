@@ -6,7 +6,8 @@ import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
 import { api } from '../../api/client.js'
 import { appQueries, chatQueries } from '../../hooks/queries.js'
 import {
-  DRAWER_CLOSE_FALLBACK_MS,
+  drawerCloseWatchdogMs,
+  drawerWidthFromPointerDelta,
   isGeneratedTouchClick,
   isHorizontalDrawerSwipe,
   shouldSuppressDrawerSwipeClick,
@@ -477,12 +478,17 @@ export default function Drawer({
     if (open && !persistent) setScrimBlocking(true)
     if (persistent) setScrimBlocking(false)
   }, [open, persistent])
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (open || !scrimBlocking) return undefined
-    const timer = setTimeout(
-      () => setScrimBlocking(false),
-      DRAWER_CLOSE_FALLBACK_MS,
-    )
+    const panel = drawerRef.current
+    const watchdogMs = panel
+      ? drawerCloseWatchdogMs(getComputedStyle(panel))
+      : 0
+    if (watchdogMs === 0) {
+      setScrimBlocking(false)
+      return undefined
+    }
+    const timer = setTimeout(() => setScrimBlocking(false), watchdogMs)
     return () => clearTimeout(timer)
   }, [open, scrimBlocking])
 
@@ -605,8 +611,17 @@ export default function Drawer({
     if (e.button !== 0) return
     e.preventDefault()
     e.stopPropagation()
+    const panelRect = drawerRef.current?.getBoundingClientRect()
+    const handleRect = e.currentTarget.getBoundingClientRect()
+    const handleCenter = handleRect.left + (handleRect.width / 2)
+    const panelCenter = panelRect
+      ? panelRect.left + (panelRect.width / 2)
+      : handleCenter
     resizeRef.current = {
       pointerId: e.pointerId,
+      startX: e.clientX,
+      startWidth: clampDesktopSidebarWidth(width),
+      edgeDirection: handleCenter < panelCenter ? -1 : 1,
       width: clampDesktopSidebarWidth(width),
     }
     e.currentTarget.setPointerCapture(e.pointerId)
@@ -615,7 +630,12 @@ export default function Drawer({
 
   function onResizePointerMove(e) {
     if (resizeRef.current?.pointerId !== e.pointerId) return
-    applyResizeWidth(e.clientX)
+    applyResizeWidth(drawerWidthFromPointerDelta({
+      startWidth: resizeRef.current.startWidth,
+      startX: resizeRef.current.startX,
+      currentX: e.clientX,
+      edgeDirection: resizeRef.current.edgeDirection,
+    }))
   }
 
   function finishResize(e) {
@@ -703,6 +723,7 @@ export default function Drawer({
             onPointerMove={onResizePointerMove}
             onPointerUp={finishResize}
             onPointerCancel={finishResize}
+            onLostPointerCapture={finishResize}
             onKeyDown={onResizeKeyDown}
             onDoubleClick={() => onWidthChange?.(DESKTOP_SIDEBAR_DEFAULT_WIDTH)}
           >

@@ -44,6 +44,7 @@ export function createConnectivityStore({
   let connectivityState = { successStreak: 0, failureStreak: 0, online: snapshot }
   let monitor = null
   let verificationCheck = null
+  let authoritativeReachabilityRevision = 0
 
   function getSnapshot() {
     return snapshot
@@ -91,6 +92,7 @@ export function createConnectivityStore({
   // Let owning write paths repair a stale offline verdict immediately instead
   // of waiting for the next poll or Android's delayed `online` event.
   function reportReachable() {
+    authoritativeReachabilityRevision += 1
     connectivityState = {
       successStreak: Math.max(1, connectivityState.successStreak),
       failureStreak: 0,
@@ -116,8 +118,14 @@ export function createConnectivityStore({
         return activeCheck
       }
       activeCheck = (async () => {
+        const startedRevision = authoritativeReachabilityRevision
         const reachable = await probeReachable()
         if (cancelled) return reachable
+        if (!reachable && startedRevision !== authoritativeReachabilityRevision) {
+          // A mutation response arrived after this probe began. Its live-server
+          // evidence is newer and stronger than the stale failed read.
+          return true
+        }
         const next = applyProbe(reachable)
         if (confirmTimer !== null) clearTimeoutFn(confirmTimer)
         confirmTimer = null
@@ -200,8 +208,13 @@ export function createConnectivityStore({
   function verify() {
     if (monitor) return monitor.check()
     if (verificationCheck) return verificationCheck
+    const startedRevision = authoritativeReachabilityRevision
     verificationCheck = probeReachable()
       .then((reachable) => {
+        if (
+          !reachable
+          && startedRevision !== authoritativeReachabilityRevision
+        ) return true
         applyProbe(reachable)
         return reachable
       })
