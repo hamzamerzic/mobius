@@ -549,6 +549,9 @@ def set_enabled(
     # and a zombie round can never become valid again.
     _release_claim(row)
   row.updated_at = now_naive_utc()
+  # The owner has taken control (paused or resumed), so the chat no longer needs
+  # their attention. Land the state and visibility together.
+  stage_followup_drawer_hidden(db, row, True)
   db.commit()
   return row
 
@@ -561,6 +564,8 @@ def close_out(db: Session, app_id: int, record_id: str) -> None:
   _release_claim(row)
   row.enabled = False
   row.updated_at = now_naive_utc()
+  # PR merged/closed: the round is over for good, so hide the chat again.
+  stage_followup_drawer_hidden(db, row, True)
   db.commit()
 
 
@@ -580,8 +585,17 @@ def escalate(db: Session, app_id: int, record_id: str) -> bool:
       updated_at=now_naive_utc(),
     )
   )
+  won = result.rowcount == 1
+  if won:
+    # The one moment an autopilot chat needs the owner: surface it in the drawer.
+    # Staged into THIS transaction on purpose. The UPDATE above is gated on
+    # ``enabled.is_(True)``, so it wins exactly once and no retry can ever
+    # re-run it; surfacing the chat in a second transaction would let a crash or
+    # a locked commit in between leave the record escalated but the chat hidden,
+    # with nothing able to repair it.
+    stage_followup_drawer_hidden(db, get_row(db, app_id, record_id), False)
   db.commit()
-  return result.rowcount == 1
+  return won
 
 
 # ─────────────────────────── ledger mirror ──────────────────────────
@@ -677,14 +691,46 @@ async def set_ledger_attention(
 # ─────────────────────────── chat spawn ─────────────────────────────
 
 
+def stage_followup_drawer_hidden(
+  db: Session, row: "models.ContributionAutopilot | None", hidden: bool,
+) -> None:
+  """Stage the drawer visibility flip without committing.
+
+  Autopilot chats are ordinary owner chats that stay hidden from the drawer
+  except while an escalation is waiting on the owner. This flips the explicit
+  ``drawer_hidden`` bit that ``_visible_in_owner_drawer`` honors, so routine
+  self-resolving rounds never clutter the chat list. Best-effort: a missing row
+  or chat just means there is nothing to toggle.
+
+  Callers stage the flip inside the transition's transaction so visibility
+  cannot disagree with the state change that motivated it.
+  """
+  if row is None or not row.followup_chat_id:
+    return
+  chat = (
+    db.query(models.Chat)
+    .filter(models.Chat.id == row.followup_chat_id)
+    .first()
+  )
+  if chat is None:
+    return
+  settings = dict(chat.agent_settings_json or {})
+  if settings.get("drawer_hidden") == bool(hidden):
+    return
+  settings["drawer_hidden"] = bool(hidden)
+  # Reassign the whole dict so SQLAlchemy tracks the JSON column mutation.
+  chat.agent_settings_json = settings
+
+
 def ensure_followup_chat(
   db: Session, app_id: int, record_id: str, *, title: str, provider: str,
 ) -> str | None:
   """Return the record's dedicated autopilot chat id, creating it once.
 
-  Reuses the stored chat when it still exists and is owner-visible; otherwise
-  creates a fresh owner-visible chat and persists its id on the DB row. Returns
-  None if there is no autopilot row (should not happen on the claimed path).
+  Reuses the stored chat when it still exists; otherwise creates a fresh chat and
+  persists its id on the DB row. The chat is an ordinary owner chat kept out of
+  the drawer (``drawer_hidden``) until an escalation surfaces it. Returns None if
+  there is no autopilot row (should not happen on the claimed path).
   """
   row = get_row(db, app_id, record_id)
   if row is None:
@@ -711,6 +757,7 @@ def ensure_followup_chat(
     pending_messages=[],
     provider=provider,
     created_by_app_id=None,
+    agent_settings_json={"drawer_hidden": True},
   )
   db.add(chat)
   db.commit()
