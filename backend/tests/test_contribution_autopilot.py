@@ -406,6 +406,39 @@ def test_failed_surfacing_leaves_escalation_retryable(db):
   assert _visible_in_owner_drawer(_chat()) is True
 
 
+def test_failed_hiding_leaves_resume_retryable(db):
+  """Resume and its drawer transition land together or remain retryable."""
+  from app.routes.chats import _visible_in_owner_drawer
+
+  autopilot.stamp_grant(db, 1, "rec", head_sha="abc")
+  chat_id = autopilot.ensure_followup_chat(
+    db, 1, "rec", title="Autopilot: fix thing", provider="claude",
+  )
+  assert autopilot.escalate(db, 1, "rec") is True
+
+  def _chat():
+    db.expire_all()
+    return db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+
+  boom = RuntimeError("database is locked")
+  original = autopilot.stage_followup_drawer_hidden
+  autopilot.stage_followup_drawer_hidden = lambda *a, **k: (_ for _ in ()).throw(boom)
+  try:
+    with pytest.raises(RuntimeError):
+      autopilot.set_enabled(db, 1, "rec", True)
+    db.rollback()
+  finally:
+    autopilot.stage_followup_drawer_hidden = original
+
+  db.expire_all()
+  assert autopilot.get_row(db, 1, "rec").enabled is False
+  assert _visible_in_owner_drawer(_chat()) is True
+
+  autopilot.set_enabled(db, 1, "rec", True)
+  assert autopilot.get_row(db, 1, "rec").enabled is True
+  assert _visible_in_owner_drawer(_chat()) is False
+
+
 def test_round_log_capped(db):
   autopilot.stamp_grant(db, 1, "rec", head_sha="abc")
   for i in range(40):

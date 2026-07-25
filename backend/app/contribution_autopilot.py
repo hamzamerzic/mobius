@@ -549,10 +549,10 @@ def set_enabled(
     # and a zombie round can never become valid again.
     _release_claim(row)
   row.updated_at = now_naive_utc()
-  db.commit()
   # The owner has taken control (paused or resumed), so the chat no longer needs
-  # their attention — tuck it back out of the drawer.
-  set_followup_drawer_hidden(db, row, True)
+  # their attention. Land the state and visibility together.
+  stage_followup_drawer_hidden(db, row, True)
+  db.commit()
   return row
 
 
@@ -564,9 +564,9 @@ def close_out(db: Session, app_id: int, record_id: str) -> None:
   _release_claim(row)
   row.enabled = False
   row.updated_at = now_naive_utc()
-  db.commit()
   # PR merged/closed: the round is over for good, so hide the chat again.
-  set_followup_drawer_hidden(db, row, True)
+  stage_followup_drawer_hidden(db, row, True)
+  db.commit()
 
 
 def escalate(db: Session, app_id: int, record_id: str) -> bool:
@@ -702,9 +702,8 @@ def stage_followup_drawer_hidden(
   self-resolving rounds never clutter the chat list. Best-effort: a missing row
   or chat just means there is nothing to toggle.
 
-  Callers that own a wider transaction stage the flip inside it so the
-  visibility can never disagree with the state change that motivated it;
-  ``set_followup_drawer_hidden`` is the standalone commit-it-now variant.
+  Callers stage the flip inside the transition's transaction so visibility
+  cannot disagree with the state change that motivated it.
   """
   if row is None or not row.followup_chat_id:
     return
@@ -721,14 +720,6 @@ def stage_followup_drawer_hidden(
   settings["drawer_hidden"] = bool(hidden)
   # Reassign the whole dict so SQLAlchemy tracks the JSON column mutation.
   chat.agent_settings_json = settings
-
-
-def set_followup_drawer_hidden(
-  db: Session, row: "models.ContributionAutopilot | None", hidden: bool,
-) -> None:
-  """Show or hide the record's follow-up chat in the owner drawer, committed."""
-  stage_followup_drawer_hidden(db, row, hidden)
-  db.commit()
 
 
 def ensure_followup_chat(
