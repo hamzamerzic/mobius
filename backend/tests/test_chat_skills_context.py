@@ -165,3 +165,38 @@ def test_visual_testing_selector_guidance_requires_observed_evidence():
   assert "an accessible name, not evidence" in visual
   assert 'button[aria-label="..."]' not in visual
   assert '[data-testid="..."]' not in visual
+
+
+def test_image_skill_publishes_exact_generated_path():
+  repo = Path(__file__).resolve().parents[2]
+  images = (
+    repo / "backend" / "scripts" / "seed-skills" / "images.md"
+  ).read_text(encoding="utf-8")
+
+  assert "publish_chat_image.py" in images
+  assert "<exact path returned by imagegen>" in images
+  assert "IMG=$(ls -t" not in images
+
+
+def test_quickstart_reuses_apply_receipt_id_without_relisting():
+  repo = Path(__file__).resolve().parents[2]
+  quickstart = (
+    repo / "backend" / "scripts" / "seed-skills"
+    / "building-apps-quickstart.md"
+  ).read_text(encoding="utf-8")
+
+  assert "compact receipt with `app_id`" in quickstart
+  assert "do not list apps again after a successful apply" in quickstart
+
+
+def test_advanced_app_skill_deletes_by_id_and_retains_recovery_receipt():
+  repo = Path(__file__).resolve().parents[2]
+  advanced = (
+    repo / "backend" / "scripts" / "seed-skills" / "building-apps.md"
+  ).read_text(encoding="utf-8")
+
+  summary = advanced.split("\n\n", 2)[1]
+  assert "app deletion/recovery" in summary
+  assert "delete_app.py" in advanced
+  assert "Exact-name lookup can return several apps" in advanced
+  assert "returns the recovery receipt" in advanced
