@@ -15,8 +15,9 @@ from app import chat as chat_mod
 from app import models
 from app.broadcast import create_broadcast
 from app.chat_writer import Barrier, get_writer
-from app.database import SessionLocal
+from app.database import SessionLocal, engine
 from app.runner_registry import registry
+from sqlalchemy import event
 
 
 def _drain_writer():
@@ -98,6 +99,38 @@ def test_sweep_skips_recent_turn():
   _drain_writer()
   assert "recent-1" not in swept
   assert _state("recent-1")[0] == "running"
+
+
+def test_wedged_candidate_query_does_not_load_transcripts():
+  _seed("wedged-projection", age_secs=200)
+  db = SessionLocal()
+  try:
+    chat = db.get(models.Chat, "wedged-projection")
+    chat.messages = [{"role": "assistant", "content": "x" * 1_000_000}]
+    db.commit()
+  finally:
+    db.close()
+
+  statements = []
+
+  def capture(_conn, _cursor, statement, _parameters, _context, _many):
+    if (
+      "FROM chats" in statement
+      and "chats.run_started_at <" in statement
+    ):
+      statements.append(statement)
+
+  event.listen(engine, "before_cursor_execute", capture)
+  try:
+    _sweep()
+  finally:
+    event.remove(engine, "before_cursor_execute", capture)
+  _drain_writer()
+
+  assert len(statements) == 1
+  projection = statements[0].split("FROM chats", 1)[0]
+  assert "chats.id" in projection
+  assert "chats.messages" not in projection
 
 
 def test_sweep_skips_live_turn():

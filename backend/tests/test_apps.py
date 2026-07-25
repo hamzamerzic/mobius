@@ -5,6 +5,8 @@ from unittest.mock import patch
 
 from app import models
 from app.config import get_settings
+from app.database import engine
+from sqlalchemy import event
 from test_app_fixtures import create_local_app
 
 
@@ -43,6 +45,35 @@ def test_update_app_rejects_cross_site_request(client, auth):
     headers={**auth, "Sec-Fetch-Site": "cross-site"},
   )
   assert cross.status_code == 403
+
+
+def test_list_apps_does_not_hydrate_source_or_icon_payloads(client, auth, db):
+  app = models.App(
+    name="Heavy metadata test",
+    description="drawer row",
+    jsx_source="x" * 1_000_000,
+    icon_png=b"x" * 1_000_000,
+    slug="heavy-metadata-test",
+  )
+  db.add(app)
+  db.commit()
+  statements = []
+
+  def capture(_conn, _cursor, statement, _parameters, _context, _many):
+    if "FROM apps" in statement and "ORDER BY apps.pinned_at" in statement:
+      statements.append(statement)
+
+  event.listen(engine, "before_cursor_execute", capture)
+  try:
+    response = client.get("/api/apps/", headers=auth)
+  finally:
+    event.remove(engine, "before_cursor_execute", capture)
+
+  assert response.status_code == 200
+  assert len(statements) == 1
+  projection = statements[0].split("FROM apps", 1)[0]
+  assert "apps.jsx_source" not in projection
+  assert "apps.icon_png" not in projection
 
 
 def test_delete_then_purge_removes_non_slug_source_dir(client, auth, db):

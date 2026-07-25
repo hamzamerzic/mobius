@@ -20,7 +20,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from app import (
   activity, app_activity, app_apply, app_git, app_jobs, app_preview, fs_locks,
@@ -696,6 +696,14 @@ async def list_apps(
             db.rollback()
   apps = (
     db.query(models.App)
+    # Drawer metadata only. AppOut excludes both payload columns, so hydrating
+    # every source file and icon blob here creates tens of MiB of avoidable
+    # allocation on each cold shell load. Keep ORM rows for the existing
+    # activity/preview annotators while deferring the two heavyweight fields.
+    .options(
+      defer(models.App.jsx_source),
+      defer(models.App.icon_png),
+    )
     .filter(models.App.deleted_at.is_(None))
     .order_by(
       models.App.pinned_at.is_(None),
