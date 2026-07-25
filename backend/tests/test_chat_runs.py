@@ -10,6 +10,9 @@ starts one bound to the test DB) and the real `reconcile_interrupted_chats`, so
 they cover the wired dual-write + reconciliation maintenance, not a mock.
 """
 
+import asyncio
+from concurrent.futures import Future
+
 from app import chat as chat_mod
 from app import models
 from app.chat_writer import (
@@ -168,6 +171,41 @@ def test_record_run_metrics_updates_exact_run_without_touching_transcript():
     assert chat.messages == [{"role": "user", "content": "keep me", "ts": 1}]
   finally:
     db.close()
+
+
+def test_record_run_metrics_keeps_session_identity_and_explicit_zero_cost(
+  monkeypatch,
+):
+  commands = []
+
+  class Writer:
+    def submit(self, command):
+      commands.append(command)
+      ack = Future()
+      ack.set_result(True)
+      return ack
+
+  monkeypatch.setattr(chat_mod, "get_writer", lambda: Writer())
+
+  asyncio.run(chat_mod._record_run_metrics(
+    chat_id="r-metrics",
+    run_token="rt-session-only",
+    provider_session_id="provider-thread",
+    cost_usd=0,
+    usage=None,
+  ))
+  asyncio.run(chat_mod._record_run_metrics(
+    chat_id="r-metrics",
+    run_token="rt-empty",
+    provider_session_id=None,
+    cost_usd=None,
+    usage=None,
+  ))
+
+  assert len(commands) == 1
+  assert commands[0].provider_session_id == "provider-thread"
+  assert commands[0].cost_usd == 0
+  assert commands[0].usage is None
 
 
 # -- continuation handoff -------------------------------------------------
