@@ -228,3 +228,47 @@ def test_codex_impossible_initial_total_uses_latest_call_fallback():
   assert usage["calculation"] == "last_call_fallback"
   assert usage["input_tokens"] == 60
   assert usage["total_tokens"] == 80
+
+
+def test_codex_impossible_final_total_uses_latest_call_fallback():
+  first = {
+    "last": {
+      "inputTokens": 20,
+      "cachedInputTokens": 10,
+      "outputTokens": 10,
+      "reasoningOutputTokens": 5,
+      "totalTokens": 30,
+    },
+    "total": {
+      "inputTokens": 100,
+      "cachedInputTokens": 50,
+      "outputTokens": 40,
+      "reasoningOutputTokens": 20,
+      "totalTokens": 140,
+    },
+  }
+  final = {
+    # The cumulative snapshot moved forward from the first notification, but
+    # it still cannot be smaller than the latest call it claims to contain.
+    "last": {
+      "inputTokens": 180,
+      "cachedInputTokens": 90,
+      "outputTokens": 60,
+      "reasoningOutputTokens": 30,
+      "totalTokens": 240,
+    },
+    "total": {
+      "inputTokens": 160,
+      "cachedInputTokens": 80,
+      "outputTokens": 50,
+      "reasoningOutputTokens": 25,
+      "totalTokens": 210,
+    },
+  }
+
+  usage = normalize_codex_usage(first, final)
+
+  assert usage is not None
+  assert usage["calculation"] == "last_call_fallback"
+  assert usage["input_tokens"] == 180
+  assert usage["total_tokens"] == 240
