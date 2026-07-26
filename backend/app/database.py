@@ -792,7 +792,7 @@ def run_migrations(eng) -> None:
           conn.execute(text(stmt))
         conn.commit()
 
-  # Unread tracking for the in-app notifications page. Backfill pre-feature
+  # Unread tracking for the in-app notification preview. Backfill pre-feature
   # history as read in the SAME transaction as the ALTER — an upgrade must not
   # greet the owner with a badge counting every notification ever sent, and a
   # crash between the two statements must not leave that state half-applied.

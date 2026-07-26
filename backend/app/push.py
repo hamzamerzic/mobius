@@ -148,7 +148,7 @@ def notify_owner(
   notification id.
 
   THE producer seam for owner notifications — any subsystem that wants a
-  row in the notifications page calls this and nothing else. One call =
+  row in the notification preview calls this and nothing else. One call =
   one history row + a `notification_created` badge nudge on the system
   bus + a (possibly suppressed) Web Push. Callers never touch the
   broadcast or push machinery directly; a transient system-bus event

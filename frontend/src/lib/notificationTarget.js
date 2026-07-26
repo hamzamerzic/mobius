@@ -13,7 +13,7 @@
 // never to a best-effort navigation.
 //
 // Accepted forms (the shapes locked by backend/tests/test_notification_target.py
-// plus the notifications page):
+// and used by the bounded preview):
 //   /shell/?app=<id-or-slug>[&intent=...]  → { view: 'canvas', app, intent }
 //   /shell/?chat=<id>                      → { view: 'chat', chatId }
 //   /app/<numeric-id>   (legacy)           → { view: 'canvas', app, intent: null }

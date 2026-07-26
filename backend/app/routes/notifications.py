@@ -67,7 +67,7 @@ def unread_count(
   owner: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
-  """Count of notifications not yet seen via the notifications page."""
+  """Count of notifications not yet seen via the notification preview."""
   n = (
     db.query(func.count(models.Notification.id))
     .filter(
