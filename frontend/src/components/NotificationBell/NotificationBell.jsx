@@ -3,10 +3,8 @@ import './NotificationBell.css'
 
 // The header bell — lives in the shell bar's right-side action slot
 // (shell__bar-actions), so it renders identically on desktop and mobile by
-// construction. A TOGGLE, not just an opener: when the notifications page is
-// the active view (`active`), the tap dismisses it through the shell's Back
-// path instead of dead-ending on navTo's same-route dedup. The unread badge
-// clears when the page marks everything read (seen-on-open model).
+// construction. It toggles one bounded preview; opening that preview marks the
+// current rows seen without creating a navigation or workspace destination.
 export default function NotificationBell({
   unreadCount = 0, active = false, buttonRef, onClick,
 }) {

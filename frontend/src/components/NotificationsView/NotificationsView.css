@@ -167,10 +167,3 @@
     max-height: min(520px, calc(100dvh - var(--shell-bar-height) - 18px));
   }
 }
-
-@media (prefers-reduced-motion: reduce) {
-  .notifications,
-  .notifications * {
-    scroll-behavior: auto;
-  }
-}

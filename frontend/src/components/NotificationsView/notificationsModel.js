@@ -1,8 +1,8 @@
-// Pure presentation helpers for the notifications page, split out of the JSX
-// so `node --test` covers them without a DOM (the settingsTab.test.js posture).
+// Pure presentation helpers for the notification preview, split out of the JSX
+// so `node --test` covers them without a DOM.
 
 // Compact relative timestamp for a notification row. Coarse on purpose — the
-// page is a history list, not a clock. Falls back to a local date for
+// preview is a recent list, not a clock. Falls back to a local date for
 // anything older than a week or unparseable.
 export function formatRelativeTime(isoString, now = Date.now()) {
   const t = Date.parse(isoString)
