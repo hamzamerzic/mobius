@@ -392,5 +392,57 @@ export const ownerQueries = {
   },
 }
 
+// ── Notifications (bell badge + lightweight preview) ─────────────────────────
+// No polling anywhere: the `notification_created` system-SSE event invalidates
+// the unread count (Shell.handleSystemEvent), and the SSE reconnect hook
+// reconciles anything missed while disconnected — the same posture as apps.
+const notificationsListKey = ['notifications', 'list']
+const notificationsUnreadKey = ['notifications', 'unread-count']
+const NOTIFICATIONS_PREVIEW_SIZE = 8
+
+async function fetchNotificationsPreview() {
+  const res = await api.notifications.list({ limit: NOTIFICATIONS_PREVIEW_SIZE })
+  const data = await jsonOrThrow(res, 'notifications fetch failed:')
+  return Array.isArray(data) ? data : []
+}
+
+function useNotificationsListQuery({ enabled = true } = {}) {
+  return useQuery({
+    queryKey: notificationsListKey,
+    queryFn: fetchNotificationsPreview,
+    enabled,
+  })
+}
+
+async function fetchUnreadCount() {
+  const res = await api.notifications.unreadCount()
+  const data = await jsonOrThrow(res, 'unread count fetch failed:')
+  return typeof data?.count === 'number' ? data.count : 0
+}
+
+function useUnreadCountQuery({ enabled = true } = {}) {
+  return useQuery({
+    queryKey: notificationsUnreadKey,
+    queryFn: fetchUnreadCount,
+    enabled,
+    staleTime: 60_000,
+  })
+}
+
+export const notificationQueries = {
+  list: {
+    key: notificationsListKey,
+    fetch: fetchNotificationsPreview,
+    useQuery: useNotificationsListQuery,
+    invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: notificationsListKey }),
+  },
+  unreadCount: {
+    key: notificationsUnreadKey,
+    fetch: fetchUnreadCount,
+    useQuery: useUnreadCountQuery,
+    invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: notificationsUnreadKey }),
+  },
+}
+
 // Convenience re-export used by ChatView's setQueryData calls.
 export const chatMessagesQueryKey = chatQueries.keys.messages

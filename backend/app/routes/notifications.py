@@ -1,10 +1,12 @@
 """Notification send and history endpoints."""
 
 import logging
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Query, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app import models
@@ -56,6 +58,50 @@ def send_notification(
     actions=actions_list,
   )
   return {"id": notification_id}
+
+
+@router.get("/unread-count")
+def unread_count(
+  # Owner-only, matching the list endpoint: the bell badge is the owner's
+  # surface and app tokens have no need to observe it.
+  owner: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Count of notifications not yet seen via the notification preview."""
+  n = (
+    db.query(func.count(models.Notification.id))
+    .filter(
+      models.Notification.owner_id == owner.id,
+      models.Notification.read_at.is_(None),
+    )
+    .scalar()
+  )
+  return {"count": int(n or 0)}
+
+
+@router.post("/read-all", dependencies=[Depends(reject_cross_site)])
+def read_all(
+  owner: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Seen-on-open: mark every unread notification read. Idempotent.
+
+  Only rows with read_at NULL are touched, so a notification that commits
+  concurrently with this UPDATE simply stays unread and is picked up by the
+  next call — no lost-update window.
+  """
+  updated = (
+    db.query(models.Notification)
+    .filter(
+      models.Notification.owner_id == owner.id,
+      models.Notification.read_at.is_(None),
+    )
+    .update(
+      {"read_at": datetime.now(UTC)}, synchronize_session=False,
+    )
+  )
+  db.commit()
+  return {"updated": int(updated)}
 
 
 @router.get("")

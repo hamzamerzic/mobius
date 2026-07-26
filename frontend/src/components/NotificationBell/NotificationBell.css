@@ -1,0 +1,53 @@
+/* Header bell — sized to sit beside the offline pill in shell__bar-actions.
+   The BUTTON is the touch target: 44×44 (mobile comfort floor) inside the
+   58px header row; the glyph stays compact and the hit area does the work. */
+
+.notification-bell {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.notification-bell:hover,
+.notification-bell--active {
+  background: var(--surface);
+}
+
+.notification-bell:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Count badge: top-right of the bell glyph, INSIDE the button's box so it can
+   never collide with the neighboring Offline pill or the brand. Numbers over
+   99 render as 99+ so the pill never outgrows the header row. */
+.notification-bell__badge {
+  position: absolute;
+  top: 4px;
+  right: 2px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-fg, #fff);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.notification-center {
+  position: relative;
+  display: flex;
+}

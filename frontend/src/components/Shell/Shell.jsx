@@ -5,6 +5,9 @@ import Drawer from '../Drawer/Drawer.jsx'
 import Toast from '../ui/Toast.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
 import WalkthroughOverlay from '../Walkthrough/WalkthroughOverlay.jsx'
+import NotificationBell from '../NotificationBell/NotificationBell.jsx'
+import useNotificationCenter from '../NotificationBell/useNotificationCenter.js'
+import NotificationsView from '../NotificationsView/NotificationsView.jsx'
 import {
   api, apiFetch, jsonOrThrow, probeDeletion, BASE, clearAppRuntimeData,
   invalidateShellListCache,
@@ -15,6 +18,7 @@ import useNavigation, {
   deepLink,
 } from '../../hooks/useNavigation.js'
 import { replaceNavEntry } from '../../lib/navHistory.js'
+import { parseNotificationTarget } from '../../lib/notificationTarget.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import useTheme from '../../hooks/useTheme.js'
 import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
@@ -571,6 +575,16 @@ export default function Shell() {
 
   const { loadTheme } = useTheme()
   const queryClient = useQueryClient()
+  const {
+    state: { open: notificationsOpen, unreadCount: notificationUnreadCount },
+    actions: {
+      toggle: toggleNotifications,
+      close: closeNotifications,
+      reconcile: reconcileNotifications,
+      onCreated: onNotificationCreated,
+    },
+    meta: { rootRef: notificationCenterRef, bellRef: notificationBellRef },
+  } = useNotificationCenter(queryClient)
   // Confirmed writes outrank offline-capable list reads. These session-scoped
   // tombstones filter every query completion (including an in-flight,
   // pre-delete NetworkFirst fallback) until a recovery succeeds.
@@ -2223,6 +2237,15 @@ export default function Shell() {
     navToRef,
   })
 
+  const handleNotificationOpen = useCallback((target) => {
+    closeNotifications()
+    if (target?.view === 'canvas') {
+      void openAppWithIntent(target.app, target.intent)
+    } else if (target?.view === 'chat') {
+      navToRef.current('chat', { chatId: target.chatId })
+    }
+  }, [closeNotifications, openAppWithIntent])
+
   const coldDeepLinkHandledRef = useRef(false)
   useEffect(() => {
     if (coldDeepLinkHandledRef.current) return
@@ -2718,6 +2741,11 @@ export default function Shell() {
       // transient intermediate state during a multi-file agent edit. The
       // producer logs the diagnostic and retries; an explicit operation such
       // as a platform update reports its own failure where it was initiated.
+    } else if (ev.type === 'notification_created') {
+      // The event is only a nudge; the durable list/count remain authoritative.
+      // Keeping this behind the notification-center interface prevents the
+      // shell event switch from learning preview implementation details.
+      onNotificationCreated()
     }
   }, [
     // Scalar state removed: shell_rebuilt now reads from refs (activeViewRef,
@@ -2728,7 +2756,7 @@ export default function Shell() {
     confirmChatDeleted, confirmChatIdentityIsLive, confirmChatRecovered,
     loadTheme, markChatRunActivity, markChatRunFinished,
     markStreamingEnd, markStreamingStart,
-    placeInWorkspace, refreshApps, refreshChats, warmAppCode,
+    onNotificationCreated, placeInWorkspace, refreshApps, refreshChats, warmAppCode,
   ])
 
   // Shell-level SSE subscription for system events. Stays open for
@@ -2742,6 +2770,7 @@ export default function Shell() {
   // first list establishes the session baseline, fresh chat-owned rows flow
   // through the same idempotent placement resolver as live app_created events.
   const reconcileSystemStateOnOpen = useCallback(() => {
+    reconcileNotifications()
     void Promise.all([
       invalidateShellListCache('apps'),
       invalidateShellListCache('chats'),
@@ -2752,6 +2781,7 @@ export default function Shell() {
       refreshChats()
     })
   }, [
+    reconcileNotifications,
     reconcileDeletedAppIdentities,
     reconcileDeletedChatIdentities,
     refreshApps,
@@ -2869,34 +2899,9 @@ export default function Shell() {
       // container, not the global.) sw.js fires this on
       // notificationclick when an existing client is focused.
       if (e.data?.type !== 'notification-click') return
-      const target = e.data.target
-      if (typeof target !== 'string' || !target) return
-      let path = target
-      let search = ''
-      try {
-        if (/^https?:\/\//.test(target)) {
-          const u = new URL(target)
-          path = u.pathname
-          search = u.search
-        } else {
-          const q = target.indexOf('?')
-          if (q !== -1) { path = target.slice(0, q); search = target.slice(q) }
-        }
-      } catch { /* keep target as-is */ }
-      // In-scope shell deep-link `/shell/?app=<id>` (cold-start-safe form,
-      // _safeTarget normalizes to this). Parse the query so a warm tap on
-      // the new target lands on the right view, same as the legacy paths.
-      if (/^\/shell\/?$/.test(path)) {
-        let app = null, chat = null, intent = null
-        try {
-          const params = new URLSearchParams(search)
-          app = params.get('app')
-          chat = params.get('chat')
-          intent = params.get('intent')
-        } catch { /* no query */ }
-        if (app) void openAppWithIntent(app, intent)
-        else if (chat) navTo('chat', { chatId: chat })
-      }
+      const target = parseNotificationTarget(e.data.target)
+      if (target?.view === 'canvas') void openAppWithIntent(target.app, target.intent)
+      else if (target?.view === 'chat') navTo('chat', { chatId: target.chatId })
     }
 
     window.addEventListener('message', onMessage)
@@ -3506,6 +3511,21 @@ export default function Shell() {
               Offline
             </span>
           )}
+          <div ref={notificationCenterRef} className="notification-center">
+            <NotificationBell
+              buttonRef={notificationBellRef}
+              unreadCount={notificationUnreadCount}
+              active={notificationsOpen}
+              onClick={toggleNotifications}
+            />
+            {notificationsOpen && (
+              <NotificationsView
+                active
+                onClose={closeNotifications}
+                onOpenTarget={handleNotificationOpen}
+              />
+            )}
+          </div>
         </div>
       </header>
 

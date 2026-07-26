@@ -792,6 +792,22 @@ def run_migrations(eng) -> None:
           conn.execute(text(stmt))
         conn.commit()
 
+  # Unread tracking for the in-app notification preview. Backfill pre-feature
+  # history as read in the SAME transaction as the ALTER — an upgrade must not
+  # greet the owner with a badge counting every notification ever sent, and a
+  # crash between the two statements must not leave that state half-applied.
+  if "notifications" in tables:
+    notif_cols = {c["name"] for c in inspector.get_columns("notifications")}
+    if "read_at" not in notif_cols:
+      with eng.connect() as conn:
+        conn.execute(text(
+          "ALTER TABLE notifications ADD COLUMN read_at DATETIME NULL"
+        ))
+        conn.execute(text(
+          "UPDATE notifications SET read_at = sent_at WHERE read_at IS NULL"
+        ))
+        conn.commit()
+
 
 def get_db():
   """Yields a database session and closes it after the request."""

@@ -513,6 +513,19 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   },
+  notifications: {
+    // Cursor pagination: `before` is the last row id of the previous page.
+    list: ({ before, limit } = {}) => {
+      const params = new URLSearchParams()
+      if (before) params.set('before', String(before))
+      if (limit) params.set('limit', String(limit))
+      const qs = params.toString()
+      return apiFetch(`/notifications${qs ? `?${qs}` : ''}`)
+    },
+    unreadCount: () => apiFetch('/notifications/unread-count'),
+    // Seen-on-open: idempotent bulk mark-read (clears the bell badge).
+    readAll: () => apiFetch('/notifications/read-all', { method: 'POST' }),
+  },
   admin: {
     restart: () => apiFetch('/admin/restart', { method: 'POST' }),
   },
