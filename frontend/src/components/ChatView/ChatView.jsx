@@ -3998,12 +3998,18 @@ export default function ChatView({
           </>
         )}
         {/* Contribution staged from THIS chat: approve it where the work
-            happened. Renders nothing unless something is actually waiting. */}
-        <ContributionReviewCard
-          chatId={chatId}
-          turnActive={turnActive}
-          onOpenApp={onOpenApp}
-        />
+            happened. Renders nothing unless something is actually waiting.
+            Owner-shell only: an app-embedded chat runs on a capability token
+            that is deliberately scoped to one chat, so it can neither list apps
+            nor take a public GitHub action, and there is no owner surface there
+            to approve one. */}
+        {!embedded && (
+          <ContributionReviewCard
+            chatId={chatId}
+            turnActive={turnActive}
+            onOpenApp={onOpenApp}
+          />
+        )}
         <ConnectionStatus
           error={connectionError}
           reconnecting={reconnecting}
