@@ -53,19 +53,19 @@ export default function Drawer({
   onDeleteAppData,
   onSettings,
   // Set of chat ids whose agent is currently streaming. Used to
-  // pulse a small accent dot next to the row label so the user can
+  // show a small accent dot next to the row label so the user can
   // see at a glance which background builds are still running.
   // Sourced from Shell (the only place that knows when a turn is
   // active across the whole app). Defaults to an empty Set so the
   // drawer renders cleanly if no parent supplies the prop.
   streamingChatIds,
   // Set of chat ids whose latest background run finished while the
-  // user was elsewhere. Rendered as a steady attention dot, distinct
-  // from the animated streaming dot above.
+  // user was elsewhere. Rendered as a green attention dot, distinct by
+  // colour from the accent streaming dot above (neither animates).
   attentionChatIds,
   // Set of app ids that first appeared in the fetched list this session
-  // (freshly built or App-Store-installed). Rendered as the same steady
-  // accent dot as chat attention, cleared by Shell when the app is opened —
+  // (freshly built or App-Store-installed). Rendered as the same green
+  // dot as chat attention, cleared by Shell when the app is opened —
   // an arrival cue for an app that otherwise lands silently at the bottom
   // of the oldest-first list.
   newAppIds,

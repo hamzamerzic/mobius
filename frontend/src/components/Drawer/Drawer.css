@@ -630,13 +630,26 @@
   border-top: 1px solid var(--border-light);
 }
 
-/* ── Streaming pulse dot ───────────────────────────── */
+/* ── Row status dots ───────────────────────────────── */
 
 /* 6px accent dot in front of a row label. Marks chats whose agent
    is mid-turn so a user switching to another chat still sees the
-   background build progressing in the drawer. Pulse via opacity so
-   the dot reads as alive but doesn't shimmer aggressively — the
-   slow 1.5s loop keeps it ambient. */
+   background build progressing in the drawer.
+
+   Deliberately static. This dot used to pulse on a 1.5s infinite loop,
+   but the drawer is always mounted and a long-running agent keeps its
+   row on screen for hours, so the animation never ended — which kept
+   the compositor producing 60 frames a second even with the app fully
+   idle, and every one of those frames paid for the composer's
+   backdrop-filter. Measured: disabling this animation (with the tab
+   title marquee) took DrawFrame, BeginFrame and render passes to zero
+   at idle. The reduced-motion path below already settled that a steady
+   dot is an acceptable representation and that "streaming" surfaces via
+   aria-label + presence; this generalises that decision to everyone.
+
+   If motion is ever wanted back here, it must be bounded — a few
+   iterations re-armed when the row's status CHANGES, never `infinite`
+   on always-mounted chrome. */
 .drawer__streaming-dot {
   flex-shrink: 0;
   width: 6px;
@@ -644,31 +657,31 @@
   margin-right: 2px;
   border-radius: 50%;
   background: var(--accent);
-  animation: drawer-streaming-pulse 1.5s ease-in-out infinite;
 }
 
+/* "The latest background run FINISHED while you were elsewhere" — a
+   different row state from the streaming dot above, and it has to stay
+   legible as one now that motion no longer separates them. Colour is the
+   channel that survives at 6px (a hollow ring or a one-pixel size delta
+   does not), and --green is already the palette's finished/healthy token
+   — SettingsView uses it for a connected provider — against --accent for
+   work still in flight. Colour is not the only channel: both dots carry
+   an aria-label and a title (Drawer.jsx), which is what a colour-blind or
+   screen-reader user reads. */
 .drawer__attention-dot {
   flex-shrink: 0;
   width: 6px;
   height: 6px;
   margin-right: 2px;
   border-radius: 50%;
-  background: var(--accent);
+  background: var(--green);
 }
 
-@keyframes drawer-streaming-pulse {
-  0%   { opacity: 1; }
-  50%  { opacity: 0.4; }
-  100% { opacity: 1; }
-}
-
-/* Respect prefers-reduced-motion — for users who turn off animations
-   the pulse becomes a steady dot rather than a flashing one. The
-   information ("streaming") still surfaces via aria-label + presence. */
+/* Respect prefers-reduced-motion. The streaming dot no longer needs an
+   override here — it is static for everyone now (see above). */
 @media (prefers-reduced-motion: reduce) {
   .drawer,
   .drawer-overlay { transition: none; }
-  .drawer__streaming-dot { animation: none; }
   .drawer__more:active { transform: none; }
 }
 
