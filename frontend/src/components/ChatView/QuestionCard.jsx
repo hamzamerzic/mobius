@@ -25,6 +25,14 @@ export default function QuestionCard({
   answeredMap,
   onAnswer,
   disabled,
+  // Callback ref that publishes this card's node to the "Möbius asked you
+  // something — tap to answer" offscreen observer. Set only by the surface
+  // rendering the answerable tail question, and only while the card is still
+  // unanswered — the cue exists to send the owner back to a card that is
+  // blocking the turn, and a submitted card no longer is. Because a live→
+  // durable surface handoff remounts this component, the observer's target
+  // has to come from here (the node's own render) rather than a lookup.
+  pendingCardRef,
 }) {
   const draftKey = questionDraftKey(chatId, questionId, questions)
   const [answers, setAnswers] = useState(
@@ -137,6 +145,7 @@ export default function QuestionCard({
   return (
     <div
       className={`qcard${answered ? ' qcard--answered' : ''}`}
+      ref={answered ? null : pendingCardRef}
       aria-disabled={disabled && !answered ? true : undefined}
     >
       {questions.map((q, qi) => {

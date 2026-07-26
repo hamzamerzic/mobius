@@ -32,6 +32,8 @@ function ActiveAssistantSurface({
   onAutoResumeChange,
   submissionBlocked,
   liveQuestionId,
+  pendingQuestionRef,
+  resumeCardRef,
   isStreaming,
 }) {
   const msg = useMemo(() => {
@@ -63,6 +65,8 @@ function ActiveAssistantSurface({
       onAutoResumeChange={onAutoResumeChange}
       submissionBlocked={submissionBlocked}
       liveQuestionId={liveQuestionId}
+      pendingQuestionRef={pendingQuestionRef}
+      resumeCardRef={resumeCardRef}
       isStreaming={isStreaming}
     />
   )
