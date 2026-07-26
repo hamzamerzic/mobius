@@ -21,6 +21,7 @@ from app.chat import (
   is_draining,
   mark_starting,
   run_chat,
+  steered_into_turn_event,
 )
 from app import chat_queue
 from app.chat_writer import (
@@ -409,16 +410,30 @@ async def _split_steer_at_route(
 
 
 def _steered_response(
-  chat_id: str, pending_messages: list[dict] | None = None,
+  chat_id: str,
+  pending_messages: list[dict] | None = None,
+  *,
+  cut_deferred: bool = False,
 ) -> JSONResponse:
   """202 for a message steered into the live turn.
 
-  The message is in the TRANSCRIPT (not the pending queue) and the live
-  turn already saw it via `steer()`, so the client renders it inline as
-  content growth rather than a queued-tray entry."""
+  The live turn has seen the message via `steer()`. Where the message LIVES
+  right now depends on the provider, and `cut_deferred` states which:
+
+  - absent/False (Codex): the transcript split already ran at the route, so the
+    row is in the TRANSCRIPT and out of the pending queue. The client drops its
+    queued-tray entry and renders the row inline as content growth.
+  - True (Claude): the split is deferred to the runner's interrupt boundary, so
+    the row is STILL in `pending_messages` (echoed above) and will move into the
+    transcript when the runner publishes `steered_into_turn` at the real seal.
+    The client keeps showing the queued row until then — dropping it here left
+    the owner's message with nowhere to render for the length of the window.
+  """
   payload = {"status": "steered", "chat_id": chat_id}
   if pending_messages is not None:
     payload["pending_messages"] = pending_messages
+  if cut_deferred:
+    payload["cut_deferred"] = True
   return JSONResponse(status_code=202, content=payload)
 
 
@@ -819,8 +834,10 @@ async def _send_message_locked(
     # Stop's queue-collapse path may pass force_steer to turn already
     # queued messages into a live steer. Codex injects into the running
     # SDK turn; Claude interrupts and re-prompts on the same client. On
-    # success the user message goes into the transcript and a
-    # `steered_into_turn` event tells the client to render it inline.
+    # success a `steered_into_turn` event tells the client the transcript has
+    # been split and the user row is in it — published here for Codex (the
+    # route is its seal point) and by the runner for Claude, whose split waits
+    # for the interrupt boundary (see the publish below).
     provider = chat.provider or "claude"
     if (
       is_chat_running(chat_id)
@@ -872,14 +889,16 @@ async def _send_message_locked(
           steered = False
       if steered:
         if defer_to_runner:
-          # The optimistic response mirrors the runner's cid conversion.
-          consumed = set(consume_cids)
+          # Nothing has been converted yet: the rows are buffered on the handle
+          # and remain in `chat.pending_messages` until the runner's seal
+          # consumes them. So report the queue AS IT IS — an optimistic list
+          # with the rows already subtracted told the client they had left the
+          # queue while the server still held them there, which is precisely
+          # the window the client must keep showing them (see `cut_deferred`
+          # on the response below).
           stored_result = {
             "stored_messages": user_msgs,
-            "pending": [
-              m for m in (chat.pending_messages or [])
-              if cid_of(m) not in consumed
-            ],
+            "pending": list(chat.pending_messages or []),
           }
         else:
           # Codex append and pending removal commit atomically for one cid.
@@ -900,31 +919,28 @@ async def _send_message_locked(
               status_code=503,
               detail="Could not save your message; please refresh.",
             )
-        bc = get_broadcast(chat_id)
-        if bc is not None:
-          stored_messages = stored_result.get("stored_messages")
-          if not isinstance(stored_messages, list) or not stored_messages:
-            stored = stored_result.get("stored") or user_msg
-            stored_messages = [stored]
-          bc.publish({
-            "type": "steered_into_turn",
-            "messages": [
-              {
-                "role": "user",
-                "ts": msg.get("ts"),
-                "cid": cid_of(msg),
-                "content": msg.get("content", ""),
-                **({"attachments": msg.get("attachments")} if msg.get("attachments") else {}),
-              }
-              for msg in stored_messages
-            ],
-            # Backward-compatible shape for any existing client still
-            # expecting a single steered row.
-            "ts": stored_messages[-1].get("ts"),
-            "content": stored_messages[-1].get("content", ""),
-          })
+        # `steered_into_turn` is the client's ONLY "cut the live stream here"
+        # signal, so it may only be published where the transcript is really
+        # split. Codex splits HERE (`_split_steer_at_route` above ran to
+        # completion), so the route is its seal point and publishes the cut
+        # unchanged. Claude defers the split to the runner's interrupt boundary,
+        # seconds later — publishing the cut here re-based the client's stream
+        # while the runner was still emitting blocks that the deferred seal then
+        # folded into A1, so those blocks painted twice for the rest of the turn.
+        # The deferred path publishes NOTHING here: the 202 below carries the
+        # still-queued row, which is the single signal that keeps it visible
+        # until `_seal_steer_split` publishes the cut.
+        if not defer_to_runner:
+          bc = get_broadcast(chat_id)
+          if bc is not None:
+            stored_messages = stored_result.get("stored_messages")
+            if not isinstance(stored_messages, list) or not stored_messages:
+              stored = stored_result.get("stored") or user_msg
+              stored_messages = [stored]
+            bc.publish(steered_into_turn_event(stored_messages))
         return _steered_response(
           chat_id, stored_result.get("pending"),
+          cut_deferred=defer_to_runner,
         )
       if body.force_steer:
         return _not_steered_response(chat_id)

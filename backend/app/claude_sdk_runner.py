@@ -408,13 +408,26 @@ class ActiveClaudeClient:
     bound at the call site; this inner timeout protects any other
     direct caller.
 
-    Stop is the hard, immediate-cut path: it drops any buffered steer
-    (clearing `pending_steer` + `_steer_requested` so no boundary cut or
-    requery fires for work the user just abandoned) and interrupts the
-    live turn right now, without waiting for a content-block boundary.
+    Stop is the hard, immediate-cut path: it drops the buffered steer
+    ENTIRELY — the provider-facing text (`pending_steer` + `_steer_requested`,
+    so no boundary cut or requery fires for work the user just abandoned) AND
+    the transcript-side rows (`_steer_user_msgs` + `_steer_consume_cids`, so the
+    turn-end seal appends nothing).
+
+    Both halves have to go, because Stop OWNS those rows from here on: a
+    deferred steer's row is still a durable entry in `chat.pending_messages`
+    (the split that would consume it never ran), `/chat/stop` clears that queue
+    and reports the cleared cids, and the client re-sends exactly them as one
+    fresh turn. Leaving the rows buffered meant the dying turn's seal appended
+    the same row into the transcript while the client re-sent it — the row
+    appeared twice, once interrupted and once answered. Nothing is lost by
+    dropping them here: they were never in the transcript, and Stop's own
+    clear-and-resend path is what preserves them.
     """
     self.pending_steer = []
     self._steer_requested = False
+    self._steer_user_msgs = []
+    self._steer_consume_cids = []
     await self._client.interrupt()
     try:
       await asyncio.wait_for(asyncio.shield(self._finished), timeout=5.0)
@@ -506,18 +519,32 @@ async def _seal_steer_split(bc, active_client, chat_id: str) -> None:
 
   Called at each requery boundary (so A1 is sealed before the answer A2
   streams) AND unconditionally in the turn-end `finally` (so a steer that was
-  buffered but never sealed — an exception/early-return before the requery, or
-  a hard Stop that cleared `pending_steer` — is still persisted rather than
-  discarded with the handle). A1 is the sink's accumulated pre-interrupt
-  content — complete once the turn closes — so `split_for_steer` seals it as
-  its own message, appends the steered row(s) after it, and resets the sink so
-  A2 lands fresh: reload order Q1, A1, Q2, A2.
+  buffered but never sealed — an exception/early-return before the requery — is
+  still persisted rather than discarded with the handle). A hard Stop is NOT one
+  of those cases: `interrupt()` drops the buffered rows outright because Stop's
+  clear-and-resend path owns them from that point (see `interrupt`), so the
+  finally finds an empty buffer and appends nothing to the turn it just killed.
+
+  A1 is the sink's accumulated pre-interrupt content — complete once the turn
+  closes — so `split_for_steer` seals it as its own message, appends the steered
+  row(s) after it, and resets the sink so A2 lands fresh: reload order Q1, A1,
+  Q2, A2.
 
   This is the fix for the steer-merge: the route cannot know where A1 ends (at
   HTTP arrival A1 has not streamed yet, so a route-side split sealed an empty
   A1 and the real A1 then merged with A2 after the steered row), but the runner
   does. `bc` is the live `_ChatEventSink`; a non-sink `bc` (legacy path / a
   test double) cannot persist here and drops the buffered rows.
+
+  This is ALSO where the client's cut lands. `steered_into_turn` is the client's
+  only "seal the live stream here and re-base it" signal, so it must be
+  published from the same instant as the durable split — deferring the split to
+  here while the route published the cut at HTTP arrival meant every block
+  streamed in between was BOTH folded into the sealed A1 and left at the head of
+  the client's re-based stream, painting twice for the rest of the turn. No
+  split (no live sink, or a failed write) publishes no cut: the client must
+  never re-base earlier than the server's actual seal. A split with no
+  publisher is the one asymmetric case — it commits and logs, see below.
 
   Durability contract (adversarial-review hardening):
   - The rows are snapshotted BEFORE the await and only the snapshotted count is
@@ -535,6 +562,27 @@ async def _seal_steer_split(bc, active_client, chat_id: str) -> None:
     return
   consume = list(active_client._steer_consume_cids)
   split = getattr(bc, "split_for_steer", None)
+  # Resolve the client-facing publisher BEFORE committing anything. Take the
+  # broadcast off the SINK rather than re-resolving it by chat_id: the cut
+  # belongs in the same event log that carries A1's blocks (so a reconnect
+  # replays the boundary at its true position), and a lookup could hand back a
+  # successor turn's broadcast when this runs from the turn-end `finally`.
+  #
+  # A missing publisher does NOT abort the split: the rows are already durable
+  # in the pending queue and the client was told the steer landed, so
+  # persistence wins over notification. It does mean this seal produces no cut,
+  # leaving the client's live stream un-rebased until its next authoritative
+  # fetch — a real divergence, so it is logged loudly here rather than returned
+  # away silently after the write has already committed.
+  raw_bc = getattr(bc, "bc", None)
+  if raw_bc is not None and not callable(getattr(raw_bc, "publish", None)):
+    raw_bc = None
+  if split is not None and raw_bc is None:
+    log.error(
+      "steer split has no broadcast to publish the cut on chat_id=%s; "
+      "the transcript will be split but the client stream cannot re-base "
+      "until it refetches", chat_id,
+    )
   if split is None:
     # No live sink (legacy/test caller): there is no streamed A1 to seal
     # against and no way to persist here — drop the buffer.
@@ -544,7 +592,7 @@ async def _seal_steer_split(bc, active_client, chat_id: str) -> None:
     )
     return
   try:
-    await split(rows, consume)
+    stored_result = await split(rows, consume)
   except Exception:
     # Leave the buffer intact so the turn-end finally retries the write.
     log.exception(
@@ -557,6 +605,33 @@ async def _seal_steer_split(bc, active_client, chat_id: str) -> None:
   active_client._steer_consume_cids = (
     active_client._steer_consume_cids[len(consume):]
   )
+  # Publish the cut now that A1 + Q2 are committed, on the broadcast resolved
+  # above. No await separates the split from this publish, so no continuation
+  # block can slip in front of it.
+  if raw_bc is None:
+    return
+  from app.chat import steered_into_turn_event
+
+  stored_messages = (
+    stored_result.get("stored_messages") if isinstance(stored_result, dict)
+    else None
+  )
+  if not isinstance(stored_messages, list) or not stored_messages:
+    # The writer echoes the rows it stored; fall back to the rows we handed it
+    # so an older/leaner ack shape still produces a well-formed cut.
+    stored_messages = rows
+  try:
+    raw_bc.publish(steered_into_turn_event(stored_messages))
+  except Exception:
+    # The split already COMMITTED, so failing to announce it is a notification
+    # loss, not a durability one — same asymmetry as the missing-publisher case
+    # above. Swallow and log: this function is awaited from the turn-end
+    # `finally`, where a raise would skip unregistering the handle and
+    # disconnecting the client, leaving the chat looking permanently live.
+    log.exception(
+      "publishing the steer cut failed chat_id=%s; the split committed but the "
+      "client stream cannot re-base until it refetches", chat_id,
+    )
 
 
 def _skill_file_read_name(

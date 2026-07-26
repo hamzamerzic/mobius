@@ -561,6 +561,154 @@ def test_seal_steer_split_retains_buffer_on_failure_and_delta_clears():
   asyncio.run(_run())
 
 
+def test_seal_publishes_the_cut_on_the_sinks_own_broadcast():
+  """The cut goes to the broadcast the SINK holds, never to a fresh lookup.
+
+  `_seal_steer_split` also runs from the turn-end `finally`, by which point a
+  successor turn can already have registered a NEW broadcast for the same chat.
+  Resolving by chat_id there would strand the cut in an event log no client is
+  reading: A1's blocks live in the old log, so the client would never re-base
+  and would paint the continuation onto the sealed segment for the rest of the
+  turn. Also covers a leaner writer ack (no `stored_messages`): the cut still
+  names the buffered rows rather than going out empty.
+  """
+  from app.broadcast import create_broadcast, get_broadcast
+  from app.claude_sdk_runner import _seal_steer_split
+
+  chat_id = "sealbroadcast"
+  handle = _make_active_claude_client(chat_id)
+  turn_bc = create_broadcast(chat_id)
+
+  async def _run():
+    handle._steer_user_msgs = [
+      {"role": "user", "content": "Q2", "ts": 10, "cid": "c-q2"}
+    ]
+    handle._steer_consume_cids = ["c-q2"]
+
+    class _SinkLike:
+      """Mirrors `_ChatEventSink`: holds the broadcast it was built with."""
+
+      def __init__(self, bc):
+        self.bc = bc
+
+      async def split_for_steer(self, rows, consume):
+        # The writer ack shape without the echoed rows.
+        return {"pending": []}
+
+    # A successor turn registers its own broadcast before this seal runs.
+    successor_bc = create_broadcast(chat_id)
+    assert get_broadcast(chat_id) is successor_bc
+    assert successor_bc is not turn_bc
+
+    await _seal_steer_split(_SinkLike(turn_bc), handle, chat_id)
+
+    assert [e.get("type") for e in successor_bc.event_log] == []
+    cuts = [e for e in turn_bc.event_log if e.get("type") == "steered_into_turn"]
+    assert len(cuts) == 1
+    assert [m["content"] for m in cuts[0]["messages"]] == ["Q2"]
+    assert [m["cid"] for m in cuts[0]["messages"]] == ["c-q2"]
+
+  asyncio.run(_run())
+
+
+def test_a_failing_publisher_cannot_escape_the_seal():
+  """Announcing the cut must never raise out of `_seal_steer_split`.
+
+  The turn-end `finally` awaits this function BEFORE it unregisters the handle
+  and disconnects the client, so an escaping exception would strand a live
+  handle in the registry and leave the chat looking permanently busy. The split
+  has already COMMITTED by the time the cut is published, so a broken publisher
+  is a notification loss, not a durability one — exactly the asymmetry the
+  missing-publisher branch already takes. Swallow it, log it, and still consume
+  the sealed rows so the turn-end retry does not double-append them.
+  """
+  from app.claude_sdk_runner import _seal_steer_split
+
+  chat_id = "sealpublishfail"
+  handle = _make_active_claude_client(chat_id)
+
+  async def _run():
+    handle._steer_user_msgs = [
+      {"role": "user", "content": "Q2", "ts": 10, "cid": "c-q2"}
+    ]
+    handle._steer_consume_cids = ["c-q2"]
+
+    class _ExplodingBroadcast:
+      def publish(self, event):
+        raise RuntimeError("broadcast is gone")
+
+    class _SinkLike:
+      def __init__(self, bc):
+        self.bc = bc
+        self.splits = 0
+
+      async def split_for_steer(self, rows, consume):
+        self.splits += 1
+        return {"stored_messages": list(rows)}
+
+    sink = _SinkLike(_ExplodingBroadcast())
+    await _seal_steer_split(sink, handle, chat_id)
+
+    assert sink.splits == 1
+    # The rows were committed, so they must not be re-appended by the retry.
+    assert handle._steer_user_msgs == []
+    assert handle._steer_consume_cids == []
+
+  asyncio.run(_run())
+
+
+def test_stop_drops_the_buffered_steer_instead_of_appending_it():
+  """A hard Stop abandons a deferred steer ENTIRELY.
+
+  Stop's contract: `/chat/stop` clears `chat.pending_messages`, reports the
+  cleared cids, and the client re-sends exactly them as one fresh turn. A
+  deferred steer's row is still IN that queue (its split never ran), so if the
+  runner kept the row buffered, the turn-end seal appended it to the turn Stop
+  had just killed while the client re-sent it — the same message twice, once
+  interrupted and once answered. `interrupt()` therefore clears the
+  transcript-side buffer too, which makes the finally's seal a no-op.
+  """
+  from app.claude_sdk_runner import ActiveClaudeClient, _seal_steer_split
+
+  class _Client:
+    async def interrupt(self):
+      return None
+
+  async def _run():
+    # Built inside THIS loop: interrupt() waits on `_finished`, which is
+    # loop-bound, so a handle constructed in a throwaway loop cannot be awaited
+    # here. mark_finished() stands in for the runner's own teardown.
+    handle = ActiveClaudeClient(_Client(), chat_id="stopsteer")
+    handle.mark_finished()
+    handle.pending_steer = ["Q2"]
+    handle._steer_requested = True
+    handle._steer_user_msgs = [
+      {"role": "user", "content": "Q2", "ts": 10, "cid": "c-q2"}
+    ]
+    handle._steer_consume_cids = ["c-q2"]
+
+    await handle.interrupt()
+
+    assert handle.pending_steer == []
+    assert handle._steer_requested is False
+    assert handle._steer_user_msgs == []
+    assert handle._steer_consume_cids == []
+
+    # The turn-end catch-all now has nothing to append.
+    class _Bc:
+      def __init__(self):
+        self.splits = 0
+
+      async def split_for_steer(self, rows, consume):
+        self.splits += 1
+
+    bc = _Bc()
+    await _seal_steer_split(bc, handle, "stopsteer")
+    assert bc.splits == 0
+
+  asyncio.run(_run())
+
+
 def test_claude_force_steer_defers_to_runner_and_reorders(client, auth):
   """A Claude fast-forward (force_steer) defers its split to the runner, same
   as an ordinary steer, so the fast-forwarded rows land AFTER the sealed
@@ -974,6 +1122,12 @@ def test_steers_into_live_claude_turn_reserves_durable_pending(
 
   assert res.status_code == 202, res.text
   assert res.json()["status"] == "steered"
+  # The split is deferred, so the response says so and echoes the row as the
+  # still-queued row it is; the client keeps showing it until the cut.
+  assert res.json()["cut_deferred"] is True
+  assert [m["content"] for m in res.json()["pending_messages"]] == [
+    "actually use blue"
+  ]
 
   chat = _read_chat(chat_id)
   assert [m["content"] for m in chat.pending_messages] == ["actually use blue"]
@@ -986,21 +1140,14 @@ def test_steers_into_live_claude_turn_reserves_durable_pending(
   assert cid_of(handle._steer_user_msgs[0]) == reserved_cid
   assert handle._steer_consume_cids == [reserved_cid]
 
-  # A `steered_into_turn` event was broadcast for the inline render.
+  # NO event at HTTP arrival on the deferred path. The 202's own
+  # `pending_messages` (asserted above) is the single signal that keeps the row
+  # visible; the CUT (`steered_into_turn`) belongs to the runner's seal — see
+  # test_claude_steer_cut_event_is_published_at_the_seal_not_at_http_arrival.
+  # A second "accepted" event reconciling the same tray would be a parallel
+  # channel racing the response it duplicates.
   bc = get_broadcast(chat_id)
-  steered_events = [
-    e for e in bc.event_log if e.get("type") == "steered_into_turn"
-  ]
-  assert len(steered_events) == 1
-  assert steered_events[0]["content"] == "actually use blue"
-  assert steered_events[0]["messages"] == [
-    {
-      "role": "user",
-      "ts": handle._steer_user_msgs[0]["ts"],
-      "cid": reserved_cid,
-      "content": "actually use blue",
-    }
-  ]
+  assert bc.event_log == []
 
 
 def test_claude_runner_splits_steer_at_boundary_not_http_arrival(
@@ -1072,6 +1219,160 @@ def test_claude_runner_splits_steer_at_boundary_not_http_arrival(
   # The runner consumed the buffered payload (no double-split on turn end).
   assert handle._steer_user_msgs == []
   assert _read_chat(chat_id).pending_messages in (None, [])
+
+
+def test_claude_steer_cut_event_is_published_at_the_seal_not_at_http_arrival(
+  client, auth,
+):
+  """`steered_into_turn` is the client's only "cut the live stream here" signal,
+  so on the deferred (Claude) path it must be published by the runner at the
+  seal — AFTER every block that belongs to A1 — and never by the route.
+
+  The regression this pins: the route published the cut at HTTP arrival while
+  the split stayed at the runner's interrupt boundary seconds later. Everything
+  Claude streamed in the gap was accumulated into the sealed A1 AND kept at the
+  head of the client's freshly re-based stream, so it painted twice for the rest
+  of the turn. The window is never empty — the AssistantMessage that triggers
+  the boundary interrupt is dispatched to the broadcast before the interrupt
+  check runs — so this duplicated on EVERY Claude steer.
+  """
+  from app.chat import _ChatEventSink, register_active_sink
+  from app.claude_sdk_runner import _seal_steer_split
+
+  chat_id = "claudecutorder"
+  db = SessionLocal()
+  try:
+    db.add(models.Chat(
+      id=chat_id, title="Claude chat", provider="claude",
+      messages=[{"role": "user", "content": "Q1", "ts": 1}],
+      agent_settings_json={"steer_enabled": True},
+    ))
+    db.commit()
+  finally:
+    db.close()
+  handle = _make_active_claude_client(chat_id)
+  registry.register(handle)
+  bc = create_broadcast(chat_id)
+  sink = _ChatEventSink(bc, chat_id, run_token="run-cut-order")
+  register_active_sink(chat_id, sink)
+
+  # A1's first block is already on the wire when the steer POST arrives.
+  sink.publish({"type": "text", "content": "A1 first"})
+
+  res = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={"content": "Q2"}, headers=auth,
+  )
+  assert res.status_code == 202, res.text
+  assert res.json()["status"] == "steered"
+
+  # HTTP arrival publishes NOTHING on the deferred path: the response body is
+  # the display signal. Publishing the cut here re-based the client's stream
+  # too early.
+  assert [e.get("type") for e in bc.event_log] == ["text"]
+
+  async def _drive_runner():
+    # The rest of A1 streams AFTER arrival — the duplication window.
+    sink.publish({"type": "text", "content": " A1 rest"})
+    await _seal_steer_split(sink, handle, chat_id)
+    # A2's first block follows the seal. It exists here so the cut's position
+    # is pinned from BOTH sides: a cut that slipped in front of a continuation
+    # block would fold A2's head into the sealed A1 and re-base after it —
+    # the mirror image of the fixed bug, and invisible to a lower bound alone.
+    sink.publish({"type": "text", "content": "A2 head"})
+
+  asyncio.run(_drive_runner())
+
+  # The cut is published exactly once, at the seal: after every A1 block and
+  # before every A2 block.
+  cut_positions = [
+    i for i, e in enumerate(bc.event_log)
+    if e.get("type") == "steered_into_turn"
+  ]
+  assert len(cut_positions) == 1
+  # The sink coalesces contiguous text into one event per segment, so the whole
+  # of A1 is one event and A2's head is another. Both bounds matter: after the
+  # last A1 event (the fixed bug) AND before the first A2 event (its mirror
+  # image, which would fold A2's head into the sealed A1).
+  text_positions = [
+    i for i, e in enumerate(bc.event_log) if e.get("type") == "text"
+  ]
+  assert [bc.event_log[i].get("content") for i in text_positions] == [
+    "A1 first A1 rest", "A2 head",
+  ]
+  assert text_positions[0] < cut_positions[0] < text_positions[1]
+  # The cut names the DURABLE rows the split committed, so the client inserts
+  # the same identity the transcript now holds.
+  cut = bc.event_log[cut_positions[0]]
+  steered_row = [m for m in _read_chat(chat_id).messages if m["role"] == "user"][-1]
+  assert cut["messages"] == [{
+    "role": "user",
+    "ts": steered_row["ts"],
+    "cid": cid_of(steered_row),
+    "content": "Q2",
+  }]
+  # And A1 really was sealed at the boundary the cut names.
+  assert [(m["role"], m.get("content")) for m in _read_chat(chat_id).messages] == [
+    ("user", "Q1"),
+    ("assistant", "A1 first A1 rest"),
+    ("user", "Q2"),
+  ]
+
+
+def test_codex_steer_still_publishes_the_cut_at_the_route(
+  client, auth, monkeypatch,
+):
+  """Codex is unaffected by moving the Claude cut.
+
+  Its `turn.steer()` injects into the SAME running turn, so the route's own
+  `_split_steer_at_route` IS the seal: signal and cut are the same instant
+  there. The route must therefore keep publishing `steered_into_turn` at
+  arrival, with the response shape unchanged (no `cut_deferred`).
+  """
+  chat_id = "codexcutroute"
+  db = SessionLocal()
+  try:
+    db.add(models.Chat(
+      id=chat_id, title="Codex chat", provider="codex",
+      messages=[{"role": "user", "content": "Q1", "ts": 1}],
+      agent_settings_json={"steer_enabled": True},
+    ))
+    db.commit()
+  finally:
+    db.close()
+  registry.register(_make_active_codex_turn(chat_id))
+  sink = _register_sink_with_partial(chat_id, "run-codex-cut", "A1")
+
+  async def _fake_steer(cid, message):
+    return True
+
+  monkeypatch.setattr(
+    "app.codex_sdk_runner.steer_into_active_turn", _fake_steer,
+  )
+
+  res = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={"content": "Q2"}, headers=auth,
+  )
+  assert res.status_code == 202, res.text
+  body = res.json()
+  assert body["status"] == "steered"
+  assert "cut_deferred" not in body
+  # The row left pending at the route, so the echoed queue no longer holds it.
+  assert body["pending_messages"] == []
+
+  bc = get_broadcast(chat_id)
+  assert [e.get("type") for e in bc.event_log] == ["steered_into_turn"]
+  cut = [e for e in bc.event_log if e.get("type") == "steered_into_turn"][0]
+  assert [m["content"] for m in cut["messages"]] == ["Q2"]
+  # The route sealed A1 and appended Q2 before publishing — the cut is
+  # truthful at the instant it is sent.
+  assert [(m["role"], m.get("content")) for m in _read_chat(chat_id).messages] == [
+    ("user", "Q1"),
+    ("assistant", "A1"),
+    ("user", "Q2"),
+  ]
+  assert sink.assistant_blocks == []
 
 
 def test_claude_reserved_row_survives_process_loss_and_sweep(
