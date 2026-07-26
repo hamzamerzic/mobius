@@ -18,6 +18,31 @@ test('one open drawer owns at most one physical sentinel', () => {
   )
 })
 
+// closeDrawer hides the panel immediately but keeps drawerOpenRef true until Back
+// consumes the sentinel, and ONLY handleBack clears it. Real popstate outcomes never
+// reach handleBack (a 'same'/'unknown' traversal direction, or a handleForward), which
+// stranded the logical ref true behind a hidden panel — every later open then hit the
+// double-activation guard and returned, so the menu could not be reopened by ANY
+// control until a page reload. An open request must always be able to recover.
+test('an open request recovers from a drawer close whose traversal never landed', () => {
+  const open = navigation.slice(
+    navigation.indexOf('function openDrawer()'),
+    navigation.indexOf('function closeDrawer('),
+  )
+  const recovery = open.indexOf('if (drawerClosePendingRef.current)')
+  const guard = open.indexOf('if (drawerOpenRef.current) return')
+  assert.ok(recovery >= 0, 'openDrawer must handle a stranded pending close')
+  assert.ok(guard > recovery,
+    'the pending-close recovery must run BEFORE the double-activation guard, '
+    + 'or the guard returns first and the drawer stays unopenable')
+  // Recovery re-adopts the still-live sentinel instead of pushing a second one.
+  assert.match(open, /if \(drawerPushedRef\.current\) \{\s*drawerOpenRef\.current = true\s*setDrawerVisible\(true\)\s*return/)
+  // Whoever else resolves the drawer's history state clears the pending flag too,
+  // so a later open can never re-adopt an already-retagged sentinel.
+  assert.match(navigation, /drawerClosePendingRef\.current = false\s*\n\s*drawerOpenRef\.current = false\s*\n\s*setDrawerVisible\(false\)/)
+  assert.match(navigation, /function handleForward\([^)]*\) \{\s*\/\/[\s\S]*?if \(drawerClosePendingRef\.current\) \{\s*drawerClosePendingRef\.current = false\s*drawerOpenRef\.current = false/)
+})
+
 test('an explicit drawer close starts visually before consuming its history sentinel', () => {
   const close = navigation.slice(
     navigation.indexOf('function closeDrawer('),

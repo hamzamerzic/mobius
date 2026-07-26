@@ -519,10 +519,30 @@ export default function useNavigation({
     // left root edge otherwise surfaces the drawer over the drop target instead
     // of splitting a left pane (owner report, live testing).
     if (drawerOpenBlockedByDrag(dragActiveRef?.current)) return
+    // A close whose traversal never landed must not disable the drawer forever.
+    // closeDrawer() hides the panel immediately but keeps drawerOpenRef true until
+    // Back consumes the sentinel — and only handleBack clears it. Several real
+    // popstate outcomes never reach handleBack (a 'same'/'unknown' direction, or a
+    // handleForward that clears the pending flag alone), which left the logical ref
+    // stuck true behind a visually closed panel. Every later open then hit the
+    // double-activation guard below and returned: the menu became permanently
+    // unopenable, by any control, until a reload. Recover instead — the panel is
+    // already hidden and its sentinel is still the current entry, so re-adopt that
+    // sentinel rather than pushing a second one.
+    if (drawerClosePendingRef.current) {
+      drawerClosePendingRef.current = false
+      if (drawerPushedRef.current) {
+        drawerOpenRef.current = true
+        setDrawerVisible(true)
+        return
+      }
+      // The sentinel was already retagged (a navigation resolved it mid-close), so
+      // there is nothing to re-adopt: open normally below.
+      drawerOpenRef.current = false
+    }
     // Synchronous guard for a rapid double activation before React has rendered
     // `drawerOpen=true`. One drawer owns exactly one physical sentinel.
     if (drawerOpenRef.current) return
-    drawerClosePendingRef.current = false
     // Do not let a just-issued app history traversal consume a drawer entry
     // pushed after it began. Preserve the user's intent and open once the
     // serialized local-pop pump is idle.
@@ -927,6 +947,10 @@ export default function useNavigation({
       } catch { /* history unavailable — leave the entry as-is */ }
     }
     navStackRef.current.push(previousRoute)
+    // This navigation resolved the drawer's history state, so clear ALL of the
+    // drawer's flags together. Leaving the pending-close flag set would make a later
+    // open try to re-adopt a sentinel this navigation has already retagged.
+    drawerClosePendingRef.current = false
     drawerOpenRef.current = false
     setDrawerVisible(false)
 
@@ -1106,7 +1130,14 @@ export default function useNavigation({
     }
 
     function handleForward(destination, sourceRoute) {
-      drawerClosePendingRef.current = false
+      // A forward traversal abandons any in-flight drawer close: clear the LOGICAL
+      // open ref alongside the pending flag. Clearing the pending flag alone left
+      // drawerOpenRef stuck true behind an already-hidden panel, which then refused
+      // every subsequent open.
+      if (drawerClosePendingRef.current) {
+        drawerClosePendingRef.current = false
+        drawerOpenRef.current = false
+      }
       const route = destination?.route
       // A nav entry represents a shell-level transition. Back destructively
       // removed its source from navStack, so Forward rebuilds that one edge.
