@@ -304,9 +304,13 @@ def test_empty_provider_result_persists_retryable_failure(monkeypatch, queued):
     for block in message.get("blocks", [])
     if block.get("type") == "error"
   ]
+  # `resumable` is the point of the marker, not incidental: it is what renders
+  # the one-tap Resume button, so a lost reply is recoverable instead of a
+  # dead-end notice. Pinned in the block shape so it cannot regress silently.
   assert retry_blocks == [{
     "type": "error",
-    "message": "This turn ended without a response — tap to retry.",
+    "message": "This turn ended without a response.",
+    "resumable": True,
   }]
   outcomes = _run_outcomes(cid)
   assert outcomes[run_token] == "failed"

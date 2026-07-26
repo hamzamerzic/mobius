@@ -616,10 +616,15 @@ class _ChatEventSink:
         # resume no-op, or a codex message whose text was lost). The runner-side
         # fixes stop those at the source; this guarantees the turn is never a
         # SILENT user->user gap — persist a neutral marker the client can retry.
-        blocks = [{
-          "type": "error",
-          "message": "This turn ended without a response — tap to retry.",
-        }]
+        #
+        # Every pause-shaped block is built by `_pause_note`, the one builder
+        # that owns the `resumable` contract — the flag MsgContent keys the
+        # one-tap Resume button on. A marker that skips the builder is a
+        # dead-end notice offering no way out of the exact gap it marks. No
+        # `kind` here, so it stays in the plain error family: a lost reply is
+        # a failure, not a benign pause. The button is the affordance, so the
+        # message only states the fact.
+        blocks = [_pause_note("This turn ended without a response.")]
       else:
         # Genuinely empty turn (no content, no error, not a lost reply) —
         # nothing to persist.
