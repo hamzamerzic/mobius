@@ -160,14 +160,44 @@ test('bell badge → page → seen-on-open clears it → Back returns (mobile)',
   await expect(page.locator('.notifications__row-title').first())
     .toHaveText('Agent finished your task')
 
-  // Seen-on-open: the idempotent read-all fired and the badge cleared.
+  // Seen-on-open: the idempotent read-all fired and the badge cleared. While
+  // the page is active the bell reads as its dismiss control.
   await expect.poll(() => state.readAllCalls).toBeGreaterThan(0)
   await expect(page.locator('.notification-bell__badge')).toHaveCount(0)
-  await expect(bell).toHaveAccessibleName('Notifications')
+  await expect(bell).toHaveAccessibleName('Close notifications')
 
   // The page is ordinary navigation: browser Back leaves it.
   await page.goBack()
   await expect(page.locator('.notifications')).toBeHidden({ timeout: 8000 })
+  await expect(bell).toHaveAccessibleName('Notifications')
+})
+
+test('the bell TOGGLES: a second tap returns via a real history pop, no dead entry', async ({ page }) => {
+  await mockNotifications(page)
+  await setup(page)
+
+  await openNotificationsViaBell(page)
+
+  // Second tap dismisses back to the chat surface.
+  await page.locator('.notification-bell').click()
+  await expect(page.locator('.notifications')).toBeHidden({ timeout: 8000 })
+  await page.waitForFunction(
+    () => !!(document.querySelector('.chat__empty-wrap')
+          || document.querySelector('.chat__scroll')
+          || document.querySelector('.chat__form')),
+    { timeout: 8000 },
+  )
+
+  // The dismissal was a POP of the entry the open pushed — not a new push.
+  // Proof: Forward re-enters the notifications page (a dead-entry dismissal
+  // would have buried it), and Back leaves it again.
+  await page.goForward()
+  await expect(page.locator('.notifications')).toBeVisible({ timeout: 8000 })
+  await page.goBack()
+  await expect(page.locator('.notifications')).toBeHidden({ timeout: 8000 })
+
+  // And the bell still opens it afresh afterwards.
+  await openNotificationsViaBell(page)
 })
 
 test('a row with a valid target deep-links; a hostile target is unclickable', async ({ page }) => {
@@ -197,6 +227,74 @@ test('a row with a valid target deep-links; a hostile target is unclickable', as
     CHAT_ID,
     { timeout: 8000 },
   )
+})
+
+test('phone header layout: 44×44 bell, 99+ badge, Offline pill, brand — no collisions', async ({ page, context }) => {
+  // Widest badge state: 120 unread renders as 99+.
+  const rows = Array.from({ length: 120 }, (_, i) => ({
+    id: `n-bulk-${i}`,
+    source_type: 'agent',
+    source_id: null,
+    title: `Bulk ${i}`,
+    body: null,
+    icon: null,
+    target: null,
+    actions: null,
+    sent_at: new Date(Date.now() - i * 1000).toISOString(),
+    clicked_at: null,
+    read_at: null,
+  }))
+  await mockNotifications(page, { rows })
+  await setup(page) // 412×915 phone viewport
+
+  const bell = page.locator('.notification-bell')
+  const badge = page.locator('.notification-bell__badge')
+  await expect(badge).toHaveText('99+')
+
+  // Touch-target floor: the button's hit area is at least 44×44.
+  const bellBox = await bell.boundingBox()
+  expect(bellBox.width).toBeGreaterThanOrEqual(44)
+  expect(bellBox.height).toBeGreaterThanOrEqual(44)
+
+  // Surface the Offline pill: cut the network so the reachability probe
+  // fails (mocked routes keep fulfilling, so the shell itself stays alive).
+  await context.setOffline(true)
+  await page.evaluate(() => window.dispatchEvent(new Event('offline')))
+  const pill = page.locator('.shell__offline')
+  await expect(pill).toBeVisible({ timeout: 15000 })
+
+  // Collision guarantees at phone width: every control sits inside the
+  // header, and no pair among {brand, Offline pill, bell, badge} overlaps
+  // (the badge may only overlap its own bell button).
+  const box = async (locator) => await locator.boundingBox()
+  const header = await box(page.locator('.shell__bar'))
+  const brand = await box(page.locator('.shell__wordmark'))
+  const pillBox = await box(pill)
+  const bellBox2 = await box(bell)
+  const badgeBox = await box(badge)
+
+  const within = (inner, outer) =>
+    inner.x >= outer.x - 0.5
+    && inner.y >= outer.y - 0.5
+    && inner.x + inner.width <= outer.x + outer.width + 0.5
+    && inner.y + inner.height <= outer.y + outer.height + 0.5
+  const overlaps = (a, b) =>
+    a.x < b.x + b.width && b.x < a.x + a.width
+    && a.y < b.y + b.height && b.y < a.y + a.height
+
+  for (const [name, b] of [['brand', brand], ['pill', pillBox], ['bell', bellBox2], ['badge', badgeBox]]) {
+    expect(within(b, header), `${name} must stay inside the header`).toBe(true)
+  }
+  const pairs = [
+    ['brand', brand, 'pill', pillBox],
+    ['brand', brand, 'bell', bellBox2],
+    ['brand', brand, 'badge', badgeBox],
+    ['pill', pillBox, 'bell', bellBox2],
+    ['pill', pillBox, 'badge', badgeBox],
+  ]
+  for (const [an, a, bn, b] of pairs) {
+    expect(overlaps(a, b), `${an} and ${bn} must not overlap`).toBe(false)
+  }
 })
 
 test('the same bell → page → clear flow works at a desktop viewport', async ({ page }) => {

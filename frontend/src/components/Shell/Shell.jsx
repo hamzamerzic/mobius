@@ -3581,11 +3581,20 @@ export default function Shell() {
             </span>
           )}
           {/* Shared header markup — the bell is identical on desktop and
-              mobile by construction. Clicking is an ordinary navTo, so the
-              page gets history/Back and the builder-tab treatment for free. */}
+              mobile by construction. A TOGGLE: opening is an ordinary navTo
+              (history/Back and the builder-tab treatment come free); tapping
+              it while the page is active dismisses through the SAME history
+              edge that opening pushed — a real pop, never a new push, so no
+              dead Back entry. In builder mode the pop refocuses the previous
+              route and the canonical notifications tab simply stays in its
+              strip (single instance preserved; the next open re-focuses it). */}
           <NotificationBell
             unreadCount={unreadCount}
-            onClick={() => navTo('notifications')}
+            active={activeView === 'notifications'}
+            onClick={() => {
+              if (activeView === 'notifications') window.history.back()
+              else navTo('notifications')
+            }}
           />
         </div>
       </header>

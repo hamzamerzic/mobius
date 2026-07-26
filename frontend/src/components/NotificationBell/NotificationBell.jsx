@@ -3,18 +3,19 @@ import './NotificationBell.css'
 
 // The header bell — lives in the shell bar's right-side action slot
 // (shell__bar-actions), so it renders identically on desktop and mobile by
-// construction. Clicking navigates to the notifications page (a takeover-class
-// view); the unread badge clears when that page marks everything read
-// (seen-on-open model).
-export default function NotificationBell({ unreadCount = 0, onClick }) {
+// construction. A TOGGLE, not just an opener: when the notifications page is
+// the active view (`active`), the tap dismisses it through the shell's Back
+// path instead of dead-ending on navTo's same-route dedup. The unread badge
+// clears when the page marks everything read (seen-on-open model).
+export default function NotificationBell({ unreadCount = 0, active = false, onClick }) {
   const count = Number.isFinite(unreadCount) && unreadCount > 0 ? unreadCount : 0
-  const label = count > 0
-    ? `Notifications, ${count} unread`
-    : 'Notifications'
+  const label = active
+    ? 'Close notifications'
+    : (count > 0 ? `Notifications, ${count} unread` : 'Notifications')
   return (
     <button
       type="button"
-      className="notification-bell"
+      className={`notification-bell${active ? ' notification-bell--active' : ''}`}
       aria-label={label}
       title={label}
       onClick={onClick}
