@@ -153,11 +153,17 @@ test('an enabled policy stays cancellable after the viewer clock reaches reset',
 
 test('a system-announced auto-resume reconnects the mounted chat surface', () => {
   // Every mounted chat surface is now a PaneChatView (one per visible chat pane,
-  // including the single-pane case): Shell forwards the run-signal MAP, and each
-  // pane derives its own monotonic run activity by its own chatId.
-  assert.match(shell, /chatRunSignals=\{chatRunSignals\}/,
-    'Shell must forward the run-signal map to the mounted chat surface (PaneChatView)')
-  assert.match(paneChatView, /externalRunSignal=\{chatRunSignal\(chatRunSignals, chatId\)\}/,
+  // including the single-pane case): Shell selects per-chat run activity BEFORE
+  // the memo boundary, so another chat's Map update cannot rerender this pane.
+  assert.match(shell, /externalRunSignal=\{chatRunSignal\(chatRunSignals, chatId\)\}/,
+    'Shell must forward only this pane chat’s monotonic run activity')
+  assert.doesNotMatch(shell, /chatRunSignals=\{chatRunSignals\}/,
+    'the replacement run-signal Map must not cross every pane memo boundary')
+  assert.match(shell, /const stablePaneNavTo = useCallback\([\s\S]*navToRef\.current/,
+    'the pane navigation facade must keep a stable identity while reaching current routing')
+  assert.match(shell, /navTo=\{stablePaneNavTo\}/,
+    'per-render navigation identity must not defeat the pane memo boundary')
+  assert.match(paneChatView, /externalRunSignal=\{externalRunSignal\}/,
     'PaneChatView must forward per-chat monotonic run activity to its ChatView')
   assert.match(chatView, /fetchMessages\(\{[\s\S]*force: true,[\s\S]*authoritative: true/,
     'the mounted chat must refresh the promoted continuation row')

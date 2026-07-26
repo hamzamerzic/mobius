@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import os
+import shutil
 import subprocess
 
 
@@ -211,4 +212,56 @@ def test_content_mode_suppresses_modals_without_dom_surgery():
 def test_app_preview_requests_ephemeral_content_only_mode():
   source = PREVIEW_APP.read_text(encoding="utf-8")
 
-  assert 'agent-screenshot.sh" --content-only "/app/${APP_ID}"' in source
+  assert 'ROUTE="/app/${APP_ID}"' in source
+  assert 'agent-screenshot.sh" --content-only "${ROUTE}"' in source
+
+
+def test_standalone_app_preview_keeps_numeric_id_as_input():
+  source = PREVIEW_APP.read_text(encoding="utf-8")
+
+  assert "preview_app.sh [--standalone] <app_id>" in source
+  assert 'f"{base}/api/apps/{app_id}"' in source
+  assert 'ROUTE="/apps/${SLUG}/"' in source
+  assert "app_id must be numeric" in source
+
+
+def test_standalone_preview_resolves_slug_without_exposing_it_to_caller(
+  tmp_path: Path,
+):
+  preview = tmp_path / "preview_app.sh"
+  shutil.copy2(PREVIEW_APP, preview)
+  fake_python = tmp_path / "python3"
+  fake_python.write_text(
+    "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' 'duplicate-name-2'\n",
+    encoding="utf-8",
+  )
+  fake_python.chmod(0o755)
+  fake_screenshot = tmp_path / "agent-screenshot.sh"
+  fake_screenshot.write_text(
+    "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$PREVIEW_LOG\"\n",
+    encoding="utf-8",
+  )
+  fake_screenshot.chmod(0o755)
+  log = tmp_path / "preview.log"
+
+  result = subprocess.run(
+    [
+      "bash", str(preview), "--standalone", "42",
+      str(tmp_path / "standalone.png"),
+    ],
+    env={
+      **os.environ,
+      "PATH": f"{tmp_path}:{os.environ['PATH']}",
+      "AGENT_TOKEN": "test-token",
+      "API_BASE_URL": "http://mobius.test",
+      "PREVIEW_LOG": str(log),
+    },
+    text=True,
+    capture_output=True,
+    check=False,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert log.read_text(encoding="utf-8").strip() == (
+    f"/apps/duplicate-name-2/ {tmp_path / 'standalone.png'}"
+  )

@@ -114,6 +114,18 @@ test('gallery navigation has explicit keyboard and lightbox alternatives', () =>
   assert.match(lightboxSource, /\{index \+ 1\} \/ \{galleryItems\.length\}/)
 })
 
+test('zoomed touch pan keeps its gesture snapshot through a queued render', () => {
+  assert.match(
+    lightboxSource,
+    /const pan = panRef\.current[\s\S]{0,180}setTransform\(\(current\) =>[\s\S]{0,180}touch\.clientX - pan\.x[\s\S]{0,80}touch\.clientY - pan\.y/,
+    'lifting a finger may clear panRef before React evaluates the queued state update',
+  )
+  assert.doesNotMatch(
+    lightboxSource,
+    /setTransform\(\(current\) =>[\s\S]{0,220}panRef\.current\.[xy]/,
+  )
+})
+
 test('resolved images follow their URL rather than a streamed array position', () => {
   const sources = new Map([
     ['/one.png', '/resolved/one.png'],

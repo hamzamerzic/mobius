@@ -86,12 +86,30 @@ test('every thinking entry remains the same collapsed nested disclosure', () => 
 })
 
 test('a single self-contained activity discloses directly without a redundant parent row', () => {
-  assert.match(activityStretch, /if \(entries\.length === 1 && !detailRef\)/,
-    'a one-entry lazy summary still owns its multi-step detail disclosure')
+  assert.match(activityStretch, /if \(entries\.length === 1 && !detailRef && !loneHasHelpers\)/,
+    'a lone ordinary entry stays direct while a named delegation earns hierarchy')
   assert.match(activityStretch, /<SingleActivity[\s\S]*entry=\{entries\[0\]\}/)
   assert.match(activityStretch,
     /item\.type === 'thinking'[\s\S]*<TimelineThought[\s\S]*direct[\s\S]*live=\{live\}/)
   assert.match(activityStretch, /<ToolBlock[\s\S]*key=\{assistantBlockKey\(item, idx\)\}/)
+})
+
+test('a delegating stretch keeps helper status and activity under one honest disclosure', () => {
+  const subagentChips = readFileSync(new URL('../SubagentChips.jsx', import.meta.url), 'utf8')
+
+  assert.match(activityStretch, /const loneHasHelpers = loneItem\?\.type === 'tool'/,
+    'even a one-tool delegation renders through the activity summary')
+  assert.match(activityStretch, /controlsId=\{timelineId\}/,
+    'the broad rollup controls the complete nested activity body')
+  assert.match(activityStretch, /id=\{timelineId\}[\s\S]*hidden=\{!open\}/,
+    'named helpers and their activity stay inside the broad summary disclosure')
+  assert.match(activityStretch,
+    /<SubagentChips[\s\S]*subagent=\{tool\.subagent\}/,
+    'helper status rows render inside the activity body')
+  assert.doesNotMatch(activityStretch, /helperOpen|toggleHelper/,
+    'the transcript has no helper-specific activity mapping, so it has no fake per-helper disclosure')
+  assert.doesNotMatch(subagentChips, /aria-expanded|aria-controls|onToggle/,
+    'helper rows remain honest noninteractive status')
 })
 
 test('lazy tool details keep top-level touch targets and compact nested rows', () => {

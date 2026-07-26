@@ -35,6 +35,21 @@ test('run activity remains isolated by chat id', () => {
 })
 
 
+test('an unrelated run preserves the selected signal identity for a memoized pane', () => {
+  let signals = new Map()
+  signals = bumpChatRunSignal(signals, 'visible-chat', 'chat_run_started')
+  const visibleSignal = chatRunSignal(signals, 'visible-chat')
+
+  signals = bumpChatRunSignal(signals, 'other-chat', 'chat_run_started')
+
+  assert.equal(
+    chatRunSignal(signals, 'visible-chat'),
+    visibleSignal,
+    'Shell can select this object before the pane memo boundary',
+  )
+})
+
+
 test('stream-open reconciliation advances work without inventing an event', () => {
   const reconciled = advanceChatRunSignal(
     EMPTY_CHAT_RUN_SIGNAL,

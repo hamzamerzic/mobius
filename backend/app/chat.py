@@ -79,7 +79,6 @@ from app.events import (
   undo_question_scrub,
 )
 from app.providers import effective_agent_settings, get_provider, get_skill_path
-from app.memory_observability import record_memory_checkpoint
 from app.runner_registry import registry
 from app.runtime_types import ChatEvent
 
@@ -4053,24 +4052,77 @@ def _build_app_context(
   chat_id: str,
   data_dir: str,
 ) -> tuple[str | None, dict[str, str]]:
-  """Return per-app chat context and environment for app-attributed chats.
+  """Return exact app identity context for app-attributed or owning chats.
 
   Embedded app chats need the agent to know which app invoked it and where
   that app's editable source lives. The chat row already carries
   `created_by_app_id`; this turns that attribution into prompt context.
+
+  Ordinary build chats can also own apps through ``App.chat_id``. Carry those
+  durable numeric identities into later turns so a resumed/compacted agent
+  does not have to rediscover an app by its non-unique display name.
   """
   if not chat_id:
     return None, {}
   chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
-  if chat is None or chat.created_by_app_id is None:
+  if chat is None:
     return None, {}
+  data_root = Path(data_dir)
+
+  if chat.created_by_app_id is None:
+    linked = (
+      db.query(models.App)
+      .filter(
+        models.App.chat_id == chat_id,
+        models.App.deleted_at.is_(None),
+      )
+      .order_by(models.App.id)
+      .all()
+    )
+    if not linked:
+      return None, {}
+    identities = []
+    for linked_app in linked:
+      source_dir = (
+        Path(linked_app.source_dir)
+        if linked_app.source_dir
+        else data_root / "apps" / (linked_app.slug or str(linked_app.id))
+      )
+      identities.append({
+        "app_id": linked_app.id,
+        "name": linked_app.name,
+        "slug": linked_app.slug,
+        "source_dir": str(source_dir),
+        "storage_dir": str(data_root / "apps" / str(linked_app.id)),
+      })
+    compact = json.dumps(
+      identities, ensure_ascii=False, separators=(",", ":"),
+    )
+    block = "\n".join([
+      "The <linked_apps> block carries apps maintained by this chat.",
+      "App names are not unique; reuse the numeric app_id for later actions.",
+      "<linked_apps>",
+      compact,
+      "</linked_apps>",
+    ])
+    env = {"CHAT_APPS_JSON": compact}
+    if len(identities) == 1:
+      identity = identities[0]
+      env.update({
+        "APP_ID": str(identity["app_id"]),
+        "APP_NAME": identity["name"] or "",
+        "APP_SOURCE_DIR": identity["source_dir"],
+        "APP_PRIMARY_FILE": str(Path(identity["source_dir"]) / "index.jsx"),
+        "APP_STORAGE_DIR": identity["storage_dir"],
+      })
+    return block, env
+
   app = db.query(models.App).filter(
     models.App.id == chat.created_by_app_id
   ).first()
   if app is None:
     return None, {}
 
-  data_root = Path(data_dir)
   source_dir = Path(app.source_dir) if app.source_dir else (
     data_root / "apps" / (app.slug or str(app.id))
   )
@@ -4378,8 +4430,8 @@ def _is_cli_slash_command(text: str) -> bool:
   without turning path-like prose such as `/data/apps/x is broken` into
   a command-shaped prompt.
   """
-  first = (text or "").lstrip("\n").split(None, 1)[0].strip()
-  return first in {"/goal"}
+  words = (text or "").lstrip("\n").split(None, 1)
+  return bool(words) and words[0].strip() in {"/goal"}
 
 
 async def run_chat(
@@ -4425,12 +4477,6 @@ async def run_chat(
   # (which `_run_chat_impl` doesn't catch) leaves the marker set for
   # reconciliation rather than silently wiping it — the safe default.
   disposition = chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
-  record_memory_checkpoint(
-    "turn_start",
-    chat_id=chat_id,
-    provider_id=provider_id,
-    run_generation=run_gen,
-  )
   try:
     disposition = await _run_chat_impl(
       messages, chat_id=chat_id, session_id=session_id,
@@ -4549,16 +4595,6 @@ async def run_chat(
         )
     except Exception:
       _get_logger().debug("chat-note guarantee skipped", exc_info=True)
-    # One terminal sample after provider teardown, browser cleanup, queue
-    # transition, and the settled-chat publisher. Comparing it with turn_start
-    # exposes memory that a completed turn failed to release without polling
-    # continuously during ordinary operation.
-    record_memory_checkpoint(
-      "turn_end",
-      chat_id=chat_id,
-      provider_id=provider_id,
-      disposition=disposition.value,
-    )
 
 
 def _chat_note_mtime(data_dir: str, chat_id: str) -> float:

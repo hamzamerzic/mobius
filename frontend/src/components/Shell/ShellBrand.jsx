@@ -1,7 +1,6 @@
 import { memo, useRef } from 'react'
 import mobiusLogoUrl from '../../assets/moebius.png'
 import { useLogoModeGesture } from './useLogoModeGesture.js'
-import useLivingHalo from './useLivingHalo.js'
 
 /**
  * The brand owns its transient press/hold animation state. Keeping that state in
@@ -13,12 +12,6 @@ const ShellBrand = memo(function ShellBrand({
   splitsEnabled,
   navigationOpen,
   builderModeActive,
-  // The halo gate — builder mode active AND no live mode beat. Distinct from
-  // builderModeActive (the logo twist), which flips synchronously with the toggle;
-  // the halo waits for the beat to settle so it never competes for frames with the
-  // deal animation (exit-design v2 §Background isolation). Defaults to
-  // builderModeActive for callers that do not thread it.
-  haloActive = builderModeActive,
   // The live mode descriptor (modeMachine transition) or null. The logo's hold hands
   // its compression to this descriptor so the spring-back lands at the beat's
   // completion (round 4 item 1); ShellBrand reads its phase/id to emit the
@@ -29,7 +22,6 @@ const ShellBrand = memo(function ShellBrand({
   onToggleNavigation,
 }) {
   const keyboardModeClickRef = useRef(false)
-  const haloRef = useRef(null)
   const logoGesture = useLogoModeGesture({
     onToggleMode,
     brandRef,
@@ -39,7 +31,6 @@ const ShellBrand = memo(function ShellBrand({
     builderModeActive,
     transition,
   })
-  useLivingHalo({ haloRef, active: splitsEnabled && haloActive })
   // The logo compresses-and-releases only for a HOLD-owned animated beat: a standalone
   // keyboard/swipe never latches, so it never synthesizes compression. Alternate two
   // identical release keyframes by epoch parity — changing the animation NAME restarts
@@ -118,9 +109,6 @@ const ShellBrand = memo(function ShellBrand({
         onAnimationEnd={logoGesture.onAnimationEnd}
       >
         <span className="shell__logo-wrap">
-          {splitsEnabled && (
-            <span ref={haloRef} className="shell__logo-halo" aria-hidden="true" />
-          )}
           {/* Decorative and pointer-inert: the button owns long presses, so mobile
               browsers cannot raise a native image preview over the gesture. */}
           <img

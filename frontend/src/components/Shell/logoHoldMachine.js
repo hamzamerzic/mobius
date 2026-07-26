@@ -78,27 +78,10 @@ export const HOLD_HAPTIC_EXIT_MS = 8
 //     exiting). iOS Safari has NO web Vibration API, so `vibrate` is simply absent
 //     and this is a graceful no-op — feature-detected, no polyfill.
 //   - the logo SPRING/SNAP is motion, SKIPPED under reduced motion (the haptic is
-//     not). The persistent state (180° twisted logo + tinted wordmark + living
-//     halo) plus the card-deal/pane-out are the durable confirmation, so there is
-//     deliberately NO toast or text label.
+//     not). The persistent state (180° twisted logo + tinted wordmark + faint
+//     static shared halo) plus the card-deal/pane-out are the durable confirmation,
+//     so there is deliberately NO toast or text label.
 export function runHoldCompletion({ vibrate, reducedMotion, entering, startFlourish }) {
   if (typeof vibrate === 'function') vibrate(entering ? HOLD_HAPTIC_ENTER_MS : HOLD_HAPTIC_EXIT_MS)
   if (!reducedMotion && typeof startFlourish === 'function') startFlourish(entering)
-}
-
-// The living halo's drift, as a PURE function of time so its motion is unit-
-// testable and allocation-free at the call site (the rAF loop reuses one object).
-// Two summed sines at IRRATIONAL frequency ratios never repeat, so the glow never
-// looks looped. Returns normalized drift the CSS composes: scale ~[0.94,1.06],
-// offset in px, and an opacity multiplier ~[0.7,1].
-const HALO_F1 = 0.00037 // rad/ms  (~2.7s)
-const HALO_F2 = 0.00061 * Math.SQRT2 // irrational ratio to F1
-export function haloFrame(tMs, out = {}) {
-  const a = Math.sin(tMs * HALO_F1)
-  const b = Math.sin(tMs * HALO_F2 + 1.7)
-  out.scale = 1 + 0.06 * (0.6 * a + 0.4 * b)
-  out.x = 3.2 * b
-  out.y = 3.2 * a
-  out.opacity = 0.85 + 0.15 * (0.5 * a + 0.5 * b)
-  return out
 }
