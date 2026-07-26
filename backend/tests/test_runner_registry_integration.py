@@ -152,6 +152,7 @@ def test_codex_runner_registers_then_unregisters_handle(monkeypatch):
     "AsyncCodex": FakeAsyncCodex,
     "CodexConfig": lambda **kwargs: SimpleNamespace(**kwargs),
     "CodexRpcError": RuntimeError,
+    "TransportClosedError": type("TransportClosedError", (Exception,), {}),
     "CommandExecutionOutputDeltaNotification": type(
       "CommandExecutionOutputDeltaNotification", (), {}
     ),

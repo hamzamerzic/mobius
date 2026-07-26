@@ -17,6 +17,18 @@ from app.runner_registry import RunnerKind, registry
 # - CodexRpcError: /usr/local/lib/python3.12/site-packages/openai_codex/errors.py:24
 # - InvalidParamsError: /usr/local/lib/python3.12/site-packages/openai_codex/errors.py:40
 
+try:
+  from openai_codex.errors import (
+    TransportClosedError as _SdkTransportClosedError,
+  )
+except ImportError:  # pragma: no cover - SDK is an optional install
+  # openai-codex is installed in its own Docker step, not via
+  # requirements.txt, so this module must still import without it. The real
+  # symbol's continued existence is pinned by test_codex_sdk_contract, which
+  # is where its disappearance should be reported.
+  class _SdkTransportClosedError(Exception):
+    pass
+
 
 class _FakeBroadcast:
   def __init__(self):
@@ -177,6 +189,7 @@ def _fake_sdk(async_codex_cls):
     "ReasoningSummaryTextDeltaNotification": _Dummy,
     "ReasoningTextDeltaNotification": _Dummy,
     "ThreadTokenUsageUpdatedNotification": _Dummy,
+    "TransportClosedError": _SdkTransportClosedError,
     "TurnCompletedNotification": _FakeTurnCompletedNotification,
     "TurnStatus": _FakeTurnStatus,
     "WebSearchThreadItem": _Dummy,
@@ -566,6 +579,50 @@ def test_is_closed_turn_error_matches_sdk_rpc_errors(monkeypatch):
 
 def test_is_closed_turn_error_does_not_treat_arbitrary_oserror_as_closed():
   assert codex_sdk_runner._is_closed_turn_error(OSError("disk full")) is False
+
+
+def test_is_transport_death_rejects_provider_runtime_error_about_not_running(
+  monkeypatch,
+):
+  """The narrow predicate is the whole reason the two exist separately.
+
+  The runner reraises every non-retryable provider ErrorNotification as a
+  plain `RuntimeError(message)`, and those messages routinely say "is not
+  running". _is_closed_turn_error accepts that text because the only cost
+  of a false positive there is a refused steer; the except-path
+  reclassification must not, or a stop racing a genuine MCP failure would
+  swallow the only report the owner ever gets. Widening the guard back to
+  _is_closed_turn_error fails here.
+  """
+  sdk = _fake_sdk(async_codex_cls=object)
+  monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
+
+  provider_fault = RuntimeError("MCP server 'x' is not running")
+
+  assert codex_sdk_runner._is_transport_death(provider_fault) is False
+  assert codex_sdk_runner._is_closed_turn_error(provider_fault) is True
+
+
+def test_is_transport_death_binds_to_the_sdk_class_not_to_its_name():
+  """Uses the installed SDK, because the binding is what is under test.
+
+  isinstance against the symbol `_sdk_imports()` exposes means a genuine
+  subclass matches and a same-named impostor does not — neither of which a
+  class-name comparison could get right.
+  """
+  pytest.importorskip("openai_codex")
+
+  class _MoreSpecificTransportError(_SdkTransportClosedError):
+    pass
+
+  impostor = type("TransportClosedError", (Exception,), {})
+
+  assert codex_sdk_runner._is_transport_death(
+    _MoreSpecificTransportError("closed stdout")
+  ) is True
+  assert codex_sdk_runner._is_transport_death(
+    impostor("closed stdout")
+  ) is False
 
 
 def test_run_codex_sdk_turn_resume_mismatch_returns_error(monkeypatch):
@@ -1286,6 +1343,243 @@ def test_run_codex_sdk_turn_cleans_up_active_session_on_stream_exception(
   assert result["error"] == "stream blew up"
   assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None
   assert mark_finished_calls == [True]
+
+
+class _KilledTransportError(_SdkTransportClosedError):
+  """A subclass of the SDK's own TransportClosedError.
+
+  Subclassing the real symbol rather than redeclaring its name is the point:
+  the runner reclassifies on isinstance, so a look-alike would prove nothing
+  and a genuine subclass would not match a name check. It is also not a
+  RuntimeError, which keeps the narrow transport branch distinguishable from
+  the looser bare-RuntimeError-text branch that belongs to
+  _is_closed_turn_error alone.
+  """
+
+
+def _run_turn_whose_stream_dies(
+  monkeypatch,
+  exc: Exception,
+  *,
+  on_register=None,
+  should_abort=None,
+  notifications=None,
+  sdk_patch=None,
+):
+  """Runs one turn whose stream raises `exc`, optionally mid-teardown.
+
+  `on_register` fires against the handle the runner has just registered —
+  the same window in which the real Stop / stall watchdog reaches a live
+  turn — so a test can mark the teardown as ours before the stream dies.
+  `notifications` are delivered before the death, so a test can give the
+  turn something to have spent; `sdk_patch` supplies the payload classes
+  those notifications need to be recognized as.
+  """
+  turn_handle = _FakeTurnHandle(notifications, stream_exc=exc)
+  thread = _FakeThread("thread-1", turn_handle)
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      return thread
+
+  sdk = _fake_sdk(FakeAsyncCodex)
+  sdk.update(sdk_patch or {})
+  monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
+
+  if on_register is not None:
+    original_register = registry.register
+
+    def _register(handle):
+      on_register(handle)
+      return original_register(handle)
+
+    monkeypatch.setattr(registry, "register", _register)
+
+  bc = _FakeBroadcast()
+  result = asyncio.run(
+    codex_sdk_runner.run_codex_sdk_turn(
+      user_message="hello",
+      session_id=None,
+      base_env={},
+      cwd="/tmp",
+      chat_id="chat-1",
+      bc=bc,
+      pending_questions={},
+      db=None,
+      **({"should_abort": should_abort} if should_abort else {}),
+    )
+  )
+  return result, bc
+
+
+def _mark_interrupted(handle):
+  handle._interrupt_requested = True
+
+
+def test_run_codex_sdk_turn_reports_self_requested_kill_as_interrupted(
+  monkeypatch,
+):
+  """A stop we asked for must not read as a provider failure.
+
+  Stop and the stall watchdog both interrupt first and then, on timeout,
+  SIGTERM the turn's private process group — so the transport dies
+  mid-stream instead of delivering turn/completed. Reporting the resulting
+  "closed stdout" as an error is wrong twice over: it blames Codex for our
+  own teardown, and the error block overwrites the stop/stall note in the
+  transcript and strips its one-tap Resume.
+  """
+  result, bc = _run_turn_whose_stream_dies(
+    monkeypatch,
+    _KilledTransportError("Codex process closed stdout. stderr_tail="),
+    on_register=_mark_interrupted,
+  )
+
+  assert result["error"] is None
+  assert result["terminal_status"] == "interrupted"
+  assert [e for e in bc.events if e.get("type") == "error"] == []
+  assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None
+
+
+def test_run_codex_sdk_turn_unrequested_transport_death_stays_an_error(
+  monkeypatch,
+):
+  """The same transport death with no stop pending is still a real failure.
+
+  Only a teardown we asked for may be reclassified, so a provider-side
+  crash keeps its error.
+  """
+  result, _bc = _run_turn_whose_stream_dies(
+    monkeypatch,
+    _KilledTransportError("Codex process closed stdout. stderr_tail="),
+  )
+
+  assert result["error"] == "Codex process closed stdout. stderr_tail="
+  assert result.get("terminal_status") is None
+  assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None
+
+
+def test_run_codex_sdk_turn_non_transport_failure_during_stop_stays_an_error(
+  monkeypatch,
+):
+  """A pending stop must not launder an unrelated bug into a clean stop.
+
+  Without this, any defect that happens to fire inside a stop window
+  returns "interrupted" with no error and no log line — invisible in both
+  the transcript and chat.log.
+  """
+  result, _bc = _run_turn_whose_stream_dies(
+    monkeypatch,
+    ValueError("unexpected notification payload"),
+    on_register=_mark_interrupted,
+  )
+
+  assert result["error"] == "unexpected notification payload"
+  assert result.get("terminal_status") is None
+
+
+def test_run_codex_sdk_turn_provider_fault_during_stop_keeps_its_error(
+  monkeypatch,
+):
+  """A provider fault that merely looks closed-ish must still be reported.
+
+  Non-retryable provider errors reach this except path as plain
+  RuntimeErrors carrying the app-server's own words, and "is not running"
+  is ordinary phrasing for a broken MCP server. Only the transport itself
+  dying may be reclassified: if the guard is widened to
+  _is_closed_turn_error, a stop in flight turns a real failure into a
+  silent clean interrupt.
+  """
+  result, _bc = _run_turn_whose_stream_dies(
+    monkeypatch,
+    RuntimeError("MCP server 'x' is not running"),
+    on_register=_mark_interrupted,
+  )
+
+  assert result["error"] == "MCP server 'x' is not running"
+  assert result.get("terminal_status") is None
+
+
+def test_run_codex_sdk_turn_failed_turn_still_reports_what_it_spent(
+  monkeypatch,
+):
+  """Tokens burned before a crash are still tokens burned.
+
+  Every other exit routes its usage through with_usage; the raw error exit
+  used to drop it, so a turn that streamed for minutes and then died looked
+  free in the budget ledger.
+  """
+  class TokenUsageUpdated:
+    def __init__(self, token_usage):
+      self.token_usage = token_usage
+
+  class Usage:
+    def __init__(self, total_tokens):
+      self.last = SimpleNamespace(
+        input_tokens=200, cached_input_tokens=100, output_tokens=100,
+        reasoning_output_tokens=50, total_tokens=300,
+      )
+      self.total = SimpleNamespace(
+        input_tokens=1_000, cached_input_tokens=400, output_tokens=100,
+        reasoning_output_tokens=50, total_tokens=total_tokens,
+      )
+      self.model_context_window = 200_000
+
+    def model_dump(self, **_kwargs):
+      return {
+        "last": vars(self.last),
+        "total": vars(self.total),
+        "modelContextWindow": self.model_context_window,
+      }
+
+  result, _bc = _run_turn_whose_stream_dies(
+    monkeypatch,
+    ValueError("unexpected notification payload"),
+    notifications=[
+      SimpleNamespace(
+        method="thread/tokenUsage/updated",
+        payload=TokenUsageUpdated(Usage(1_100)),
+      ),
+    ],
+    sdk_patch={"ThreadTokenUsageUpdatedNotification": TokenUsageUpdated},
+  )
+
+  assert result["error"] == "unexpected notification payload"
+  assert result["usage"]["total"]["total_tokens"] == 1_100
+  # One update means no thread delta to compute, so the exact numbers are
+  # normalize_codex_usage's business; what this test owns is that the error
+  # exit carries the metrics at all.
+  assert "usage_metrics" in result
+
+
+def test_run_codex_sdk_turn_superseded_generation_kill_is_interrupted(
+  monkeypatch,
+):
+  """A newer turn taking over the chat is also Möbius ending this one.
+
+  This leg needs no ActiveCodexTurn at all, so it is the one that reaches
+  a teardown during startup — pinned here so a later narrowing of
+  stop_requested() to the interrupt flag alone goes red.
+  """
+  superseded = {"value": False}
+
+  result, _bc = _run_turn_whose_stream_dies(
+    monkeypatch,
+    _KilledTransportError("Codex process closed stdout. stderr_tail="),
+    on_register=lambda _handle: superseded.update(value=True),
+    should_abort=lambda: superseded["value"],
+  )
+
+  assert result["error"] is None
+  assert result["terminal_status"] == "interrupted"
 
 
 def test_run_codex_sdk_turn_error_notification_will_retry_continues(monkeypatch):

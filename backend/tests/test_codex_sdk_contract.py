@@ -239,3 +239,21 @@ def test_reasoning_effort_enum_tolerates_unknown_efforts():
 
   for value in ("high", "xhigh", "max", "ultra", "some-future-effort"):
     assert ReasoningEffort(value).value == value
+
+
+def test_transport_closed_error_is_still_exposed_by_the_sdk():
+  """_is_transport_death decides whether an error reaches the owner at all.
+
+  It binds to this class by isinstance, and a stop that SIGTERMs the turn's
+  process group is reclassified as a clean interrupt only when the raised
+  exception is one. If a future SDK renames or drops the symbol, the runner
+  would stop recognizing its own teardown and go back to publishing a raw
+  provider error over the pause note — so fail here first.
+  """
+  pytest.importorskip("openai_codex")
+  from openai_codex.errors import CodexError, TransportClosedError
+
+  assert issubclass(TransportClosedError, CodexError)
+  # Not a RuntimeError: the runner relies on that to keep provider
+  # ErrorNotifications (reraised as plain RuntimeErrors) out of this branch.
+  assert not issubclass(TransportClosedError, RuntimeError)
