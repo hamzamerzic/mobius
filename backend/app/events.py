@@ -581,12 +581,21 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     # Backfill the input summary. Prefer an exact tool_use_id match (Codex
     # backfills a WebSearch query at completion, when several searches may be
     # in flight); older id-less events retain the earliest input-less fallback.
+    def _apply_tool_input(blk: dict) -> None:
+      blk["input"] = event.get("input", "")
+      # A Memory lookup is identified from the command it runs (stamped on the
+      # event by the sink). Carrying that marker onto the block is what lets the
+      # turn name the recall while it is still running, and is the ONLY thing
+      # that authorizes the later output phase to cite notes.
+      if isinstance(event.get("recall"), dict):
+        blk["recall"] = event["recall"]
+
     tool_use_id = event.get("tool_use_id")
     if tool_use_id:
       for blk in assistant_blocks:
         if (blk.get("type") == "tool"
             and blk.get("tool_use_id") == tool_use_id):
-          blk["input"] = event.get("input", "")
+          _apply_tool_input(blk)
           return True
       candidates = [
         blk for blk in assistant_blocks
@@ -596,12 +605,12 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
       ]
       if len(candidates) == 1:
         candidates[0]["tool_use_id"] = tool_use_id
-        candidates[0]["input"] = event.get("input", "")
+        _apply_tool_input(candidates[0])
         return True
       return False
     for blk in assistant_blocks:
       if blk.get("type") == "tool" and not blk.get("input"):
-        blk["input"] = event.get("input", "")
+        _apply_tool_input(blk)
         break
     return True
 
@@ -621,6 +630,10 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
         exit_code = event.get("output_exit_code")
         if exit_code is not None:
           blk["output_exit_code"] = exit_code
+      # Settle a Memory lookup from "searching" to what it actually recalled.
+      # The sink parsed this from the FULL output, before the carving above.
+      if isinstance(event.get("recall"), dict):
+        blk["recall"] = event["recall"]
       return True
     return False
 

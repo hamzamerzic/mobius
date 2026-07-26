@@ -920,6 +920,10 @@ export default function useStreamConnection(chatId, {
                 updated[i] = {
                   ...updated[i],
                   input: event.input,
+                  // A Memory lookup names itself from its command, so the live
+                  // line can read "Searching Memory…" while the search runs
+                  // rather than a generic "Running a command".
+                  ...(event.recall ? { recall: event.recall } : {}),
                   ...(event.tool_use_id && !updated[i].tool_use_id
                     ? { tool_use_id: event.tool_use_id }
                     : {}),

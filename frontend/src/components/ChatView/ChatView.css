@@ -978,6 +978,51 @@
   line-height: 1;
 }
 
+/* A recalled note reads as the same KIND of citation as a web source, so it
+   shares the chip entirely and diverges only in its mark: a glyph rather than
+   a domain letter, tinted to separate "remembered" from "read on the web"
+   without becoming a second visual language. */
+.chat__source-glyph {
+  width: 13px;
+  height: 13px;
+}
+
+/* A note title is prose, not a domain, so it needs more room than a host chip
+   and is the part that should absorb any shortfall. */
+.chat__source-chip--memory {
+  max-width: 320px;
+}
+
+.chat__source-chip--memory .chat__source-icon {
+  color: color-mix(in srgb, var(--accent) 62%, var(--text));
+  background: color-mix(in srgb, var(--accent-dim) 52%, var(--surface2));
+}
+
+/* "Memory" is a fixed six-character label; letting it share the shrink budget
+   with the title collapses it to "Me…" and says nothing. */
+.chat__source-chip--memory .chat__source-host {
+  flex: 0 0 auto;
+}
+
+/* An empty lookup is a fact about the answer, not a destination — so it is
+   stated plainly and styled back, with no hover or pointer affordance. */
+.chat__source-chip--quiet {
+  max-width: none;
+  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
+  background: color-mix(in srgb, var(--surface2) 34%, var(--surface));
+  border-style: dashed;
+}
+
+.chat__source-chip--quiet .chat__source-icon {
+  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
+  background: color-mix(in srgb, var(--surface2) 60%, var(--surface));
+  border-color: transparent;
+}
+
+.chat__source-chip--quiet .chat__source-title {
+  font-style: italic;
+}
+
 .chat__source-copy {
   display: flex;
   align-items: baseline;

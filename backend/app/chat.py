@@ -78,6 +78,7 @@ from app.events import (
   process_event,
   undo_question_scrub,
 )
+from app.memory_recall import recall_from_command, recall_from_output
 from app.providers import effective_agent_settings, get_provider, get_skill_path
 from app.runner_registry import registry
 from app.runtime_types import ChatEvent
@@ -389,6 +390,44 @@ class _ChatEventSink:
 
     ack.add_done_callback(_log_if_failed)
 
+  def _tool_was_memory_recall(self, tool_use_id) -> bool:
+    """Whether this tool was identified as a Memory lookup at input time.
+
+    Read-only by design: resolving the block is a question, not the place to
+    adopt a legacy id (`process_event` still owns that a moment later). Only a
+    tool whose COMMAND named memory_search may go on to cite notes, so output
+    text alone can never mint a citation.
+    """
+    for blk in reversed(self.assistant_blocks):
+      if blk.get("type") != "tool":
+        continue
+      if tool_use_id:
+        if blk.get("tool_use_id") == tool_use_id:
+          return isinstance(blk.get("recall"), dict)
+        continue
+      # Legacy events without an id: the newest still-open tool is the only
+      # safe candidate, matching `_tool_block_for_event`'s fallback.
+      if blk.get("status") != "done":
+        return isinstance(blk.get("recall"), dict)
+    return False
+
+  def _stamp_memory_recall(self, event: ChatEvent) -> None:
+    """Name a Memory-app recall on the event, in two lifecycle phases.
+
+    At input time the command identifies the lookup, so the live turn can say
+    it is remembering while the search still runs. At output time that same
+    tool's stdout is parsed into the notes it actually returned — including the
+    honest "found nothing" outcome, which is otherwise indistinguishable from
+    never having looked.
+    """
+    if event.get("type") == "tool_input":
+      recall = recall_from_command(event.get("input"))
+      if recall is not None:
+        event["recall"] = recall
+      return
+    if self._tool_was_memory_recall(event.get("tool_use_id")):
+      event["recall"] = recall_from_output(event.get("content"))
+
   def _reduce_tool_output(self, event: ChatEvent) -> None:
     """Move a large tool_output's full text OFF the wire (contract rule 6).
 
@@ -505,6 +544,14 @@ class _ChatEventSink:
     # its full text BEFORE process_event (which copies content onto the block)
     # and before the broadcast below, so the rewritten event is the single
     # source feeding the persisted block, the live wire, and the catch-up log.
+    #
+    # Memory recall is stamped just BEFORE that reduction, for the same reason
+    # and on the same funnel: a full lookup's stdout exceeds the inline
+    # threshold, so parsing after rule-6 carving would silently lose the note
+    # titles that make a citation readable. One stamp here reaches the persisted
+    # block, the live wire, and the catch-up log alike, for both runners.
+    if event_type in ("tool_input", "tool_output"):
+      self._stamp_memory_recall(event)
     if event_type == "tool_output":
       self._reduce_tool_output(event)
     if event_type == "thinking":

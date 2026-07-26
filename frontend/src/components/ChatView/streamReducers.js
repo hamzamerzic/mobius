@@ -337,6 +337,11 @@ export function attachToolOutput(prev, content, event = null) {
   if (event?.tool_use_id && !block.tool_use_id) {
     block.tool_use_id = event.tool_use_id
   }
+  // Settle a Memory lookup from "searching" to the notes it actually returned.
+  // The backend parsed these from the full output, before the reduction below.
+  if (event?.recall) {
+    block.recall = event.recall
+  }
   if (event?.output_truncated) {
     block.output_truncated = true
     block.output_full_len = event.output_full_len
