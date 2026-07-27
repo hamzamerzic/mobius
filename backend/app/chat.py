@@ -391,8 +391,8 @@ class _ChatEventSink:
 
     ack.add_done_callback(_log_if_failed)
 
-  def _tool_was_memory_recall(self, tool_use_id) -> bool:
-    """Whether this tool was identified as a Memory lookup at input time.
+  def _memory_recall_for_tool(self, tool_use_id) -> dict | None:
+    """Return the input-time Memory marker for this tool, if there is one.
 
     Read-only by design: resolving the block is a question, not the place to
     adopt a legacy id (`process_event` still owns that a moment later). Only a
@@ -404,13 +404,18 @@ class _ChatEventSink:
         continue
       if tool_use_id:
         if blk.get("tool_use_id") == tool_use_id:
-          return isinstance(blk.get("recall"), dict)
+          recall = blk.get("recall")
+          return recall if isinstance(recall, dict) else None
         continue
       # Legacy events without an id: the newest still-open tool is the only
       # safe candidate, matching `_tool_block_for_event`'s fallback.
       if blk.get("status") != "done":
-        return isinstance(blk.get("recall"), dict)
-    return False
+        recall = blk.get("recall")
+        return recall if isinstance(recall, dict) else None
+    return None
+
+  def _tool_was_memory_recall(self, tool_use_id) -> bool:
+    return self._memory_recall_for_tool(tool_use_id) is not None
 
   def _stamp_memory_recall(self, event: ChatEvent) -> None:
     """Name a Memory-app recall on the event, in two lifecycle phases.
@@ -423,17 +428,34 @@ class _ChatEventSink:
     if event.get("type") in ("tool_start", "tool_input"):
       if event.get("type") == "tool_start" and event.get("tool") != "Bash":
         return
+      # Both a tool_start AND a tool_input can arrive for one tool call on the
+      # Claude runner. Stamp the command-derived marker exactly once per block:
+      # if the block for this tool_use_id already carries a recall marker, leave
+      # it settled and skip. (Codex has no tool_input; Claude's tool_start input
+      # is empty, so in practice only one phase produces a marker — this keeps a
+      # future runner that populates both from double-stamping.)
+      if self._tool_was_memory_recall(event.get("tool_use_id")):
+        return
       recall = recall_from_command(event.get("input"))
       if recall is not None:
         event["recall"] = recall
       return
-    if (event.get("output_complete")
-        and self._tool_was_memory_recall(event.get("tool_use_id"))):
-      event["recall"] = recall_from_result(
+    pending = self._memory_recall_for_tool(event.get("tool_use_id"))
+    if event.get("output_complete") and pending is not None:
+      settled = recall_from_result(
         event.get("content"), event.get("output_exit_code"),
       )
+      # The command path is the authoritative installed-app identity. Stamp it
+      # onto each successful note so deep links keep working when the official
+      # system app had to install as memory-2 (or another numeric suffix).
+      app_slug = pending.get("app_slug")
+      if settled.get("status") == "hit" and isinstance(app_slug, str):
+        settled["notes"] = [
+          {**note, "app_slug": app_slug} for note in settled.get("notes", [])
+        ]
+      event["recall"] = settled
 
-  def _reduce_tool_output(self, event: ChatEvent) -> None:
+  def _reduce_tool_output(self, event: ChatEvent) -> bool:
     """Move a large tool_output's full text OFF the wire (contract rule 6).
 
     This is the single funnel where the live SSE push, the catch-up event_log,
@@ -460,11 +482,11 @@ class _ChatEventSink:
     content = event.get("content")
     if (not isinstance(content, str)
         or len(content) <= TOOL_OUTPUT_INLINE_THRESHOLD):
-      return
+      return False
     if not self.chat_id:
       # No chat to key a stash by (a detached/synthetic sink — chat_id is always
       # set on the live path). Can't move the text off-wire safely, so leave it.
-      return
+      return False
     tool_use_id = event.get("tool_use_id")
     if not tool_use_id:
       # Unexpected post-card-221: mint a stash id and stamp it on the event so
@@ -476,16 +498,21 @@ class _ChatEventSink:
         "minted stash id %s", self.chat_id, tool_use_id,
       )
     full = content
-    excerpt, full_len, exit_code = excerpt_tool_output(full)
+    excerpt, full_len, parsed_exit_code = excerpt_tool_output(full)
     event["content"] = excerpt
     event["output_truncated"] = True
     event["output_full_len"] = full_len
-    event["output_exit_code"] = exit_code
+    # Codex can supply a typed exit code independently of its display text.
+    # That runner-owned fact outranks best-effort parsing of the excerpt.
+    typed_exit_code = event.get("output_exit_code")
+    if not isinstance(typed_exit_code, int) or isinstance(typed_exit_code, bool):
+      event["output_exit_code"] = parsed_exit_code
     self._submit_fire_and_forget(
       StashToolOutput(
         chat_id=self.chat_id, tool_use_id=tool_use_id, output=full,
       )
     )
+    return True
 
   def record_lifecycle(self, event: dict) -> None:
     """Queue private lifecycle metadata without broadcasting it.
@@ -550,17 +577,18 @@ class _ChatEventSink:
     # and before the broadcast below, so the rewritten event is the single
     # source feeding the persisted block, the live wire, and the catch-up log.
     #
-    # Memory recall is stamped just BEFORE that reduction on the same funnel.
-    # The app prints its bounded structured result last, so one validated stamp
-    # reaches the persisted block, live wire, and catch-up log for both runners.
-    if event_type == "tool_output" and event.get("output_exit_code") is None:
-      exit_code = tool_output_exit_code(event.get("content"))
-      if exit_code is not None:
-        event["output_exit_code"] = exit_code
+    # Reduce first so a large JSON envelope is parsed only once. The app prints
+    # its bounded structured Memory result last, so the carved tail still
+    # contains the line that settles a recognized lookup.
+    output_reduced = False
+    if event_type == "tool_output":
+      output_reduced = self._reduce_tool_output(event)
+      if not output_reduced and event.get("output_exit_code") is None:
+        exit_code = tool_output_exit_code(event.get("content"))
+        if exit_code is not None:
+          event["output_exit_code"] = exit_code
     if event_type in ("tool_start", "tool_input", "tool_output"):
       self._stamp_memory_recall(event)
-    if event_type == "tool_output":
-      self._reduce_tool_output(event)
     if event_type == "thinking":
       self._prepare_thinking_event(event)
 

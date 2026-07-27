@@ -52,7 +52,9 @@ RECALL_FAILED = "failed"
 _MAX_COMMAND_SCAN_CHARS = 8192
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _INTERPRETER_RE = re.compile(r"^(?:.*/)?python[0-9.]*$")
-_SCRIPT_RE = re.compile(r"^/data/apps/memory(?:-[0-9]+)?/memory_search\.py$")
+_SCRIPT_RE = re.compile(
+  r"^/data/apps/(?P<app_slug>memory(?:-[0-9]+)?)/memory_search\.py$"
+)
 _CONTROL_TOKEN_RE = re.compile(r"^[;&|()<>]+$")
 
 _RESULT_PREFIX = "MOBIUS_MEMORY_RESULT_V1:"
@@ -115,22 +117,34 @@ def _simple_command_tokens(command: str) -> list[str] | None:
   return tokens
 
 
-def _tokens_run_search(tokens: list[str]) -> bool:
+def _tokens_search_slug(tokens: list[str]) -> str | None:
+  """Return the invoked Memory app slug for the exact documented command.
+
+  Exact arity is a security boundary, not mere tidiness: ``shlex`` treats a
+  newline as whitespace, so accepting arbitrary trailing tokens would also
+  accept a second shell command whose output could forge the structured result
+  line. The supported command is env assignments + Python flags + script +
+  query + chat id, and then it must end.
+  """
   index = 0
   while index < len(tokens) and _ENV_ASSIGN_RE.match(tokens[index]):
     index += 1
   if index >= len(tokens):
-    return False
+    return None
   head = tokens[index]
-  if _SCRIPT_RE.match(head):
-    return len(tokens) > index + 2
+  direct = _SCRIPT_RE.fullmatch(head)
+  if direct:
+    return direct.group("app_slug") if len(tokens) == index + 3 else None
   if not _INTERPRETER_RE.match(head):
-    return False
+    return None
   for script_index, token in enumerate(tokens[index + 1:], start=index + 1):
     if token.startswith("-"):
       continue
-    return bool(_SCRIPT_RE.match(token) and len(tokens) > script_index + 2)
-  return False
+    script = _SCRIPT_RE.fullmatch(token)
+    if script and len(tokens) == script_index + 3:
+      return script.group("app_slug")
+    return None
+  return None
 
 
 def recall_from_command(command: object) -> dict | None:
@@ -150,7 +164,11 @@ def recall_from_command(command: object) -> dict | None:
   if "memory_search.py" not in command:
     return None
   tokens = _simple_command_tokens(command)
-  return {"status": RECALL_SEARCHING} if tokens and _tokens_run_search(tokens) else None
+  app_slug = _tokens_search_slug(tokens) if tokens else None
+  return (
+    {"status": RECALL_SEARCHING, "app_slug": app_slug}
+    if app_slug else None
+  )
 
 
 def recall_from_result(text: object, exit_code: object = None) -> dict:

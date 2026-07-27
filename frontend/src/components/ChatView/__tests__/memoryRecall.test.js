@@ -6,6 +6,7 @@ import {
   messageRecall,
   noteHref,
   noteLabel,
+  safeMemoryAppSlug,
   safeNoteId,
 } from '../memoryRecall.js'
 
@@ -97,6 +98,14 @@ test('a note links into the Memory app through the shell intent contract', () =>
   )
   assert.equal(noteHref({ id: '../evil' }), '',
     'an unsafe id yields no link rather than an unsafe one')
+  assert.equal(
+    noteHref({ id: 'alpha', app_slug: 'memory-2' }),
+    '/shell/?app=memory-2&intent=note%3Aalpha',
+    'a suffixed official install links to the app that performed the recall',
+  )
+  assert.equal(safeMemoryAppSlug('memory-12'), 'memory-12')
+  assert.equal(noteHref({ id: 'alpha', app_slug: '../memory' }), '',
+    'a present but invalid app slug fails closed')
 })
 
 test('a note without a title still reads as words, never blank', () => {

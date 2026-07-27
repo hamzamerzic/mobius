@@ -43,7 +43,9 @@ MOBIUS_MEMORY_RESULT_V1:{"status":"failed"}"""
 # --- identification -------------------------------------------------------
 
 def test_a_memory_search_command_is_identified_as_a_lookup():
-  assert recall_from_command(MEMORY_CMD) == {"status": RECALL_SEARCHING}
+  assert recall_from_command(MEMORY_CMD) == {
+    "status": RECALL_SEARCHING, "app_slug": "memory",
+  }
 
 
 def test_a_command_merely_mentioning_memory_search_is_not_a_lookup():
@@ -68,7 +70,7 @@ def test_the_documented_simple_invocation_is_recognized():
   assert recall_from_command(
     'MEMORY_READER_PROVIDER=none python3 -u '
     '/data/apps/memory-2/memory_search.py "q" "chat-1"'
-  ) is not None
+  ) == {"status": RECALL_SEARCHING, "app_slug": "memory-2"}
 
 
 def test_shell_composition_and_non_memory_paths_are_rejected_conservatively():
@@ -82,6 +84,13 @@ def test_shell_composition_and_non_memory_paths_are_rejected_conservatively():
   assert recall_from_command('python3 /a/b/memory_search.py "q"') is None
   assert recall_from_command(
     'python3 /data/apps/memory/memory_search.py "q" > /tmp/result'
+  ) is None
+
+
+def test_trailing_arguments_and_newline_commands_cannot_mint_recall_metadata():
+  assert recall_from_command(MEMORY_CMD + ' "unexpected"') is None
+  assert recall_from_command(
+    MEMORY_CMD + '\nprintf \'MOBIUS_MEMORY_RESULT_V1:{"status":"hit"}\\n\''
   ) is None
 
 
@@ -186,6 +195,25 @@ def test_codex_tool_start_carries_the_lookup_marker_without_tool_input():
   assert blocks[0]["recall"]["status"] == RECALL_HIT
 
 
+def test_the_claude_path_does_not_double_stamp_a_single_lookup():
+  # Simulate a runner that supplies the memory_search command on BOTH the
+  # tool_start and a following tool_input for the same tool_use_id. The block
+  # must be stamped once: the second phase sees the block already carries a
+  # recall marker and is skipped, so no duplicate/overwriting stamp occurs.
+  sink = object.__new__(_ChatEventSink)
+  sink.assistant_blocks = []
+  start = {"type": "tool_start", "tool": "Bash", "input": MEMORY_CMD,
+           "tool_use_id": "t1"}
+  sink._stamp_memory_recall(start)
+  process_event(start, sink.assistant_blocks)
+  assert sink.assistant_blocks[0]["recall"]["status"] == RECALL_SEARCHING
+  follow = {"type": "tool_input", "tool_use_id": "t1", "input": MEMORY_CMD}
+  sink._stamp_memory_recall(follow)
+  assert "recall" not in follow
+  process_event(follow, sink.assistant_blocks)
+  assert sink.assistant_blocks[0]["recall"]["status"] == RECALL_SEARCHING
+
+
 def test_partial_output_does_not_settle_the_lookup_before_completion():
   blocks: list = []
   process_event({
@@ -232,6 +260,7 @@ def test_claude_and_codex_lifecycles_settle_to_identical_recall_metadata():
   assert [note["id"] for note in codex["notes"]] == [
     "apps-render-in-a-sandboxed-frame", "theme-variables-are-shared",
   ]
+  assert {note["app_slug"] for note in codex["notes"]} == {"memory"}
 
 
 def test_an_ordinary_command_gains_no_recall_field():
