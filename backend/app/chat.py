@@ -61,6 +61,7 @@ from app.chat_writer import (
   StashToolOutput,
   alloc_run_token,
   await_ack as _await_ack,
+  cid_of,
   get_writer,
   next_message_ts as _next_message_ts,
   update_last_assistant_message as _update_last_assistant_message,
@@ -224,6 +225,44 @@ def active_sink_memory_diagnostics(*, include_payloads: bool = True) -> list[dic
       "pending_lifecycle_writes": len(sink._lifecycle_writes),
     })
   return diagnostics
+
+
+def steered_into_turn_event(stored_messages: list[dict]) -> dict:
+  """Build the `steered_into_turn` SSE payload for a batch of steered rows.
+
+  `steered_into_turn` is the AUTHORITATIVE CUT and the client's ONLY "seal the
+  live stream here and re-base it" signal. It means the transcript split has
+  COMMITTED: A1 sealed, these rows appended after it, the sink reset for A2. So
+  it may only be published from the instant the split really happens — by the
+  Claude runner immediately after `split_for_steer`, and by the steer route for
+  Codex (whose `turn.steer()` has no interrupt boundary, so the route IS the
+  seal point). Two publishers, one builder, so the wire shape cannot drift.
+
+  Publishing it at HTTP arrival on the deferred (Claude) path is what made a
+  steer paint duplicated output for the rest of the turn: every block the runner
+  streamed between arrival and the real seal was accumulated into the sealed A1
+  AND left at the head of the client's freshly re-based stream. The deferred
+  path publishes NOTHING at arrival — the 202's own `pending_messages` is what
+  keeps the accepted row visible until the cut, so there is no second channel
+  reconciling the same tray.
+  """
+  return {
+    "type": "steered_into_turn",
+    "messages": [
+      {
+        "role": "user",
+        "ts": msg.get("ts"),
+        "cid": cid_of(msg),
+        "content": msg.get("content", ""),
+        **({"attachments": msg.get("attachments")} if msg.get("attachments") else {}),
+      }
+      for msg in stored_messages
+    ],
+    # Backward-compatible shape for any existing client still expecting a
+    # single steered row.
+    "ts": stored_messages[-1].get("ts"),
+    "content": stored_messages[-1].get("content", ""),
+  }
 
 
 class _ChatEventSink:

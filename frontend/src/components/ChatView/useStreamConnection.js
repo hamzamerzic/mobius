@@ -128,12 +128,19 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  *                         block in place (see streamReducers.js).
  *   queued_turn_starting  Backend about to promote a queued message
  *                         { ts }. Notifies caller via callback.
- *   steered_into_turn     A send was steered into a live provider turn
- *                         instead of queued { ts, content }. Codex uses
- *                         true SDK steer; Claude interrupts and
- *                         re-prompts. Notifies caller so it drops the
- *                         optimistic queued-tray entry and renders the
- *                         message inline as content growth.
+ *   steered_into_turn     THE CUT. The transcript split has committed: the
+ *                         pre-steer assistant segment is sealed and the
+ *                         steered user row(s) are in the transcript
+ *                         { ts, content, messages }. Published by the steer
+ *                         route for Codex (which splits there) and by the
+ *                         Claude runner at its seal. Notifies caller so it
+ *                         promotes the live stream into its own message,
+ *                         re-bases streamItems for the continuation, and
+ *                         renders the row inline as content growth. There is
+ *                         no separate "accepted" event: on the deferred
+ *                         (Claude) path the send's own 202 echoes the row as
+ *                         the still-queued row it is, so the tray has ONE
+ *                         reconciler until the cut arrives.
  *   catch_up_done         Replay burst finished; live events follow.
  *   error                 { message }. Surfaced inline.
  *   done                  Turn complete; SSE closes.
@@ -159,8 +166,9 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  *   identifies the first pending entry in the promoted group and `message`
  *   is the backend-authoritative combined user message when available.
  * @param {(info: {ts: number|null, content: string}) => void} [callbacks.onSteeredIntoTurn]
- *   Fired when a send was steered into a live provider turn. The caller
- *   drops the optimistic queued-tray entry and renders the message inline.
+ *   Fired when the steer's transcript split has COMMITTED. The caller seals the
+ *   live stream into its own message, drops the queued-tray entry, and renders
+ *   the steered message inline.
  * @param {(questionId: string|null) => void} [callbacks.onLiveQuestion]
  *   Fired when the stream shows the currently-live AskUserQuestion card.
  *
@@ -1061,9 +1069,10 @@ export default function useStreamConnection(chatId, {
               message: event.message || null,
             })
           } else if (event.type === 'steered_into_turn') {
-            // The backend already put the user message in the transcript;
-            // the caller drops the optimistic queued-tray entry and renders
-            // it inline as content growth (no send-time spacer/scroll-pin).
+            // THE CUT. The backend has committed the split — the pre-steer
+            // assistant segment is sealed and the user message is in the
+            // transcript — so the caller drops the queued-tray entry and
+            // renders it inline as content growth (no send-time spacer/pin).
             // Flush the typewriter buffer FIRST so the pre-steer assistant
             // text is fully in latestItemsRef before the caller promotes it
             // to its own finished message — without this, the last frame of
@@ -1072,16 +1081,35 @@ export default function useStreamConnection(chatId, {
             flushBuffer()
             if (isCatchUp) {
               // Replay during the catch-up burst (a mid-A2 reconnect or
-              // remount): the DB fetch already returned the sealed pre-steer
-              // assistant (A1) AND the steered user row (Q2), so promoting the
-              // replayed pre-steer text into a fresh message would DUPLICATE
-              // A1, and re-inserting Q2 is redundant. Drop the replayed
+              // remount): the sealed pre-steer assistant (A1) and the steered
+              // user row (Q2) are DB rows now, so promoting the replayed
+              // pre-steer text into a fresh message would DUPLICATE A1 and
+              // re-inserting Q2 would duplicate the row. Drop the replayed
               // pre-steer segment from streamItems so the post-steer
               // continuation (A2) accumulates fresh and promotes as its own
               // assistant after Q2. Clear the off-screen catch-up buffer; the
               // visible stream is replaced only when catch-up commits.
+              //
+              // This reconstructs the SERVER's boundary because the cut sits at
+              // its true position in the replayed log: the publisher is the seal
+              // itself, so every event before it belongs to A1 and every event
+              // after it belongs to A2. While the cut was published at HTTP
+              // arrival instead, the A1 blocks that followed it survived here
+              // and replayed as the head of A2 — the duplication, reproduced on
+              // every reconnect.
               catchUpItems = []
               forceNewTextBlockRef.current = false
+              // Dropping the replayed segment only reconstructs the transcript
+              // if those DB rows are actually loaded, and this branch is exactly
+              // the case where they may not be: a socket that died before the
+              // cut arrived live means A1 was never promoted locally and Q2 was
+              // never inserted, so discarding the replay here would erase A1
+              // from view and leave Q2 sitting in the tray until turn end. The
+              // cut cannot be applied on replay (promoting replayed items is
+              // the duplication), so the DB is the only place both rows exist —
+              // ask for it. One authoritative read at a known boundary; the
+              // event log replays the cut once per connection, not on a timer.
+              onNeedsRefreshRef.current?.({ force: true })
             } else {
               onSteeredIntoTurnRef.current?.({
                 ts: event.ts ?? null,

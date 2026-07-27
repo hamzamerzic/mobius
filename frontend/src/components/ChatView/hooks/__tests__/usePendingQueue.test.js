@@ -392,3 +392,59 @@ test('two distinct in-flight rows with identical text stay distinct (cid disambi
   assert.ok(list.find(m => m.cid === 'local-1'))
   assert.ok(list.find(m => m.cid === 'local-2'))
 })
+
+// ── The deferred steer's 202 must confirm one row, not hydrate the tray ──────
+// A Claude steer is accepted at HTTP arrival but its transcript split (and so
+// the cut that retires the tray row) happens later, at the runner's interrupt
+// boundary. The 202 therefore echoes a queue snapshot taken BEFORE the cut,
+// and the two can land in either order. These pin why doSend confirms the one
+// cid it owns instead of reconciling the whole tray against that snapshot.
+
+test('confirming the deferred steer row is a no-op once the cut retired it', () => {
+  const { result } = renderHook(usePendingQueue)
+  result.current.add(fixtureMsg({ cid: 'steered', ts: 500 }), { inFlight: true })
+  // The runner's cut lands first: onSteeredIntoTurn renders the row inline and
+  // cancels its tray entry.
+  result.current.cancelByCid('steered')
+  // ...and only then does the steer's own 202 resolve.
+  result.current.confirmQueued('steered', { ts: 500 })
+  assert.deepEqual(
+    result.current.pendingMessagesRef.current, [],
+    'the row is already inline in the transcript; confirming must not put a '
+    + 'second copy back in the tray',
+  )
+})
+
+test('hydrating the deferred steer snapshot WOULD resurrect and drop rows', () => {
+  // The failure mode the confirm avoids, asserted on the real hook so the
+  // reason for not calling hydrate here is executable rather than a comment.
+  const { result } = renderHook(usePendingQueue)
+  result.current.add(fixtureMsg({ cid: 'steered', ts: 500 }), { inFlight: true })
+  // A second send queues and its own POST acks while the steer's 202 is still
+  // in flight, so it is confirmed and no longer in-flight.
+  result.current.add(fixtureMsg({ cid: 'later', ts: 600 }), { inFlight: true })
+  result.current.confirmQueued('later', { ts: 600 })
+  // The cut retires the steered row.
+  result.current.cancelByCid('steered')
+  // Now the stale snapshot arrives.
+  result.current.hydrate([{ role: 'user', content: 'hi', ts: 500, cid: 'steered' }])
+  assert.deepEqual(
+    result.current.pendingMessagesRef.current.map(m => m.cid), ['steered'],
+    'wholesale reconcile against a pre-cut snapshot resurrects the row the cut '
+    + 'retired AND drops the row queued after the snapshot was taken',
+  )
+})
+
+test('confirming one cid leaves a concurrently-queued row alone', () => {
+  const { result } = renderHook(usePendingQueue)
+  result.current.add(fixtureMsg({ cid: 'steered', ts: 500 }), { inFlight: true })
+  result.current.add(fixtureMsg({ cid: 'later', ts: 600 }), { inFlight: true })
+  result.current.confirmQueued('later', { ts: 600 })
+  result.current.confirmQueued('steered', { ts: 500 })
+  const list = result.current.pendingMessagesRef.current
+  assert.deepEqual(list.map(m => m.cid), ['steered', 'later'])
+  assert.ok(
+    list.every(m => m.serverTs === true),
+    'both rows are server-confirmed, so fast-forward stays available on both',
+  )
+})
