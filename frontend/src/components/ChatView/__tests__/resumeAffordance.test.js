@@ -15,15 +15,81 @@ const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 // with an unbounded `[\s\S]*?` between the tag and the prop, a DIFFERENT
 // element's props further down the file satisfy the match, so "both render
 // paths pass the ref" can pass with one of them not passing it at all.
+// Scan the opening tag that begins at `start` (source[start] === '<'), skipping
+// over quoted strings ('...', "...", `...`) and balanced { } JSX expression
+// containers so that a '>' inside an arrow prop (onClick={() => ...}), a
+// comparison, or a comment does NOT prematurely end the tag. Returns the index
+// of the tag-closing '>' and whether the tag is self-closing ('/>').
+function scanOpeningTag(source, start) {
+  for (let i = start + 1, brace = 0; i < source.length; i++) {
+    const c = source[i]
+    if (c === '"' || c === "'" || c === '`') {
+      i++
+      while (i < source.length && source[i] !== c) i++
+      continue
+    }
+    if (c === '{') { brace++; continue }
+    if (c === '}') { brace--; continue }
+    if (brace > 0) continue
+    if (c === '/' && source[i + 1] === '>') return { gt: i + 1, selfClosing: true }
+    if (c === '>') return { gt: i, selfClosing: false }
+  }
+  return { gt: -1, selfClosing: false }
+}
+
 function sliceElement(source, openTag) {
   const from = source.indexOf(openTag)
   assert.ok(from >= 0, `expected to find ${openTag}`)
-  let depth = 0
-  for (let i = from; i < source.length; i++) {
-    if (source[i] === '<') depth++
-    if (source[i] === '>') {
+  // Recover the tag name from the opening tag (e.g. '<button' -> 'button',
+  // '<div\n className=...' -> 'div') so we can find its real close.
+  const nameMatch = /^<\s*([A-Za-z][\w.]*)/.exec(openTag)
+  assert.ok(nameMatch, `openTag must start with a tag name: ${openTag}`)
+  const tagName = nameMatch[1]
+
+  const opening = scanOpeningTag(source, from)
+  assert.notEqual(opening.gt, -1, `unterminated opening tag ${openTag}`)
+
+  if (opening.selfClosing) {
+    const slice = source.slice(from, opening.gt + 1)
+    assert.ok(slice.endsWith('/>'),
+      `self-closing slice for ${openTag} must end with '/>'`)
+    return slice
+  }
+
+  // Not self-closing: walk forward, quote/brace aware, tracking nesting of
+  // same-named tags, until the matching '</tagName>' close.
+  const close = `</${tagName}`
+  const nestedOpen = new RegExp(`^<\\s*${tagName}[\\s/>]`)
+  let depth = 1
+  for (let i = opening.gt + 1, brace = 0; i < source.length; i++) {
+    const c = source[i]
+    if (c === '"' || c === "'" || c === '`') {
+      i++
+      while (i < source.length && source[i] !== c) i++
+      continue
+    }
+    if (c === '{') { brace++; continue }
+    if (c === '}') { brace--; continue }
+    if (brace > 0) continue
+    if (c !== '<') continue
+    if (source.startsWith(close, i)) {
       depth--
-      if (depth === 0) return source.slice(from, i + 1)
+      if (depth === 0) {
+        const gt = source.indexOf('>', i)
+        assert.notEqual(gt, -1, `unterminated close for ${openTag}`)
+        const slice = source.slice(from, gt + 1)
+        const tail = slice.replace(/\s+/g, ' ')
+        assert.ok(tail.endsWith(`${close}>`) || tail.endsWith(`${close} >`),
+          `slice for ${openTag} must end with ${close}>`)
+        return slice
+      }
+      continue
+    }
+    // A nested opening tag of the same name deepens the nesting — unless it is
+    // self-closing, which needs no matching close.
+    if (nestedOpen.test(source.slice(i))) {
+      const nested = scanOpeningTag(source, i)
+      if (nested.gt !== -1 && !nested.selfClosing) depth++
     }
   }
   assert.fail(`unterminated element ${openTag}`)
