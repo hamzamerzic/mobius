@@ -67,6 +67,8 @@ _RESULT_RE = re.compile(
 # anything else keeps traversal, absolute paths, and control characters out of
 # a value the client turns into a deep link.
 _PATH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*\.md$")
+_NOTE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_MAX_NOTE_ID_CHARS = 128
 
 
 def _clean(value: str, limit: int) -> str:
@@ -82,6 +84,24 @@ def _note_id(path: str) -> str:
   """The graph node id for a citation path: its file stem."""
   tail = path.rsplit("/", 1)[-1]
   return tail[:-3] if tail.endswith(".md") else tail
+
+
+def _safe_note_id(value: object, path: str) -> str:
+  """Keep the graph's real node id, with a path-stem fallback for old apps.
+
+  A graph id is not required to equal its markdown filename. The Memory app
+  opens nodes by id, so replacing a valid structured id with the path stem
+  makes a well-formed citation navigate to nowhere whenever those differ.
+  """
+  if isinstance(value, str):
+    candidate = value.strip()
+    if (
+      candidate
+      and len(candidate) <= _MAX_NOTE_ID_CHARS
+      and _NOTE_ID_RE.fullmatch(candidate)
+    ):
+      return candidate
+  return _note_id(path)
 
 
 def _title_from_path(path: str) -> str:
@@ -211,7 +231,7 @@ def recall_from_result(text: object, exit_code: object = None) -> dict:
     title = _clean(raw_note.get("title"), MAX_RECALL_TITLE_CHARS)
     excerpt = _clean(raw_note.get("excerpt"), MAX_RECALL_EXCERPT_CHARS)
     note = {
-      "id": _note_id(path),
+      "id": _safe_note_id(raw_note.get("id"), path),
       "path": path,
       "title": title or _title_from_path(path) or path,
     }

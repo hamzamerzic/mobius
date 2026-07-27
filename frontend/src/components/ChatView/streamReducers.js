@@ -351,7 +351,8 @@ export function attachToolOutput(prev, content, event = null) {
     block.tool_use_id = event.tool_use_id
   }
   // Settle a Memory lookup from "searching" to the notes it actually returned.
-  // The backend parsed these from the full output, before the reduction below.
+  // The backend stamps this from the bounded structured tail that survives any
+  // large-output carving.
   if (event?.recall) {
     block.recall = event.recall
   }

@@ -647,7 +647,8 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
         blk["output_truncated"] = True
         blk["output_full_len"] = event.get("output_full_len")
       # Settle a Memory lookup from "searching" to what it actually recalled.
-      # The sink parsed this from the FULL output, before the carving above.
+      # The app prints its bounded result last, so it survives any head+tail
+      # carving the sink performed before parsing.
       if isinstance(event.get("recall"), dict):
         blk["recall"] = event["recall"]
       return True

@@ -106,6 +106,34 @@ def test_a_successful_lookup_cites_the_notes_it_opened():
   assert recall["notes"][0]["excerpt"] == "Each mini-app runs isolated."
 
 
+def test_a_citation_keeps_the_graph_node_id_when_it_differs_from_the_file():
+  recall = recall_from_result(
+    'MOBIUS_MEMORY_RESULT_V1:{"status":"hit","notes":['
+    '{"id":"canonical-node","path":"notes/readable-filename.md",'
+    '"title":"Canonical node"}]}',
+    0,
+  )
+
+  assert recall["notes"] == [{
+    "id": "canonical-node",
+    "path": "notes/readable-filename.md",
+    "title": "Canonical node",
+  }]
+
+
+def test_an_unsafe_or_missing_graph_node_id_falls_back_to_the_file_stem():
+  recall = recall_from_result(
+    'MOBIUS_MEMORY_RESULT_V1:{"status":"hit","notes":['
+    '{"id":"../escape","path":"notes/safe-fallback.md"},'
+    '{"path":"notes/legacy-note.md"}]}',
+    0,
+  )
+
+  assert [note["id"] for note in recall["notes"]] == [
+    "safe-fallback", "legacy-note",
+  ]
+
+
 def test_a_lookup_that_found_nothing_says_so():
   assert recall_from_result(EMPTY_OUTPUT, 0) == {"status": RECALL_EMPTY}
 
