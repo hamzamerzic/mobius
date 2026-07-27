@@ -825,6 +825,26 @@ cleans sessions up on navigation. Never probe or fall back to the blocked
 browser API from the opaque frame. The complete contract lives in the platform
 `CAPABILITIES.md`.
 
+## Local zoom surfaces
+
+The Möbius shell keeps its toolbar, drawer, chat, and app frame at one stable
+page scale on touch devices. An app that genuinely needs zoom—a map, image,
+canvas, diagram, or document—owns it **inside that specific surface**:
+
+- put `touch-action: none` on the zoomable content surface, not on the app root;
+- use Pointer Events to track a two-pointer distance and transform only the
+  content inside that surface;
+- keep surrounding controls and ordinary reading regions on native pan/tap
+  behavior;
+- provide visible zoom-in, zoom-out, and reset controls (plus keyboard
+  equivalents where relevant), so pinch is never the only way to enlarge
+  content.
+
+Do not add `user-scalable=no` or a maximum scale to the app frame, and do not
+try to zoom the parent document. The shared frame intentionally leaves that
+policy out: each app decides whether it needs a local zoom interaction, while
+the shell chrome remains fixed.
+
 ---
 
 ## Agent-powered mini-apps
