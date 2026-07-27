@@ -1449,6 +1449,58 @@ def test_run_codex_sdk_turn_reports_self_requested_kill_as_interrupted(
   assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None
 
 
+def test_run_codex_sdk_turn_self_requested_kill_still_reports_usage(
+  monkeypatch,
+):
+  """A stop we asked for is a clean interrupt, but the tokens still count.
+
+  Usage delivered before the self-kill must survive the transport-death
+  reclassification: the interrupted (error=None) exit routes through
+  with_usage just like every other exit, so a stopped turn is not free in
+  the budget ledger.
+  """
+  class TokenUsageUpdated:
+    def __init__(self, token_usage):
+      self.token_usage = token_usage
+
+  class Usage:
+    def __init__(self, total_tokens):
+      self.last = SimpleNamespace(
+        input_tokens=200, cached_input_tokens=100, output_tokens=100,
+        reasoning_output_tokens=50, total_tokens=300,
+      )
+      self.total = SimpleNamespace(
+        input_tokens=1_000, cached_input_tokens=400, output_tokens=100,
+        reasoning_output_tokens=50, total_tokens=total_tokens,
+      )
+      self.model_context_window = 200_000
+
+    def model_dump(self, **_kwargs):
+      return {
+        "last": vars(self.last),
+        "total": vars(self.total),
+        "modelContextWindow": self.model_context_window,
+      }
+
+  result, _bc = _run_turn_whose_stream_dies(
+    monkeypatch,
+    _KilledTransportError("Codex process closed stdout. stderr_tail="),
+    on_register=_mark_interrupted,
+    notifications=[
+      SimpleNamespace(
+        method="thread/tokenUsage/updated",
+        payload=TokenUsageUpdated(Usage(1_100)),
+      ),
+    ],
+    sdk_patch={"ThreadTokenUsageUpdatedNotification": TokenUsageUpdated},
+  )
+
+  assert result["error"] is None
+  assert result["terminal_status"] == "interrupted"
+  assert result["usage"]["total"]["total_tokens"] == 1_100
+  assert "usage_metrics" in result
+
+
 def test_run_codex_sdk_turn_unrequested_transport_death_stays_an_error(
   monkeypatch,
 ):

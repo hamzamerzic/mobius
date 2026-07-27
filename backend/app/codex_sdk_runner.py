@@ -571,7 +571,6 @@ def _sdk_imports() -> dict[str, Any]:
   from openai_codex.client import CodexConfig
   from openai_codex.errors import (
     CodexRpcError,
-    InvalidParamsError,
     TransportClosedError,
   )
   from openai_codex.types import ReasoningEffort, ReasoningSummary
@@ -650,7 +649,6 @@ def _sdk_imports() -> dict[str, Any]:
     "ErrorNotification": ErrorNotification,
     "FileChangePatchUpdatedNotification": FileChangePatchUpdatedNotification,
     "FileChangeThreadItem": FileChangeThreadItem,
-    "InvalidParamsError": InvalidParamsError,
     "ReasoningEffort": ReasoningEffort,
     "ReasoningSummary": ReasoningSummary,
     "Sandbox": Sandbox,
@@ -1500,7 +1498,9 @@ def _is_transport_death(exc: BaseException) -> bool:
     return False
   if isinstance(exc, sdk["TransportClosedError"]):
     return True
-  if isinstance(exc, (sdk["InvalidParamsError"], sdk["CodexRpcError"])):
+  # InvalidParamsError is a subclass of CodexRpcError, so matching the base
+  # class alone already covers it.
+  if isinstance(exc, sdk["CodexRpcError"]):
     text = str(exc).lower()
     return "closed" in text or "not running" in text or "broken pipe" in text
   return False
