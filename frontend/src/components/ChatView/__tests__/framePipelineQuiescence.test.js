@@ -128,6 +128,10 @@ test('streaming and attention rows stay tellable apart without motion', () => {
   const streaming = ruleBody('.drawer__streaming-dot')
   const attention = ruleBody('.drawer__attention-dot')
   assert.notEqual(streaming, attention, 'the two drawer row states render identically')
+  // Streaming is a filled disc in --accent; the finished/attention dot is a
+  // hollow ring (transparent fill + coloured border) so the two stay tellable
+  // apart on a non-colour channel for colour-vision-deficient users.
   assert.match(streaming, /background:\s*var\(--accent\)/)
-  assert.match(attention, /background:\s*var\(--green\)/)
+  assert.match(attention, /background:\s*transparent/)
+  assert.match(attention, /border:[^;]*var\(--green\)/)
 })

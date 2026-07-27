@@ -994,12 +994,14 @@ const DrawerRow = memo(function DrawerRow({
         ) : building ? (
           <span
             className="drawer__streaming-dot"
+            role="img"
             aria-label="Building"
             title="Building…"
           />
         ) : attention ? (
           <span
             className="drawer__attention-dot"
+            role="img"
             aria-label="New activity"
             title="New activity"
           />
