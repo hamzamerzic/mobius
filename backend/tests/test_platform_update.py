@@ -1,20 +1,21 @@
 """Clone-native platform reconcile — the git plumbing that fetches origin and
-rebases the local edits onto the new version without ever losing them or serving
-a broken tree.
+merges it once with local edits without ever losing them or serving a broken
+tree.
 
 These drive ``platform_update.reconcile_clone`` against throwaway repos in
 ``tmp_path``: a bare ``origin`` repo, a ``platform`` clone of it (mirroring the
 entrypoint bootstrap: local ``main`` + an ``upstream`` marker branch at HEAD),
 and the module's ``/data`` flag paths monkeypatched into ``tmp_path`` so no real
 platform tree is touched. Each platform tree carries a trivially-importable
-``backend/app`` package so the post-rebase import probe (a real ``import
+``backend/app`` package so the post-merge import probe (a real ``import
 app.main`` subprocess) exercises for real.
 
-The load-bearing cases: a clean fast-forward advances the served tree; a disjoint
-local edit is preserved by a rebase; a same-line conflict aborts and serves the
-OLD code; a text-clean rebase whose result fails to import rolls back to the old
-code; an offline fetch keeps serving unchanged; and a crash-interrupted rebase is
-aborted on the next pass.
+The load-bearing cases: a clean fast-forward advances the served tree; a
+disjoint local edit is preserved with its original commit identity; all net
+conflicts surface in one merge; a text-clean merge whose result fails to import
+rolls back to the old code; an offline fetch keeps serving unchanged; and a
+crash-interrupted merge is aborted on the next pass. A legacy interrupted rebase
+is still cleaned up because an update can cross this implementation boundary.
 """
 
 import subprocess
@@ -38,7 +39,7 @@ def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProce
 
 # A trivially-importable backend so the import probe (`import app.main` with cwd
 # repo/backend) runs for real. `main.py` imports the sibling `foo` module so a
-# test can delete `foo` upstream to make a text-clean rebase import-broken.
+# test can delete `foo` upstream to make a text-clean merge import-broken.
 _MAIN_PY = "import app.foo\n\nVALUE = app.foo.VALUE\nLINE_A = 1\nLINE_B = 2\nLINE_C = 3\n"
 _FOO_PY = "VALUE = 'foo'\n"
 
@@ -182,13 +183,13 @@ def test_clean_shallow_fast_forward_does_not_fetch_full_history(
   assert _served_sha(platform) == new
 
 
-# --- V-B2: disjoint local edit preserved via rebase -------------------------
+# --- V-B2: disjoint local edit preserved via one merge ----------------------
 
 def test_local_edit_preserved_across_update(clone_env):
   origin, platform = clone_env
-  _local_commit(platform, edits={"backend/app/main.py":
+  local = _local_commit(platform, edits={"backend/app/main.py":
     _MAIN_PY.replace("LINE_A = 1", "LINE_A = 111")})
-  _advance_origin(origin, edits={"backend/app/main.py":
+  target = _advance_origin(origin, edits={"backend/app/main.py":
     _MAIN_PY.replace("LINE_C = 3", "LINE_C = 333")})
 
   res = pu.reconcile_clone(platform, at_boot=True)
@@ -197,11 +198,23 @@ def test_local_edit_preserved_across_update(clone_env):
   served = (platform / "backend/app/main.py").read_text()
   assert "LINE_A = 111" in served  # local edit
   assert "LINE_C = 333" in served  # upstream edit
+  # A single merge preserves the original local commit instead of rewriting it
+  # through a per-commit rebase. Both complete histories are explicit parents.
+  parents = _git(
+    platform, "show", "-s", "--format=%P", res.new_sha,
+  ).stdout.split()
+  assert parents == [local, target]
+  assert _git(
+    platform, "merge-base", "--is-ancestor", local, res.new_sha,
+  ).returncode == 0
+  assert _git(
+    platform, "merge-base", "--is-ancestor", target, res.new_sha,
+  ).returncode == 0
   assert not pu.CONFLICT_FLAG.exists()
 
 
 # --- regression: a drifted upstream marker never triggers a data-losing
-# fast-forward. The ff-vs-rebase choice is decided by ANCESTRY, not the upstream
+# fast-forward. The ff-vs-merge choice is decided by ANCESTRY, not the upstream
 # marker, so committed local edits survive even when the marker is set to the
 # exact value that would have made the old marker-gated `reset --hard target`
 # discard them. This is the headline data-safety invariant of the fix. ---------
@@ -221,7 +234,7 @@ def test_drifted_upstream_marker_never_discards_local_commits(clone_env):
 
   res = pu.reconcile_clone(platform, at_boot=True)
 
-  # local is NOT an ancestor of target, so ancestry forces a REBASE (not a reset)
+  # local is NOT an ancestor of target, so ancestry forces a MERGE (not a reset)
   # and BOTH survive — the local commit is not discarded despite the bad marker.
   assert res.status == "updated"
   served = (platform / "backend/app/main.py").read_text()
@@ -244,10 +257,10 @@ def test_conflict_serves_old_and_flags(clone_env):
   res = pu.reconcile_clone(platform, at_boot=True)
 
   assert res.status == "conflict"
-  # Served tree is the pre-reconcile local code, intact; no half-rebase left.
+  # Served tree is the pre-reconcile local code, intact; no half-merge left.
   assert _served_sha(platform) == pre
   assert "LINE_A = 'LOCAL'" in (platform / "backend/app/main.py").read_text()
-  assert not pu._rebase_in_progress(platform)
+  assert not pu._reconcile_in_progress(platform)
   assert pu.CONFLICT_FLAG.exists()
   assert any("main.py" in p for p in res.conflict_paths)
   status = pu.platform_status(platform)
@@ -255,11 +268,69 @@ def test_conflict_serves_old_and_flags(clone_env):
   assert any("main.py" in p for p in status["conflict_paths"])
 
 
-# --- V-B4: import-broken text-clean rebase -> rollback ----------------------
-
-def test_import_broken_rebase_rolls_back(clone_env):
+def test_diverged_update_surfaces_all_net_conflicts_together(clone_env):
   origin, platform = clone_env
-  # A disjoint local edit (so the rebase is text-clean), while upstream DELETES
+  _local_commit(platform, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LOCAL'")})
+  _local_commit(platform, edits={"backend/app/foo.py": "VALUE = 'LOCAL'\n"})
+  _advance_origin(origin, edits={
+    "backend/app/main.py": _MAIN_PY.replace(
+      "LINE_A = 1", "LINE_A = 'UPSTREAM'",
+    ),
+    "backend/app/foo.py": "VALUE = 'UPSTREAM'\n",
+  })
+
+  res = pu.reconcile_clone(platform, at_boot=True)
+
+  # A per-commit rebase stopped on main.py, then made the resolver discover the
+  # foo.py conflict only after continuing. The net merge reports both at once.
+  assert res.status == "conflict"
+  assert set(res.conflict_paths) == {
+    "backend/app/main.py", "backend/app/foo.py",
+  }
+  assert not pu._reconcile_in_progress(platform)
+
+
+@pytest.mark.parametrize(
+  ("merge_rc", "expected_error"),
+  [
+    (pu._MERGE_TIMEOUT, "merge_timeout"),
+    (2, "merge_failed"),
+  ],
+)
+def test_non_conflict_merge_failure_serves_old_without_a_resolver_flag(
+  clone_env, monkeypatch, merge_rc, expected_error,
+):
+  origin, platform = clone_env
+  pre = _local_commit(platform, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LOCAL'")})
+  target = _advance_origin(origin, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_C = 3", "LINE_C = 'UPSTREAM'")})
+  # A previous attempt may have left either durable review state behind. A
+  # timeout or git failure with no unmerged paths has nothing a resolver can
+  # act on, so returning "error" while preserving one of these flags would make
+  # the next status read lie about what just happened.
+  pu._write_conflict_flag("b" * 40, ["backend/app/old.py"])
+  pu._write_rolled_back_flag("c" * 40, "old import failure")
+  monkeypatch.setattr(pu, "_merge_target", lambda _repo, _target: merge_rc)
+
+  res = pu.reconcile_clone(platform, at_boot=True)
+
+  assert res.status == "error"
+  assert res.error == expected_error
+  assert res.target_sha == target
+  assert _served_sha(platform) == pre
+  assert not pu._reconcile_in_progress(platform)
+  assert not pu.CONFLICT_FLAG.exists()
+  assert not pu.ROLLED_BACK_FLAG.exists()
+  assert not pu.RECONCILE_PRE_FLAG.exists()
+
+
+# --- V-B4: import-broken text-clean merge -> rollback -----------------------
+
+def test_import_broken_merge_rolls_back(clone_env):
+  origin, platform = clone_env
+  # A disjoint local edit (so the merge is text-clean), while upstream DELETES
   # foo.py — which main.py still imports. Textually clean, import-broken.
   pre = _local_commit(platform, edits={"backend/app/main.py":
     _MAIN_PY + "LOCAL = 'kept'\n"})
@@ -335,29 +406,29 @@ def test_detached_head_uncommitted_edit_survives_reconcile(clone_env):
   assert "LINE_C = 1001" in served
 
 
-# --- crash-safety: a stale in-progress rebase is aborted --------------------
+# --- crash-safety: interrupted merge + legacy rebase are aborted ------------
 
-def test_stale_rebase_aborted_on_next_pass(clone_env):
+def test_stale_merge_aborted_on_next_pass(clone_env):
   origin, platform = clone_env
-  # Force a real conflict and leave the rebase in progress (no abort), mirroring
-  # a crash mid-rebase.
+  # Force a real conflict and leave the merge in progress (no abort), mirroring
+  # a crash mid-merge.
   pre = _local_commit(platform, edits={"backend/app/main.py":
     _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LOCAL'")})
   new = _advance_origin(origin, edits={"backend/app/main.py":
     _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'UPSTREAM'")})
   _git(platform, "fetch", "-q", "origin")
-  rc = _git(platform, "rebase", new, "main", check=False).returncode
-  assert rc != 0 and pu._rebase_in_progress(platform)  # left mid-rebase
+  rc = _git(platform, "merge", "--no-ff", new, check=False).returncode
+  assert rc != 0 and pu._merge_in_progress(platform)  # left mid-merge
 
-  # Next reconcile must abort the stale rebase FIRST, then reconcile cleanly
+  # Next reconcile must abort the stale merge FIRST, then reconcile cleanly
   # (here: re-conflict and serve old — the point is it does not wedge or corrupt).
   res = pu.reconcile_clone(platform, at_boot=True)
   assert res.status == "conflict"
   assert _served_sha(platform) == pre
-  assert not pu._rebase_in_progress(platform)
+  assert not pu._reconcile_in_progress(platform)
 
 
-def test_boot_guard_aborts_interrupted_rebase_before_serving(clone_env):
+def test_boot_guard_aborts_interrupted_merge_before_serving(clone_env):
   origin, platform = clone_env
   pre = _local_commit(platform, edits={"backend/app/main.py":
     _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LOCAL'")})
@@ -365,19 +436,36 @@ def test_boot_guard_aborts_interrupted_rebase_before_serving(clone_env):
     _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'UPSTREAM'")})
   _git(platform, "fetch", "-q", "origin")
   pu._write_reconcile_pre(pre)
-  rc = _git(platform, "rebase", new, "main", check=False).returncode
-  assert rc != 0 and pu._rebase_in_progress(platform)
+  rc = _git(platform, "merge", "--no-ff", new, check=False).returncode
+  assert rc != 0 and pu._merge_in_progress(platform)
   assert "<<<<<<<" in (platform / "backend/app/main.py").read_text()
 
   summary = pu.boot_guard_clean_served_tree(platform)
 
   assert summary.startswith("boot_guard[reset]")
   assert _served_sha(platform) == pre
-  assert not pu._rebase_in_progress(platform)
+  assert not pu._reconcile_in_progress(platform)
   assert "<<<<<<<" not in (platform / "backend/app/main.py").read_text()
   ok, err = pu._import_probe(platform)
   assert ok, err
   assert not pu.RECONCILE_PRE_FLAG.exists()
+
+
+def test_legacy_stale_rebase_aborted_on_next_pass(clone_env):
+  origin, platform = clone_env
+  pre = _local_commit(platform, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LOCAL'")})
+  new = _advance_origin(origin, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'UPSTREAM'")})
+  _git(platform, "fetch", "-q", "origin")
+  rc = _git(platform, "rebase", new, "main", check=False).returncode
+  assert rc != 0 and pu._rebase_in_progress(platform)
+
+  res = pu.reconcile_clone(platform, at_boot=True)
+
+  assert res.status == "conflict"
+  assert _served_sha(platform) == pre
+  assert not pu._reconcile_in_progress(platform)
 
 
 def test_boot_guard_sync_propagates_failure(monkeypatch):
@@ -855,8 +943,8 @@ async def test_platform_conflict_resolver_chat_is_click_gated(
   pu._write_conflict_flag(target, ["backend/app/main.py"])
   calls = []
 
-  async def fake_spawn(db, paths):
-    calls.append((db, paths))
+  async def fake_spawn(db, paths, target_sha):
+    calls.append((db, paths, target_sha))
     return {
       "chat_id": "resolver-chat",
       "created": True,
@@ -873,11 +961,28 @@ async def test_platform_conflict_resolver_chat_is_click_gated(
     "created": True,
     "started": True,
   }
-  assert calls == [(db, ["backend/app/main.py"])]
+  assert calls == [(db, ["backend/app/main.py"], target)]
   flag = pu._read_conflict_flag()
   assert flag["upstream"] == target
   assert flag["paths"] == ["backend/app/main.py"]
   assert flag["chat_id"] == "resolver-chat"
+
+
+def test_platform_conflict_resolver_message_pins_reviewed_target():
+  target = "a" * 40
+
+  content = pu._platform_conflict_resolver_message(
+    target,
+    ["backend/app/main.py", "frontend/src/App.jsx"],
+  )
+
+  assert f"merge --no-ff {target}" in content
+  assert "merge --no-ff origin/main" not in content
+  assert "backend/app/main.py, frontend/src/App.jsx" in content
+  # The resolver runs in a headless shell where `git merge --continue` opens an
+  # editor and hangs/errors; it must finish non-interactively instead.
+  assert "commit --no-edit" in content
+  assert "merge --continue" not in content
 
 
 def test_status_restart_needed_when_disk_head_changed_after_boot(clone_env):
