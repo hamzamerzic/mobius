@@ -81,9 +81,32 @@ from app.events import (
   undo_question_scrub,
 )
 from app.memory_recall import recall_from_command, recall_from_result
-from app.providers import effective_agent_settings, get_provider, get_skill_path
+from app.providers import (
+  authenticated_provider_ids,
+  effective_agent_settings,
+  get_provider,
+  get_skill_path,
+)
 from app.runner_registry import registry
 from app.runtime_types import ChatEvent
+
+
+NO_AGENT_CONNECTED_MESSAGE = (
+  "No agent is available right now. Connect or reconnect one in Settings "
+  "to start building with M\u00f6bius.\n\n"
+  "In the meantime, browse the App Store\u2014many apps work without AI. "
+  "You\u2019ll need a connected agent to modify an app, build a new one, or "
+  "change how M\u00f6bius looks."
+)
+
+_NO_AGENT_USAGE_METRICS = {
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "cache_read_input_tokens": 0,
+  "cache_creation_input_tokens": 0,
+  "reasoning_output_tokens": 0,
+  "total_tokens": 0,
+}
 
 
 _chat_log_handler: RotatingFileHandler | None = None
@@ -3749,6 +3772,7 @@ async def _complete_turn(
   limit_reached: bool = False,
   parked_until: datetime | None = None,
   park_reason: str | None = None,
+  provider_free: bool = False,
 ) -> chat_queue.TerminalDisposition:
   """Terminal sequence shared by both providers' success + error exits.
 
@@ -4070,6 +4094,11 @@ async def _complete_turn(
   if close_browser:
     await _close_browser_session(chat_id)
   db.close()
+  if (
+    provider_free
+    and disposition is chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
+  ):
+    return chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED
   return disposition
 
 
@@ -4714,7 +4743,10 @@ async def run_chat(
           _s.data_dir,
           chat_id,
           deterministic=(
-            disposition == chat_queue.TerminalDisposition.LIMIT_PARKED
+            disposition in {
+              chat_queue.TerminalDisposition.LIMIT_PARKED,
+              chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED,
+            }
           ),
         )
     except Exception:
@@ -4742,6 +4774,7 @@ def _chat_note_mtime(data_dir: str, chat_id: str) -> float:
 # limit, while still preserving the final parked state for compaction/recovery.
 _NOTE_SETTLED_DISPOSITIONS = frozenset({
   chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED,
+  chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED,
   chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED,
   chat_queue.TerminalDisposition.LIMIT_PARKED,
 })
@@ -5362,6 +5395,46 @@ async def _run_chat_impl_with_db(
   # the SDK runner. Without this, the SDK fails with a cryptic error.
   auth_error = provider.check_auth(settings.data_dir)
   if auth_error:
+    # A fresh install may intentionally finish setup without connecting an
+    # agent; a returning owner's sole credential can also expire. When no
+    # provider can run, treat that product state as useful connect/reconnect
+    # guidance, not a dead-end error: send it through the same sink as a real
+    # assistant response so it typewrites live and survives reload.
+    #
+    # This branch is deliberately gated on EVERY registered provider being
+    # disconnected. If another provider is connected, this chat's selected
+    # provider genuinely failed and the existing error path below remains the
+    # honest response.
+    if not authenticated_provider_ids(settings.data_dir):
+      await _record_run_metrics(
+        chat_id=chat_id,
+        run_token=run_token or "",
+        provider_session_id=None,
+        cost_usd=0.0,
+        usage=_NO_AGENT_USAGE_METRICS,
+      )
+      # Metrics are ordered through the writer actor and may await its ack.
+      # Stop can supersede this run while no provider handle or sink exists;
+      # revalidate before installing a sink so a stale turn cannot overwrite
+      # a fresh successor's steering target or publish guidance after Stop.
+      if _run_generation_superseded(chat_id, run_gen):
+        _log_superseded_run(chat_id, "no-agent-metrics")
+        db.close()
+        return chat_queue.TerminalDisposition.STALE_NO_ACTION
+      sink = _ChatEventSink(bc, chat_id, run_token=run_token)
+      register_active_sink(chat_id, sink)
+      sink.publish({"type": "text", "content": NO_AGENT_CONNECTED_MESSAGE})
+      return await _complete_turn(
+        bc=bc,
+        sink=sink,
+        db=db,
+        chat_id=chat_id,
+        run_gen=run_gen,
+        provider_id=provider_id,
+        cost_usd=0,
+        close_browser=False,
+        provider_free=True,
+      )
     bc.publish({"type": "error", "message": auth_error})
     disposition = await _terminal_setup_error_cleanup(chat_id, run_token or "", run_gen)
     bc.publish({"type": "done"})
