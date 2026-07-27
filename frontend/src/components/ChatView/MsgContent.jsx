@@ -346,11 +346,12 @@ function MsgContentInner({
           }
           return renderBlock(node.single.item, node.single.idx)
         })}
-        {/* The turn's web sources, collected from its tool blocks and shown
-            once after the answer. Renders nothing when the turn did no web
-            search, so an ordinary reply is unchanged. */}
+        {/* What informed the turn — notes recalled from Memory, then web
+            sources — collected from its tool blocks and shown once after the
+            answer. Renders nothing when the turn neither searched the web nor
+            consulted Memory, so an ordinary reply is unchanged. */}
         {msg.role === 'assistant' && !isStreaming && (
-          <MessageSources blocks={msg.blocks} />
+          <MessageSources blocks={msg.blocks} onInternalNav={onInternalNav} />
         )}
       </>
     )

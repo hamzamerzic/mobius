@@ -17,6 +17,7 @@ import {
   applyTaskEvent,
   appendTextItem,
   replaceTextItem,
+  startToolLifecycle,
 } from './streamReducers.js'
 import {
   readStoredStreamSnapshot,
@@ -882,21 +883,9 @@ export default function useStreamConnection(chatId, {
             }
           } else if (event.type === 'tool_start') {
             flushBuffer()
-            applyStreamItems(prev => [...prev, {
-              type: 'tool',
-              tool: event.tool,
-              input: event.input || '',
-              output: '',
-              status: 'running',
-              // Carry the real per-tool identity from the wire (lever 2a). It
-              // keys the tool block (StreamingMessage/MsgContent) and lets a
-              // catch-up commit reconcile onto it by identity instead of
-              // remounting the heaviest block (expanded state, <img>, lazy
-              // fullOutput). streamItemToBlock spreads ...item, so it flows to
-              // the promoted message too. Undefined on a legacy/tokenless wire,
-              // where the ordinal fallback key still applies.
-              tool_use_id: event.tool_use_id,
-            }])
+            // Codex identifies Memory here; Claude may add the same marker on
+            // a later tool_input. One reducer owns the shared live block shape.
+            applyStreamItems(prev => startToolLifecycle(prev, event))
           } else if (event.type === 'tool_input') {
             // Backfill by stable identity. Older id-less events retain their
             // earliest-input-less fallback; a late id may be adopted only when
@@ -928,6 +917,10 @@ export default function useStreamConnection(chatId, {
                 updated[i] = {
                   ...updated[i],
                   input: event.input,
+                  // A Memory lookup names itself from its command, so the live
+                  // line can read "Searching Memory…" while the search runs
+                  // rather than a generic "Running a command".
+                  ...(event.recall ? { recall: event.recall } : {}),
                   ...(event.tool_use_id && !updated[i].tool_use_id
                     ? { tool_use_id: event.tool_use_id }
                     : {}),

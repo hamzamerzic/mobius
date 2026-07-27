@@ -11,6 +11,7 @@ import {
   toolCallLabel,
   effectiveToolName,
   isDistinctiveActivityTool,
+  memoryRecallLabel,
 } from '../toolActivityLabel.js'
 
 const e = item => ({ item })
@@ -221,6 +222,15 @@ test('toolCallLabel names the concrete nested step in progressive and past tense
     toolCallLabel({ tool: 'custom_tool', input: 'mode=fast', status: 'done' }),
     'custom_tool: mode=fast',
   )
+})
+
+test('failed Memory activity is honest and remains distinctive', () => {
+  const failed = {
+    type: 'tool', tool: 'Bash', status: 'done',
+    recall: { status: 'failed' },
+  }
+  assert.equal(memoryRecallLabel(failed), 'Memory lookup failed')
+  assert.equal(isDistinctiveActivityTool(failed), true)
 })
 
 

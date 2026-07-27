@@ -334,6 +334,20 @@ def _tool_output_exit_code(content: str, parsed):
   return int(m.group(1)) if m else None
 
 
+def tool_output_exit_code(content: object):
+  """Return a typed command exit code from any sized tool output."""
+  if not isinstance(content, str):
+    return None
+  parsed = None
+  stripped = content.lstrip()
+  if stripped[:1] in ("{", "["):
+    try:
+      parsed = json.loads(content)
+    except (ValueError, TypeError):
+      parsed = None
+  return _tool_output_exit_code(content, parsed)
+
+
 def excerpt_tool_output(content: str):
   """Reduce a large tool_output string to (excerpt, full_len, exit_code).
 
@@ -574,6 +588,8 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     tool_use_id = event.get("tool_use_id")
     if tool_use_id:
       block["tool_use_id"] = tool_use_id
+    if isinstance(event.get("recall"), dict):
+      block["recall"] = event["recall"]
     assistant_blocks.append(block)
     return True
 
@@ -581,12 +597,21 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     # Backfill the input summary. Prefer an exact tool_use_id match (Codex
     # backfills a WebSearch query at completion, when several searches may be
     # in flight); older id-less events retain the earliest input-less fallback.
+    def _apply_tool_input(blk: dict) -> None:
+      blk["input"] = event.get("input", "")
+      # A Memory lookup is identified from the command it runs (stamped on the
+      # event by the sink). Carrying that marker onto the block is what lets the
+      # turn name the recall while it is still running, and is the ONLY thing
+      # that authorizes the later output phase to cite notes.
+      if isinstance(event.get("recall"), dict):
+        blk["recall"] = event["recall"]
+
     tool_use_id = event.get("tool_use_id")
     if tool_use_id:
       for blk in assistant_blocks:
         if (blk.get("type") == "tool"
             and blk.get("tool_use_id") == tool_use_id):
-          blk["input"] = event.get("input", "")
+          _apply_tool_input(blk)
           return True
       candidates = [
         blk for blk in assistant_blocks
@@ -596,12 +621,12 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
       ]
       if len(candidates) == 1:
         candidates[0]["tool_use_id"] = tool_use_id
-        candidates[0]["input"] = event.get("input", "")
+        _apply_tool_input(candidates[0])
         return True
       return False
     for blk in assistant_blocks:
       if blk.get("type") == "tool" and not blk.get("input"):
-        blk["input"] = event.get("input", "")
+        _apply_tool_input(blk)
         break
     return True
 
@@ -615,12 +640,17 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
       # the full text and read a failure exit code from a field, not a parse
       # of the possibly-carved excerpt. Absent fields leave the block shape
       # unchanged (a small, un-reduced output).
+      exit_code = event.get("output_exit_code")
+      if exit_code is not None:
+        blk["output_exit_code"] = exit_code
       if event.get("output_truncated"):
         blk["output_truncated"] = True
         blk["output_full_len"] = event.get("output_full_len")
-        exit_code = event.get("output_exit_code")
-        if exit_code is not None:
-          blk["output_exit_code"] = exit_code
+      # Settle a Memory lookup from "searching" to what it actually recalled.
+      # The app prints its bounded result last, so it survives any head+tail
+      # carving the sink performed before parsing.
+      if isinstance(event.get("recall"), dict):
+        blk["recall"] = event["recall"]
       return True
     return False
 
