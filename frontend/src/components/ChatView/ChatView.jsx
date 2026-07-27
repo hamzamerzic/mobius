@@ -889,7 +889,14 @@ export default function ChatView({
   // layout-derived floor and re-applies the active mode under the reader gate
   // (design §2). Skipped entirely for single-pane chats (paneContentHeight
   // null) so today's resize behavior is untouched.
-  useEffect(() => {
+  //
+  // Must be a layout effect: this is the only automatic scroll write in the
+  // controller that would otherwise run after paint. Every other one is
+  // pre-paint (syncLayout in a layout effect, the tail follow in a
+  // ResizeObserver callback, settleStreamingPin in rAF), and running this one
+  // post-paint shows the reader a frame at the old scroll position before the
+  // correction lands — visible as a jump when pane geometry changes.
+  useLayoutEffect(() => {
     if (paneContentHeight != null) paneResized(paneContentHeight)
   }, [paneContentHeight, paneResized])
 

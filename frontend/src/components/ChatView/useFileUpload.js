@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { getAuthHeaders, BASE } from '../../api/client.js'
 
 /**
@@ -32,7 +32,12 @@ export default function useFileUpload({ chatId, initialFiles = [], onFilesChange
   const onFilesChangeRef = useRef(onFilesChange)
   onFilesChangeRef.current = onFilesChange
 
-  function commitFiles(nextOrUpdater) {
+  // Every action below is wrapped in useCallback and reads its inputs through
+  // refs, so the returned identities only change when `chatId` does. Callers
+  // put these in dependency arrays (ChatView's `doSend`), and an unstable
+  // identity there re-allocates `doSend` on every render, which breaks
+  // MsgContent's memo and re-renders the whole transcript on each keystroke.
+  const commitFiles = useCallback((nextOrUpdater) => {
     const next = typeof nextOrUpdater === 'function'
       ? nextOrUpdater(filesRef.current)
       : nextOrUpdater
@@ -40,7 +45,7 @@ export default function useFileUpload({ chatId, initialFiles = [], onFilesChange
     setFiles(next)
     onFilesChangeRef.current?.(next)
     return next
-  }
+  }, [])
 
   // Revoke any surviving object URLs when the component unmounts —
   // e.g. the user navigated away while files were still staged.
@@ -50,7 +55,7 @@ export default function useFileUpload({ chatId, initialFiles = [], onFilesChange
     }
   }, [])
 
-  async function addFiles(fileList) {
+  const addFiles = useCallback(async (fileList) => {
     if (!fileList.length) return
 
     const newChips = fileList.map(f => ({
@@ -97,9 +102,9 @@ export default function useFileUpload({ chatId, initialFiles = [], onFilesChange
         ))
       }
     }
-  }
+  }, [chatId, commitFiles])
 
-  function removeFile(id) {
+  const removeFile = useCallback((id) => {
     // Extract the side effects (URL revoke + network DELETE) from the
     // setFiles updater. React may double-invoke state updaters in
     // Strict Mode, which would fire two DELETE requests for the same
@@ -113,24 +118,24 @@ export default function useFileUpload({ chatId, initialFiles = [], onFilesChange
         headers: getAuthHeaders(),
       }).catch(() => {})
     }
-  }
+  }, [chatId, commitFiles])
 
-  function releaseFiles(fileList) {
+  const releaseFiles = useCallback((fileList) => {
     for (const f of fileList || []) {
       if (f.objectUrl) URL.revokeObjectURL(f.objectUrl)
     }
-  }
+  }, [])
 
-  function clearFiles({ revoke = true } = {}) {
+  const clearFiles = useCallback(({ revoke = true } = {}) => {
     const current = filesRef.current
     if (revoke) releaseFiles(current)
     commitFiles([])
-  }
+  }, [releaseFiles, commitFiles])
 
-  function restoreFiles(fileList) {
+  const restoreFiles = useCallback((fileList) => {
     const restored = Array.isArray(fileList) ? fileList : []
     commitFiles(restored)
-  }
+  }, [commitFiles])
 
   return { files, addFiles, removeFile, clearFiles, restoreFiles, releaseFiles }
 }

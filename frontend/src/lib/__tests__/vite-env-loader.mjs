@@ -19,10 +19,19 @@ const REACT_SHIM = new URL(
   import.meta.url,
 ).href
 
+// Modules whose `react` import is redirected to the hook shim so a test in
+// this suite can drive them with renderHook. Opt-in per module rather than
+// blanket: most files here are read as source text, and a global alias would
+// silently swap React out from under anything that later imports for real.
+const REACT_SHIMMED_MODULES = [
+  '/components/Shell/useAppIntentNavigation.js',
+  '/components/ChatView/useFileUpload.js',
+]
+
 export async function resolve(specifier, context, nextResolve) {
   if (
     specifier === 'react'
-    && context.parentURL?.endsWith('/components/Shell/useAppIntentNavigation.js')
+    && REACT_SHIMMED_MODULES.some(m => context.parentURL?.endsWith(m))
   ) {
     return { url: REACT_SHIM, shortCircuit: true, format: 'module' }
   }
