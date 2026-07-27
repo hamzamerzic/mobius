@@ -4,6 +4,7 @@ tool_use_id); the sink reduces the wire event and submits the stash; the
 GET /tool-output/{tool_use_id} endpoint serves a bounded expansion preview and
 the exact text on explicit copy. Also covers the reducer
 carrying tool identity + truncation metadata onto the persisted block."""
+import json
 import uuid
 
 from sqlalchemy import event as sqlalchemy_event
@@ -422,6 +423,49 @@ def test_sink_reduces_large_tagged_output_and_stashes_full(db):
         models.ToolOutput.tool_use_id == "tu_big",
     ).first()
     assert row is not None and row.output == big
+
+
+def test_sink_keeps_a_runner_supplied_exit_code_on_large_plain_output(db):
+    sink = _sink()
+    sink.publish({
+        "type": "tool_start", "tool": "Bash", "input": "run",
+        "tool_use_id": "tu_typed",
+    })
+    big = "plain output\n" + ("x" * (TOOL_OUTPUT_INLINE_THRESHOLD + 100))
+    event = {
+        "type": "tool_output", "content": big, "tool_use_id": "tu_typed",
+        "output_exit_code": 7,
+    }
+
+    sink.publish(event)
+
+    assert event["output_truncated"] is True
+    assert event["output_exit_code"] == 7
+    assert sink.assistant_blocks[-1]["output_exit_code"] == 7
+
+
+def test_sink_parses_a_large_json_envelope_once(monkeypatch, db):
+    import app.events as events
+
+    sink = _sink()
+    big = json.dumps({
+        "stdout": "x" * (TOOL_OUTPUT_INLINE_THRESHOLD + 100),
+        "exit_code": 3,
+    })
+    loads = events.json.loads
+    calls = 0
+
+    def counting_loads(value):
+        nonlocal calls
+        calls += 1
+        return loads(value)
+
+    monkeypatch.setattr(events.json, "loads", counting_loads)
+    event = {"type": "tool_output", "content": big, "tool_use_id": "tu_json"}
+    sink.publish(event)
+
+    assert calls == 1
+    assert event["output_exit_code"] == 3
 
 
 def test_sink_passes_through_small_output(db):

@@ -56,6 +56,15 @@ function MsgContentInner({
   // fresh function reference every render and defeat it.
   isLastMsg,
   liveQuestionId,
+  // Callback refs (ChatView's useNudgeTargetRef) that publish the DOM node of
+  // the card each footer nudge watches. This renderer serves BOTH surfaces of
+  // the active answer — the durable message row and the live streaming <li> —
+  // so a mid-turn surface handoff reaches the observer as a plain node swap
+  // instead of leaving it bound to a node React has detached. Only the card
+  // that actually blocks the turn publishes: the answerable tail question and
+  // the resumable tail note.
+  pendingQuestionRef,
+  resumeCardRef,
   // Active answers always use this renderer for both their DB partial and
   // live SSE payload. isStreaming only enables the cursor, aria-live, and the
   // active thinking timer; it never selects a different component tree.
@@ -209,6 +218,7 @@ function MsgContentInner({
               answeredMap={answers}
               onAnswer={answerable ? onQuestionAnswer : undefined}
               disabled={!answerable && !answers}
+              pendingCardRef={answerable ? pendingQuestionRef : undefined}
             />
           </div>
         )
@@ -268,6 +278,18 @@ function MsgContentInner({
               <button
                 type="button"
                 className="chat__resume"
+                // Publish ONLY the tail note's button. `resumable` gates on
+                // isLastMsg, not on tail position, so a last message holding
+                // two resumable error blocks renders two buttons — and one
+                // shared callback ref has ONE slot: the later mount wins, then
+                // an unmount of the OTHER button calls the ref with null and
+                // the cue goes dark while the real target is still on screen
+                // and offscreen. The tail is also exactly what arms the cue
+                // (ChatView's tailResumableBlock), so gating here keeps the
+                // observed node and the `active` flag talking about the same
+                // block. The old querySelectorAll lookup took `.pop()`, which
+                // is what this reproduces.
+                ref={i === lastEntryIdx ? resumeCardRef : undefined}
                 onClick={() => onResume('continue')}
                 disabled={submissionBlocked}
                 title={submissionBlocked
@@ -324,11 +346,12 @@ function MsgContentInner({
           }
           return renderBlock(node.single.item, node.single.idx)
         })}
-        {/* The turn's web sources, collected from its tool blocks and shown
-            once after the answer. Renders nothing when the turn did no web
-            search, so an ordinary reply is unchanged. */}
+        {/* What informed the turn — notes recalled from Memory, then web
+            sources — collected from its tool blocks and shown once after the
+            answer. Renders nothing when the turn neither searched the web nor
+            consulted Memory, so an ordinary reply is unchanged. */}
         {msg.role === 'assistant' && !isStreaming && (
-          <MessageSources blocks={msg.blocks} />
+          <MessageSources blocks={msg.blocks} onInternalNav={onInternalNav} />
         )}
       </>
     )
@@ -387,6 +410,15 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.submissionBlocked === next.submissionBlocked
     && prev.isLastMsg === next.isLastMsg
     && prev.liveQuestionId === next.liveQuestionId
+    // The nudge refs are props, so an exhaustive comparator has to include
+    // them: a ref whose identity changed must reach the DOM node, or React
+    // never re-invokes it and the observer keeps the old channel. In practice
+    // they never change (useNudgeTargetRef memoizes both with []), which is
+    // why these two lines cost nothing. Skipping a re-render does NOT
+    // unpublish anything — React only re-runs a callback ref when the ref or
+    // the host node changes, and a bailed-out render changes neither.
+    && prev.pendingQuestionRef === next.pendingQuestionRef
+    && prev.resumeCardRef === next.resumeCardRef
     && prev.isActiveAnswer === next.isActiveAnswer
     && prev.isStreaming === next.isStreaming
     // suppressedQuestionKeys is a Set (new reference each render) or null.

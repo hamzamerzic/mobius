@@ -89,7 +89,8 @@ git diff -- frontend/src frontend/public | head -80
 touch /data/platform/frontend/src/path/to/changed-file.jsx
 ```
 
-Pick up the changes through the platform-apply flow (rebase onto `origin/main`) rather than hand-copying files — see `contributing.md`.
+Pick up the changes through the platform-apply flow (merge the reviewed
+`origin/main` target) rather than hand-copying files — see `contributing.md`.
 
 ---
 

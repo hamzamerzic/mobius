@@ -85,7 +85,7 @@ if [ "$_boot_counter" -ge 3 ] && [ -f /data/.last-successful-boot ]; then
   # TIMESTAMPED /data/platform.crashloop-prev.<ts> for inspection/recovery, not
   # deleted. A one-slot .crashloop-prev would let a SECOND crash-loop delete the
   # first preserved tree before the owner could inspect it, so we timestamp each
-  # quarantine and keep only the newest few. (slice B's deploy=rebase
+  # quarantine and keep only the newest few. (slice B's deploy=merge
   # reconciliation will refine this.)
   _cl_ts=$(date -u +%Y%m%dT%H%M%SZ)
   if [ -e /data/platform ] && [ -n "$(ls -A /data/platform 2>/dev/null)" ] &&
@@ -736,9 +736,9 @@ printf '%s\n' "$_served_sha" > /tmp/serving-sha
 chmod 644 /tmp/serving-source /tmp/serving-sha 2>/dev/null || true
 
 if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
-  # Slice B deploy=rebase reconcile. A deploy ships a new image AND advances
-  # canonical origin/main; fetch origin and replay the local edits onto the new
-  # version NOW, before uvicorn imports the code, so the update goes live this
+  # Slice B deploy=merge reconcile. A deploy ships a new image AND advances
+  # canonical origin/main; fetch origin and merge the new version once with the
+  # local edits NOW, before uvicorn imports the code, so the update goes live this
   # boot with no restart. Runs as mobius (writes /data; root would poison /data
   # ownership + hit git "dubious ownership"), cwd the served backend so `app`
   # imports resolve from the clone, under the IDENTICAL GIT_*/PYTHONPATH scrub
@@ -746,12 +746,12 @@ if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
   # `|| true` guards the shell, so a reconcile failure never bricks boot; a
   # conflict/rollback leaves the pre-reconcile code on disk (aborted/reset) and
   # sets a flag Settings surfaces. The outer `timeout` is a last-resort bound set
-  # ABOVE the reconcile's bounded operations: fetch 120 + unshallow 120 + rebase
+  # ABOVE the reconcile's bounded operations: fetch 120 + unshallow 120 + merge
   # 120 + probe 60 = 420, plus commit_local's own bounded git calls. Keep this
   # comfortably higher so internal timeouts fire FIRST; the post-timeout guard
   # below still cleans the tree if the outer kill ever wins. recoveryd remains
   # the outer floor.
-  echo "Platform layer: reconciling /data/platform with origin (slice B deploy=rebase)..." >&2
+  echo "Platform layer: reconciling /data/platform with origin (slice B deploy=merge)..." >&2
   su -s /bin/sh mobius -c \
     "cd /data/platform/backend && $_env_scrub timeout 900 python3 -c \
      'from app import platform_update; print(platform_update.reconcile_clone_sync())'" \
@@ -767,7 +767,7 @@ if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
     echo "Platform layer: boot guard failed; refusing to serve the platform tree." >&2
     exit 1
   fi
-  # A fast-forward / rebase advanced main, so the served sha the /api/version and
+  # A fast-forward / merge advanced main, so the served sha the /api/version and
   # /api/debug/serving routes report (written to /tmp/serving-sha above) must
   # reflect the reconciled HEAD, not the pre-reconcile clone tip.
   _served_sha=$(su -s /bin/sh mobius -c \

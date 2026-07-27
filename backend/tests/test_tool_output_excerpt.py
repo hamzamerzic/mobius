@@ -9,6 +9,7 @@ from app.events import (
     TOOL_OUTPUT_HEAD,
     TOOL_OUTPUT_INLINE_THRESHOLD,
     excerpt_tool_output,
+    tool_output_exit_code,
 )
 
 
@@ -36,6 +37,12 @@ def test_bash_failure_head_and_exit_code_survive_truncation():
     assert excerpt.startswith("Exit code 137\n")
     assert exit_code == 137
     assert full_len == len(content)
+
+
+def test_small_tool_outputs_expose_the_same_typed_exit_code():
+    assert tool_output_exit_code("Exit code 7\nfailed") == 7
+    assert tool_output_exit_code(json.dumps({"stderr": "x", "exit_code": 2})) == 2
+    assert tool_output_exit_code("success") is None
 
 
 def test_json_envelope_stays_valid_json_with_exit_code_intact():

@@ -1074,7 +1074,10 @@ def test_dispatch_client_web_search_tool_result_emits_sources():
     {"type": "tool_start", "tool": "WebSearch", "input": "", "tool_use_id": "t1"},
     {"type": "tool_input", "tool": "WebSearch", "input": "mobius docs",
      "tool_use_id": "t1"},
-    {"type": "tool_output", "content": result_text, "tool_use_id": "t1"},
+    {
+      "type": "tool_output", "content": result_text, "tool_use_id": "t1",
+      "output_complete": True,
+    },
     # tool_use_id binds these sources to the search that produced them, so a
     # batch of parallel WebSearch calls does not collapse onto one block.
     {"type": "tool_sources", "tool_use_id": "t1", "sources": [

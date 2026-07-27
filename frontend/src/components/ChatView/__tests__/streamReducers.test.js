@@ -30,6 +30,7 @@ import {
   appendTextItem,
   repairInterleavedQuestionText,
   replaceTextItem,
+  startToolLifecycle,
 } from '../streamReducers.js'
 import { questionKey } from '../questionKey.js'
 
@@ -45,6 +46,17 @@ function questionEvent(id, text) {
     questions: [{ question: text, options: [{ label: 'A' }, { label: 'B' }] }],
   }
 }
+
+test('Codex tool start preserves provider-neutral Memory recall metadata', () => {
+  const items = startToolLifecycle([], {
+    tool: 'Bash',
+    input: 'python3 /data/apps/memory/memory_search.py "q"',
+    tool_use_id: 'cmd-1',
+    recall: { status: 'searching' },
+  })
+  assert.deepEqual(items[0].recall, { status: 'searching' })
+  assert.equal(items[0].tool_use_id, 'cmd-1')
+})
 
 test('text item identity keeps late deltas before an interleaved question', () => {
   let items = appendTextItem([], 'Build it', { textItemId: 'msg-1' })
@@ -257,6 +269,15 @@ test('large live tool output keeps the metadata needed for lazy full fetch', () 
     output_full_len: 120_000,
     output_exit_code: 0,
   })
+})
+
+test('small completed command output keeps its typed exit code', () => {
+  const prev = [toolItem('Bash', { input: 'false' })]
+  const next = attachToolOutput(prev, 'failed', {
+    tool_use_id: 'toolu_small_failure',
+    output_exit_code: 1,
+  })
+  assert.equal(next[0].output_exit_code, 1)
 })
 
 test('live output metadata cannot replace a runner-assigned tool identity', () => {

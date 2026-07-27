@@ -15,7 +15,10 @@
 // matching React's "layout effects fire after commit" timing without a
 // real DOM commit cycle. Dep semantics follow React: Object.is per
 // element; undefined deps = fire every render; [] = fire once; [a,b] =
-// fire when a or b changes by identity.
+// fire when a or b changes by identity. A function returned by an effect
+// is retained as its cleanup and invoked before that effect fires again,
+// like React — a hook that owns an external subscription (an
+// IntersectionObserver) cannot be tested honestly without that teardown.
 //
 // Why this instead of @testing-library/react-hooks: zero new
 // devDependencies, fits the Möbius preference for keeping the
@@ -80,7 +83,7 @@ export function useCallback(fn, deps) {
 function _scheduleEffect(fn, deps) {
   const i = _slotIndex++
   if (_slots[i] === undefined) {
-    _slots[i] = { prevDeps: _UNSET }
+    _slots[i] = { prevDeps: _UNSET, cleanup: null }
   }
   const slot = _slots[i]
   // Fire on: first render (prevDeps === _UNSET), no dep array
@@ -92,7 +95,7 @@ function _scheduleEffect(fn, deps) {
     deps.length !== slot.prevDeps.length ||
     deps.some((d, idx) => !Object.is(d, slot.prevDeps[idx]))
   slot.prevDeps = deps === undefined ? _UNSET : deps
-  if (shouldFire) _pendingEffects.push(fn)
+  if (shouldFire) _pendingEffects.push({ slot, fn })
 }
 
 // useLayoutEffect and useEffect collapse to the same scheduling here:
@@ -110,28 +113,44 @@ export function useEffect(fn, deps) {
 function _flushEffects() {
   // Drain in registration order. Effects that call setState would
   // re-trigger _rerender → run → another flush; the hooks tested here
-  // only mutate refs inside effects, so the recursion concern is
-  // theoretical. If you hit it, gate _flushEffects behind a depth
-  // counter or move setState callers to useEffect-with-deferred-flush.
+  // only mutate refs or re-set the same state inside effects, so the
+  // recursion concern is theoretical. If you hit it, gate _flushEffects
+  // behind a depth counter or move setState callers to
+  // useEffect-with-deferred-flush.
   const toRun = _pendingEffects.splice(0)
-  for (const fn of toRun) fn()
+  for (const { slot, fn } of toRun) {
+    // Tear down the previous subscription before re-establishing it, so a
+    // re-fire cannot leave two live observers behind (React's order too).
+    if (typeof slot.cleanup === 'function') slot.cleanup()
+    const cleanup = fn()
+    slot.cleanup = typeof cleanup === 'function' ? cleanup : null
+  }
 }
 
 /**
  * Run a hook function as if React were mounting it. Returns a
- * { result, rerender } pair; `result.current` reflects the latest
- * return value, and `rerender(...args)` re-invokes the hook with
- * fresh arguments while preserving slot state.
+ * { result, rerender, unmount } triple; `result.current` reflects the
+ * latest return value, `rerender(...args)` re-invokes the hook with
+ * fresh arguments while preserving slot state, and `unmount()` runs
+ * every retained effect cleanup like React's teardown.
  *
  * Effects (useLayoutEffect / useEffect) registered during the hook
  * call are flushed synchronously after hookFn returns, so callers
  * can assert on ref values that effects set without an `act` wrapper.
+ *
+ * `unmount` exists because a hook that owns an external subscription
+ * (an IntersectionObserver) has a teardown path that no dep change can
+ * reach: without it, "the observer is disconnected when the component
+ * goes away" is untestable and a leaked observer looks identical to a
+ * released one.
  */
 export function renderHook(hookFn, ...initialArgs) {
   __reset()
   const result = { current: undefined }
   let currentArgs = initialArgs
+  let unmounted = false
   function run() {
+    if (unmounted) return
     _slotIndex = 0
     result.current = hookFn(...currentArgs)
     _flushEffects()
@@ -143,6 +162,17 @@ export function renderHook(hookFn, ...initialArgs) {
     rerender: (...nextArgs) => {
       currentArgs = nextArgs.length > 0 ? nextArgs : currentArgs
       run()
+    },
+    unmount: () => {
+      if (unmounted) return
+      unmounted = true
+      // React tears effects down in the order they were registered.
+      for (const slot of _slots) {
+        if (slot && typeof slot.cleanup === 'function') {
+          slot.cleanup()
+          slot.cleanup = null
+        }
+      }
     },
   }
 }

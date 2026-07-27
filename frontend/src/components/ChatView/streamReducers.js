@@ -38,6 +38,19 @@ import {
 // Mirrors backend/app/tool_summaries.py's question-tool branch.
 const QUESTION_TOOLS = new Set(['AskUserQuestion', 'request_user_input'])
 
+/** Build the one live tool-block shape shared by every provider. */
+export function startToolLifecycle(prev, event) {
+  return [...prev, {
+    type: 'tool',
+    tool: event?.tool,
+    input: event?.input || '',
+    output: '',
+    status: 'running',
+    ...(event?.recall ? { recall: event.recall } : {}),
+    ...(event?.tool_use_id ? { tool_use_id: event.tool_use_id } : {}),
+  }]
+}
+
 /**
  * Append a streamed text delta to its provider message item.
  *
@@ -337,12 +350,18 @@ export function attachToolOutput(prev, content, event = null) {
   if (event?.tool_use_id && !block.tool_use_id) {
     block.tool_use_id = event.tool_use_id
   }
+  // Settle a Memory lookup from "searching" to the notes it actually returned.
+  // The backend stamps this from the bounded structured tail that survives any
+  // large-output carving.
+  if (event?.recall) {
+    block.recall = event.recall
+  }
+  if (event?.output_exit_code != null) {
+    block.output_exit_code = event.output_exit_code
+  }
   if (event?.output_truncated) {
     block.output_truncated = true
     block.output_full_len = event.output_full_len
-    if (event.output_exit_code != null) {
-      block.output_exit_code = event.output_exit_code
-    }
   }
   updated[i] = block
   return updated

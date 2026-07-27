@@ -10,6 +10,91 @@ const msgContent = readFileSync(new URL('../MsgContent.jsx', import.meta.url), '
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 
+// Slice ONE JSX element's own text, from its tag to the matching close of that
+// tag. A source assertion about an element's props is worthless without this:
+// with an unbounded `[\s\S]*?` between the tag and the prop, a DIFFERENT
+// element's props further down the file satisfy the match, so "both render
+// paths pass the ref" can pass with one of them not passing it at all.
+// Scan the opening tag that begins at `start` (source[start] === '<'), skipping
+// over quoted strings ('...', "...", `...`) and balanced { } JSX expression
+// containers so that a '>' inside an arrow prop (onClick={() => ...}), a
+// comparison, or a comment does NOT prematurely end the tag. Returns the index
+// of the tag-closing '>' and whether the tag is self-closing ('/>').
+function scanOpeningTag(source, start) {
+  for (let i = start + 1, brace = 0; i < source.length; i++) {
+    const c = source[i]
+    if (c === '"' || c === "'" || c === '`') {
+      i++
+      while (i < source.length && source[i] !== c) i++
+      continue
+    }
+    if (c === '{') { brace++; continue }
+    if (c === '}') { brace--; continue }
+    if (brace > 0) continue
+    if (c === '/' && source[i + 1] === '>') return { gt: i + 1, selfClosing: true }
+    if (c === '>') return { gt: i, selfClosing: false }
+  }
+  return { gt: -1, selfClosing: false }
+}
+
+function sliceElement(source, openTag) {
+  const from = source.indexOf(openTag)
+  assert.ok(from >= 0, `expected to find ${openTag}`)
+  // Recover the tag name from the opening tag (e.g. '<button' -> 'button',
+  // '<div\n className=...' -> 'div') so we can find its real close.
+  const nameMatch = /^<\s*([A-Za-z][\w.]*)/.exec(openTag)
+  assert.ok(nameMatch, `openTag must start with a tag name: ${openTag}`)
+  const tagName = nameMatch[1]
+
+  const opening = scanOpeningTag(source, from)
+  assert.notEqual(opening.gt, -1, `unterminated opening tag ${openTag}`)
+
+  if (opening.selfClosing) {
+    const slice = source.slice(from, opening.gt + 1)
+    assert.ok(slice.endsWith('/>'),
+      `self-closing slice for ${openTag} must end with '/>'`)
+    return slice
+  }
+
+  // Not self-closing: walk forward, quote/brace aware, tracking nesting of
+  // same-named tags, until the matching '</tagName>' close.
+  const close = `</${tagName}`
+  const nestedOpen = new RegExp(`^<\\s*${tagName}[\\s/>]`)
+  let depth = 1
+  for (let i = opening.gt + 1, brace = 0; i < source.length; i++) {
+    const c = source[i]
+    if (c === '"' || c === "'" || c === '`') {
+      i++
+      while (i < source.length && source[i] !== c) i++
+      continue
+    }
+    if (c === '{') { brace++; continue }
+    if (c === '}') { brace--; continue }
+    if (brace > 0) continue
+    if (c !== '<') continue
+    if (source.startsWith(close, i)) {
+      depth--
+      if (depth === 0) {
+        const gt = source.indexOf('>', i)
+        assert.notEqual(gt, -1, `unterminated close for ${openTag}`)
+        const slice = source.slice(from, gt + 1)
+        const tail = slice.replace(/\s+/g, ' ')
+        assert.ok(tail.endsWith(`${close}>`) || tail.endsWith(`${close} >`),
+          `slice for ${openTag} must end with ${close}>`)
+        return slice
+      }
+      continue
+    }
+    // A nested opening tag of the same name deepens the nesting — unless it is
+    // self-closing, which needs no matching close.
+    if (nestedOpen.test(source.slice(i))) {
+      const nested = scanOpeningTag(source, i)
+      if (nested.gt !== -1 && !nested.selfClosing) depth++
+    }
+  }
+  assert.fail(`unterminated element ${openTag}`)
+}
+
 test('MsgContent gates the Resume button on a resumable tail note', () => {
   assert.match(msgContent, /onResume/,
     'MsgContent must accept an onResume prop')
@@ -78,6 +163,73 @@ test('ChatView routes both offscreen attention nudges through the controller', (
     'nearest-element scrolling can strand either primary action behind the composer')
   assert.match(css, /\.chat__resume-nudge/,
     'the resume nudge reuses the question-nudge visual style')
+})
+
+test('both attention nudges observe a node published by the card, not a lookup', () => {
+  // The nudges track a card that changes DOM node mid-turn: the live streaming
+  // surface renders the pending question while the turn runs, the durable
+  // message row renders it once the turn parks. A querySelector taken when the
+  // observer binds cannot see that swap, so the observer was left on a detached
+  // node — and with the turn parked awaiting the answer nothing re-renders, so
+  // the pill stuck forever. Node identity has to be the hook's input.
+  assert.doesNotMatch(chatView, /querySelectorAll\('\.qcard|querySelectorAll\('\.chat__resume/,
+    'neither nudge may locate its card by query')
+  assert.match(chatView, /const \[pendingQuestionEl, pendingQuestionRef\] = useNudgeTargetRef\(\)/,
+    'the pending question card publishes its node through a callback ref')
+  assert.match(chatView, /useOffscreenNudge\(\s*scrollRef, hasPendingQuestion, pendingQuestionEl,/,
+    'the question nudge observes the published node')
+  assert.match(chatView, /const \[resumeCardEl, resumeCardRef\] = useNudgeTargetRef\(\)/,
+    'the resume card publishes its node the same way — no parallel mechanism')
+  assert.match(chatView, /useOffscreenNudge\(\s*scrollRef, hasPendingResume, resumeCardEl,/,
+    'the resume nudge observes the published node')
+
+  // BOTH render paths must publish through the SAME ref so the live→durable
+  // handoff reaches the observer as an ordinary node swap. Each element is
+  // sliced to its OWN text first: an unbounded wildcard between the tag and the
+  // prop lets one call site satisfy both patterns, which makes deleting the
+  // refs from the durable row — the reported bug, exactly — undetectable.
+  for (const [label, openTag] of [
+    ['durable message rows', '<MsgContent'],
+    ['the live active surface', '<ActiveAssistantSurface'],
+  ]) {
+    const element = sliceElement(chatView, openTag)
+    assert.match(element, /pendingQuestionRef=\{pendingQuestionRef\}/,
+      `${label} must publish the question card through the shared ref`)
+    assert.match(element, /resumeCardRef=\{resumeCardRef\}/,
+      `${label} must publish the resume card through the shared ref`)
+  }
+  // The live surface reaches MsgContent through two more components, and a hop
+  // that accepts the prop without forwarding it kills the cue for the whole
+  // live half of the turn — silently, since the durable half still works.
+  for (const [file, child] of [
+    ['../ActiveAssistantSurface.jsx', '<StreamingMessage'],
+    ['../StreamingMessage.jsx', '<MsgContent'],
+  ]) {
+    const source = readFileSync(new URL(file, import.meta.url), 'utf8')
+    const element = sliceElement(source, child)
+    for (const prop of ['pendingQuestionRef', 'resumeCardRef']) {
+      assert.match(element, new RegExp(`${prop}=\\{${prop}\\}`),
+        `${file} must forward ${prop} to ${child}`)
+    }
+  }
+  // Only the card that actually blocks the turn registers: an answered question
+  // or a scrolled-back history card is not somewhere to send the owner back to.
+  assert.match(msgContent, /pendingCardRef=\{answerable \? pendingQuestionRef : undefined\}/,
+    'only the answerable tail question publishes its node')
+  // ONE publisher per ref. `resumable` gates on isLastMsg, not tail position, so
+  // a last message with two resumable blocks renders two Resume buttons; a
+  // shared single-slot ref would then be nulled by whichever unmounts first and
+  // the cue would go dark with the real button still offscreen. The tail is also
+  // what arms the cue (tailResumableBlock), so both must name the same block.
+  const resumeButton = sliceElement(msgContent, '<button')
+  assert.match(resumeButton, /className="chat__resume"/,
+    'the sliced element is the Resume button')
+  assert.match(resumeButton, /ref=\{i === lastEntryIdx \? resumeCardRef : undefined\}/,
+    'only the TAIL resumable note may publish the observed node')
+  const questionCard = readFileSync(new URL('../QuestionCard.jsx', import.meta.url), 'utf8')
+  const qcard = sliceElement(questionCard, '<div\n      className={`qcard')
+  assert.match(qcard, /ref=\{answered \? (null|undefined) : pendingCardRef\}/,
+    'a submitted card retires itself from the cue')
 })
 
 test('ariaStatus announces the recovery state instead of "Response ready."', () => {

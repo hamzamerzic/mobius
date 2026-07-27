@@ -31,6 +31,10 @@ const ACTIVITY_LABELS = new Map([
   // image file, mapped here by extension via effectiveToolName. Plural here —
   // the summary swaps to the singular "Viewing an image" for a lone one.
   ['ViewImage', 'Viewing images'],
+  // Consulting the Memory app. A Bash call to its search script, classified by
+  // the `recall` marker the backend stamps from the command — see
+  // effectiveToolName. Uncountable, so it has no singular twin.
+  ['MemoryRecall', 'Searching Memory'],
 ])
 
 // Past-tense twins for SETTLED lines — "Ran commands", not a "Running
@@ -57,6 +61,7 @@ const PAST_LABELS = new Map([
   ['AskUserQuestion', 'Asked you'],
   ['Skill', 'Used a skill'],
   ['ViewImage', 'Viewed images'],
+  ['MemoryRecall', 'Recalled from Memory'],
 ])
 
 // Singular twins for a ONE-occurrence activity: a lone Bash reads "Ran a
@@ -97,6 +102,7 @@ const ACTIVITY_ICONS = new Map([
   ['AskUserQuestion', 'dot'],
   ['Skill', 'dot'],
   ['ViewImage', 'image'],
+  ['MemoryRecall', 'search'],
 ])
 
 // An unknown tool falls back to its raw name (then the generic 'Tool' for a
@@ -149,6 +155,11 @@ const INSTANCE_VERBS = new Map([
 
 export function toolCallLabel(tool) {
   const name = effectiveToolName(tool) || 'Tool'
+  // A memory lookup says what it FOUND, not what it ran: the raw command is
+  // implementation vocabulary, and the count is the fact worth reading at a
+  // glance. "Nothing relevant" is stated explicitly, because a silent recall
+  // is indistinguishable from never having looked.
+  if (name === 'MemoryRecall') return memoryRecallLabel(tool)
   const input = typeof tool?.input === 'string' ? tool.input.trim() : ''
   const verbs = INSTANCE_VERBS.get(name)
   if (!verbs) return name + (input ? `: ${input}` : '')
@@ -171,6 +182,12 @@ export function toolCallLabel(tool) {
 const IMAGE_PATH_RE = /\.(png|jpe?g|gif|webp|bmp|avif)(?:[?#].*)?$/i
 export function effectiveToolName(tool) {
   const name = tool?.tool
+  // A Memory lookup is a Bash call the backend already identified from its
+  // command (memory_recall.py, stamped on the one publish() funnel). Keying off
+  // that stamp rather than re-matching the command here means one detection
+  // point for both runners, and it keeps working after transcript compaction
+  // strips the command string from a settled activity block.
+  if (tool?.recall && typeof tool.recall === 'object') return 'MemoryRecall'
   if (name === 'Read') {
     // On the wire tool.input is the STRING summary the backend builds
     // (summarize_tool_input -> the bare file_path for a Read), never the raw
@@ -193,7 +210,22 @@ export function effectiveToolName(tool) {
 // compaction, and subagent spawns join here once the backend surfaces their
 // events (today only image views are frontend-detectable — a Skill load is
 // swallowed into a chip, not a tool block).
-const DISTINCTIVE_ACTIVITIES = new Set(['ViewImage'])
+const DISTINCTIVE_ACTIVITIES = new Set(['ViewImage', 'MemoryRecall'])
+
+// The one-line story of a memory lookup, including honest operational failure.
+// Reading the count from the citation set the backend already parsed keeps the
+// label and the pills under the answer from ever disagreeing.
+export function memoryRecallLabel(tool) {
+  const recall = tool?.recall
+  if (recall?.status === 'searching' || tool?.status === 'running') {
+    return 'Searching Memory'
+  }
+  if (recall?.status === 'empty') return 'Searched Memory — nothing relevant'
+  if (recall?.status === 'failed') return 'Memory lookup failed'
+  const count = Array.isArray(recall?.notes) ? recall.notes.length : 0
+  if (count === 0) return 'Recalled from Memory'
+  return `Recalled ${count} note${count === 1 ? '' : 's'} from Memory`
+}
 export function isDistinctiveActivityTool(item) {
   return item?.type === 'tool' && DISTINCTIVE_ACTIVITIES.has(effectiveToolName(item))
 }

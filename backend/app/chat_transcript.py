@@ -4,6 +4,14 @@ from __future__ import annotations
 
 import re
 
+from app.memory_recall import (
+  RECALL_EMPTY,
+  RECALL_FAILED,
+  RECALL_HIT,
+  RECALL_SEARCHING,
+  merge_recall_notes,
+)
+
 
 _QUESTION_TOOLS = {"AskUserQuestion", "request_user_input"}
 _IMAGE_PATH_RE = re.compile(
@@ -116,7 +124,14 @@ def historical_tool_output_ids(
 
 def _distinctive_activity(block: dict) -> bool:
   """Keep notable one-line activity beats out of a folded metadata run."""
-  if block.get("type") != "tool" or block.get("tool") != "Read":
+  if block.get("type") != "tool":
+    return False
+  # Consulting Memory is a beat worth seeing on its own, not shell housekeeping
+  # folded into "ran commands". The marker was stamped from the command itself,
+  # so this needs no knowledge of how that command is spelled.
+  if isinstance(block.get("recall"), dict):
+    return True
+  if block.get("tool") != "Read":
     return False
   raw = block.get("input")
   if isinstance(raw, dict):
@@ -161,6 +176,11 @@ def _compact_activity_item(block: dict) -> dict:
   # tool input remains in the on-demand activity detail.
   if block.get("tool") == "Read" and isinstance(block.get("input"), str):
     tool["input"] = block["input"][:2048]
+  # A Memory recall is already a bounded citation set, and it is what the
+  # collapsed line says ("Recalled 4 notes from Memory"). Dropping it here
+  # would make the beat visible live and gone on the next chat load.
+  if isinstance(block.get("recall"), dict):
+    tool["recall"] = block["recall"]
   return tool
 
 
@@ -242,6 +262,31 @@ def _compact_activity_run(
     if len(sources) >= _MAX_COMPACT_SOURCES:
       break
 
+  # Memory citations roll up for the same reason web sources do: the message
+  # renders them once per turn, so they must outlive the individual tool blocks
+  # this projection folds away. `_compact_activity_entries` keeps only two
+  # entries per tool name, so without this a third lookup's notes would vanish.
+  recall_notes: list[dict] = []
+  seen_recall_paths: set[str] = set()
+  recall_status = ""
+  recall_rank = {
+    RECALL_SEARCHING: 0,
+    RECALL_FAILED: 1,
+    RECALL_EMPTY: 2,
+    RECALL_HIT: 3,
+  }
+  for _, block in blocks:
+    recall = block.get("recall")
+    if not isinstance(recall, dict):
+      continue
+    # A real hit outranks an empty search, which outranks a failed probe. This
+    # preserves useful evidence without letting one failure erase a successful
+    # result elsewhere in the same folded run.
+    status = recall.get("status")
+    if recall_rank.get(status, -1) > recall_rank.get(recall_status, -1):
+      recall_status = status
+    merge_recall_notes(recall_notes, seen_recall_paths, recall)
+
   start = blocks[0][0]
   end = blocks[-1][0] + 1
   return {
@@ -255,6 +300,10 @@ def _compact_activity_run(
       block.get("type") == "tool" for _, block in blocks
     ),
     **({"sources": sources} if sources else {}),
+    **(
+      {"recall": {"status": recall_status, "notes": recall_notes}}
+      if recall_status else {}
+    ),
   }
 
 

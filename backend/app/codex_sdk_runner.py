@@ -569,7 +569,10 @@ def _sdk_imports() -> dict[str, Any]:
   """
   from openai_codex import ApprovalMode, AsyncCodex, Sandbox
   from openai_codex.client import CodexConfig
-  from openai_codex.errors import CodexRpcError, InvalidParamsError
+  from openai_codex.errors import (
+    CodexRpcError,
+    TransportClosedError,
+  )
   from openai_codex.types import ReasoningEffort, ReasoningSummary
   from openai_codex.generated.v2_all import (
     AgentMessageDeltaNotification,
@@ -646,7 +649,6 @@ def _sdk_imports() -> dict[str, Any]:
     "ErrorNotification": ErrorNotification,
     "FileChangePatchUpdatedNotification": FileChangePatchUpdatedNotification,
     "FileChangeThreadItem": FileChangeThreadItem,
-    "InvalidParamsError": InvalidParamsError,
     "ReasoningEffort": ReasoningEffort,
     "ReasoningSummary": ReasoningSummary,
     "Sandbox": Sandbox,
@@ -667,6 +669,7 @@ def _sdk_imports() -> dict[str, Any]:
     "ThreadTokenUsageUpdatedNotification": (
       ThreadTokenUsageUpdatedNotification
     ),
+    "TransportClosedError": TransportClosedError,
     "TurnCompletedNotification": TurnCompletedNotification,
     "TurnStatus": TurnStatus,
     "WebSearchThreadItem": WebSearchThreadItem,
@@ -1193,9 +1196,13 @@ def _tool_completed_events(item: Any, sdk: dict[str, Any]) -> list[dict[str, Any
 
   if isinstance(item, sdk["CommandExecutionThreadItem"]):
     output = (item.aggregated_output or "").strip()
-    events: list[dict[str, Any]] = []
-    if output:
-      events.append({"type": "tool_output", "content": output})
+    exit_code = getattr(item, "exit_code", None)
+    events: list[dict[str, Any]] = [{
+      "type": "tool_output",
+      "content": output,
+      "output_complete": True,
+      **({"output_exit_code": exit_code} if isinstance(exit_code, int) else {}),
+    }]
     events.append({"type": "tool_end"})
     return events
 
@@ -1463,19 +1470,54 @@ def _file_change_patch_summary(changes: list[Any]) -> str:
   return "\n".join(lines)
 
 
-def _is_closed_turn_error(exc: BaseException) -> bool:
-  """Returns True when the live turn handle is already closed/dead."""
+def _is_transport_death(exc: BaseException) -> bool:
+  """Returns True when the app-server connection itself died.
+
+  Strictly the transport: the SDK's own TransportClosedError, or an RPC
+  error the app-server raised about a closed/dead channel. Deliberately
+  excludes plain RuntimeErrors, because the runner reraises every
+  non-retryable provider ErrorNotification as `RuntimeError(message)` —
+  an MCP server "is not running" is a provider fault to report, not a
+  dead pipe.
+
+  The transport class comes from `_sdk_imports()` and is matched with
+  isinstance, not by class name: this predicate decides whether an error
+  reaches the owner at all, so it must be bound to the real symbol (and
+  must match its subclasses) rather than to anything that happens to
+  share a name.
+  """
   sdk: dict[str, Any] | None = None
   try:
     sdk = _sdk_imports()
-  except ModuleNotFoundError:
+  except ImportError:
+    # ImportError, not ModuleNotFoundError: an SDK that renames or drops
+    # TransportClosedError fails the `from ... import` the same way a missing
+    # package does, and this predicate runs INSIDE the turn's except handler —
+    # raising here would mask the very exception it was asked to classify.
     sdk = None
-  if sdk is not None and isinstance(
-    exc, (sdk["InvalidParamsError"], sdk["CodexRpcError"])
-  ):
+  if sdk is None:
+    # Without the SDK no turn can have started, so no transport of ours can
+    # have died. Matching on a class name alone would be worse than useless
+    # here: it would let any look-alike be mistaken for the real thing.
+    return False
+  if isinstance(exc, sdk["TransportClosedError"]):
+    return True
+  # InvalidParamsError is a subclass of CodexRpcError, so matching the base
+  # class alone already covers it.
+  if isinstance(exc, sdk["CodexRpcError"]):
     text = str(exc).lower()
     return "closed" in text or "not running" in text or "broken pipe" in text
-  if exc.__class__.__name__ == "TransportClosedError":
+  return False
+
+
+def _is_closed_turn_error(exc: BaseException) -> bool:
+  """Returns True when the live turn handle is already closed/dead.
+
+  Wider than `_is_transport_death`: a steer against a finished turn also
+  surfaces as a plain RuntimeError, and there the cost of a false positive
+  is only a refused steer.
+  """
+  if _is_transport_death(exc):
     return True
   if isinstance(exc, RuntimeError):
     text = str(exc).lower()
@@ -1917,6 +1959,33 @@ async def run_codex_sdk_turn(
   def abort_requested() -> bool:
     return bool(should_abort and should_abort())
 
+  def stop_requested() -> bool:
+    """True when Möbius, not the provider, ended this turn.
+
+    The single definition of "we did this to ourselves", shared by terminal
+    validation (which sees a clean TurnStatus.interrupted) and the except
+    path (which sees the transport die mid-stream because force_stop killed
+    the turn's process group). Both need the same fact.
+
+    Includes the superseded-generation abort: a newer turn taking over this
+    chat is still Möbius ending this one. That leg can be true before
+    `active_turn` exists, which is deliberate — a teardown during startup is
+    no more the provider's fault than one mid-stream.
+    """
+    return bool(
+      (active_turn is not None and active_turn.interrupt_requested)
+      or abort_requested()
+    )
+
+  def with_usage(result: RunnerResult) -> RunnerResult:
+    """Attaches whatever the turn spent before it ended, however it ended."""
+    if final_token_usage is not None:
+      result["usage"] = _model_dump(final_token_usage)
+      result["usage_metrics"] = normalize_codex_usage(
+        first_token_usage, final_token_usage,
+      )
+    return result
+
   def aborted_result() -> RunnerResult:
     return {
       "session_id": current_session_id,
@@ -2295,33 +2364,49 @@ async def run_codex_sdk_turn(
       error_text, terminal_status, final_message_phase = _codex_terminal_error(
         completed_turn,
         sdk,
-        interrupt_requested=bool(
-          (active_turn and active_turn.interrupt_requested)
-          or abort_requested()
-        ),
+        interrupt_requested=stop_requested(),
         completed_message_phases=completed_message_phases,
       )
-      result: RunnerResult = {
+      result: RunnerResult = with_usage({
         "session_id": current_session_id,
         "cost_usd": None,
         "error": error_text,
-      }
-      if final_token_usage is not None:
-        result["usage"] = _model_dump(final_token_usage)
-        result["usage_metrics"] = normalize_codex_usage(
-          first_token_usage, final_token_usage,
-        )
+      })
       if terminal_status is not None:
         result["terminal_status"] = terminal_status
       if final_message_phase is not None:
         result["final_message_phase"] = final_message_phase
       return result
   except Exception as exc:
-    return {
+    if _is_transport_death(exc) and stop_requested():
+      # Our own teardown, seen from the inside. A stop interrupts the turn;
+      # when that times out the escalation SIGTERMs the turn's private
+      # process group, so the transport dies mid-stream instead of
+      # delivering turn/completed. Surfacing that as a provider failure is
+      # both wrong and destructive: the raw string overwrites the stall note
+      # (chat._pause_note) published moments earlier, because error blocks
+      # coalesce latest-wins and drop every events.ERROR_PASSTHROUGH_FIELDS
+      # the new event omits — taking the note's one-tap Resume with it and
+      # leaving the owner an unexplained error and no way back.
+      #
+      # Usually expected after escalation, but WARNING is deliberate: a real
+      # app-server crash can coincide with a requested stop and has the same
+      # transport shape. The dying words are the only forensic evidence left
+      # once the owner-facing error is suppressed.
+      log.warning(
+        "Codex transport closed by our own stop chat_id=%s: %s", chat_id, exc,
+      )
+      return with_usage({
+        "session_id": current_session_id,
+        "cost_usd": None,
+        "error": None,
+        "terminal_status": _enum_wire_value(sdk["TurnStatus"].interrupted),
+      })
+    return with_usage({
       "session_id": current_session_id,
       "cost_usd": None,
       "error": str(exc),
-    }
+    })
   finally:
     deferred_cancel: asyncio.CancelledError | None = None
     if process_group_capture_stop is not None:

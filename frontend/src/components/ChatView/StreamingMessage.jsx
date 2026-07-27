@@ -22,6 +22,8 @@ export default function StreamingMessage({
   onAutoResumeChange,
   submissionBlocked,
   liveQuestionId,
+  pendingQuestionRef,
+  resumeCardRef,
   isStreaming,
 }) {
   return (
@@ -45,6 +47,8 @@ export default function StreamingMessage({
         submissionBlocked={submissionBlocked}
         isLastMsg
         liveQuestionId={liveQuestionId}
+        pendingQuestionRef={pendingQuestionRef}
+        resumeCardRef={resumeCardRef}
         isActiveAnswer
         isStreaming={isStreaming}
         suppressedQuestionKeys={null}
