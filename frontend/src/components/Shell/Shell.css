@@ -87,11 +87,12 @@
   /* The rAF-written hold progress [0..1]; the hold ring reads it via the cascade
      (builder-mode control below). */
   --hold-progress: 0;
-  /* Suppress the double-tap zoom on the logo while KEEPING vertical scroll and
-     pinch zoom — only the horizontal swipe is owned here; viewport zoom is never
-     disabled globally. The callout/selection is suppressed so a press-and-hold
-     activates builder mode instead of raising a menu (the JS also preventDefaults
-     contextmenu during a hold). */
+  /* Suppress double-tap zoom on the logo while keeping this component's gesture
+     declaration local: vertical pan and pinch remain allowed here, then the
+     shell root applies the page-level pinch policy once for the whole document.
+     The callout/selection is suppressed so a press-and-hold activates builder
+     mode instead of raising a menu (the JS also preventDefaults contextmenu
+     during a hold). */
   touch-action: pan-y pinch-zoom;
   -webkit-touch-callout: none;
 }

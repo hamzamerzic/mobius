@@ -329,8 +329,9 @@
        News report renders in its own iframe, so its body text is unaffected. */
     body { -webkit-user-select: none; user-select: none; }
     input, textarea, [contenteditable], [contenteditable] * { -webkit-user-select: text; user-select: text; }
-    /* Keep taps responsive while preserving the browser's native pinch zoom.
-       Custom gesture surfaces can still opt into touch-action:none locally. */
+    /* Keep ordinary taps and pans responsive. The parent shell owns the page
+       viewport; a map, image, canvas, or document that needs zoom opts its own
+       surface into touch-action:none and transforms only that content. */
     html, body { touch-action: manipulation; }
     html, body, #root { height: 100%; }
     /* The shell keeps the selected app painted behind its drawer scrim, but the
