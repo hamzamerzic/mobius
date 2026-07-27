@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import re
 
-from app.memory_recall import RECALL_HIT, merge_recall_notes
+from app.memory_recall import (
+  RECALL_EMPTY,
+  RECALL_FAILED,
+  RECALL_HIT,
+  RECALL_SEARCHING,
+  merge_recall_notes,
+)
 
 
 _QUESTION_TOOLS = {"AskUserQuestion", "request_user_input"}
@@ -263,14 +269,22 @@ def _compact_activity_run(
   recall_notes: list[dict] = []
   seen_recall_paths: set[str] = set()
   recall_status = ""
+  recall_rank = {
+    RECALL_SEARCHING: 0,
+    RECALL_FAILED: 1,
+    RECALL_EMPTY: 2,
+    RECALL_HIT: 3,
+  }
   for _, block in blocks:
     recall = block.get("recall")
     if not isinstance(recall, dict):
       continue
-    # Any lookup that returned something outranks one that came back empty:
-    # the turn did remember, even if another probe found nothing.
-    if recall_status != RECALL_HIT:
-      recall_status = recall.get("status") or recall_status
+    # A real hit outranks an empty search, which outranks a failed probe. This
+    # preserves useful evidence without letting one failure erase a successful
+    # result elsewhere in the same folded run.
+    status = recall.get("status")
+    if recall_rank.get(status, -1) > recall_rank.get(recall_status, -1):
+      recall_status = status
     merge_recall_notes(recall_notes, seen_recall_paths, recall)
 
   start = blocks[0][0]

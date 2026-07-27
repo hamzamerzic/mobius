@@ -1,3 +1,4 @@
+import BrainCircuit from 'lucide-react/dist/esm/icons/brain-circuit.mjs'
 import { messageSources, sourceHost, sourceLabel } from './messageSources.js'
 import { messageRecall, noteHref, noteLabel } from './memoryRecall.js'
 
@@ -6,29 +7,8 @@ function sourceMark(host) {
   return displayHost.match(/[a-z0-9]/i)?.[0]?.toUpperCase() || '•'
 }
 
-// A recalled note is not a website, so it gets a mark of its own rather than a
-// domain letter. Local and inline for the same reason the web chip's mark is:
-// nothing about viewing an answer should contact a remote server.
 function MemoryMark() {
-  return (
-    <svg
-      className="chat__source-glyph"
-      viewBox="0 0 16 16"
-      aria-hidden="true"
-      focusable="false"
-    >
-      <path
-        d="M8 2.2c-1.5 0-2.6 1-2.8 2.3-1.1.3-1.9 1.2-1.9 2.4 0 .5.2 1 .4 1.4-.3.4-.5.9-.5 1.5 0 1.4 1.2 2.5 2.7 2.5.5 0 1-.1 1.4-.4.2.5.4.9.7 1.2V2.2z"
-        fill="currentColor"
-        opacity="0.85"
-      />
-      <path
-        d="M8 2.2c1.5 0 2.6 1 2.8 2.3 1.1.3 1.9 1.2 1.9 2.4 0 .5-.2 1-.4 1.4.3.4.5.9.5 1.5 0 1.4-1.2 2.5-2.7 2.5-.5 0-1-.1-1.4-.4-.2.5-.4.9-.7 1.2V2.2z"
-        fill="currentColor"
-        opacity="0.55"
-      />
-    </svg>
-  )
+  return <BrainCircuit className="chat__source-glyph" aria-hidden="true" />
 }
 
 // Everything that informed an answer, surfaced ONCE at the end of the message:

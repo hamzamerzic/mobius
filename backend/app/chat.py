@@ -76,9 +76,10 @@ from app.events import (
   excerpt_tool_output,
   finalize_blocks,
   process_event,
+  tool_output_exit_code,
   undo_question_scrub,
 )
-from app.memory_recall import recall_from_command, recall_from_output
+from app.memory_recall import recall_from_command, recall_from_result
 from app.providers import effective_agent_settings, get_provider, get_skill_path
 from app.runner_registry import registry
 from app.runtime_types import ChatEvent
@@ -414,19 +415,23 @@ class _ChatEventSink:
   def _stamp_memory_recall(self, event: ChatEvent) -> None:
     """Name a Memory-app recall on the event, in two lifecycle phases.
 
-    At input time the command identifies the lookup, so the live turn can say
-    it is remembering while the search still runs. At output time that same
-    tool's stdout is parsed into the notes it actually returned — including the
-    honest "found nothing" outcome, which is otherwise indistinguishable from
-    never having looked.
+    The documented simple command identifies the lookup, so the live turn can
+    say it is remembering while the search runs. Only the final output event
+    settles it from the Memory app's structured result; streaming deltas cannot
+    prematurely claim success, emptiness, or failure.
     """
-    if event.get("type") == "tool_input":
+    if event.get("type") in ("tool_start", "tool_input"):
+      if event.get("type") == "tool_start" and event.get("tool") != "Bash":
+        return
       recall = recall_from_command(event.get("input"))
       if recall is not None:
         event["recall"] = recall
       return
-    if self._tool_was_memory_recall(event.get("tool_use_id")):
-      event["recall"] = recall_from_output(event.get("content"))
+    if (event.get("output_complete")
+        and self._tool_was_memory_recall(event.get("tool_use_id"))):
+      event["recall"] = recall_from_result(
+        event.get("content"), event.get("output_exit_code"),
+      )
 
   def _reduce_tool_output(self, event: ChatEvent) -> None:
     """Move a large tool_output's full text OFF the wire (contract rule 6).
@@ -545,12 +550,14 @@ class _ChatEventSink:
     # and before the broadcast below, so the rewritten event is the single
     # source feeding the persisted block, the live wire, and the catch-up log.
     #
-    # Memory recall is stamped just BEFORE that reduction, for the same reason
-    # and on the same funnel: a full lookup's stdout exceeds the inline
-    # threshold, so parsing after rule-6 carving would silently lose the note
-    # titles that make a citation readable. One stamp here reaches the persisted
-    # block, the live wire, and the catch-up log alike, for both runners.
-    if event_type in ("tool_input", "tool_output"):
+    # Memory recall is stamped just BEFORE that reduction on the same funnel.
+    # The app prints its bounded structured result last, so one validated stamp
+    # reaches the persisted block, live wire, and catch-up log for both runners.
+    if event_type == "tool_output" and event.get("output_exit_code") is None:
+      exit_code = tool_output_exit_code(event.get("content"))
+      if exit_code is not None:
+        event["output_exit_code"] = exit_code
+    if event_type in ("tool_start", "tool_input", "tool_output"):
       self._stamp_memory_recall(event)
     if event_type == "tool_output":
       self._reduce_tool_output(event)

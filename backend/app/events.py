@@ -334,6 +334,20 @@ def _tool_output_exit_code(content: str, parsed):
   return int(m.group(1)) if m else None
 
 
+def tool_output_exit_code(content: object):
+  """Return a typed command exit code from any sized tool output."""
+  if not isinstance(content, str):
+    return None
+  parsed = None
+  stripped = content.lstrip()
+  if stripped[:1] in ("{", "["):
+    try:
+      parsed = json.loads(content)
+    except (ValueError, TypeError):
+      parsed = None
+  return _tool_output_exit_code(content, parsed)
+
+
 def excerpt_tool_output(content: str):
   """Reduce a large tool_output string to (excerpt, full_len, exit_code).
 
@@ -574,6 +588,8 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     tool_use_id = event.get("tool_use_id")
     if tool_use_id:
       block["tool_use_id"] = tool_use_id
+    if isinstance(event.get("recall"), dict):
+      block["recall"] = event["recall"]
     assistant_blocks.append(block)
     return True
 
@@ -624,12 +640,12 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
       # the full text and read a failure exit code from a field, not a parse
       # of the possibly-carved excerpt. Absent fields leave the block shape
       # unchanged (a small, un-reduced output).
+      exit_code = event.get("output_exit_code")
+      if exit_code is not None:
+        blk["output_exit_code"] = exit_code
       if event.get("output_truncated"):
         blk["output_truncated"] = True
         blk["output_full_len"] = event.get("output_full_len")
-        exit_code = event.get("output_exit_code")
-        if exit_code is not None:
-          blk["output_exit_code"] = exit_code
       # Settle a Memory lookup from "searching" to what it actually recalled.
       # The sink parsed this from the FULL output, before the carving above.
       if isinstance(event.get("recall"), dict):

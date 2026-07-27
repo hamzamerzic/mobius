@@ -205,8 +205,9 @@ def test_stamp_tool_use_id_uses_stable_item_id():
 
 def test_tool_completed_events_emit_output_before_end():
   class CommandExecutionThreadItem:
-    def __init__(self, output: str):
+    def __init__(self, output: str, exit_code: int = 0):
       self.aggregated_output = output
+      self.exit_code = exit_code
 
   sdk = {"CommandExecutionThreadItem": CommandExecutionThreadItem}
   sdk.update({
@@ -222,7 +223,20 @@ def test_tool_completed_events_emit_output_before_end():
   )
 
   assert events == [
-    {"type": "tool_output", "content": "hello"},
+    {
+      "type": "tool_output", "content": "hello",
+      "output_complete": True, "output_exit_code": 0,
+    },
+    {"type": "tool_end"},
+  ]
+
+  assert codex_sdk_runner._tool_completed_events(
+    CommandExecutionThreadItem("", exit_code=7), sdk,
+  ) == [
+    {
+      "type": "tool_output", "content": "",
+      "output_complete": True, "output_exit_code": 7,
+    },
     {"type": "tool_end"},
   ]
 

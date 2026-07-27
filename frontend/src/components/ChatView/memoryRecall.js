@@ -82,6 +82,9 @@ export function messageRecall(blocks) {
     if (!recall || typeof recall !== 'object') continue
     // A lookup still in flight is a live activity beat, not yet a citation.
     if (recall.status === 'searching') continue
+    // A failed lookup remains visible in its activity row, but it did not
+    // successfully consult the graph and must not mint a source section.
+    if (recall.status === 'failed') continue
     looked = true
     if (recall.status === 'empty') empty = true
     if (!Array.isArray(recall.notes)) continue

@@ -212,7 +212,7 @@ export function effectiveToolName(tool) {
 // swallowed into a chip, not a tool block).
 const DISTINCTIVE_ACTIVITIES = new Set(['ViewImage', 'MemoryRecall'])
 
-// The one-line story of a memory lookup, in the three states that matter.
+// The one-line story of a memory lookup, including honest operational failure.
 // Reading the count from the citation set the backend already parsed keeps the
 // label and the pills under the answer from ever disagreeing.
 export function memoryRecallLabel(tool) {
@@ -221,6 +221,7 @@ export function memoryRecallLabel(tool) {
     return 'Searching Memory'
   }
   if (recall?.status === 'empty') return 'Searched Memory — nothing relevant'
+  if (recall?.status === 'failed') return 'Memory lookup failed'
   const count = Array.isArray(recall?.notes) ? recall.notes.length : 0
   if (count === 0) return 'Recalled from Memory'
   return `Recalled ${count} note${count === 1 ? '' : 's'} from Memory`

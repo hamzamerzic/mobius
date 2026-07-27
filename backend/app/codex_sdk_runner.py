@@ -1193,9 +1193,13 @@ def _tool_completed_events(item: Any, sdk: dict[str, Any]) -> list[dict[str, Any
 
   if isinstance(item, sdk["CommandExecutionThreadItem"]):
     output = (item.aggregated_output or "").strip()
-    events: list[dict[str, Any]] = []
-    if output:
-      events.append({"type": "tool_output", "content": output})
+    exit_code = getattr(item, "exit_code", None)
+    events: list[dict[str, Any]] = [{
+      "type": "tool_output",
+      "content": output,
+      "output_complete": True,
+      **({"output_exit_code": exit_code} if isinstance(exit_code, int) else {}),
+    }]
     events.append({"type": "tool_end"})
     return events
 

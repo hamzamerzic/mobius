@@ -7,48 +7,29 @@ other shell command, so the owner cannot tell "it remembered something" from
 "it ran housekeeping" — nor, more importantly, "it looked and found nothing"
 from "it never looked".
 
-Detection is deliberately two-phase and keyed off the tool's own lifecycle
-rather than the shape of its output:
+Detection is deliberately two-phase and keyed off the tool's own lifecycle:
 
-* ``recall_from_command`` matches the *command being run*. This is the only
-  positive identification; nothing here ever concludes "this was a memory
-  lookup" from output text alone, so an unrelated command that happens to
-  print ``FILES:`` can never mint a citation.
-* ``recall_from_output`` is then trusted to parse that command's stdout, and is
-  only ever called for a tool already identified by the first phase.
+* ``recall_from_command`` accepts only the simple absolute invocation documented
+  by the Memory skill. It deliberately rejects shell composition rather than
+  trying to partially parse Bash.
+* ``recall_from_result`` reads the Memory app's bounded structured result line
+  and is only called for a tool already identified by the first phase.
 
-The stdout contract belongs to the Memory app (``memory_search.py``'s
-``retrieve``/``run``) and is stable::
-
-    Relevant memories:
-    - <title>: <excerpt> [<relative/path.md>]
-    - <title>: <excerpt> [<relative/path.md>]
-    FILES: notes/a.md, notes/b.md
-
-or, for a lookup that matched nothing::
-
-    No relevant memories.
-
-``FILES:`` is authoritative: those paths were opened by confined Python after
-the graph commit was pinned, whereas the ``- title: excerpt [path]`` lines are
-presentation. So paths come from ``FILES:`` and the section lines only enrich
-them with a title and excerpt. That split also makes the parse robust to the
-head+tail carving a large tool output receives (``events.py``
-``excerpt_tool_output``): both markers sit at the very start and very end of
-the stream, so a carved middle costs some titles but never the citation set.
-
-Every failure mode degrades to *less* metadata, never to a wrong citation:
-an unparseable body still yields a bounded "hit" with path-derived titles, and
-a missing command summary yields no recall at all.
+The structured line is printed last, so head+tail carving preserves it. Human
+prose and the legacy ``FILES:`` line remain useful to the agent, but neither is
+parsed for product state. Missing, malformed, or contradictory result metadata
+is an explicit failed lookup, never a successful note-less recall.
 """
 
 from __future__ import annotations
 
+import json
 import re
+import shlex
 
 # Recall metadata rides inline on the SSE event, the persisted tool block, and
 # the compacted activity summary — the same budget the web-source citations
-# live within. memory_search.py itself returns at most 6 files with 900-char
+# live within. memory_search.py itself returns at most 4 files with 900-char
 # excerpts; these ceilings leave headroom without letting a malformed or
 # hostile stdout inflate every transcript read.
 MAX_RECALL_NOTES = 12
@@ -61,28 +42,24 @@ _MAX_SECTION_LINES_SCANNED = 256
 RECALL_SEARCHING = "searching"
 RECALL_HIT = "hit"
 RECALL_EMPTY = "empty"
+RECALL_FAILED = "failed"
 
-# The command summary the backend builds for Bash is the verbatim command
-# string, so identification means answering "did this command RUN the search
-# script?" — not "does this command mention it?". Substring matching gets that
-# wrong in the most ordinary way possible: `grep -rn memory_search.py …` and
-# `cat memory_search.py` both name the script while doing something else
-# entirely, and either would mint a citation from unrelated output.
-#
-# So the command is split into segments and each segment's HEAD is inspected:
-# a lookup is either the script executed directly or an interpreter invoked on
-# it. Anything where the script is a mere argument is correctly ignored.
+# The command summary is the verbatim Bash command. Accept only Memory's
+# documented simple absolute invocation. This is intentionally a narrow
+# protocol, not a growing shell grammar: composition, redirection, substitution,
+# and relative scripts all yield no observability marker while the command
+# itself continues to run normally.
 _MAX_COMMAND_SCAN_CHARS = 8192
-_SEGMENT_RE = re.compile(r"[;&|\n]+")
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _INTERPRETER_RE = re.compile(r"^(?:.*/)?python[0-9.]*$")
-_SCRIPT_RE = re.compile(r"^(?:.*/)?memory_search\.py$")
+_SCRIPT_RE = re.compile(r"^/data/apps/memory(?:-[0-9]+)?/memory_search\.py$")
+_CONTROL_TOKEN_RE = re.compile(r"^[;&|()<>]+$")
 
-_EMPTY_RE = re.compile(r"^No relevant memories\.\s*$", re.MULTILINE)
-_FILES_RE = re.compile(r"^FILES:[ \t]*(.+)$", re.MULTILINE)
-# "- <title>: <excerpt> [<path>]" — the excerpt is greedy-free and the path is
-# anchored to the end of the line, matching how memory_search.py builds it.
-_SECTION_RE = re.compile(r"^- (.*?): (.*) \[([^\]]+)\]$", re.MULTILINE)
+_RESULT_PREFIX = "MOBIUS_MEMORY_RESULT_V1:"
+_RESULT_RE = re.compile(
+  rf"^{re.escape(_RESULT_PREFIX)}(?P<payload>\{{.*\}})[ \t]*$",
+  re.MULTILINE,
+)
 
 # A citation path is only ever a repository-relative markdown pointer. Refusing
 # anything else keeps traversal, absolute paths, and control characters out of
@@ -121,12 +98,24 @@ def _safe_path(value: str) -> str:
   return candidate if _PATH_RE.match(candidate) else ""
 
 
-def _segment_runs_search(segment: str) -> bool:
-  """Whether one command segment EXECUTES the memory search script."""
-  tokens = [token.strip("'\"") for token in segment.split()]
-  tokens = [token for token in tokens if token]
-  # `FOO=bar python3 script.py` — leading environment assignments are not the
-  # command being run.
+def _simple_command_tokens(command: str) -> list[str] | None:
+  try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    tokens = list(lexer)
+  except ValueError:
+    return None
+  if not tokens or any(_CONTROL_TOKEN_RE.fullmatch(token) for token in tokens):
+    return None
+  # Reject substitutions/backticks conservatively. They are not part of the
+  # documented call and would turn this recognizer back into a shell parser.
+  if any("`" in token or "$(" in token for token in tokens):
+    return None
+  return tokens
+
+
+def _tokens_run_search(tokens: list[str]) -> bool:
   index = 0
   while index < len(tokens) and _ENV_ASSIGN_RE.match(tokens[index]):
     index += 1
@@ -134,15 +123,13 @@ def _segment_runs_search(segment: str) -> bool:
     return False
   head = tokens[index]
   if _SCRIPT_RE.match(head):
-    return True
+    return len(tokens) > index + 2
   if not _INTERPRETER_RE.match(head):
     return False
-  # `python3 -u script.py` — interpreter flags may precede the script, but the
-  # first non-flag token is the thing actually being run.
-  for token in tokens[index + 1:]:
+  for script_index, token in enumerate(tokens[index + 1:], start=index + 1):
     if token.startswith("-"):
       continue
-    return bool(_SCRIPT_RE.match(token))
+    return bool(_SCRIPT_RE.match(token) and len(tokens) > script_index + 2)
   return False
 
 
@@ -162,59 +149,49 @@ def recall_from_command(command: object) -> dict | None:
   # not memory lookups and should cost one substring scan.
   if "memory_search.py" not in command:
     return None
-  for segment in _SEGMENT_RE.split(command):
-    if _segment_runs_search(segment):
-      return {"status": RECALL_SEARCHING}
-  return None
+  tokens = _simple_command_tokens(command)
+  return {"status": RECALL_SEARCHING} if tokens and _tokens_run_search(tokens) else None
 
 
-def recall_from_output(text: object) -> dict:
-  """Parse a known memory lookup's stdout into a bounded citation set.
-
-  Only ever called for a tool ``recall_from_command`` already identified, so
-  an unrecognized body is a lookup whose output we could not read — not a
-  reason to claim nothing was found. That case returns a note-less ``hit``,
-  which renders as a plain "recalled from Memory" beat rather than the far
-  stronger (and possibly false) "nothing relevant" claim.
-  """
+def recall_from_result(text: object, exit_code: object = None) -> dict:
+  """Validate a known Memory command's final structured result."""
+  if isinstance(exit_code, bool):
+    exit_code = None
+  if isinstance(exit_code, int) and exit_code != 0:
+    return {"status": RECALL_FAILED}
   if not isinstance(text, str) or not text.strip():
-    # No output at all: the command produced nothing readable. Keep the beat,
-    # drop the claim.
-    return {"status": RECALL_HIT, "notes": []}
+    return {"status": RECALL_FAILED}
 
-  body = text[:_MAX_OUTPUT_SCAN_CHARS]
+  body = text[-_MAX_OUTPUT_SCAN_CHARS:]
+  matches = list(_RESULT_RE.finditer(body))
+  if not matches:
+    return {"status": RECALL_FAILED}
+  try:
+    payload = json.loads(matches[-1].group("payload"))
+  except (TypeError, ValueError, json.JSONDecodeError):
+    return {"status": RECALL_FAILED}
+  if not isinstance(payload, dict):
+    return {"status": RECALL_FAILED}
 
-  files_match = None
-  for files_match in _FILES_RE.finditer(body):
-    # The last FILES: line wins — a head+tail carve keeps the tail, and the
-    # real one is always the final line memory_search.py prints.
-    pass
-
-  if files_match is None:
-    if _EMPTY_RE.search(body):
-      return {"status": RECALL_EMPTY}
-    return {"status": RECALL_HIT, "notes": []}
-
-  titles: dict[str, tuple[str, str]] = {}
-  for index, section in enumerate(_SECTION_RE.finditer(body)):
-    if index >= _MAX_SECTION_LINES_SCANNED:
-      break
-    raw_title, raw_excerpt, raw_path = section.groups()
-    path = _safe_path(raw_path)
-    if path and path not in titles:
-      titles[path] = (
-        _clean(raw_title, MAX_RECALL_TITLE_CHARS),
-        _clean(raw_excerpt, MAX_RECALL_EXCERPT_CHARS),
-      )
+  status = payload.get("status")
+  if status == RECALL_FAILED:
+    return {"status": RECALL_FAILED}
+  if status == RECALL_EMPTY:
+    return {"status": RECALL_EMPTY}
+  if status != RECALL_HIT or not isinstance(payload.get("notes"), list):
+    return {"status": RECALL_FAILED}
 
   notes: list[dict[str, str]] = []
   seen: set[str] = set()
-  for raw_path in files_match.group(1).split(","):
-    path = _safe_path(raw_path)
+  for raw_note in payload["notes"][:_MAX_SECTION_LINES_SCANNED]:
+    if not isinstance(raw_note, dict):
+      continue
+    path = _safe_path(raw_note.get("path"))
     if not path or path in seen:
       continue
     seen.add(path)
-    title, excerpt = titles.get(path, ("", ""))
+    title = _clean(raw_note.get("title"), MAX_RECALL_TITLE_CHARS)
+    excerpt = _clean(raw_note.get("excerpt"), MAX_RECALL_EXCERPT_CHARS)
     note = {
       "id": _note_id(path),
       "path": path,
@@ -225,10 +202,10 @@ def recall_from_output(text: object) -> dict:
     notes.append(note)
     if len(notes) >= MAX_RECALL_NOTES:
       break
-
-  # A FILES: line whose every entry failed validation is a malformed citation
-  # set, not an empty lookup — same conservative fallback as an unreadable body.
-  return {"status": RECALL_HIT, "notes": notes}
+  return (
+    {"status": RECALL_HIT, "notes": notes}
+    if notes else {"status": RECALL_FAILED}
+  )
 
 
 def merge_recall_notes(

@@ -70,10 +70,8 @@ test('compacted activity carries citations so they survive a reload', () => {
   assert.deepEqual(recall.notes.map(n => n.id), ['alpha'])
 })
 
-test('a lookup whose output could not be parsed still counts as looking', () => {
-  const recall = messageRecall([toolBlock({ status: 'hit', notes: [] })])
-  assert.deepEqual(recall, { notes: [], empty: false },
-    'no notes to cite, but no false "nothing relevant" claim either')
+test('a failed lookup creates no citation section or empty-memory claim', () => {
+  assert.equal(messageRecall([toolBlock({ status: 'failed' })]), null)
 })
 
 test('citations are bounded so one turn cannot flood the transcript', () => {
