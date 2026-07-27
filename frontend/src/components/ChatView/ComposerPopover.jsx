@@ -65,6 +65,7 @@ import { Plus, Paperclip } from '@openai/apps-sdk-ui/components/Icon'
 import FileText from 'lucide-react/dist/esm/icons/file-text.mjs'
 import Info from 'lucide-react/dist/esm/icons/info.mjs'
 import ChatSettingsPanel from './ChatSettingsPanel.jsx'
+import { popoverMaxHeight, nearestClipTop } from './composerPopoverHeight.js'
 
 export default function ComposerPopover({
   chatInfo,
@@ -113,6 +114,36 @@ export default function ComposerPopover({
   // between the click handler and the post-commit effect, leaving
   // the ref stale. Sync capture in onClick is reliable.
   const wasInputFocusedRef = useRef(false)
+  // Measured cap on the panel's height: the space above the trigger inside both
+  // the chat pane (which clips with `overflow: hidden`) and the keyboard-shrunk
+  // visible viewport. See composerPopoverHeight.js for why CSS viewport units
+  // can't express either boundary.
+  const [maxHeight, setMaxHeight] = useState(null)
+
+  useEffect(() => {
+    if (!open) return
+    const measure = () => {
+      const trigger = triggerRef.current
+      if (!trigger) return
+      setMaxHeight(popoverMaxHeight({
+        triggerTop: trigger.getBoundingClientRect().top,
+        viewportTop: window.visualViewport?.offsetTop || 0,
+        clipTop: nearestClipTop(trigger),
+      }))
+    }
+    measure()
+    // The keyboard animates in/out, and iOS scrolls the layout viewport during
+    // that animation, so re-measure on every viewport event for as long as the
+    // panel is open rather than trusting the open-time measurement.
+    window.addEventListener('resize', measure)
+    window.visualViewport?.addEventListener('resize', measure)
+    window.visualViewport?.addEventListener('scroll', measure)
+    return () => {
+      window.removeEventListener('resize', measure)
+      window.visualViewport?.removeEventListener('resize', measure)
+      window.visualViewport?.removeEventListener('scroll', measure)
+    }
+  }, [open])
 
   useEffect(() => {
     if (!open) return
@@ -200,7 +231,12 @@ export default function ComposerPopover({
         <Plus width={26} height={26} />
       </button>
       {open && (
-        <div className="composer-popover" role="dialog" aria-label="Chat options">
+        <div
+          className="composer-popover"
+          role="dialog"
+          aria-label="Chat options"
+          style={maxHeight ? { maxHeight: `${maxHeight}px` } : undefined}
+        >
           <div className="composer-popover__section">
             <button
               type="button"
