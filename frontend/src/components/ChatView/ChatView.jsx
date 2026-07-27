@@ -23,7 +23,7 @@ import { getOnlineSnapshot } from '../../lib/connectivityStore.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
-import useOffscreenNudge from './hooks/useOffscreenNudge.js'
+import useOffscreenNudge, { useNudgeTargetRef } from './hooks/useOffscreenNudge.js'
 import ChatInputBar from './ChatInputBar.jsx'
 import { hasSendablePayload } from './composerSubmission.js'
 import AgentContextInspector from './AgentContextInspector.jsx'
@@ -421,7 +421,8 @@ export default function ChatView({
   // The pending-question and resume "tap to jump to it" nudges each track
   // whether their card is scrolled out of the viewport. Both use one shared
   // observer hook (useOffscreenNudge, below); their booleans are computed near
-  // hasPendingQuestion / hasPendingResume where the card finders live.
+  // hasPendingQuestion / hasPendingResume, alongside the callback refs the
+  // cards themselves use to publish the node being observed.
   const [showInspector, setShowInspector] = useState(false)
   const [showSummary, setShowSummary] = useState(false)
   const [visibleTimestampKey, setVisibleTimestampKey] = useState(null)
@@ -3591,30 +3592,30 @@ export default function ChatView({
     }
   }, [pendingLimitResetAt])
 
-  // Visibility of that card is a pure viewport question — an
-  // IntersectionObserver rooted at the scroll container is the signal,
-  // no scroll math and no interaction with the spacer machinery. The
-  // card's DOM node is stable across streaming ticks (keyed children),
-  // so the observer only needs re-binding when the rendering surface
-  // can change: pending-flag flips, stream↔messages promotion, or a
-  // messages commit. Both nudges share useOffscreenNudge (above).
-  // The LAST un-answered card is the pending one: it lives in the last
-  // assistant message or the streaming <li>.
-  const findPendingQuestionCard = () =>
-    [...(scrollRef.current?.querySelectorAll('.qcard:not(.qcard--answered)') ?? [])].pop()
+  // Visibility of either card is a pure viewport question — an
+  // IntersectionObserver rooted at the scroll container is the signal, no
+  // scroll math and no interaction with the spacer machinery. ChatView must
+  // NOT look the card up: the pending question moves between two rendering
+  // surfaces (the live streaming <li> and the durable message row) at a moment
+  // ChatView cannot enumerate, and a lookup taken at bind time then observes a
+  // node React has since detached — with the turn parked on the answer nothing
+  // re-renders, so the cue would stick forever. Instead the element that IS
+  // the card publishes its node through these refs (see useNudgeTargetRef);
+  // both surfaces publish through the same channel, so the live→durable
+  // handoff reaches the observer as an ordinary node swap.
+  const [pendingQuestionEl, pendingQuestionRef] = useNudgeTargetRef()
   const pendingCardOffscreen = useOffscreenNudge(
-    scrollRef, hasPendingQuestion, findPendingQuestionCard,
-    [showActiveAssistantSurface, messages],
+    scrollRef, hasPendingQuestion, pendingQuestionEl,
   )
 
-  // The resume card: only the tail resumable note renders `.chat__resume`
-  // (MsgContent gates the button on isLastMsg), so observing that button is
-  // enough to know the card's visibility; a tap on the nudge scrolls it in.
-  const findResumeCard = () =>
-    [...(scrollRef.current?.querySelectorAll('.chat__resume') ?? [])].pop()
+  // The resume card publishes the same way, from the TAIL resumable note only
+  // — the same block tailResumableBlock arms the cue on. (MsgContent renders a
+  // Resume button on every resumable block of the last message, so the tail
+  // gate lives at the publication site; one shared ref can only hold one
+  // node.) A tap on the nudge scrolls that node in.
+  const [resumeCardEl, resumeCardRef] = useNudgeTargetRef()
   const resumeCardOffscreen = useOffscreenNudge(
-    scrollRef, hasPendingResume, findResumeCard,
-    [showActiveAssistantSurface, messages],
+    scrollRef, hasPendingResume, resumeCardEl,
   )
 
   // The ONE active <li> carries this data-key for both DB and live payloads.
@@ -3919,6 +3920,8 @@ export default function ChatView({
                 isLastMsg={isLastMsg}
                 liveQuestionId={liveQuestionId}
                 suppressedQuestionKeys={streamItemQuestionKeys}
+                pendingQuestionRef={pendingQuestionRef}
+                resumeCardRef={resumeCardRef}
               />
               {msg.ts && ownerUserMessage && (
                 <time className={`chat__ts${visibleTimestampKey === dataKey ? ' chat__ts--visible' : ''}`}>
@@ -3952,6 +3955,11 @@ export default function ChatView({
               onAutoResumeChange={handleAutoResumeChange}
               submissionBlocked={providerSwitching}
               liveQuestionId={liveQuestionId}
+              // Same publication channel as the durable rows above: while the
+              // turn is live THIS surface owns the pending question card, so
+              // the offscreen observer follows the handoff automatically.
+              pendingQuestionRef={pendingQuestionRef}
+              resumeCardRef={resumeCardRef}
               // Liveness for the ACTIVE surface follows the TURN, not the
               // payload source: when a richer DB partial wins source selection
               // (useDbActivePayload, e.g. through the reconnect catch-up
