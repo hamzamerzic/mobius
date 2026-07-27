@@ -118,6 +118,11 @@ DEFAULT_TARGET_REF = "origin/main"
 # this is wedged, not busy. Fetch gets its own (network-bound) budget.
 _GIT_TIMEOUT = 120
 _FETCH_TIMEOUT = 120
+# Distinct sentinel returned by ``_merge_target`` when the merge wedged and was
+# aborted (as opposed to a positive git returncode from a content conflict).
+# After the abort no unmerged paths survive, so the caller must treat this as an
+# error/serve-old outcome rather than fabricating a zero-path content conflict.
+_MERGE_TIMEOUT = -1
 # The post-merge import probe. A module-level infinite loop or a blocking call
 # in agent-edited code would otherwise wedge boot forever; a timeout-kill counts
 # as probe-fail -> roll back.
@@ -596,8 +601,12 @@ def _merge_target(repo: Path, target: str) -> int:
   resolver discover conflicts one historical commit at a time. ``--no-ff`` is
   deliberate: this helper is called only for diverged histories, and the merge
   commit preserves both the reviewed upstream target and the complete local
-  history as explicit parents. Returns 0 on a clean committed merge and nonzero
-  on conflict/error; the caller owns abort + serve-old recovery.
+  history as explicit parents. Returns 0 on a clean committed merge and a
+  positive returncode on a content conflict/error; returns the distinct
+  sentinel :data:`_MERGE_TIMEOUT` when the merge wedged and was aborted (no
+  unmerged paths survive the abort, so the caller must classify it as an error/
+  serve-old outcome rather than a content conflict). The caller owns abort +
+  serve-old recovery.
   """
   env = _scrubbed_git_env(repo)
   try:
@@ -614,9 +623,10 @@ def _merge_target(repo: Path, target: str) -> int:
     return proc.returncode
   except subprocess.TimeoutExpired:
     # A wedged merge must not leave a half-merged tree: abort so the caller's
-    # serve-old path is honoured.
+    # serve-old path is honoured. Return a distinct sentinel so the caller does
+    # not read the (now empty) unmerged paths and fabricate a zero-path conflict.
     _git("merge", "--abort", repo=repo, check=False)
-    return 1
+    return _MERGE_TIMEOUT
 
 
 def _reset_hard_to(repo: Path, local: str, sha: str) -> None:
@@ -1251,12 +1261,25 @@ def reconcile_clone(
       # net conflict instead of stopping once per historical local commit.
       rc = _merge_target(repo, target)
       if rc != 0:
-        # Conflict: NEVER leave a half-merged tree. Abort back to PRE (the old,
-        # working code keeps serving), record the conflict, clear any stale
-        # rollback flag, and let the caller open a resolver chat.
+        # NEVER leave a half-merged tree. Read the unmerged paths BEFORE the
+        # abort clears them.
         paths = _unmerged_paths(repo)
         _git("merge", "--abort", repo=repo, check=False)
         _reset_hard_to(repo, local, pre)  # belt-and-braces: ensure main == PRE
+        # A wedged merge (timeout sentinel) — or, defensively, ANY nonzero
+        # result that produced no unmerged paths — is NOT a reviewable content
+        # conflict: ``_merge_target`` already aborted it, so there is nothing for
+        # a resolver chat to reconcile. Classify it as an error/serve-old outcome
+        # (reset to PRE, no conflict flag, no resolver chat) rather than
+        # fabricating a zero-path conflict.
+        if rc == _MERGE_TIMEOUT or not paths:
+          CONFLICT_FLAG.unlink(missing_ok=True)
+          ROLLED_BACK_FLAG.unlink(missing_ok=True)
+          _clear_reconcile_pre()
+          err = "merge_timeout" if rc == _MERGE_TIMEOUT else "merge_failed"
+          return ReconcileResult("error", pre, pre, target, error=err)
+        # Content conflict: record it, clear any stale rollback flag, and let the
+        # caller open a resolver chat.
         _write_conflict_flag(target, paths)
         ROLLED_BACK_FLAG.unlink(missing_ok=True)
         _clear_reconcile_pre()
@@ -1834,7 +1857,8 @@ def _platform_conflict_resolver_message(
     f"{target_sha}` compares the complete local and reviewed upstream trees "
     "once and stops with every conflicting file marked; combine the intent of "
     "the local version and upstream's, save each file, then `git add` it and "
-    "`git merge --continue`. When the merge finishes, the working branch "
+    "`git commit --no-edit` (this finishes the merge non-interactively from the "
+    "prepared merge message). When the merge finishes, the working branch "
     "carries both histories.\n\n"
     "When the reconcile is committed, clear the flag "
     "(`rm -f /data/.platform-conflict`) and tell the owner to **restart the "

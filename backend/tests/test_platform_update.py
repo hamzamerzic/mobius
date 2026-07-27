@@ -291,6 +291,41 @@ def test_diverged_update_surfaces_all_net_conflicts_together(clone_env):
   assert not pu._reconcile_in_progress(platform)
 
 
+@pytest.mark.parametrize(
+  ("merge_rc", "expected_error"),
+  [
+    (pu._MERGE_TIMEOUT, "merge_timeout"),
+    (2, "merge_failed"),
+  ],
+)
+def test_non_conflict_merge_failure_serves_old_without_a_resolver_flag(
+  clone_env, monkeypatch, merge_rc, expected_error,
+):
+  origin, platform = clone_env
+  pre = _local_commit(platform, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LOCAL'")})
+  target = _advance_origin(origin, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_C = 3", "LINE_C = 'UPSTREAM'")})
+  # A previous attempt may have left either durable review state behind. A
+  # timeout or git failure with no unmerged paths has nothing a resolver can
+  # act on, so returning "error" while preserving one of these flags would make
+  # the next status read lie about what just happened.
+  pu._write_conflict_flag("b" * 40, ["backend/app/old.py"])
+  pu._write_rolled_back_flag("c" * 40, "old import failure")
+  monkeypatch.setattr(pu, "_merge_target", lambda _repo, _target: merge_rc)
+
+  res = pu.reconcile_clone(platform, at_boot=True)
+
+  assert res.status == "error"
+  assert res.error == expected_error
+  assert res.target_sha == target
+  assert _served_sha(platform) == pre
+  assert not pu._reconcile_in_progress(platform)
+  assert not pu.CONFLICT_FLAG.exists()
+  assert not pu.ROLLED_BACK_FLAG.exists()
+  assert not pu.RECONCILE_PRE_FLAG.exists()
+
+
 # --- V-B4: import-broken text-clean merge -> rollback -----------------------
 
 def test_import_broken_merge_rolls_back(clone_env):
@@ -944,6 +979,10 @@ def test_platform_conflict_resolver_message_pins_reviewed_target():
   assert f"merge --no-ff {target}" in content
   assert "merge --no-ff origin/main" not in content
   assert "backend/app/main.py, frontend/src/App.jsx" in content
+  # The resolver runs in a headless shell where `git merge --continue` opens an
+  # editor and hangs/errors; it must finish non-interactively instead.
+  assert "commit --no-edit" in content
+  assert "merge --continue" not in content
 
 
 def test_status_restart_needed_when_disk_head_changed_after_boot(clone_env):
