@@ -2290,6 +2290,23 @@
   text-align: center;
 }
 
+/* The thumbnail itself is the "open full screen" affordance, so it fills
+   the card edge-to-edge and carries no chrome of its own. */
+.chat__attach-card-thumb-button {
+  all: unset;
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: zoom-in;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.chat__attach-card-thumb-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 13px;
+}
+
 .chat__attach-card-thumb {
   width: 100%;
   height: 100%;
