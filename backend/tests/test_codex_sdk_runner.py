@@ -1426,7 +1426,7 @@ def _mark_interrupted(handle):
 
 
 def test_run_codex_sdk_turn_reports_self_requested_kill_as_interrupted(
-  monkeypatch,
+  monkeypatch, caplog,
 ):
   """A stop we asked for must not read as a provider failure.
 
@@ -1447,6 +1447,12 @@ def test_run_codex_sdk_turn_reports_self_requested_kill_as_interrupted(
   assert result["terminal_status"] == "interrupted"
   assert [e for e in bc.events if e.get("type") == "error"] == []
   assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None
+  assert any(
+    record.levelname == "WARNING"
+    and "Codex transport closed by our own stop" in record.message
+    and "closed stdout" in record.message
+    for record in caplog.records
+  )
 
 
 def test_run_codex_sdk_turn_self_requested_kill_still_reports_usage(

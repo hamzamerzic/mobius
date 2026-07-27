@@ -2385,10 +2385,11 @@ async def run_codex_sdk_turn(
       # the new event omits — taking the note's one-tap Resume with it and
       # leaving the owner an unexplained error and no way back.
       #
-      # Expected, so INFO — but the transport's dying words are the only
-      # forensics a kill leaves behind, and nothing downstream logs them
-      # once `error` is None.
-      log.info(
+      # Usually expected after escalation, but WARNING is deliberate: a real
+      # app-server crash can coincide with a requested stop and has the same
+      # transport shape. The dying words are the only forensic evidence left
+      # once the owner-facing error is suppressed.
+      log.warning(
         "Codex transport closed by our own stop chat_id=%s: %s", chat_id, exc,
       )
       return with_usage({
