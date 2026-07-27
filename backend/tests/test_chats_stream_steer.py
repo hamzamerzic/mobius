@@ -611,6 +611,50 @@ def test_seal_publishes_the_cut_on_the_sinks_own_broadcast():
   asyncio.run(_run())
 
 
+def test_writer_dedup_still_publishes_the_committed_cut():
+  """An empty stored-row echo does not undo the split that just committed.
+
+  `split_for_steer` seals A1 and resets the sink BEFORE the writer appends the
+  steered row. `stored_messages: []` means only that cid dedup found the row
+  already in the durable transcript; it does not mean the A1/A2 boundary was
+  skipped. Suppressing the cut here would leave the client appending A2 to the
+  segment the server has already sealed. The handed row still supplies the cid
+  that retires its tray entry and identifies the already-durable user turn.
+  """
+  from app.broadcast import create_broadcast
+  from app.claude_sdk_runner import _seal_steer_split
+
+  chat_id = "sealdedup"
+  handle = _make_active_claude_client(chat_id)
+  turn_bc = create_broadcast(chat_id)
+
+  async def _run():
+    row = {"role": "user", "content": "Q2", "ts": 10, "cid": "c-q2"}
+    handle._steer_user_msgs = [row]
+    handle._steer_consume_cids = ["c-q2"]
+
+    class _SinkLike:
+      def __init__(self, bc):
+        self.bc = bc
+
+      async def split_for_steer(self, rows, consume):
+        assert rows == [row]
+        assert consume == ["c-q2"]
+        # The durable writer already has this cid, but the sink-side split still
+        # sealed A1 and reset its accumulator for A2.
+        return {"stored_messages": []}
+
+    await _seal_steer_split(_SinkLike(turn_bc), handle, chat_id)
+
+    cuts = [e for e in turn_bc.event_log if e.get("type") == "steered_into_turn"]
+    assert len(cuts) == 1
+    assert cuts[0]["messages"][0]["cid"] == "c-q2"
+    assert handle._steer_user_msgs == []
+    assert handle._steer_consume_cids == []
+
+  asyncio.run(_run())
+
+
 def test_a_failing_publisher_cannot_escape_the_seal():
   """Announcing the cut must never raise out of `_seal_steer_split`.
 
