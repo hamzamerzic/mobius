@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import {
   popoverMaxHeight,
   POPOVER_CAP,
-  POPOVER_FLOOR,
 } from '../composerPopoverHeight.js'
 
 test('caps at POPOVER_CAP when there is plenty of room above the trigger', () => {
@@ -34,7 +33,7 @@ test('takes the viewport boundary when it is below the pane top', () => {
   assert.equal(popoverMaxHeight({ triggerTop: 500, viewportTop: 200, clipTop: 40 }), 284)
 })
 
-test('never returns less than POPOVER_FLOOR', () => {
-  assert.equal(popoverMaxHeight({ triggerTop: 40 }), POPOVER_FLOOR)
-  assert.equal(popoverMaxHeight({ triggerTop: 0 }), POPOVER_FLOOR)
+test('never overflows the available space in a cramped pane', () => {
+  assert.equal(popoverMaxHeight({ triggerTop: 40 }), 24)
+  assert.equal(popoverMaxHeight({ triggerTop: 0 }), 0)
 })

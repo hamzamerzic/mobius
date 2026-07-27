@@ -4392,6 +4392,20 @@ def test_for_chat_returns_only_this_chat_s_prepared_reviews(client, owner_token)
   assert body["autopilot_default"] is True
 
 
+def test_diff_file_paths_reads_headers_not_source_that_looks_like_one(tmp_path):
+  diff_path = tmp_path / "review.diff"
+  diff_path.write_text(
+    "diff --git a/real file.jsx b/real file.jsx\n"
+    "--- a/real file.jsx\n"
+    "+++ b/real file.jsx\n"
+    "@@ -1 +1,2 @@\n"
+    " keep\n"
+    "++++ not-a-reviewed-path.jsx\n",
+  )
+
+  assert github_routes._diff_file_paths(diff_path) == ["real file.jsx"]
+
+
 def test_for_chat_reports_local_drift_so_the_card_can_block_send(
   client, owner_token,
 ):
@@ -4412,7 +4426,7 @@ def test_for_chat_reports_local_drift_so_the_card_can_block_send(
   assert (repo / "index.jsx").read_text() == "export default 3\n"
 
 
-def test_for_chat_drops_abandoned_and_leaves_settled_to_the_client(
+def test_for_chat_returns_only_records_that_still_need_a_chat_action(
   client, owner_token,
 ):
   _write_token(login="octocat", user_id=42)
@@ -4428,13 +4442,9 @@ def test_for_chat_drops_abandoned_and_leaves_settled_to_the_client(
     f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
   )
   assert r.status_code == 200, r.text
-  ids = [item["id"] for item in r.json()["records"]]
-  # An abandoned record is gone for good; an open one is history the app owns,
-  # but it is still returned so the client can decide (it carries no review).
-  assert "dropped" not in ids
-  assert ids == ["already-open"]
-  assert r.json()["records"][0]["review"] is None
-  assert r.json()["records"][0]["number"] == 7
+  # Abandoned work is gone; settled work is history owned by Contribute rather
+  # than irrelevant data the chat endpoint asks every client to discard.
+  assert r.json()["records"] == []
 
 
 def test_for_chat_honors_the_owner_s_autopilot_default(client, owner_token):
@@ -4495,16 +4505,33 @@ def test_for_chat_requires_the_owner_or_that_app(client, owner_token):
   assert anon.status_code == 401
 
 
-def test_submit_records_where_the_owner_pressed_send(client, owner_token):
+def test_submit_records_where_the_owner_pressed_send(
+  client, owner_token, monkeypatch,
+):
   """Provenance only: the ledger says which surface approved the publish."""
   _write_token(login="octocat", user_id=42)
   app_id, _ = _app_token(client, owner_token, github_access=True)
   _prepared_for_chat(app_id, "provenance", "chat-a")
 
-  r = client.post(
+  invalid = client.post(
     f"/api/github/contributions/{app_id}/provenance/submit",
     headers={"Authorization": f"Bearer {owner_token}"},
     json={"autopilot": False, "submitter": "not-a-real-surface"},
   )
   # An unknown surface is rejected by the schema rather than stored.
-  assert r.status_code == 422, r.text
+  assert invalid.status_code == 422, invalid.text
+
+  def fake_submit(record, _diff_path):
+    assert record["submitter"] == "chat-review-card"
+    return "https://github.com/mobius-os/app-demo/pull/17", 17, {}
+
+  monkeypatch.setattr(github_routes, "_submit_prepared_pr", fake_submit)
+  submitted = client.post(
+    f"/api/github/contributions/{app_id}/provenance/submit",
+    headers={"Authorization": f"Bearer {owner_token}"},
+    json={"autopilot": False, "submitter": "chat-review-card"},
+  )
+
+  assert submitted.status_code == 200, submitted.text
+  record_path, _ = github_routes._record_paths(app_id, "provenance")
+  assert json.loads(record_path.read_text())["submitter"] == "chat-review-card"

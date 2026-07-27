@@ -74,9 +74,9 @@ export default function Drawer({
   settingsWarning,
   // Shared flag the workspace drag controller raises while a row is being
   // dragged OUT of the drawer (design §3.1). The swipe-to-close touch handlers
-  // below consult it and STAND DOWN — they are React-passive listeners, so they
-  // cannot be preventDefault-ed by the controller's pointer capture; the flag is
-  // the only way they can yield the gesture. Null when the flag is off.
+  // below consult it and STAND DOWN so the native non-passive pan recognizer
+  // never claims a gesture that the pointer-captured row drag owns. Null when
+  // the flag is off.
   dragActiveRef,
 }) {
   const streamingSet = streamingChatIds || EMPTY_SET

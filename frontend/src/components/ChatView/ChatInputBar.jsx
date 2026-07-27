@@ -325,9 +325,9 @@ function FileChips({ files, onRemove, chatId }) {
               <button
                 type="button"
                 className="chat__attach-card-thumb-button"
-                // Same keyboard-preserving trick as the × button: without
-                // this, the tap moves focus off the textarea and iOS
-                // collapses the soft keyboard behind the viewer.
+                // Preserve the textarea until the dialog mounts. The shared
+                // lightbox then moves focus into itself deliberately and
+                // restores this button/text-entry context when it closes.
                 onPointerDown={(e) => e.preventDefault()}
                 onClick={() => setLightboxIndex(galleryIndex)}
                 aria-label={`View ${chip.name} full screen`}

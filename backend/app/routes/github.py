@@ -38,6 +38,7 @@ import logging
 import os
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -3503,21 +3504,46 @@ async def contribution_review_status(
 
 
 # Paths touched by a stored diff, for the chat card's "what am I sending" list.
-# Deliberately a header scan rather than a real patch parser: the card only needs
-# names, and the app owns full diff rendering.
+# Use the canonical per-file header rather than `+++`: added source is allowed
+# to begin with those characters, so scanning hunk contents can invent a path
+# that is not part of the reviewed change.
 def _diff_file_paths(diff_path: Path, limit: int = 40) -> list[str]:
+  def header_path(line: str) -> str:
+    raw = line[4:].rstrip("\r\n").split("\t", 1)[0]
+    if raw.startswith('"'):
+      try:
+        tokens = shlex.split(raw)
+      except ValueError:
+        return ""
+      raw = tokens[0] if tokens else ""
+    if raw.startswith(("a/", "b/")):
+      raw = raw[2:]
+    return raw
+
   paths: list[str] = []
+  in_file_header = False
+  old_path = ""
   try:
     with diff_path.open("r", encoding="utf-8", errors="replace") as handle:
       for line in handle:
+        if line.startswith("diff --git "):
+          in_file_header = True
+          old_path = ""
+          continue
+        if not in_file_header:
+          continue
+        if line.startswith("--- "):
+          old_path = header_path(line)
+          continue
         if not line.startswith("+++ "):
+          if line.startswith(("@@ ", "GIT binary patch", "Binary files ")):
+            in_file_header = False
           continue
-        target = line[4:].strip()
+        target = header_path(line)
         if target == "/dev/null":
-          continue
-        if target.startswith("b/"):
-          target = target[2:]
-        if target and target not in paths:
+          target = old_path
+        in_file_header = False
+        if target and target != "/dev/null" and target not in paths:
           paths.append(target)
         if len(paths) >= limit:
           break
@@ -3531,22 +3557,28 @@ def _chat_review_projection(record: dict, app_id: int) -> dict:
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
   record_id = str(record.get("id") or "")
   _, diff_path = _record_paths(app_id, record_id)
+
+  def text(value: object) -> str:
+    return value if isinstance(value, str) else ""
+
+  labels = [
+    value.strip() for value in plan.get("labels", [])
+    if isinstance(value, str) and value.strip()
+  ][:2] if isinstance(plan.get("labels"), list) else []
   return {
     "id": record_id,
-    "type": record.get("type"),
-    "status": record.get("status"),
-    "title": plan.get("title") or record.get("title"),
-    "summary": record.get("summary"),
-    "repo": plan.get("repo") or record.get("repo"),
-    "branch": plan.get("branch") or record.get("branch"),
-    "body_draft": plan.get("body_draft"),
-    "diff_stat": plan.get("diff_stat"),
+    "type": text(record.get("type")),
+    "status": text(record.get("status")),
+    "title": text(plan.get("title") or record.get("title")),
+    "summary": text(record.get("summary")),
+    "repo": text(plan.get("repo") or record.get("repo")),
+    "branch": text(plan.get("branch") or record.get("branch")),
+    "body_draft": text(plan.get("body_draft")),
+    "diff_stat": text(plan.get("diff_stat")),
     "files": _diff_file_paths(diff_path),
-    "labels": plan.get("labels") if isinstance(plan.get("labels"), list) else [],
-    "url": record.get("url"),
-    "number": record.get("number"),
-    "last_submit_error": record.get("last_submit_error"),
-    "updated_at": record.get("updated_at"),
+    "labels": labels,
+    "last_submit_error": text(record.get("last_submit_error")),
+    "updated_at": text(record.get("updated_at")),
     "is_stack": isinstance(plan.get("stack"), dict),
   }
 
@@ -3568,10 +3600,9 @@ async def contributions_for_chat(
   still goes through the submit endpoint below, which owns every freshness,
   attribution, and fork check.
 
-  Filtering by chat first is what keeps this cheap. The local preflight below is
-  the same one the app's review cards use, but a single chat normally has zero or
-  one prepared record, so it runs on that bounded set rather than the whole
-  ledger.
+  Only the local preflight is filtered by chat: ledger records are small and
+  bounded on read, then a single chat normally leaves zero or one prepared
+  candidate for the more expensive repository inspection below.
   """
   _validate_submit_app(app_id, principal, db)
   db.close()
@@ -3579,14 +3610,24 @@ async def contributions_for_chat(
   async with fs_locks.app_storage_lock(app_id):
     records = []
     if contribution_dir.exists():
-      for path in sorted(contribution_dir.glob("*.json"))[:500]:
+      # Prefer the most recently changed ledger entries. Record ids are not
+      # chronological, so lexicographic truncation can permanently hide a newly
+      # staged review after a long-lived instance crosses the scan cap.
+      paths_with_mtime = []
+      for path in contribution_dir.glob("*.json"):
+        try:
+          paths_with_mtime.append((path.stat().st_mtime_ns, path))
+        except OSError:
+          continue
+      for _mtime, path in sorted(paths_with_mtime, reverse=True)[:500]:
         record = _read_record_tolerant(path)
         if (
           record is not None
-          and record.get("id")
+          and isinstance(record.get("id"), str)
+          and _CONTRIBUTION_ID.match(record["id"])
           and str(record.get("chat_id") or "") == chat_id
           and record.get("type") == "pr"
-          and record.get("status") != "abandoned"
+          and record.get("status") in {"prepared", "submitting"}
         ):
           records.append(record)
     settings_path = (

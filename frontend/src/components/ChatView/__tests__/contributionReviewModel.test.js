@@ -92,11 +92,14 @@ test('a stack layer is never sendable from chat — the chain is reviewed togeth
   assert.match(sendBlocker(record, { connected: true }), /stacked set/)
 })
 
-// The submit endpoint re-runs every check before it pushes. If this card treated
-// a missing verdict as "blocked" it would strand a sendable review; if it treated
-// a verdict as authoritative it would be claiming an authority it does not have.
-test('an absent verdict defers to the server rather than blocking', () => {
-  assert.equal(sendBlocker({ status: 'prepared' }, { connected: true }), null)
+// The submit endpoint re-runs every check, but a one-tap public action must not
+// present an absent preflight as ready. Submitting is already in flight and does
+// not need another blocker.
+test('an absent prepared verdict fails closed', () => {
+  assert.match(
+    sendBlocker({ status: 'prepared' }, { connected: true }),
+    /Open Contribute/,
+  )
   assert.equal(sendBlocker({ status: 'submitting' }, { connected: true }), null)
   assert.equal(sendBlocker(null, { connected: true }), null)
 })
@@ -143,6 +146,11 @@ test('the payoff line matches who benefits and keeps acceptance conditional', ()
   const app = payoffLine({ repo: 'mobius-os/app-example' })
   assert.match(app, /everyone using this app/)
   for (const line of [platform, app]) assert.match(line, /^If it's accepted/)
+})
+
+test('the card discloses the continuing review authority granted by Send', () => {
+  assert.match(cardSrc, /autopilot=\{autopilotOnSend\(data\)\}/)
+  assert.match(cardSrc, /Möbius will also handle review feedback/)
 })
 
 // The whole safety argument for a one-tap chat button is that it reuses the app's
@@ -300,4 +308,9 @@ test('every card shape shares one swipe implementation', () => {
   assert.equal((cardSrc.match(/function useSwipeToDismiss\(/g) || []).length, 1)
   assert.equal((cardSrc.match(/= useSwipeToDismiss\(onDismiss\)/g) || []).length, 2)
   assert.equal((cardSrc.match(/addEventListener\('touchmove'/g) || []).length, 1)
+})
+
+test('a failed send is shown only on the record that failed', () => {
+  assert.match(cardSrc, /setError\(\{\s*id: record\.id,/)
+  assert.match(cardSrc, /error=\{error\?\.id === record\.id \? error\.message : null\}/)
 })

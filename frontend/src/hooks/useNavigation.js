@@ -519,27 +519,11 @@ export default function useNavigation({
     // left root edge otherwise surfaces the drawer over the drop target instead
     // of splitting a left pane (owner report, live testing).
     if (drawerOpenBlockedByDrag(dragActiveRef?.current)) return
-    // A close whose traversal never landed must not disable the drawer forever.
-    // closeDrawer() hides the panel immediately but keeps drawerOpenRef true until
-    // Back consumes the sentinel — and only handleBack clears it. Several real
-    // popstate outcomes never reach handleBack (a 'same'/'unknown' direction, or a
-    // handleForward that clears the pending flag alone), which left the logical ref
-    // stuck true behind a visually closed panel. Every later open then hit the
-    // double-activation guard below and returned: the menu became permanently
-    // unopenable, by any control, until a reload. Recover instead — the panel is
-    // already hidden and its sentinel is still the current entry, so re-adopt that
-    // sentinel rather than pushing a second one.
-    if (drawerClosePendingRef.current) {
-      drawerClosePendingRef.current = false
-      if (drawerPushedRef.current) {
-        drawerOpenRef.current = true
-        setDrawerVisible(true)
-        return
-      }
-      // The sentinel was already retagged (a navigation resolved it mid-close), so
-      // there is nothing to re-adopt: open normally below.
-      drawerOpenRef.current = false
-    }
+    // A close owns an asynchronous history traversal. Do not "re-adopt" the
+    // sentinel while that traversal is unresolved: the cursor may already have
+    // left it even though popstate has not run, and treating the boolean flag as
+    // proof that it is still current makes the next close over-pop a real route.
+    if (drawerClosePendingRef.current) return
     // Synchronous guard for a rapid double activation before React has rendered
     // `drawerOpen=true`. One drawer owns exactly one physical sentinel.
     if (drawerOpenRef.current) return
@@ -1442,6 +1426,17 @@ export default function useNavigation({
           } })
           return
         }
+        // The pending-close intent is stronger evidence than direction here.
+        // Navigation API indices normally classify this as Back, but a browser
+        // may omit or duplicate shell indices. The source tag still proves that
+        // this traversal is consuming the drawer's own physical sentinel.
+        if (drawerClosePendingRef.current && source?.kind === 'drawer') {
+          e.intercept({ handler() {
+            currentNavStateRef.current = destination
+            handleBack(destination, source)
+          } })
+          return
+        }
         if (direction === 'forward') {
           e.intercept({ handler() {
             currentNavStateRef.current = destination
@@ -1507,6 +1502,13 @@ export default function useNavigation({
         appLocalPopInFlightRef.current = false
         appLocalPopInFlightEntryRef.current = null
         setTimeout(resumeLocalAppPops, 0)
+        return
+      }
+      // Safari's popstate path has no traversal indices. Even when the generic
+      // direction classifier returns same/unknown, a pending close whose source
+      // is the drawer sentinel must consume that sentinel through handleBack.
+      if (drawerClosePendingRef.current && source?.kind === 'drawer') {
+        handleBack(destination, source)
         return
       }
       if (direction === 'forward') {

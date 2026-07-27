@@ -60,7 +60,7 @@
  * ╚════════════════════════════════════════════════════════════════╝
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Plus, Paperclip } from '@openai/apps-sdk-ui/components/Icon'
 import FileText from 'lucide-react/dist/esm/icons/file-text.mjs'
 import Info from 'lucide-react/dist/esm/icons/info.mjs'
@@ -120,7 +120,7 @@ export default function ComposerPopover({
   // can't express either boundary.
   const [maxHeight, setMaxHeight] = useState(null)
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) return
     const measure = () => {
       const trigger = triggerRef.current
@@ -138,10 +138,18 @@ export default function ComposerPopover({
     window.addEventListener('resize', measure)
     window.visualViewport?.addEventListener('resize', measure)
     window.visualViewport?.addEventListener('scroll', measure)
+    // The textarea can grow while this stays open. That moves the trigger
+    // upward without resizing either viewport, so observe the owning form too.
+    const resizeObserver = typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(measure)
+      : null
+    const form = triggerRef.current?.closest('.chat__form')
+    if (form) resizeObserver?.observe(form)
     return () => {
       window.removeEventListener('resize', measure)
       window.visualViewport?.removeEventListener('resize', measure)
       window.visualViewport?.removeEventListener('scroll', measure)
+      resizeObserver?.disconnect()
     }
   }, [open])
 
@@ -235,7 +243,7 @@ export default function ComposerPopover({
           className="composer-popover"
           role="dialog"
           aria-label="Chat options"
-          style={maxHeight ? { maxHeight: `${maxHeight}px` } : undefined}
+          style={maxHeight !== null ? { maxHeight: `${maxHeight}px` } : undefined}
         >
           <div className="composer-popover__section">
             <button

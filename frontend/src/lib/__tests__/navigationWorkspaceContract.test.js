@@ -19,26 +19,32 @@ test('one open drawer owns at most one physical sentinel', () => {
 })
 
 // closeDrawer hides the panel immediately but keeps drawerOpenRef true until Back
-// consumes the sentinel, and ONLY handleBack clears it. Real popstate outcomes never
-// reach handleBack (a 'same'/'unknown' traversal direction, or a handleForward), which
-// stranded the logical ref true behind a hidden panel — every later open then hit the
-// double-activation guard and returned, so the menu could not be reopened by ANY
-// control until a page reload. An open request must always be able to recover.
-test('an open request recovers from a drawer close whose traversal never landed', () => {
+// consumes the sentinel. Safari can classify that popstate as same/unknown when
+// shell indices are missing. Resolve the pending close at the event boundary;
+// never infer from drawerPushedRef that the sentinel is still current while a
+// traversal is in flight, because the next close could then over-pop a real route.
+test('a pending drawer close consumes its tagged source before direction fallback', () => {
   const open = navigation.slice(
     navigation.indexOf('function openDrawer()'),
     navigation.indexOf('function closeDrawer('),
   )
-  const recovery = open.indexOf('if (drawerClosePendingRef.current)')
   const guard = open.indexOf('if (drawerOpenRef.current) return')
-  assert.ok(recovery >= 0, 'openDrawer must handle a stranded pending close')
-  assert.ok(guard > recovery,
-    'the pending-close recovery must run BEFORE the double-activation guard, '
-    + 'or the guard returns first and the drawer stays unopenable')
-  // Recovery re-adopts the still-live sentinel instead of pushing a second one.
-  assert.match(open, /if \(drawerPushedRef\.current\) \{\s*drawerOpenRef\.current = true\s*setDrawerVisible\(true\)\s*return/)
+  const pending = open.indexOf('if (drawerClosePendingRef.current) return')
+  assert.ok(pending >= 0 && guard > pending,
+    'an unresolved traversal blocks another open before the ordinary open guard')
+  assert.doesNotMatch(open, /if \(drawerPushedRef\.current\) \{\s*drawerOpenRef\.current = true/,
+    'a boolean cannot prove that an async history cursor still sits on the sentinel')
+  assert.equal(
+    (navigation.match(
+      /if \(drawerClosePendingRef\.current && source\?\.kind === 'drawer'\) \{/g,
+    ) || []).length,
+    2,
+    'both Navigation API and popstate paths consume a pending tagged drawer source',
+  )
+  assert.match(navigation,
+    /if \(drawerClosePendingRef\.current && source\?\.kind === 'drawer'\) \{[\s\S]{0,180}?handleBack\(destination, source\)/)
   // Whoever else resolves the drawer's history state clears the pending flag too,
-  // so a later open can never re-adopt an already-retagged sentinel.
+  // so a later open cannot remain latched behind a hidden panel.
   assert.match(navigation, /drawerClosePendingRef\.current = false\s*\n\s*drawerOpenRef\.current = false\s*\n\s*setDrawerVisible\(false\)/)
   assert.match(navigation, /function handleForward\([^)]*\) \{\s*\/\/[\s\S]*?if \(drawerClosePendingRef\.current\) \{\s*drawerClosePendingRef\.current = false\s*drawerOpenRef\.current = false/)
 })

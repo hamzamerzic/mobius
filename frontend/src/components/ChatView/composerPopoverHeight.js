@@ -28,12 +28,6 @@ export const POPOVER_GAP = 8
 export const POPOVER_TOP_MARGIN = 8
 /** Upper bound on tall screens — a full-height panel reads as a takeover. */
 export const POPOVER_CAP = 420
-/**
- * Floor. Below this the panel is useless, so we'd rather let it overflow than
- * render a 40px slit; in practice only reachable on a landscape phone with the
- * keyboard up, where the trigger sits very near the top of its pane.
- */
-export const POPOVER_FLOOR = 160
 
 /**
  * Top edge (in client coordinates) of the nearest ancestor that would clip the
@@ -63,7 +57,6 @@ export function nearestClipTop(el) {
  * @param {number} [m.viewportTop]  `visualViewport.offsetTop` (0 when absent)
  * @param {number} [m.clipTop]      `nearestClipTop(trigger)` (0 when none)
  * @param {number} [m.cap]
- * @param {number} [m.floor]
  * @returns {number} max-height in CSS pixels
  */
 export function popoverMaxHeight({
@@ -71,9 +64,11 @@ export function popoverMaxHeight({
   viewportTop = 0,
   clipTop = 0,
   cap = POPOVER_CAP,
-  floor = POPOVER_FLOOR,
 }) {
   const boundary = Math.max(viewportTop, clipTop)
   const space = triggerTop - boundary - POPOVER_GAP - POPOVER_TOP_MARGIN
-  return Math.max(floor, Math.min(cap, Math.floor(space)))
+  // A minimum would knowingly cross the clipping boundary in the exact cramped
+  // geometry this helper exists to make safe. A short scrollport is imperfect
+  // but reachable; overflowing above the pane makes its first actions impossible.
+  return Math.max(0, Math.min(cap, Math.floor(space)))
 }

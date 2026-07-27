@@ -36,8 +36,8 @@ export function actionableRecords(payload) {
  *
  * The server already ran the same local preflight the Contribute app's review
  * cards use; this only turns its verdict into one owner-facing sentence. A
- * missing verdict is treated as sendable because the submit endpoint remains
- * authoritative — this card must never be the thing that decides a push is safe.
+ * missing verdict fails closed. The submit endpoint remains authoritative, but
+ * this one-tap public action must not claim that an absent review is ready.
  */
 export function sendBlocker(record, { connected } = {}) {
   if (!record || record.status !== 'prepared') return null
@@ -46,7 +46,8 @@ export function sendBlocker(record, { connected } = {}) {
   }
   if (connected === false) return 'Connect GitHub in Contribute first.'
   const review = record.review
-  if (!review || review.state === 'ready') return null
+  if (!review) return 'Open Contribute to review this before sending.'
+  if (review.state === 'ready') return null
   return review.message
     || 'This needs to be prepared again before it can be sent.'
 }

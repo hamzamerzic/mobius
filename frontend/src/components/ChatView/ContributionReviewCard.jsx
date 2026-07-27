@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from '@openai/apps-sdk-ui/components/Icon'
 import { api } from '../../api/client.js'
@@ -29,9 +29,11 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
   const appId = contributeAppId(apps)
   const contributeApp = findContributeApp(apps, appId)
 
-  const queryKey = ['contributions-for-chat', appId, chatId]
-  // Read-only, and cheap because the server filters by chat before it inspects
-  // anything. A 404 (older backend) resolves to null and the card stays hidden.
+  const queryKey = useMemo(
+    () => ['contributions-for-chat', appId, chatId],
+    [appId, chatId],
+  )
+  // Read-only. A 404 (older backend) resolves to null and the card stays hidden.
   const { data } = useQuery({
     queryKey,
     queryFn: () => api.contributions.forChat(appId, chatId)
@@ -47,10 +49,10 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
   const wasActive = useRef(turnActive)
   useEffect(() => {
     if (wasActive.current && !turnActive) {
-      queryClient.invalidateQueries({ queryKey: ['contributions-for-chat'] })
+      queryClient.invalidateQueries({ queryKey, exact: true })
     }
     wasActive.current = turnActive
-  }, [turnActive, queryClient])
+  }, [turnActive, queryClient, queryKey])
 
   const [busyId, setBusyId] = useState(null)
   const [error, setError] = useState(null)
@@ -74,8 +76,13 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
       })
       const body = await res.json().catch(() => null)
       if (!res.ok) {
-        setError(body?.detail?.message || body?.detail
-          || 'Could not contribute this. Open Contribute for the details.')
+        const detail = body?.detail?.message || body?.detail
+        setError({
+          id: record.id,
+          message: typeof detail === 'string'
+            ? detail
+            : 'Could not contribute this. Open Contribute for the details.',
+        })
         return
       }
       setSent({
@@ -85,10 +92,13 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
         repo: record.repo,
       })
     } catch {
-      setError('Could not reach the server. Nothing was contributed.')
+      setError({
+        id: record.id,
+        message: 'Could not reach the server. Nothing was contributed.',
+      })
     } finally {
       setBusyId(null)
-      queryClient.invalidateQueries({ queryKey: ['contributions-for-chat'] })
+      queryClient.invalidateQueries({ queryKey, exact: true })
     }
   }
 
@@ -106,8 +116,9 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
           key={record.id}
           record={record}
           connected={data?.connected !== false}
+          autopilot={autopilotOnSend(data)}
           busy={busyId === record.id}
-          error={busyId === record.id ? null : error}
+          error={error?.id === record.id ? error.message : null}
           onSend={send}
           onOpenContribute={contributeApp && onOpenApp
             ? () => onOpenApp(contributeApp, { final: true })
@@ -145,6 +156,7 @@ function useSwipeToDismiss(onDismiss) {
   useEffect(() => {
     const el = cardRef.current
     if (!el) return undefined
+    let dismissTimer = null
 
     const clear = () => {
       el.classList.remove('contrib-card--dragging')
@@ -185,7 +197,7 @@ function useSwipeToDismiss(onDismiss) {
       if (passedDismissThreshold(dx, dy)) {
         el.style.transform = `translateX(${dx > 0 ? '110%' : '-110%'})`
         el.style.opacity = '0'
-        window.setTimeout(() => dismissRef.current?.(), 160)
+        dismissTimer = window.setTimeout(() => dismissRef.current?.(), 160)
         return
       }
       clear()
@@ -205,6 +217,7 @@ function useSwipeToDismiss(onDismiss) {
       el.removeEventListener('touchmove', onMove)
       el.removeEventListener('touchend', onEnd)
       el.removeEventListener('touchcancel', onCancel)
+      if (dismissTimer !== null) window.clearTimeout(dismissTimer)
     }
   }, [])
 
@@ -268,7 +281,7 @@ function SentRow({ sent, onDismiss }) {
 }
 
 function ReviewRow({
-  record, connected, busy, error, onSend, onOpenContribute, onDismiss,
+  record, connected, autopilot, busy, error, onSend, onOpenContribute, onDismiss,
 }) {
   const [open, setOpen] = useState(false)
   const blocker = sendBlocker(record, { connected })
@@ -311,6 +324,11 @@ function ReviewRow({
           reason, not encouragement. */}
       {!blocker && !error && !submitting && (
         <p className="contrib-card__payoff">{payoffLine(record)}</p>
+      )}
+      {autopilot && !blocker && !error && !submitting && (
+        <p className="contrib-card__meta">
+          Möbius will also handle review feedback after you contribute.
+        </p>
       )}
       {blocker && <p className="contrib-card__blocker">{blocker}</p>}
       {error && <p className="contrib-card__blocker">{error}</p>}
