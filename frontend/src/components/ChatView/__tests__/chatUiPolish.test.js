@@ -5,6 +5,10 @@ import assert from 'node:assert/strict'
 const indexCss = readFileSync(new URL('../../../index.css', import.meta.url), 'utf8')
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+const chatSettingsPanel = readFileSync(
+  new URL('../ChatSettingsPanel.jsx', import.meta.url),
+  'utf8',
+)
 
 function stripComments(css) {
   return css.replace(/\/\*[\s\S]*?\*\//g, '')
@@ -20,6 +24,28 @@ test('theme transition does not animate every descendant or expensive shadows', 
     'theme toggles must not install a document-wide transition')
   assert.doesNotMatch(transitionRules, /box-shadow/,
     'theme toggles should not animate box-shadow across chat surfaces')
+})
+
+test('effort choice stays interactive and fully visible while its optimistic save settles', () => {
+  const effortStepper = chatSettingsPanel.match(
+    /<EffortStepper\s+efforts=\{rowEfforts\}[\s\S]*?onStopPointerDown=\{preserveFocusUnlessTouch\}[\s\S]*?\/>/,
+  )?.[0] || ''
+
+  assert.match(
+    effortStepper,
+    /disabled=\{switchBusy \|\| !providerConfigured\}/,
+    'only a provider switch or unavailable provider should disable effort',
+  )
+  assert.doesNotMatch(
+    effortStepper,
+    /disabled=\{[^}]*saving/,
+    'a routine save must not dim the effort control into a visible blackout',
+  )
+  assert.match(
+    chatSettingsPanel,
+    /if \(reqId !== latestReqId\.current\) return 'stale'/,
+    'rapid effort choices remain safe through the existing latest-request guard',
+  )
 })
 
 test('restored chat rows and tool blocks do not replay entrance animation', () => {
@@ -48,17 +74,15 @@ test('stop action has no visible circular shell', () => {
     'Stop keyboard focus should move to the square glyph')
 })
 
-test('mobile hold copies immediately without opening an action menu', () => {
+test('mobile messages preserve native text selection and its action menu', () => {
   const css = stripComments(chatCss)
 
   assert.doesNotMatch(css, /\.chat__copy-menu|\.chat__copy-overlay/,
-    'instant copy should not render a menu or modal backdrop')
-  assert.match(chatView, /void copyMessage\(message, key\)/,
-    'the completed hold should copy the message directly')
-  assert.match(chatView, /navigator\.vibrate\?\.\(8\)/,
-    'successful copy should offer subtle haptic confirmation where supported')
-  assert.match(chatView, /event\.pointerType !== 'touch'/,
-    'desktop text interaction should stay unchanged')
+    'messages should not render a custom copy menu or modal backdrop')
+  assert.doesNotMatch(chatView, /handleMessagePointerDown|cancelMessageHold|copyMessage/,
+    'messages must not intercept the long press used for native text selection')
+  assert.doesNotMatch(chatView, /onContextMenu=/,
+    'messages must not suppress the native selection action menu')
 })
 
 test('web tool activity uses the assistant reading width', () => {

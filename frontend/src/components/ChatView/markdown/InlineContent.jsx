@@ -4,7 +4,11 @@ import DOMPurify from 'dompurify'
 import { getToken, isEphemeralAuth, BASE } from '../../../api/client.js'
 import { mediaTokenParam } from '../../../api/mediaToken.js'
 import { useMathHtml } from './math.js'
-import { parseImageDims, imageVarsFromDims } from './imageDims.js'
+import { imageDimensionsForHref, imageVarsFromDims } from './imageDims.js'
+import {
+  getMediaChatId,
+  previewSrcForChatMedia,
+} from './mediaImageSource.js'
 import ImageLightbox from './ImageLightbox.jsx'
 import { useHistoryDismiss } from '../../../hooks/useHistoryDismiss.jsx'
 import '../lightbox.css'
@@ -16,18 +20,19 @@ const SAFE_IMAGE_PROTOCOLS = new Set(['http:', 'https:'])
  * Renders inline markdown tokens (text, bold, italic, code, links, math).
  * Takes a marked inline token array and produces React elements.
  */
-export default function InlineContent({ tokens, onInternalNav }) {
+export default function InlineContent({ tokens, onInternalNav, mediaDimensions }) {
   if (!tokens) return null
   return tokens.map((token, i) => (
     <InlineToken
       key={i}
       token={token}
       onInternalNav={onInternalNav}
+      mediaDimensions={mediaDimensions}
     />
   ))
 }
 
-function InlineToken({ token, onInternalNav }) {
+function InlineToken({ token, onInternalNav, mediaDimensions }) {
   if (token.type === 'text') {
     return token.text
   }
@@ -48,6 +53,7 @@ function InlineToken({ token, onInternalNav }) {
         <InlineContent
           tokens={token.tokens}
           onInternalNav={onInternalNav}
+          mediaDimensions={mediaDimensions}
         />
       </strong>
     )
@@ -59,6 +65,7 @@ function InlineToken({ token, onInternalNav }) {
         <InlineContent
           tokens={token.tokens}
           onInternalNav={onInternalNav}
+          mediaDimensions={mediaDimensions}
         />
       </em>
     )
@@ -75,6 +82,7 @@ function InlineToken({ token, onInternalNav }) {
         <InlineContent
           tokens={token.tokens}
           onInternalNav={onInternalNav}
+          mediaDimensions={mediaDimensions}
         />
       )
     }
@@ -116,13 +124,20 @@ function InlineToken({ token, onInternalNav }) {
         <InlineContent
           tokens={token.tokens}
           onInternalNav={onInternalNav}
+          mediaDimensions={mediaDimensions}
         />
       </a>
     )
   }
 
   if (token.type === 'image') {
-    return <ExpandableImage href={token.href} alt={token.text || ''} />
+    return (
+      <ExpandableImage
+        href={token.href}
+        alt={token.text || ''}
+        mediaDimensions={mediaDimensions}
+      />
+    )
   }
 
   if (token.type === 'br') {
@@ -135,6 +150,7 @@ function InlineToken({ token, onInternalNav }) {
         <InlineContent
           tokens={token.tokens}
           onInternalNav={onInternalNav}
+          mediaDimensions={mediaDimensions}
         />
       </del>
     )
@@ -170,13 +186,6 @@ function safeLinkHref(href) {
 // the owner JWT must not appear there (it would leak into access logs, history,
 // Referer). Other /api/ paths that appear in markdown images (rare) still get the
 // owner token in the URL, but the primary media-serve paths are hardened.
-const MEDIA_PATH_RE = /^(?:.*)?\/api\/chats\/([^/]+)\/(?:uploads|media)\//
-
-function getMediaChatId(src) {
-  const m = src.match(MEDIA_PATH_RE)
-  return m ? m[1] : null
-}
-
 function resolveStaticImageSrc(href) {
   // Returns a URL for non-media API paths (or null for invalid hrefs).
   // Appends the owner token for API paths that aren't upload/generated routes —
@@ -202,6 +211,7 @@ export function ExpandableImage({
   loading,
   onOpen,
   onResolved,
+  mediaDimensions,
 }) {
   const [open, setOpen] = useState(false)
   const [resolvedSrc, setResolvedSrc] = useState(null)
@@ -209,21 +219,28 @@ export function ExpandableImage({
 
   const rawSrc = safeUrl(href, SAFE_IMAGE_PROTOCOLS)
   const mediaChatId = rawSrc ? getMediaChatId(rawSrc) : null
+  const previewSrc = resolvedSrc
+    ? previewSrcForChatMedia(resolvedSrc)
+    : null
 
-  // Reserve the exact aspect ratio on the FIRST paint when the markup carries
-  // known dimensions (?w=&h=, lever 3): a screenshot whose size the agent
-  // already knew never shifts on decode. Absent dims this stays null and the
-  // frame falls back to the CSS 4/3 default, corrected by onLoad below.
-  const [imageVars, setImageVars] = useState(() => {
-    const dims = parseImageDims(rawSrc)
-    if (!dims) return null
-    const viewportH = (typeof window !== 'undefined'
-      && (window.visualViewport?.height || window.innerHeight)) || 800
-    return imageVarsFromDims(dims.width, dims.height, viewportH)
-  })
+  // Local chat images get their intrinsic size from the owning media path,
+  // projected into the message response. The URL remains a resource identity,
+  // not a layout transport. This value is available on the first render, before
+  // token resolution or image bytes, so decode can never resize the frame.
+  const dims = imageDimensionsForHref(rawSrc, mediaDimensions)
+  const viewportH = (typeof window !== 'undefined'
+    && (window.visualViewport?.height || window.innerHeight)) || 800
+  const imageVars = dims
+    ? imageVarsFromDims(dims.width, dims.height, viewportH)
+    : null
+  const dimensionError = !!(
+    mediaChatId
+    && mediaDimensions != null
+    && !dims
+  )
 
   useEffect(() => {
-    if (!rawSrc) { setResolvedSrc(null); return }
+    if (!rawSrc || dimensionError) { setResolvedSrc(null); return }
     let cancelled = false
     if (mediaChatId) {
       // Media path: fetch a short-lived media token, never the owner JWT in URL.
@@ -235,7 +252,7 @@ export function ExpandableImage({
       setResolvedSrc(resolveStaticImageSrc(rawSrc))
     }
     return () => { cancelled = true }
-  }, [rawSrc, mediaChatId])
+  }, [rawSrc, mediaChatId, dimensionError])
 
   useEffect(() => {
     if (resolvedSrc && onResolved) {
@@ -248,6 +265,13 @@ export function ExpandableImage({
   // returning null until resolvedSrc let the whole box insert late and shove the
   // surrounding text. The <img> swaps in once resolvedSrc lands.
   if (!rawSrc) return null
+  if (dimensionError) {
+    return (
+      <span className="md-image-error" role="img" aria-label={alt || 'Image unavailable'}>
+        Image unavailable
+      </span>
+    )
+  }
   return (
     <>
       <button
@@ -265,24 +289,13 @@ export function ExpandableImage({
           }
         }}
       >
-        {resolvedSrc && (
+        {previewSrc && (
           <img
-            src={resolvedSrc}
+            src={previewSrc}
             alt={alt}
             className="md-image"
-            loading={loading}
+            loading={loading || 'lazy'}
             decoding="async"
-            onLoad={(e) => {
-              const img = e.currentTarget
-              if (img.naturalWidth && img.naturalHeight) {
-                const ratio = img.naturalWidth / img.naturalHeight
-                const viewportH =
-                  window.visualViewport?.height || window.innerHeight || 800
-                setImageVars(imageVarsFromDims(
-                  img.naturalWidth, img.naturalHeight, viewportH,
-                ))
-              }
-            }}
           />
         )}
       </button>

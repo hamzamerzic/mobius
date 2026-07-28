@@ -354,6 +354,12 @@ def _chat_detail_response(
       message_offset=start,
       live_message=live_message,
     )
+  from app.chat_media_dimensions import project_message_image_dimensions
+  page = project_message_image_dimensions(
+    page,
+    chat_id=chat.id,
+    data_dir=get_settings().data_dir,
+  )
 
   provider = chat.provider or "claude"
   pending_question = questions.get(chat.id)
@@ -877,6 +883,7 @@ async def patch_chat(
     # Naming precedence (user > agent > first-message). A clear resets the name;
     # a manual rename locks it; an agent by_agent sync only fills the name when
     # it isn't locked, so it can never clobber a name the owner chose.
+    previous_title = chat.title
     if body.clear_title:
       chat.title = _first_message_title(chat) or "New chat"
       chat.title_locked = False
@@ -1023,6 +1030,15 @@ async def patch_chat(
 
     db.commit()
     db.refresh(chat)
+    if chat.title != previous_title:
+      # The platform summary publisher PATCHes the generated name immediately
+      # after its durable note CAS. Publish only committed truth so every open
+      # shell can refresh its drawer and tab labels without waiting for another
+      # drawer open or chat-list poll. Manual-title precedence still lives above.
+      get_system_broadcast().publish({
+        "type": "chat_renamed",
+        "chatId": str(chat_id),
+      })
     # Record a real provider switch (Claude <-> Codex) once, after this first
     # commit — NOT after the owner-provider mirror commit below, which would
     # double-log. Model/effort tweaks within a provider are deliberately not

@@ -239,11 +239,28 @@ _HTTP_TIMEOUT = 15.0
 # different host.
 _MAX_REDIRECTS = 5
 
-# Cron scaffold lives at this path in the built image. Tests normally override
-# the module attribute; the test-runtime mutation guard below is the backstop
-# when the baked scaffold is present (as it is inside the production image).
-CRON_SCAFFOLD = Path("/app/scripts/init-cron-scaffold.sh")
+_BAKED_CRON_SCAFFOLD = Path("/app/scripts/init-cron-scaffold.sh")
+# Tests override this module attribute to prevent production cron mutation.
+CRON_SCAFFOLD = _BAKED_CRON_SCAFFOLD
 _ALLOW_TEST_CRON_ENV = "MOBIUS_ALLOW_TEST_CRON"
+
+
+def _cron_scaffold() -> Path:
+  """Return an explicit test override or the active production scaffold.
+
+  Startup reconciliation must migrate persisted crontab entries immediately
+  after a platform update, before the next image rebuild refreshes /app. Prefer
+  the served checkout for that production default; retain the baked copy as
+  the degraded-boot floor.
+  """
+  if CRON_SCAFFOLD != _BAKED_CRON_SCAFFOLD:
+    return CRON_SCAFFOLD
+  live = (
+    Path(__file__).resolve().parent.parent
+    / "scripts"
+    / "init-cron-scaffold.sh"
+  )
+  return live if live.is_file() else _BAKED_CRON_SCAFFOLD
 
 
 def _cron_mutation_blocked_in_test_runtime() -> bool:
@@ -1141,15 +1158,22 @@ def _register_cron(slug: str, schedule_expr: str, job_path: Path,
       500,
       "Cron mutation is disabled in the test runtime.",
     )
-  scaffold = CRON_SCAFFOLD
+  scaffold = _cron_scaffold()
   if not scaffold.exists():
     # In tests we mock this away; in containers it's always present.
     raise HTTPException(500, "init-cron-scaffold.sh missing from image.")
   cmd = [str(scaffold), slug, schedule_expr, job_path.name]
   if app_id is not None:
     cmd.append(str(app_id))
+  # Cron has a deliberately minimal environment. Materialize the configured
+  # backend URL and the active supervisor path into its generated entry so
+  # scheduled jobs use the same live runner and server as Run now.
+  from app.app_jobs import runner_script
+  env = dict(os.environ)
+  env["API_BASE_URL"] = get_settings().api_base_url
+  env["MOBIUS_APP_JOB_RUNNER"] = str(runner_script())
   result = subprocess.run(
-    cmd, capture_output=True, text=True, timeout=30,
+    cmd, capture_output=True, text=True, timeout=30, env=env,
   )
   if result.returncode != 0:
     raise HTTPException(
@@ -2330,6 +2354,7 @@ async def install_from_manifest(
   # means a plain local commit (fresh install, or a conflict that left local
   # untouched).
   merge_applied = False
+  equivalence_target_to_retire: str | None = None
   if icon_warning:
     warnings.append(icon_warning)
 
@@ -2845,6 +2870,11 @@ async def install_from_manifest(
                 source_tree = merged_source
                 divergence = "clean_merge"
                 merge_applied = True
+                if merge.equivalent_change_refs:
+                  warnings.append(
+                    "reconciled reviewed changes that were already present "
+                    "upstream"
+                  )
                 # Read exec bits only now that we WILL write this tree — a
                 # conflict/unreadable verdict never ls-tree's the (possibly
                 # degenerate) merged oid.
@@ -3112,6 +3142,7 @@ async def install_from_manifest(
                 app_git.commit_replay, source_dir_path,
                 app.upstream_commit, commit_msg,
               )
+              equivalence_target_to_retire = app.upstream_commit
             else:
               await asyncio.to_thread(
                 app_git.commit_local, source_dir_path, commit_msg,
@@ -3178,6 +3209,24 @@ async def install_from_manifest(
     rollback_actions.clear()
     created_paths.clear()
     db.refresh(app)
+
+    # Only the durable update may retire provenance.  Doing this before the DB
+    # commit would lose the witness if a later storage/row failure rolled the
+    # install back.  Ref deletion is best-effort post-commit housekeeping: the
+    # replay already parents `main` directly on this upstream target, so keeping
+    # an obsolete ref is harmless while deleting it bounds metadata growth.
+    if app.source_dir and equivalence_target_to_retire:
+      try:
+        async with fs_locks.source_dir_lock(str(app.source_dir)):
+          await asyncio.to_thread(
+            app_git.retire_landed_equivalent_changes,
+            app.source_dir, equivalence_target_to_retire,
+          )
+      except Exception:
+        log.warning(
+          "install: could not retire integrated contribution provenance",
+          exc_info=True,
+        )
 
     # app_install: log only after the row is durable so the timestamp
     # in the activity log reflects when the install actually landed,
@@ -3348,9 +3397,19 @@ async def install_from_manifest(
   ):
     try:
       from app.app_jobs import launch_app_job
-      source = Path(app.source_dir)
-      launch_app_job(app.id, source / job_name, source)
-      warnings.append("initialization started")
+      source_dir = Path(app.source_dir)
+      # Bootstrap runs inside FastAPI lifespan, before this backend can answer
+      # the supervisor's scoped capability calls.  Keep that ordering detail in
+      # the generic runner: it waits for the existing readiness signal before
+      # starting.  Interactive installs already happen against a live server.
+      wait_for_ready = source == "bootstrap"
+      launch_app_job(
+        app.id, source_dir / job_name, source_dir, wait_for_ready=wait_for_ready,
+      )
+      warnings.append(
+        "initialization waiting for startup readiness"
+        if wait_for_ready else "initialization started"
+      )
     except Exception as exc:
       log.exception("install: initialization job failed to start")
       warnings.append(f"initialization failed to start — {exc!r}")

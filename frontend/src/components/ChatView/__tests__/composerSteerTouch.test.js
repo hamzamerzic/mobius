@@ -26,12 +26,12 @@ test('Send, Steer, and Stop reuse one continuously visible primary action', () =
   )
   assert.match(
     chatView,
-    /const showSteer = !hasPendingQuestion[\s\S]*?turnActive[\s\S]*?pendingQueue\.pendingMessages\.length > 0/,
+    /const showSteer = !hasPendingQuestion[\s\S]*?turnActive[\s\S]*?pendingQueue\.visiblePendingMessages\.length > 0/,
     'an optimistic visible queue row should choose Steer immediately',
   )
   assert.match(
     chatView,
-    /const queueWrites = \[\.\.\.queuedSendRequestsRef\.current\.values\(\)\][\s\S]*?await Promise\.allSettled\(queueWrites\)[\s\S]*?const snapshot = pendingQueue\.pendingMessagesRef\.current/,
+    /const queueWrites = \[\.\.\.queuedSendRequestsRef\.current\.values\(\)\][\s\S]*?await Promise\.allSettled\(queueWrites\)[\s\S]*?const snapshot = pendingQueue\.getVisiblePendingMessages\(\)/,
     'an early Steer tap must await the queue write before reading steerable rows',
   )
   const steerBlock = inputBar.match(
@@ -61,6 +61,6 @@ test('per-row fast-forward dispatches on touchend too', () => {
 test('the shared steer path snapshots scroll before dismissing the mobile composer', () => {
   assert.match(
     chatView,
-    /async function steerRowsImpl\(steerRowsList\) \{[\s\S]*?steerPinIntentRef\.current = makeSendPinIntent\(steerWillPin\)[\s\S]*?if \(_isTouchPrimary\) inputRef\.current\?\.blur\(\)[\s\S]*?pendingQueue\.promoteManyByCid\(consumePendingCids\)/,
+    /async function steerRowsImpl\(steerRowsList\) \{[\s\S]*?steerPinIntentRef\.current = makeSendPinIntent\(steerWillPin\)[\s\S]*?if \(_isTouchPrimary\) inputRef\.current\?\.blur\(\)[\s\S]*?pendingQueue\.reserveForSteer\(consumePendingCids\)/,
   )
 })
