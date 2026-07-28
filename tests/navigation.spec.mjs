@@ -546,7 +546,7 @@ test.describe('Back button edge cases', () => {
     expect((await getNavState(page)).url).toBe('/shell/')
 
     await openDrawer(page)
-    await navigateToChat(page, 0)
+    await navigateToChat(page, 1)
     expect((await getNavState(page)).url).toBe('/shell/')
 
     await goBack(page)
