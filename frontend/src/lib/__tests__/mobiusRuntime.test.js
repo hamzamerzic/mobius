@@ -20,6 +20,7 @@ import {
   makeNav,
   makeSignal,
   overlayPending,
+  sanitizeEmbedGuidance,
 } from '../../../public/mobius-runtime.js'
 
 const SERVER = { value: 5 }       // a fallback (server/cache mirror) value
@@ -27,6 +28,13 @@ const QUEUED = { value: 9 }
 
 const put = (path, data) => ({ method: 'PUT', path, data })
 const del = (path) => ({ method: 'DELETE', path })
+
+test('runtime normalizes app guidance at the same boundary used by setGuidance', () => {
+  assert.equal(sanitizeEmbedGuidance('  Edit the selected file.  '), 'Edit the selected file.')
+  assert.equal(sanitizeEmbedGuidance('   '), null)
+  assert.equal(sanitizeEmbedGuidance(42), null)
+  assert.equal(sanitizeEmbedGuidance('x'.repeat(500)).length, 300)
+})
 
 test('no pending op → fallback stands (the cached/server value)', () => {
   assert.deepEqual(overlayPending([], 'hi.json', SERVER), SERVER)

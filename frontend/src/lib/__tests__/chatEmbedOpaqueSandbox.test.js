@@ -42,6 +42,20 @@ test('runtime INIT carries a one-use bootstrap rather than an owner or app token
   assert.doesNotMatch(runtimeSource, /msg\.token\s*=/)
 })
 
+test('runtime updates guidance only through the correlated embed window', () => {
+  assert.match(runtimeSource, /setGuidance\(value\)/)
+  assert.match(runtimeSource, /type: EMBED_GUIDANCE/)
+  assert.match(runtimeSource, /instanceId,[\s\S]*chatId,[\s\S]*guidance/)
+  assert.match(embedSource, /msg\.instanceId === instanceIdRef\.current/)
+  assert.match(embedSource, /msg\.chatId === chatIdRef\.current/)
+  assert.match(embedSource, /authorizedRef\.current/)
+  assert.match(
+    embedSource,
+    /if \(!authorizedRef\.current\) \{\s*setGuidance\(sanitizeEmbedGuidance\(msg\.guidance\)\)/,
+    'a refresh INIT must not roll live guidance back to its older payload',
+  )
+})
+
 test('lazy embed route announces receiver readiness before the runtime mints a grant', () => {
   assert.match(appSource, /beginEmbedBootstrap\(\)/)
   assert.match(bootstrapSource, /event\.source !== window\.parent/)
