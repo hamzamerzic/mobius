@@ -215,7 +215,9 @@ function AppRoot() {
     }
   }, [hasToken, setupStatusQuery.isError, setupStatusQuery.isSuccess, setupStatusQuery.data])
 
-  if (status === 'loading' || isRestoring) return null
+  if (status === 'loading' || isRestoring) {
+    return <RouteLoading label={isRestoring ? 'Restoring Möbius' : 'Loading Möbius'} />
+  }
   if (status === 'sso') return <RouteLoading label="Signing in to Möbius" />
   if (status === 'sso-error') return (
     <ManagedSignInError
@@ -258,7 +260,9 @@ function AppRoot() {
 
 function RouteLoading({ label }) {
   return (
-    <div className="app-route-loading" role="status" aria-label={label} />
+    <div className="app-route-loading" role="status">
+      <span>{label}…</span>
+    </div>
   )
 }
 
