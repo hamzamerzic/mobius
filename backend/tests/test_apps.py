@@ -303,6 +303,145 @@ def test_app_token_can_update_own_schedule_only(client, auth, monkeypatch):
   assert r.status_code == 403
 
 
+def test_schedule_update_with_timezone_materializes_and_declares(
+  client, auth, monkeypatch,
+):
+  """A timezone-owned schedule registers the truthful every-minute gate plus
+  its durable identity; invalid contracts never reach registration."""
+  calls = []
+
+  def fake_register(slug, schedule_expr, job_path, app_id=None,
+                    timezone=None, zone_cron=None):
+    calls.append((slug, schedule_expr, job_path.name, app_id,
+                  timezone, zone_cron))
+
+  monkeypatch.setattr("app.install._register_cron", fake_register)
+  monkeypatch.setattr(
+    "app.cron_tz.materialize_zone_cron",
+    lambda zone_cron, tz_name: "* * * * *",
+  )
+  source_dir = Path(get_settings().data_dir) / "apps" / "memory"
+  source_dir.mkdir(parents=True, exist_ok=True)
+  (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+  app_id = create_local_app(
+    client, auth, name="Memory", description="test", source_dir=source_dir,
+  )["id"]
+
+  r = client.post(
+    f"/api/apps/{app_id}/schedule",
+    json={"cron": "0 5 * * *", "job": "fetch.sh",
+          "timezone": "Europe/Belgrade"},
+    headers=auth,
+  )
+  assert r.status_code == 200, r.text
+  assert r.json() == {
+    "cron": "* * * * *", "job": "fetch.sh",
+    "timezone": "Europe/Belgrade", "zone_cron": "0 5 * * *",
+  }
+  assert calls == [
+    ("memory", "* * * * *", "fetch.sh", app_id,
+     "Europe/Belgrade", "0 5 * * *"),
+  ]
+
+  r = client.post(
+    f"/api/apps/{app_id}/schedule",
+    json={"cron": "0 5 * * *", "timezone": "Not/AZone"},
+    headers=auth,
+  )
+  assert r.status_code == 400
+  r = client.post(
+    f"/api/apps/{app_id}/schedule",
+    json={"cron": "0 5 * * 1", "timezone": "Europe/Belgrade"},
+    headers=auth,
+  )
+  assert r.status_code == 400
+  assert len(calls) == 1
+
+
+def test_reconcile_restores_zone_schedule_as_wall_clock_gate(client, auth, db):
+  """Reconciliation restores the gate from the durable IANA identity."""
+  source_dir = Path(get_settings().data_dir) / "apps" / "memory"
+  source_dir.mkdir(parents=True)
+  (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+  (source_dir / "init-cron.sh").write_text(
+    f'ENTRY="* * * * * {source_dir}/fetch.sh 56"\n'
+    'SCHEDULE_TZ="Europe/Belgrade"\n'
+    'SCHEDULE_SOURCE="0 5 * * *"\n',
+    encoding="utf-8",
+  )
+  app_id = create_local_app(
+    client, _service_auth(), name="Memory", description="test",
+    source_dir=source_dir,
+  )["id"]
+
+  from app.routes import apps as apps_module
+  calls = []
+
+  def fake_register(slug, schedule_expr, job_path, app_id=None,
+                    timezone=None, zone_cron=None):
+    calls.append((slug, schedule_expr, timezone, zone_cron))
+
+  with patch("app.install._register_cron", fake_register), \
+       patch("app.cron_tz.materialize_zone_cron",
+             lambda zone_cron, tz_name: "* * * * *"):
+    count, warnings = apps_module.reconcile_app_cron_supervision(db)
+
+  assert warnings == []
+  assert count == 1
+  assert calls == [("memory", "* * * * *", "Europe/Belgrade", "0 5 * * *")]
+
+
+def test_reconcile_fails_closed_on_malformed_zone_declaration(
+  client, auth, db,
+):
+  """A damaged declaration cannot turn the gate into an every-minute job."""
+  source_dir = Path(get_settings().data_dir) / "apps" / "memory"
+  source_dir.mkdir(parents=True)
+  (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+  (source_dir / "init-cron.sh").write_text(
+    f'ENTRY="* * * * * {source_dir}/fetch.sh 56"\n'
+    'SCHEDULE_TZ="Europe/Belgrade"\n',
+    encoding="utf-8",
+  )
+  create_local_app(
+    client, _service_auth(), name="Memory", description="test",
+    source_dir=source_dir,
+  )
+
+  from app.routes import apps as apps_module
+  with patch("app.install._register_cron") as register:
+    count, warnings = apps_module.reconcile_app_cron_supervision(db)
+
+  assert count == 0
+  assert len(warnings) == 1
+  assert "Incomplete IANA wall-clock schedule declaration" in warnings[0]
+  register.assert_not_called()
+
+
+def test_app_schedules_expose_zone_declaration(client, auth):
+  """A schedule owned in an IANA zone surfaces its durable identity."""
+  source_dir = Path(get_settings().data_dir) / "apps" / "memory"
+  source_dir.mkdir(parents=True)
+  (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+  (source_dir / "init-cron.sh").write_text(
+    f'ENTRY="* * * * * {source_dir}/fetch.sh 56"\n'
+    "# Zone-aware schedule identity (platform-managed).\n"
+    'SCHEDULE_TZ="Europe/Belgrade"\n'
+    'SCHEDULE_SOURCE="0 5 * * *"\n',
+    encoding="utf-8",
+  )
+  create_local_app(
+    client, _service_auth(), name="Memory", description="test",
+    source_dir=source_dir,
+  )
+  r = client.get("/api/apps/schedules", headers=auth)
+  assert r.status_code == 200, r.text
+  rows = r.json()
+  assert [(j["cron"], j["timezone"], j["zone_cron"]) for j in rows] == [
+    ("* * * * *", "Europe/Belgrade", "0 5 * * *"),
+  ]
+
+
 def test_platform_source_patch_rejected_and_store_identity_preserved(client, auth, db):
   from app import models
   data_dir = Path(get_settings().data_dir)
@@ -366,6 +505,7 @@ def test_app_schedules_are_readable_by_app_tokens(client, auth):
     headers={"Authorization": f"Bearer {token}"},
   )
   assert r.status_code == 200, r.text
+  from app import cron_tz
   assert r.json() == [{
     "id": 1,
     "name": "News",
@@ -373,6 +513,9 @@ def test_app_schedules_are_readable_by_app_tokens(client, auth):
     "cron": "0 10 * * *",
     "job": "fetch.sh",
     "next_run": None,
+    "timezone": None,
+    "zone_cron": None,
+    "server_timezone": cron_tz.server_timezone_name(),
   }]
 
 

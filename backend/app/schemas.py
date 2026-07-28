@@ -269,14 +269,28 @@ class AppInstallOut(AppOut):
 
 
 class AppScheduleUpdate(BaseModel):
-  """Body for updating one installed app's cron schedule."""
+  """Body for updating one installed app's cron schedule.
+
+  When ``timezone`` (an IANA identifier) is set, ``cron`` is a plain daily
+  expression owned in that zone; the platform stores that identity durably
+  and materializes an every-minute gate that resolves the real wall-clock
+  occurrence. Ambiguous times run once at their first occurrence; nonexistent
+  times run at the first valid minute after the gap. Without ``timezone``,
+  ``cron`` is interpreted in the server's local timezone as before.
+  """
 
   cron: str
   job: str | None = None
+  timezone: str | None = None
 
 
 class AppScheduleOut(BaseModel):
-  """Read-only metadata for an installed app's recurring cron job."""
+  """Read-only metadata for an installed app's recurring cron job.
+
+  ``cron`` is always the live crontab cadence. For an IANA-owned schedule it
+  is the every-minute gate; ``timezone``/``zone_cron`` carry the durable wall
+  clock identity. ``server_timezone`` is the server clock's own IANA identity.
+  """
 
   id: int
   name: str
@@ -284,6 +298,9 @@ class AppScheduleOut(BaseModel):
   cron: str
   job: str
   next_run: datetime | None = None
+  timezone: str | None = None
+  zone_cron: str | None = None
+  server_timezone: str = "UTC"
 
 
 class ConflictFile(BaseModel):

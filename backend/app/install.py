@@ -1066,8 +1066,17 @@ def clear_pending_conflict_update(source_dir: str | Path) -> None:
 
 
 def _register_cron(slug: str, schedule_expr: str, job_path: Path,
-                   app_id: int | None = None) -> None:
+                   app_id: int | None = None,
+                   timezone: str | None = None,
+                   zone_cron: str | None = None) -> None:
   """Runs init-cron-scaffold.sh to install the crontab entry.
+
+  ``timezone``/``zone_cron`` (given together) declare the schedule's durable
+  zone-aware identity. The scaffold writes that identity into the complete
+  durable declaration atomically *before* installing the live entry. This
+  ordering means a persistence failure cannot change live behavior while
+  returning failure; a later live-write failure leaves a durable declaration
+  that boot reconciliation can safely retry.
 
   The scaffold writes both the durable ``init-cron.sh`` declaration and the
   live crontab entry. On restart, lifespan parses that declaration and rewrites
@@ -1097,6 +1106,23 @@ def _register_cron(slug: str, schedule_expr: str, job_path: Path,
       500,
       "Cron mutation is disabled in the test runtime.",
     )
+  if (timezone is None) != (zone_cron is None):
+    raise HTTPException(
+      500, "Cron registration bug: timezone and zone_cron must be paired.",
+    )
+  if timezone is not None:
+    from app import cron_tz
+
+    if app_id is None:
+      raise HTTPException(
+        500, "A timezone-owned schedule requires an app id.",
+      )
+    if not cron_tz.valid_timezone(timezone):
+      raise HTTPException(500, f"Unknown IANA timezone: {timezone!r}")
+    if cron_tz.parse_daily_cron(zone_cron) is None:
+      raise HTTPException(
+        500, f"Zone-owned schedule must be a plain daily cron: {zone_cron!r}",
+      )
   scaffold = _cron_scaffold()
   if not scaffold.exists():
     # In tests we mock this away; in containers it's always present.
@@ -1104,6 +1130,8 @@ def _register_cron(slug: str, schedule_expr: str, job_path: Path,
   cmd = [str(scaffold), slug, schedule_expr, job_path.name]
   if app_id is not None:
     cmd.append(str(app_id))
+  if timezone is not None:
+    cmd.extend([timezone, zone_cron])
   # Cron has a deliberately minimal environment. Materialize the configured
   # backend URL and the active supervisor path into its generated entry so
   # scheduled jobs use the same live runner and server as Run now.
@@ -1173,7 +1201,11 @@ def _crontab_command_path(line: str) -> str:
     return ""
   for i, token in enumerate(toks):
     if token.endswith("/app-job-runner.py") and len(toks) > i + 2:
-      return toks[i + 2]
+      # The supervised runner's job path is always its final argument. A
+      # wall-clock schedule inserts its timezone and source expression before
+      # the app id; using the final argument keeps uninstall parsing aligned
+      # with both ordinary and gated invocations.
+      return toks[-1]
   return toks[0]
 
 
