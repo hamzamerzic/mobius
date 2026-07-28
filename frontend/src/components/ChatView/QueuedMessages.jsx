@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { DoubleChevronRight, X } from '@openai/apps-sdk-ui/components/Icon'
+import { ChevronDown, DoubleChevronRight, X } from '@openai/apps-sdk-ui/components/Icon'
 import { stripAugmentation } from './msgText.js'
 import { cidOf } from './chatRuntimeState.js'
 
@@ -83,13 +83,12 @@ export default function QueuedMessages({
         <span className="queued__hint">
           Will send after the current turn finishes
         </span>
-        <svg
+        <ChevronDown
           className={`queued__hdr-chevron${collapsed ? ' queued__hdr-chevron--collapsed' : ''}`}
-          width="10" height="10" viewBox="0 0 10 10" fill="none"
+          width={10}
+          height={10}
           aria-hidden="true"
-        >
-          <path d="M2 4l3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-        </svg>
+        />
       </div>
       {!collapsed && (
         <div id={itemsId} className="queued__items">
@@ -119,13 +118,12 @@ export default function QueuedMessages({
                   disabled={!needsTruncation}
                 >
                   {needsTruncation && (
-                    <svg
+                    <ChevronDown
                       className={`queued__chevron${isExpanded ? ' queued__chevron--open' : ''}`}
-                      width="10" height="10" viewBox="0 0 10 10" fill="none"
+                      width={10}
+                      height={10}
                       aria-hidden="true"
-                    >
-                      <path d="M2 4l3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                    </svg>
+                    />
                   )}
                   <span className="queued__text">
                     {isExpanded ? text : preview}

@@ -54,7 +54,7 @@ test('placeholder and the first real thought render through the shared activity 
 })
 
 test('every thinking entry remains the same collapsed nested disclosure', () => {
-  assert.match(activityHeader, /kind === 'reasoning'/,
+  assert.match(activityHeader, /reasoning: Sparkle/,
     'the shared icon set should include a dedicated reasoning mark')
   assert.match(activityStretch, /const iconKind = thinkingOnly \? 'reasoning' : leadToolIcon/,
     'thinking-only stretches should select the reasoning glyph')

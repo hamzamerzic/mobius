@@ -1,6 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import Check from 'lucide-react/dist/esm/icons/check.mjs'
-import Copy from 'lucide-react/dist/esm/icons/copy.mjs'
+import { Check, Copy } from '@openai/apps-sdk-ui/components/Icon'
 import { formatToolResult, toolResultCopyText } from './toolResultFormat.js'
 import { copyPlainText } from './messageCopy.js'
 import { fetchLazyText } from './lazySidecar.js'
@@ -432,8 +431,8 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
                     title={copyState === 'failed' ? 'Try copying again' : copyLabel}
                   >
                     {copyState === 'copied'
-                      ? <Check size={13} strokeWidth={2.3} aria-hidden="true" />
-                      : <Copy size={13} strokeWidth={2} aria-hidden="true" />}
+                      ? <Check width={13} height={13} aria-hidden="true" />
+                      : <Copy width={13} height={13} aria-hidden="true" />}
                     <span>{copyVisibleLabel}</span>
                   </button>
                   <span className="chat__sr-only" role="status" aria-live="polite">

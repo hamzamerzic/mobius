@@ -1,9 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
+import { Moon, Sun } from '@openai/apps-sdk-ui/components/Icon'
 import GripVertical from 'lucide-react/dist/esm/icons/grip-vertical.mjs'
-import Moon from 'lucide-react/dist/esm/icons/moon.mjs'
-import Sun from 'lucide-react/dist/esm/icons/sun.mjs'
 import { api, clearQueryCache, clearToken } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
 import { platformVersionIdentity } from '../../lib/platformVersionIdentity.js'
@@ -212,6 +211,7 @@ function BackgroundProviderRow({
             }
           }}
         >
+          {/* The SDK has no drag/reorder glyph; DotsVertical is a menu action. */}
           <GripVertical size={18} strokeWidth={2} aria-hidden="true" />
         </button>
       )}
@@ -1528,13 +1528,13 @@ export default function SettingsView({
                 className={`settings__appearance-option${themeMode === 'light' ? ' settings__appearance-option--active' : ''}`}
                 aria-hidden="true"
               >
-                <Sun size={17} strokeWidth={1.8} />
+                <Sun width={17} height={17} />
               </span>
               <span
                 className={`settings__appearance-option${themeMode === 'dark' ? ' settings__appearance-option--active' : ''}`}
                 aria-hidden="true"
               >
-                <Moon size={17} strokeWidth={1.8} />
+                <Moon width={17} height={17} />
               </span>
             </button>
           </div>

@@ -1,8 +1,5 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react'
-import ChevronLeft from 'lucide-react/dist/esm/icons/chevron-left.mjs'
-import ChevronRight from 'lucide-react/dist/esm/icons/chevron-right.mjs'
-import Download from 'lucide-react/dist/esm/icons/download.mjs'
-import X from 'lucide-react/dist/esm/icons/x.mjs'
+import { ChevronLeft, ChevronRight, Download, X } from '@openai/apps-sdk-ui/components/Icon'
 import useDialogFocus from '../../../hooks/useDialogFocus.js'
 import {
   clampImageScale,
@@ -370,7 +367,7 @@ export default function ImageLightbox({
                 goToIndex(index - 1)
               }}
             >
-              <ChevronLeft size={22} aria-hidden="true" />
+              <ChevronLeft width={22} height={22} aria-hidden="true" />
             </button>
             <button
               type="button"
@@ -382,7 +379,7 @@ export default function ImageLightbox({
                 goToIndex(index + 1)
               }}
             >
-              <ChevronRight size={22} aria-hidden="true" />
+              <ChevronRight width={22} height={22} aria-hidden="true" />
             </button>
           </>
         )}
@@ -395,10 +392,10 @@ export default function ImageLightbox({
           >
             {downloadError
               ? <span className="lightbox-dl-err" aria-live="assertive">!</span>
-              : <Download size={20} aria-hidden="true" />}
+              : <Download width={20} height={20} aria-hidden="true" />}
           </button>
           <button ref={closeBtnRef} className="lightbox-btn" onClick={onClose} title="Close" aria-label="Close">
-            <X size={20} aria-hidden="true" />
+            <X width={20} height={20} aria-hidden="true" />
           </button>
         </div>
       </div>

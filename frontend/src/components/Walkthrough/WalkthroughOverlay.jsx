@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Download } from 'lucide-react'
+import { Download } from '@openai/apps-sdk-ui/components/Icon'
 import { api } from '../../api/client.js'
 import { ownerQueries } from '../../hooks/queries.js'
 import {
@@ -106,7 +106,7 @@ export default function WalkthroughOverlay({ onDone, onOpenSettings, onExploreAp
       </p>
       <section className="wt__install" aria-labelledby="wt-install-title">
         <span className="wt__install-icon" aria-hidden="true">
-          <Download size={18} strokeWidth={2} />
+          <Download width={18} height={18} />
         </span>
         <div className="wt__install-copy">
           <h3 id="wt-install-title">Keep Möbius close</h3>

@@ -61,9 +61,7 @@
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Plus, Paperclip } from '@openai/apps-sdk-ui/components/Icon'
-import FileText from 'lucide-react/dist/esm/icons/file-text.mjs'
-import Info from 'lucide-react/dist/esm/icons/info.mjs'
+import { FileDocument, InfoCircle, Paperclip, Plus } from '@openai/apps-sdk-ui/components/Icon'
 import ChatSettingsPanel from './ChatSettingsPanel.jsx'
 import { popoverMaxHeight, nearestClipTop } from './composerPopoverHeight.js'
 
@@ -295,7 +293,7 @@ export default function ComposerPopover({
               onClick={handleOpenSummary}
             >
               <span className="composer-popover__row-icon" aria-hidden="true">
-                <FileText width={18} height={18} />
+                <FileDocument width={18} height={18} />
               </span>
               <span className="composer-popover__row-main">
                 <span className="composer-popover__row-title">Chat summary</span>
@@ -311,7 +309,7 @@ export default function ComposerPopover({
               onClick={handleOpenInspector}
             >
               <span className="composer-popover__row-icon" aria-hidden="true">
-                <Info width={18} height={18} />
+                <InfoCircle width={18} height={18} />
               </span>
               <span className="composer-popover__row-main">
                 <span className="composer-popover__row-title">What the agent knows</span>

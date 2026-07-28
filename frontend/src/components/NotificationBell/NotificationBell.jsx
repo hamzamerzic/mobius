@@ -1,4 +1,4 @@
-import Bell from 'lucide-react/dist/esm/icons/bell.mjs'
+import { Bell } from '@openai/apps-sdk-ui/components/Icon'
 import './NotificationBell.css'
 
 // The header bell — lives in the shell bar's right-side action slot
@@ -23,7 +23,7 @@ export default function NotificationBell({
       title={label}
       onClick={onClick}
     >
-      <Bell size={18} aria-hidden="true" />
+      <Bell width={18} height={18} aria-hidden="true" />
       {count > 0 && (
         <span className="notification-bell__badge" aria-hidden="true">
           {count > 99 ? '99+' : count}

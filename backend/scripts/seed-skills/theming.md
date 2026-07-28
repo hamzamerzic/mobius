@@ -1,6 +1,6 @@
 # Theming and the shell
 
-How to change Möbius's look and modify the shell UI: hot-reloaded `theme.css`, light/dark CSS variables, structural JSX edits that need a rebuild, lucide icons, and keeping the shell from breaking. `Read` this before any visual change to the shell.
+How to change Möbius's look and modify the shell UI: hot-reloaded `theme.css`, light/dark CSS variables, structural JSX edits that need a rebuild, OpenAI Apps SDK icons, and keeping the shell from breaking. `Read` this before any visual change to the shell.
 
 The shell UI is fully editable. Source lives at `/data/platform/frontend/src/` (part of the `/data/platform` repo clone that actually runs).
 
@@ -85,14 +85,14 @@ After a git/platform update, not a normal save, the watcher sees no edit event; 
 
 ## Icons in the shell
 
-`lucide-react` is in the shell's `package.json`. Import icons rather than inlining raw `<svg><path d="..."/>`:
+Use the OpenAI Apps SDK UI icon set for generic shell actions and navigation. Import from its public component entry rather than inlining raw `<svg><path d="..."/>` or introducing a parallel generic icon vocabulary:
 
 ```jsx
-import { Paperclip, ArrowUp, Mic, ChevronDown, X } from 'lucide-react'
-<button><ArrowUp size={20} strokeWidth={2} /></button>
+import { ArrowUp, ChevronDown, Mic, Paperclip, X } from '@openai/apps-sdk-ui/components/Icon'
+<button><ArrowUp width={20} height={20} /></button>
 ```
 
-Inline SVG path data is brittle, unreviewable in diffs, and hard to size consistently. The Lucide set covers the OpenAI Apps SDK glyphs the shell uses (Paperclip, ArrowUp/Send, Mic, ChevronDown, X, Trash, Settings, MessageSquare, Grid). Reach for inline SVG only when no equivalent exists. Dependency additions belong in the repo/image, not as runtime installs.
+The SDK components accept normal SVG props; set `width` and `height` explicitly at the call site when the surrounding CSS does not own the size. Keep provider logos, brand marks, progress graphics, and purpose-built state illustrations custom when the SDK has no honest semantic match. Inline path data is otherwise brittle, hard to review, and easy to size inconsistently. Dependency additions belong in the repo/image, not as runtime installs.
 
 ---
 

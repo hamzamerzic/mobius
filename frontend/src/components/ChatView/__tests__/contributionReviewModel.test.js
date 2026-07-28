@@ -400,11 +400,10 @@ test('the swipe has a visible, focusable equivalent', () => {
   assert.match(cardSrc, /className="contrib-card__dismiss"/)
   assert.match(cardSrc, /aria-label="Dismiss — keeps it in Contribute"/)
   assert.match(cardSrc, /onClick=\{\(\) => onDismiss\?\.\(\)\}/)
-  // Every card shape uses the same outlined close icon as the shell's other
-  // compact dismiss controls; the heavier Apps SDK glyph looked out of place.
-  assert.match(cardSrc, /import X from 'lucide-react\/dist\/esm\/icons\/x\.mjs'/)
+  // Every card shape shares the shell's OpenAI SDK close icon.
+  assert.match(cardSrc, /import \{ X \} from '@openai\/apps-sdk-ui\/components\/Icon'/)
   assert.equal(
-    (cardSrc.match(/<X size=\{14\} strokeWidth=\{2\} aria-hidden="true" \/>/g) || []).length,
+    (cardSrc.match(/<X width=\{14\} height=\{14\} aria-hidden="true" \/>/g) || []).length,
     3,
   )
   assert.doesNotMatch(cardSrc, /title="Dismiss/)

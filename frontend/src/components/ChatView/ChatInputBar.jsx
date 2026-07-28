@@ -81,7 +81,7 @@ import { useRef, useState, useEffect, useLayoutEffect } from 'react'
 import { createPortal } from 'react-dom'
 import ImageLightbox from './markdown/ImageLightbox.jsx'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
-import { ArrowUp, Mic, DoubleChevronRight } from '@openai/apps-sdk-ui/components/Icon'
+import { ArrowUp, DoubleChevronRight, Mic, Stop } from '@openai/apps-sdk-ui/components/Icon'
 import { BASE } from '../../api/client.js'
 import { mediaTokenParam } from '../../api/mediaToken.js'
 import {
@@ -171,9 +171,7 @@ function PrimaryAction({
         onClick={onStop}
         aria-label="Stop"
       >
-        <svg width="16" height="16" viewBox="0 0 12 12" fill="currentColor">
-          <rect width="12" height="12" rx="2" />
-        </svg>
+        <Stop width={16} height={16} aria-hidden="true" />
       </button>
     )
   }

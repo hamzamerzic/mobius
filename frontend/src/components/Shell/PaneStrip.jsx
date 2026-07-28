@@ -1,7 +1,5 @@
 import { useLayoutEffect, useRef } from 'react'
-import Maximize2 from 'lucide-react/dist/esm/icons/maximize-2.mjs'
-import Minimize2 from 'lucide-react/dist/esm/icons/minimize-2.mjs'
-import X from 'lucide-react/dist/esm/icons/x.mjs'
+import { CollapseSm, ExpandSm, X } from '@openai/apps-sdk-ui/components/Icon'
 import * as tabModel from './tabModel.js'
 import { STRIP_H, WORKSPACE_SPLITS_ENABLED } from './paneModel.js'
 
@@ -166,7 +164,7 @@ export function PaneTab({
         tabIndex={-1}
         onClick={onClose}
       >
-        <X size={13} aria-hidden="true" />
+        <X width={13} height={13} aria-hidden="true" />
       </button>
     </div>
   )
@@ -174,7 +172,7 @@ export function PaneTab({
 
 export function PaneFocusButton({ paneId, focused, onToggle }) {
   const label = focused ? 'Show all panes' : 'Focus pane'
-  const Icon = focused ? Minimize2 : Maximize2
+  const Icon = focused ? CollapseSm : ExpandSm
   return (
     <button
       type="button"
@@ -183,7 +181,7 @@ export function PaneFocusButton({ paneId, focused, onToggle }) {
       title={label}
       onClick={() => onToggle(paneId)}
     >
-      <Icon size={14} aria-hidden="true" />
+      <Icon width={14} height={14} aria-hidden="true" />
     </button>
   )
 }

@@ -1,9 +1,4 @@
-import Bell from 'lucide-react/dist/esm/icons/bell.mjs'
-import AppWindow from 'lucide-react/dist/esm/icons/app-window.mjs'
-import BotMessageSquare from 'lucide-react/dist/esm/icons/bot-message-square.mjs'
-import MessageSquare from 'lucide-react/dist/esm/icons/message-square.mjs'
-import Settings2 from 'lucide-react/dist/esm/icons/settings-2.mjs'
-import X from 'lucide-react/dist/esm/icons/x.mjs'
+import { Agent, Bell, Chat, Grid, SettingsSlider, X } from '@openai/apps-sdk-ui/components/Icon'
 import { useEffect, useState } from 'react'
 import { notificationQueries } from '../../hooks/queries.js'
 import { parseNotificationTarget } from '../../lib/notificationTarget.js'
@@ -11,10 +6,10 @@ import { formatRelativeTime, iconKindForSource } from './notificationsModel.js'
 import './NotificationsView.css'
 
 const ICONS = {
-  system: Settings2,
-  agent: BotMessageSquare,
-  chat: MessageSquare,
-  app: AppWindow,
+  system: SettingsSlider,
+  agent: Agent,
+  chat: Chat,
+  app: Grid,
   default: Bell,
 }
 
@@ -51,7 +46,7 @@ export default function NotificationsView({ active = false, onClose, onOpenTarge
           aria-label="Close notifications"
           onClick={onClose}
         >
-          <X size={18} aria-hidden="true" />
+          <X width={18} height={18} aria-hidden="true" />
         </button>
       </div>
       <div className="notifications__content">
@@ -65,7 +60,7 @@ export default function NotificationsView({ active = false, onClose, onOpenTarge
         )}
         {!isLoading && !isError && rows.length === 0 && (
           <div className="notifications__empty">
-            <Bell size={28} aria-hidden="true" />
+            <Bell width={28} height={28} aria-hidden="true" />
             <p>Updates from your apps and agents will appear here.</p>
           </div>
         )}
@@ -76,7 +71,7 @@ export default function NotificationsView({ active = false, onClose, onOpenTarge
             const body = (
               <>
                 <span className="notifications__row-icon" aria-hidden="true">
-                  <Icon size={17} />
+                  <Icon width={17} height={17} />
                 </span>
                 <span className="notifications__row-main">
                   <span className="notifications__row-title">{n.title}</span>
