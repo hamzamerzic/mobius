@@ -42,8 +42,9 @@
 //     'conflict' error re-read + retry (the app owns its merge; the runtime does NOT retry for you). See building-apps.md.
 //   window.mobius.chat({mount, chatId?, picker?, ...}) -> Promise<handle>
 //     Embeds the real agent chat (ChatView) in a nested iframe inside
-//     `mount`. handle.on('ready'|'message-sent'|'turn-done'|'error', cb)
-//     and handle.destroy(). See the "Agent-chat embed" block below.
+//     `mount`. handle.on('ready'|'message-sent'|'turn-done'|'error', cb),
+//     handle.setGuidance(text), and handle.destroy(). See the
+//     "Agent-chat embed" block below.
 //   window.mobius.nav.open(label, onBack)        -> { ready, outcome, close }
 //     outcome distinguishes shell ownership from standalone fallback and
 //     request failures; see building-apps.md.
@@ -2228,6 +2229,7 @@ export function makeSignal(appId, storage, appInstanceId = null) {
 // sync, the way app-frame.html ↔ AppCanvas.jsx already are.
 const EMBED_NS = 'moebius:chat-embed:'
 const EMBED_INIT = EMBED_NS + 'init'
+const EMBED_GUIDANCE = EMBED_NS + 'guidance'
 const EMBED_READY = EMBED_NS + 'ready'
 const EMBED_MESSAGE_SENT = EMBED_NS + 'message-sent'
 const EMBED_TURN_DONE = EMBED_NS + 'turn-done'
@@ -2237,6 +2239,13 @@ const EMBED_BOOTSTRAP_READY = EMBED_NS + 'bootstrap-ready'
 // Context protocol — mirrored from src/lib/chatEmbed.js; keep in sync.
 const EMBED_CONTEXT_REQUEST = EMBED_NS + 'context-request'
 const EMBED_CONTEXT_RESPONSE = EMBED_NS + 'context-response'
+const EMBED_GUIDANCE_MAX_LENGTH = 300
+
+export function sanitizeEmbedGuidance(value) {
+  if (typeof value !== 'string') return null
+  const guidance = value.trim()
+  return guidance ? guidance.slice(0, EMBED_GUIDANCE_MAX_LENGTH) : null
+}
 
 // The four embed handle events split into two kinds. 'ready' and 'error'
 // are one-shot lifecycle events, but the child posts its mount-time READY
@@ -2767,12 +2776,15 @@ export function makeChat({ appId, getToken, storage }) {
 
     let frameReveal = makeFrameRevealController(iframe)
 
-    // Sanitize quickActions: max 4, each must have string label + prompt.
+    // Keep the older prompt-chip contract for apps that still use it. Newer
+    // apps can provide one calm guidance line instead; guidance wins in the
+    // renderer when both are present.
     const quickActions = Array.isArray(opts.quickActions)
       ? opts.quickActions
           .filter(a => a && typeof a.label === 'string' && typeof a.prompt === 'string')
           .slice(0, 4)
       : undefined
+    let guidance = sanitizeEmbedGuidance(opts.guidance)
 
     let controlsShell = null
     let frameMount = mount
@@ -2937,6 +2949,7 @@ export function makeChat({ appId, getToken, storage }) {
             picker: pickerOn,
           }
           if (quickActions && quickActions.length > 0) msg.quickActions = quickActions
+          if (guidance) msg.guidance = guidance
           targetFrame.contentWindow.postMessage(msg, '*')
         },
         onAttemptError: (error) => {
@@ -2954,6 +2967,17 @@ export function makeChat({ appId, getToken, storage }) {
       hasAuthorizedOnce = false
       authorizationHandoff = createAuthorizationHandoff()
       if (previous.parentNode) previous.parentNode.replaceChild(iframe, previous)
+    }
+
+    function postGuidance() {
+      const targetFrame = iframe
+      if (!targetFrame.contentWindow) return
+      targetFrame.contentWindow.postMessage({
+        type: EMBED_GUIDANCE,
+        instanceId,
+        chatId,
+        guidance,
+      }, '*')
     }
 
     function onMessage(e) {
@@ -2980,6 +3004,10 @@ export function makeChat({ appId, getToken, storage }) {
         }
         if (!hasAuthorizedOnce) {
           hasAuthorizedOnce = true
+          // INIT may have been posted before the caller received its handle.
+          // Re-send the current value at READY so a setGuidance() during the
+          // authorization exchange cannot be stranded behind the old INIT.
+          postGuidance()
           // `ready` is now visually truthful: callers receive it only after
           // the authorized child has had two frames to commit and the iframe
           // itself is revealed. Authorization acknowledgement above remains
@@ -3041,6 +3069,16 @@ export function makeChat({ appId, getToken, storage }) {
         // Delegates to the sticky emitter: a 'ready'/'error' that already
         // fired (the mount-time READY) replays to a late handler.
         onEvent(event, cb)
+        return this
+      },
+      setGuidance(value) {
+        const nextGuidance = sanitizeEmbedGuidance(value)
+        if (nextGuidance === guidance) return this
+        guidance = nextGuidance
+        // Before READY, the latest value travels with INIT. Afterwards, update
+        // the authorized child in place so changing app context never remounts
+        // the iframe or interrupts a streaming turn.
+        if (hasAuthorizedOnce) postGuidance()
         return this
       },
       destroy() {

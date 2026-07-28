@@ -264,6 +264,23 @@
   transform: none;
 }
 
+/* App-authored embedded-chat guidance. Apps own the current instruction; the
+   shell owns its consistent, readable presentation. */
+.chat-embed .chat__empty--guidance {
+  padding: 24px 28px;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+.chat__empty-guidance {
+  margin: 0;
+  max-width: 42ch;
+  color: var(--muted); /* CONTRACT: low-contrast hint on opaque fill */
+  font-size: 15px;
+  line-height: 1.6;
+  text-wrap: balance;
+}
+
 /* Quick-action chip row — embedded empty state with app-declared suggestions.
    Horizontally scrollable pill row; max 4 chips rendered by ChatView.jsx.
    Tap pre-fills the composer (never auto-sends). */

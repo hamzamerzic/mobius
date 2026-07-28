@@ -878,6 +878,7 @@ useEffect(() => {
     scopeLabel: 'Workout Jul 11', // optional label for the scoped chat picker
     systemPrompt,              // shapes the chat on create + re-applies on resume
     picker: false,             // hide the provider/effort picker inside the app sheet
+    guidance: 'Ask the agent how to work with this project.', // optional empty-state context
     onTurnDone: () => refresh(),   // a turn finished — reload app state
   }).then((h) => { if (disposed) h.destroy(); else handle = h })
   return () => { disposed = true; handle?.destroy() }
@@ -899,6 +900,24 @@ useEffect(() => {
   trying to switch one persisted transcript between providers.
 - `onReady` / `onTurnDone` / `onMessageSent` / `onError` are wired before the
   embed mounts, so they never miss an event. `onTurnDone` is where you refresh.
+- `guidance` is one short app-authored instruction in an empty embedded chat.
+  It takes precedence over legacy `quickActions` when both are present. When
+  the useful instruction changes with app state, keep the returned handle and
+  call `handle.setGuidance(nextText)`; this updates the mounted chat in place
+  without losing its transcript, composer, or streaming turn. Passing an empty
+  string clears it. The runtime trims and bounds the text.
+
+  ```jsx
+  const chatHandleRef = useRef(null)
+  useEffect(() => {
+    chatHandleRef.current?.setGuidance(guidance)
+  }, [guidance])
+  ```
+
+  Set `chatHandleRef.current` when the mount promise resolves and clear it
+  before destroying that same handle. The helper safely carries the latest
+  pre-ready update through authorization, so app state does not need to wait
+  for `onReady`.
 - **Viewer variant:** to display an EXISTING chat owned by this app (including a
   same-app cron-attributed daily chat resolved from a `meta.json`), pass an explicit
   `chatId` and no `persist` — the helper just mounts it read-through.

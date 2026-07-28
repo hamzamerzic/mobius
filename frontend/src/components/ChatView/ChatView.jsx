@@ -250,6 +250,7 @@ export default function ChatView({
   onVoiceListeningChange,
   showPicker = true,
   embedded = false,
+  guidance = null,
   quickActions = null,
   getContext = null,
   composerRequest = null,
@@ -3758,10 +3759,14 @@ export default function ChatView({
       {showEmpty && (
         <div className="chat__empty-wrap">
           {embedded ? (
-            // App-embedded chats: render quick action chips when the app
-            // provided them via opts.quickActions; otherwise a neutral hint.
-            // Chips pre-fill the composer (never auto-send) — max 4 rendered.
-            Array.isArray(quickActions) && quickActions.length > 0 ? (
+            // Guidance is the current contextual instruction and therefore
+            // takes precedence. Older apps keep their quick-action chips until
+            // they deliberately migrate; an app may also choose a bare composer.
+            typeof guidance === 'string' && guidance.trim() ? (
+              <div className="chat__empty chat__empty--embed chat__empty--guidance">
+                <p className="chat__empty-guidance">{guidance}</p>
+              </div>
+            ) : Array.isArray(quickActions) && quickActions.length > 0 ? (
               <div className="chat__empty chat__empty--embed chat__empty--chips">
                 <div className="chat__quick-actions" role="list">
                   {quickActions.slice(0, 4).map((action, i) => (

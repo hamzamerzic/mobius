@@ -9,10 +9,10 @@ import {
 import { applyThemeToDom } from '../../lib/themeService.js'
 import { handoffEmbedBootstrap } from '../../lib/chatEmbedBootstrap.js'
 import {
-  INIT, READY, MESSAGE_SENT, TURN_DONE, ERROR, AUTH_EXPIRING,
+  INIT, GUIDANCE, READY, MESSAGE_SENT, TURN_DONE, ERROR, AUTH_EXPIRING,
   BOOTSTRAP_READY,
   CONTEXT_REQUEST, CONTEXT_RESPONSE, CONTEXT_RESPONSE_TIMEOUT_MS,
-  isEmbedMessage, retainEmbedSessionAfterExchangeFailure,
+  isEmbedMessage, retainEmbedSessionAfterExchangeFailure, sanitizeEmbedGuidance,
 } from '../../lib/chatEmbed.js'
 import {
   EMPTY_TURN_DONE_GATE,
@@ -30,6 +30,7 @@ export default function ChatEmbed() {
   const [chatId, setChatId] = useState(null)
   const [picker, setPicker] = useState(true)
   const [quickActions, setQuickActions] = useState(null)
+  const [guidance, setGuidance] = useState(null)
   const authorizedRef = useRef(false)
   const parentRef = useRef(typeof window !== 'undefined' ? window.parent : null)
   const instanceIdRef = useRef(null)
@@ -162,6 +163,12 @@ export default function ChatEmbed() {
         setChatId(session.chat_id)
         setPicker(typeof msg.picker === 'boolean' ? msg.picker : true)
         setQuickActions(Array.isArray(msg.quickActions) ? msg.quickActions : null)
+        // INIT seeds guidance for a new document. A later session refresh must
+        // not replay the older INIT value over a newer live GUIDANCE message
+        // that arrived while its network exchange was in flight.
+        if (!authorizedRef.current) {
+          setGuidance(sanitizeEmbedGuidance(msg.guidance))
+        }
         setAuthorized(true)
         authorizedRef.current = true
 
@@ -201,6 +208,14 @@ export default function ChatEmbed() {
       const msg = event.data
       if (msg.type === INIT) {
         establish(msg).catch(() => {})
+        return
+      }
+      if (msg.type === GUIDANCE) {
+        if (
+          authorizedRef.current
+          && msg.instanceId === instanceIdRef.current
+          && msg.chatId === chatIdRef.current
+        ) setGuidance(sanitizeEmbedGuidance(msg.guidance))
         return
       }
       if (
@@ -256,6 +271,7 @@ export default function ChatEmbed() {
           chatId={chatId}
           embedded
           showPicker={picker}
+          guidance={guidance}
           quickActions={quickActions}
           getContext={getContext}
           onMessageStart={() => {

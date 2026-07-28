@@ -35,6 +35,15 @@ export const BOOTSTRAP_READY = NS + 'bootstrap-ready' // child listener is insta
 
 // Parent (app frame) → child (embed frame).
 export const INIT = NS + 'init' // hand the embed its config + correlation id
+export const GUIDANCE = NS + 'guidance' // update app-authored empty-state guidance
+
+export const EMBED_GUIDANCE_MAX_LENGTH = 300
+
+export function sanitizeEmbedGuidance(value) {
+  if (typeof value !== 'string') return null
+  const guidance = value.trim()
+  return guidance ? guidance.slice(0, EMBED_GUIDANCE_MAX_LENGTH) : null
+}
 
 // Context protocol (send-time app state injection).
 //

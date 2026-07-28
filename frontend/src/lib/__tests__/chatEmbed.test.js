@@ -18,10 +18,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  NS, INIT, READY, MESSAGE_SENT, TURN_DONE, ERROR, HEIGHT, AUTH_EXPIRING,
+  NS, INIT, GUIDANCE, READY, MESSAGE_SENT, TURN_DONE, ERROR, HEIGHT, AUTH_EXPIRING,
   BOOTSTRAP_READY,
   CONTEXT_RESPONSE_TIMEOUT_MS,
   isEmbedMessage, embedUrl, makeEmitter, retainEmbedSessionAfterExchangeFailure,
+  sanitizeEmbedGuidance,
 } from '../chatEmbed.js'
 
 const ORIGIN = 'https://mobius.example'
@@ -33,7 +34,7 @@ function evt({ origin = ORIGIN, source = SRC, type, instanceId, chatId } = {}) {
 
 test('all message types share the moebius:chat-embed: namespace', () => {
   for (const t of [
-    INIT, READY, MESSAGE_SENT, TURN_DONE, ERROR, HEIGHT, AUTH_EXPIRING,
+    INIT, GUIDANCE, READY, MESSAGE_SENT, TURN_DONE, ERROR, HEIGHT, AUTH_EXPIRING,
     BOOTSTRAP_READY,
   ]) {
     assert.ok(t.startsWith(NS), `${t} must start with ${NS}`)
@@ -42,6 +43,13 @@ test('all message types share the moebius:chat-embed: namespace', () => {
   // never be mistaken for an embed message on the shared origin.
   assert.ok(!NS.startsWith('moebius:frame'))
   assert.ok(!NS.startsWith('moebius:nav'))
+})
+
+test('embedded guidance is normalized and bounded at the protocol boundary', () => {
+  assert.equal(sanitizeEmbedGuidance('  Open report.tex and fix it.  '), 'Open report.tex and fix it.')
+  assert.equal(sanitizeEmbedGuidance('   '), null)
+  assert.equal(sanitizeEmbedGuidance({ text: 'not a string' }), null)
+  assert.equal(sanitizeEmbedGuidance('x'.repeat(500)).length, 300)
 })
 
 test('context relay tolerates two busy frame hops without blocking sends indefinitely', () => {
