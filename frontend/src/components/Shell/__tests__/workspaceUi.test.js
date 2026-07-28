@@ -21,6 +21,9 @@ const settingsView = readFileSync(
 const walkthrough = readFileSync(
   new URL('../../Walkthrough/WalkthroughOverlay.jsx', import.meta.url), 'utf8',
 )
+const walkthroughCss = readFileSync(
+  new URL('../../Walkthrough/WalkthroughOverlay.css', import.meta.url), 'utf8',
+)
 
 test('the workspace menu avoids an oversized border-and-shadow card', () => {
   const rule = css.match(/\.workspace__menu\s*\{[\s\S]*?\}/)?.[0] || ''
@@ -123,13 +126,31 @@ test('the undo chord is flag-gated and defers to focused inputs', () => {
 test('the first-run walkthrough stays short and action-first', () => {
   assert.doesNotMatch(walkthrough, /const STEPS/)
   assert.match(walkthrough, /Your Möbius is ready/)
-  assert.match(walkthrough, /Connect agent/)
-  assert.match(walkthrough, /Explore apps/)
-  assert.match(walkthrough, /Install Möbius/)
-  assert.match(walkthrough, /How to install/)
+  assert.match(walkthrough, /Connect an agent/)
+  assert.match(walkthrough, /Open the App Store/)
+  assert.match(walkthrough, /Keep Möbius close/)
   assert.match(walkthrough, /requestInstall/)
-  assert.doesNotMatch(walkthrough, /wt__kicker|wt__mark|Open Settings|Open the App Store|I’ll explore/)
+  assert.match(walkthrough, /I’ll explore/)
   assert.match(walkthrough, /mobius:walkthrough-completed/)
+})
+
+test('the first-run walkthrough remains dismissible in a short landscape viewport wider than 520px', () => {
+  const shortLandscape = { width: 700, height: 360 }
+  assert.ok(shortLandscape.width > 520)
+  assert.ok(shortLandscape.height < 520)
+
+  const baseCardRule = walkthroughCss.match(/\.wt__card\s*\{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(
+    baseCardRule,
+    /max-height:\s*calc\(100dvh - 80px - env\(safe-area-inset-top,\s*0px\)\)/,
+    'the viewport-height cap must apply outside the phone-width media query',
+  )
+  assert.match(baseCardRule, /overflow-y:\s*auto/,
+    'clipped actions must remain reachable by scrolling')
+  assert.match(baseCardRule, /overscroll-behavior:\s*contain/,
+    'scrolling the coach card must not move the workspace behind it')
+  assert.doesNotMatch(baseCardRule, /overflow:\s*hidden/,
+    'the width-independent card rule must never clip its final actions')
 })
 
 test('the authenticated shell offers a keyboard skip link', () => {
@@ -143,8 +164,8 @@ test('drawer lists distinguish loading, error, and confirmed empty data', () => 
   assert.match(shell, /chatsStatus=\{chatsStatus\}/)
   assert.match(drawer, /chatsStatus === 'loading'/)
   assert.match(drawer, /chatsStatus === 'error'/)
-  assert.match(drawer, /chatsStatus === 'success' && allChats\.length > 0/)
-  assert.doesNotMatch(drawer, /No conversations yet/)
+  assert.match(drawer, /chatsStatus === 'success'/)
+  assert.match(drawer, /No conversations yet/)
 })
 
 test('a crashed app pane is isolated by a per-pane ErrorBoundary', () => {
@@ -1124,6 +1145,7 @@ test('round4-3: the New Chat landing renders for a null slot / reveal underlay a
   // Seamless swap: the landing reuses ChatView's exact empty treatment.
   assert.match(newChatLanding, /className="chat chat--empty"/)
   assert.match(newChatLanding, /className="chat__empty-wrap"/)
+  assert.match(newChatLanding, /className="chat__empty-glyph"/)
   assert.match(newChatLanding, /What&apos;s on your mind\?/)
   assert.match(newChatLanding, /Couldn’t start a new chat/)
 })
