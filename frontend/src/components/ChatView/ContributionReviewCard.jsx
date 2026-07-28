@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import X from 'lucide-react/dist/esm/icons/x.mjs'
+import { X } from '@openai/apps-sdk-ui/components/Icon'
 import { api } from '../../api/client.js'
 import { appQueries } from '../../hooks/queries.js'
 import {
@@ -309,7 +309,7 @@ function SentRow({ sent, onDismiss }) {
           aria-label="Dismiss"
           onClick={() => onDismiss?.()}
         >
-          <X size={14} strokeWidth={2} aria-hidden="true" />
+          <X width={14} height={14} aria-hidden="true" />
         </button>
       </div>
       <p className="contrib-card__summary">
@@ -350,7 +350,7 @@ function StackReviewRow({ item, onOpenContribute, onDismiss }) {
           aria-label="Dismiss — keeps the stack in Contribute"
           onClick={() => onDismiss?.()}
         >
-          <X size={14} strokeWidth={2} aria-hidden="true" />
+          <X width={14} height={14} aria-hidden="true" />
         </button>
       </div>
       <p className="contrib-card__summary">
@@ -422,7 +422,7 @@ function ReviewRow({
           aria-label="Dismiss — keeps it in Contribute"
           onClick={() => onDismiss?.()}
         >
-          <X size={14} strokeWidth={2} aria-hidden="true" />
+          <X width={14} height={14} aria-hidden="true" />
         </button>
       </div>
       <p className="contrib-card__summary">

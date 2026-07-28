@@ -1,3 +1,4 @@
+import { ArrowRotateCw } from '@openai/apps-sdk-ui/components/Icon'
 import MarkerCard from './MarkerCard.jsx'
 
 export default function AutoContinuationCard({ msg }) {
@@ -9,22 +10,7 @@ export default function AutoContinuationCard({ msg }) {
   return (
     <MarkerCard
       title={title}
-      icon={
-        <svg
-          aria-hidden="true"
-          viewBox="0 0 16 16"
-          width="14"
-          height="14"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.4"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="M13 7a5 5 0 1 0-1.5 4" />
-          <path d="M10.5 8H13V5.5" />
-        </svg>
-      }
+      icon={<ArrowRotateCw width={14} height={14} aria-hidden="true" />}
     />
   )
 }

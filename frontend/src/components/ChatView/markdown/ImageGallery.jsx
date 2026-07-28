@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import ChevronLeft from 'lucide-react/dist/esm/icons/chevron-left.mjs'
-import ChevronRight from 'lucide-react/dist/esm/icons/chevron-right.mjs'
+import { ChevronLeft, ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import { ExpandableImage } from './InlineContent.jsx'
 import ImageLightbox from './ImageLightbox.jsx'
 import { projectResolvedGalleryItems } from './imageGallery.js'
@@ -209,7 +208,7 @@ export default function ImageGallery({ images, mediaDimensions }) {
         disabled={!canPrevious}
         onClick={() => scrollByItem(-1)}
       >
-        <ChevronLeft size={18} aria-hidden="true" />
+        <ChevronLeft width={18} height={18} aria-hidden="true" />
       </button>
       <button
         type="button"
@@ -218,7 +217,7 @@ export default function ImageGallery({ images, mediaDimensions }) {
         disabled={!canNext}
         onClick={() => scrollByItem(1)}
       >
-        <ChevronRight size={18} aria-hidden="true" />
+        <ChevronRight width={18} height={18} aria-hidden="true" />
       </button>
 
       {viewerItem?.src && createPortal(

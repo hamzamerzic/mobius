@@ -1,6 +1,6 @@
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import Minimize2 from 'lucide-react/dist/esm/icons/minimize-2.mjs'
+import { CollapseSm } from '@openai/apps-sdk-ui/components/Icon'
 import {
   AppsNavIcon,
   NewChatNavIcon,
@@ -4177,7 +4177,7 @@ export default function Shell() {
           inert={navigationSurfaceOpen}
           onClick={() => dispatchImmersive({ type: 'exit' })}
         >
-          <Minimize2 size={18} aria-hidden="true" />
+          <CollapseSm width={18} height={18} aria-hidden="true" />
         </button>
       )}
       <Toast

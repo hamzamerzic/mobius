@@ -1,6 +1,6 @@
 /* Render an internal app deep link as a compact preview that retains normal link fallback. */
 
-import { ChevronRight } from 'lucide-react'
+import { ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import { appQueries } from '../../../hooks/queries.js'
 import AppLinkPreview from './AppLinkPreview.jsx'
 
@@ -35,7 +35,7 @@ export default function AppLinkCard({ card, onInternalNav }) {
           <strong>{card.title}</strong>
           <span>Open in {card.appName}</span>
         </span>
-        <ChevronRight className="md-app-card__chevron" size={20} aria-hidden="true" />
+        <ChevronRight className="md-app-card__chevron" width={20} height={20} aria-hidden="true" />
       </span>
     </a>
   )

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Download } from 'lucide-react'
+import { Download } from '@openai/apps-sdk-ui/components/Icon'
 import { api } from '../../api/client.js'
 import { ownerQueries } from '../../hooks/queries.js'
 import {
@@ -124,7 +124,7 @@ export default function WalkthroughOverlay({ onDone, onOpenSettings, onExploreAp
           aria-expanded={nativeInstallReady ? undefined : showInstallHelp}
           aria-controls={nativeInstallReady ? undefined : 'wt-install-help'}
         >
-          <Download size={15} strokeWidth={2} aria-hidden="true" />
+          <Download width={15} height={15} aria-hidden="true" />
           {installButtonLabel}
         </button>
         {showInstallHelp && (

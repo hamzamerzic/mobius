@@ -1,4 +1,4 @@
-import BrainCircuit from 'lucide-react/dist/esm/icons/brain-circuit.mjs'
+import { Brain } from '@openai/apps-sdk-ui/components/Icon'
 import { messageSources, sourceHost, sourceLabel } from './messageSources.js'
 import { messageRecall, noteHref, noteLabel } from './memoryRecall.js'
 
@@ -8,7 +8,7 @@ function sourceMark(host) {
 }
 
 function MemoryMark() {
-  return <BrainCircuit className="chat__source-glyph" aria-hidden="true" />
+  return <Brain className="chat__source-glyph" aria-hidden="true" />
 }
 
 // Everything that informed an answer, surfaced ONCE at the end of the message:

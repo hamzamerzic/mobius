@@ -22,7 +22,7 @@ import { requestAppCodeWarm } from '../../lib/appPrecache.js'
 import {
   initSwapState, reduceSwap, compareVersions, INCOMING_SWAP_TIMEOUT_MS,
 } from '../../lib/previewSwapState.js'
-import WifiOff from 'lucide-react/dist/esm/icons/wifi-off.mjs'
+import { GlobeOffRealTimeSearch } from '@openai/apps-sdk-ui/components/Icon'
 import './AppCanvas.css'
 
 function appFrameRequestUrl(appId, version, frameRev) {
@@ -1160,7 +1160,7 @@ export default function AppCanvas({
         <div className="canvas-wrap">
           <div className="canvas-loading" aria-live="polite">
             <div className="canvas-loading__offline">
-              {!online && <WifiOff className="canvas-loading__offline-icon" aria-hidden="true" />}
+              {!online && <GlobeOffRealTimeSearch className="canvas-loading__offline-icon" aria-hidden="true" />}
               <div className="canvas-loading__offline-title">{title}</div>
               <div className="canvas-loading__offline-detail">{detail}</div>
               {online && (
@@ -1365,7 +1365,7 @@ export default function AppCanvas({
             // semantics, not this in-shell read path. So this branch is the
             // not-yet-cached case for a non-capable app, not "never cached."
             <div className="canvas-loading__offline">
-              <WifiOff className="canvas-loading__offline-icon" aria-hidden="true" />
+              <GlobeOffRealTimeSearch className="canvas-loading__offline-icon" aria-hidden="true" />
               <div className="canvas-loading__offline-title">You're offline</div>
               <div className="canvas-loading__offline-detail">
                 {appName ? `${appName} needs a connection to open.`

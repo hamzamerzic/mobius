@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import Search from 'lucide-react/dist/esm/icons/search.mjs'
+import { Search } from '@openai/apps-sdk-ui/components/Icon'
 import './AppsDirectory.css'
 
 export default function AppsDirectory({

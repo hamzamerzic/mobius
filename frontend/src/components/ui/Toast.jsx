@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import X from 'lucide-react/dist/esm/icons/x.mjs'
+import { X } from '@openai/apps-sdk-ui/components/Icon'
 import './Toast.css'
 
 /**
@@ -82,7 +82,7 @@ export default function Toast({ message, variant = 'info', duration = 4000, onDi
           aria-label="Dismiss notification"
           onClick={handleDismiss}
         >
-          <X size={16} aria-hidden="true" />
+          <X width={16} height={16} aria-hidden="true" />
         </button>
       )}
     </div>

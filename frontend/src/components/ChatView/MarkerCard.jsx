@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react'
+import { ChevronDown } from '@openai/apps-sdk-ui/components/Icon'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
 
 // Shared shell for "marker" messages — system/product moments that are neither
@@ -28,12 +29,11 @@ export default function MarkerCard({ icon, title, subtitle, children }) {
       </span>
       {collapsible && (
         <span className="chat__marker-toggle" aria-hidden="true">
-          <svg
+          <ChevronDown
             className={`chat__chevron${open ? '' : ' chat__chevron--collapsed'}`}
-            width="10" height="10" viewBox="0 0 10 10" fill="none"
-          >
-            <path d="M2 4l3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
+            width={10}
+            height={10}
+          />
         </span>
       )}
     </>
