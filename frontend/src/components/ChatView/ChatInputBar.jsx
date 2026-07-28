@@ -43,9 +43,9 @@
  * ║      Without it, tapping × steals focus → iOS collapses kb.      ║
  * ║                                                                  ║
  * ║   4. ICONS COME FROM THE APPS-SDK-UI PACKAGE                     ║
- * ║      Primary action: `ArrowUp` (22) for send, `Mic` (24) for     ║
- * ║      voice, inlined stop-square SVG for stop. The package        ║
- * ║      ships these — don't substitute hand-rolled paths.           ║
+ * ║      Primary action: `ArrowUp` (22) for send, `Mic` (24), and    ║
+ * ║      `Stop` (24). The package ships these — don't substitute     ║
+ * ║      hand-rolled paths.                                          ║
  * ║                                                                  ║
  * ║   5. ATTACH CARD CLASSIFIER (`classifyFile`) drives the badge    ║
  * ║      colour (PDF red, DOC blue, others muted). `stripExt`        ║
@@ -171,7 +171,7 @@ function PrimaryAction({
         onClick={onStop}
         aria-label="Stop"
       >
-        <Stop width={16} height={16} aria-hidden="true" />
+        <Stop width={24} height={24} aria-hidden="true" />
       </button>
     )
   }
