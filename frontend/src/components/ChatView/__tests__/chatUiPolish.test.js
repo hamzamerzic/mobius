@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 
 const indexCss = readFileSync(new URL('../../../index.css', import.meta.url), 'utf8')
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
+const chatInputBar = readFileSync(new URL('../ChatInputBar.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const queuedMessages = readFileSync(new URL('../QueuedMessages.jsx', import.meta.url), 'utf8')
 const chatSettingsPanel = readFileSync(
@@ -79,6 +80,14 @@ test('stop action has no visible circular shell', () => {
     'Stop must override the circular action-slot focus outline')
   assert.match(stopGlyphFocusRule, /outline:\s*2px solid var\(--accent\)/,
     'Stop keyboard focus should move to the square glyph')
+})
+
+test('stop action keeps a legible glyph inside its full touch target', () => {
+  assert.match(
+    chatInputBar,
+    /<Stop width=\{24\} height=\{24\} aria-hidden="true" \/>/,
+    'the SDK Stop icon needs a 24px box because its square occupies only part of the viewBox',
+  )
 })
 
 test('mobile messages preserve native text selection and its action menu', () => {
