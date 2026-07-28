@@ -803,8 +803,8 @@ self.addEventListener('push', (e) => {
   const data = e.data.json()
   const options = {
     body: data.body || '',
-    icon: data.icon || '/moebius.png',
-    badge: '/moebius.png',
+    icon: data.icon || '/icons/icon-192.png',
+    badge: '/icons/icon-192.png',
     data: { target: data.target || '/', actions: data.actions },
     actions: (data.actions || []).slice(0, 2).map(a => ({
       action: a.action,

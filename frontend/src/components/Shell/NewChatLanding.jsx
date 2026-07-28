@@ -1,4 +1,4 @@
-import mobiusLogoUrl from '../../assets/moebius.png'
+import mobiusLogoUrl from '../../assets/moebius.svg'
 
 /**
  * The first-class New Chat landing painted for a null single-screen slot
