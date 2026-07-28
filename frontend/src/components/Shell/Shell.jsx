@@ -653,6 +653,12 @@ export default function Shell() {
   })
   const apps = appsQuery.data ?? []
   const chats = chatsQuery.data ?? []
+  const appsStatus = apps.length > 0 || appsQuery.isSuccess
+    ? 'success'
+    : (appsQuery.isError ? 'error' : 'loading')
+  const chatsStatus = chats.length > 0 || chatsQuery.isSuccess
+    ? 'success'
+    : (chatsQuery.isError ? 'error' : 'loading')
   // Prime only the two most-recent chats that are not already open, including
   // active chats: their cached transcript is useful while stream catch-up runs.
   // ChatView still revalidates on mount, but this gives its synchronous cache
@@ -3575,6 +3581,16 @@ export default function Shell() {
       + `${modeMachine.transitionRootClass(modeState, { splitsEnabled: SPLITS })
         ? ` ${modeMachine.transitionRootClass(modeState, { splitsEnabled: SPLITS })}` : ''}`
       + `${builderModeActive && paneModel.BUILDER_POWER_CHROME ? ' shell--builder-power' : ''}`}>
+      <a
+        className="shell__skip-link"
+        href="#main-content"
+        onClick={(event) => {
+          event.preventDefault()
+          contentElRef.current?.focus({ preventScroll: true })
+        }}
+      >
+        Skip to content
+      </a>
       {/* The existing brand toggle remains the visible close affordance while the
           mobile drawer is modal. Keep the workspace inert below, but do not inert
           the header: doing so lets the scrim intercept the toggle and strands the
@@ -3659,9 +3675,13 @@ export default function Shell() {
         interactionLocked={drawerModeTransitioning}
         onClose={drawerModeTransitioning ? undefined : closeDrawer}
         apps={apps}
+        appsStatus={appsStatus}
+        onRetryApps={() => appsQuery.refetch()}
         activeView={activeView}
         activeAppId={activeAppId}
         chats={chats}
+        chatsStatus={chatsStatus}
+        onRetryChats={() => chatsQuery.refetch()}
         activeChatId={activeChatId}
         onChat={selectChat}
         onApp={(id) => navTo('canvas', { appId: id })}
@@ -3769,7 +3789,7 @@ export default function Shell() {
         </nav>
         )
       })()}
-      <main className="shell__content" inert={navigationSurfaceOpen} ref={contentElRef}>
+      <main className="shell__content" id="main-content" tabIndex={-1} inert={navigationSurfaceOpen} ref={contentElRef}>
         {/* Content layer (design §2): app-iframe wrappers (id-sorted) and chat
             wrappers (chatId-sorted) as ONE flat sibling set, never reparented.
             A wrapper is positioned (--paned) when its tab is a visible pane's

@@ -123,12 +123,28 @@ test('the undo chord is flag-gated and defers to focused inputs', () => {
 test('the first-run walkthrough stays short and action-first', () => {
   assert.doesNotMatch(walkthrough, /const STEPS/)
   assert.match(walkthrough, /Your Möbius is ready/)
-  assert.match(walkthrough, /Connect an agent/)
-  assert.match(walkthrough, /Open the App Store/)
-  assert.match(walkthrough, /Keep Möbius close/)
+  assert.match(walkthrough, /Connect agent/)
+  assert.match(walkthrough, /Explore apps/)
+  assert.match(walkthrough, /Install Möbius/)
+  assert.match(walkthrough, /How to install/)
   assert.match(walkthrough, /requestInstall/)
-  assert.match(walkthrough, /I’ll explore/)
+  assert.doesNotMatch(walkthrough, /wt__kicker|wt__mark|Open Settings|Open the App Store|I’ll explore/)
   assert.match(walkthrough, /mobius:walkthrough-completed/)
+})
+
+test('the authenticated shell offers a keyboard skip link', () => {
+  assert.match(shell, /href="#main-content"/)
+  assert.match(shell, /event\.preventDefault\(\)[\s\S]*?contentElRef\.current\?\.focus\(\{ preventScroll: true \}\)/)
+  assert.match(shell, /<main className="shell__content" id="main-content" tabIndex=\{-1\}/)
+})
+
+test('drawer lists distinguish loading, error, and confirmed empty data', () => {
+  assert.match(shell, /appsStatus=\{appsStatus\}/)
+  assert.match(shell, /chatsStatus=\{chatsStatus\}/)
+  assert.match(drawer, /chatsStatus === 'loading'/)
+  assert.match(drawer, /chatsStatus === 'error'/)
+  assert.match(drawer, /chatsStatus === 'success' && allChats\.length > 0/)
+  assert.doesNotMatch(drawer, /No conversations yet/)
 })
 
 test('a crashed app pane is isolated by a per-pane ErrorBoundary', () => {
@@ -722,7 +738,7 @@ test('navigation surfaces keep the brand close path while the workspace is inert
   assert.match(shell, /const navigationSurfaceOpen = modalDrawerOpen/)
   assert.doesNotMatch(shell, /const navigationSurfaceOpen = .*apps/,
     'the canonical Apps tab is workspace content, not a modal navigation surface')
-  assert.match(shell, /<main className="shell__content" inert=\{navigationSurfaceOpen\}/)
+  assert.match(shell, /<main className="shell__content"[^>]*inert=\{navigationSurfaceOpen\}/)
   assert.match(shellBrand, /aria-expanded=\{navigationOpen\}/)
   assert.match(shell, /drawerOpen \? closeDrawer\(\) : openDrawer\(\)/)
 })
