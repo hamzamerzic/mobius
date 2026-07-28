@@ -12,6 +12,7 @@ import {
 import { preserveTogglePosition } from './preserveTogglePosition.js'
 import { ActivityTypeIcon } from './ActivityLineHeader.jsx'
 import { useDisclosureState } from './disclosureState.js'
+import MemoryRecallCard from './MemoryRecallCard.jsx'
 import ToolImageResult from './ToolImageResult.jsx'
 import {
   durableImageReference,
@@ -78,7 +79,7 @@ function ToolResult({ r }) {
   )
 }
 
-export default function ToolBlock({ t, chatId, compact = false, disclosureKey }) {
+function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
   // Collapsed until tapped — nothing produces a pre-opened tool block anymore
   // (the last producer, the legacy compaction path, renders as CompactionCard;
   // a legacy persisted `defaultOpen` field is ignored and renders collapsed
@@ -477,5 +478,32 @@ export default function ToolBlock({ t, chatId, compact = false, disclosureKey })
         </div>
       )}
     </div>
+  )
+}
+
+export default function ToolBlock({
+  t,
+  chatId,
+  compact = false,
+  disclosureKey,
+  onInternalNav,
+}) {
+  if (effectiveToolName(t) === 'MemoryRecall') {
+    return (
+      <MemoryRecallCard
+        t={t}
+        chatId={chatId}
+        disclosureKey={disclosureKey}
+        onInternalNav={onInternalNav}
+      />
+    )
+  }
+  return (
+    <GenericToolBlock
+      t={t}
+      chatId={chatId}
+      compact={compact}
+      disclosureKey={disclosureKey}
+    />
   )
 }

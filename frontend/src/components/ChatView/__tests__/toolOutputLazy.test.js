@@ -4,7 +4,8 @@ import assert from 'node:assert/strict'
 
 test('expansion keeps ordinary output bounded and image fallback cancellable', () => {
   const src = readFileSync(new URL('../ToolBlock.jsx', import.meta.url), 'utf8')
-  const start = src.indexOf('useEffect(() => {', src.indexOf('export default function ToolBlock'))
+  const genericStart = src.indexOf('function GenericToolBlock')
+  const start = src.indexOf('useEffect(() => {', genericStart)
   const end = src.indexOf('// Show the larger bounded preview', start)
   const effect = src.slice(start, end)
 
