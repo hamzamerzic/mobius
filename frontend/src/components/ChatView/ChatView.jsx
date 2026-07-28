@@ -821,6 +821,11 @@ export default function ChatView({
   //
   // See useScrollMode.js + ARCHITECTURE.md "Chat scroll + steer
   // contract" for full design.
+  // Promotion may publish the durable assistant row through the query cache
+  // before React paints clearStreamItems. Remember the exact currently-painted
+  // array at that boundary so selection can retire only that surface, never a
+  // later continuation that merely happens to lag latestItemsRef by one render.
+  const retiredAssistantItemsRef = useRef(null)
   const {
     gestureWindowUntilRef,
     revealed,
@@ -1294,6 +1299,11 @@ export default function ChatView({
       forgetSendIntent({ cidList: steeredMessages.map(cidOf) })
     },
   })
+  useEffect(() => {
+    if (retiredAssistantItemsRef.current !== streamItems) {
+      retiredAssistantItemsRef.current = null
+    }
+  }, [streamItems])
 
   // System run activity is a structured sequence, not a running boolean: it
   // preserves coalesced start+finish events. Reconciliation is single-flight
@@ -1613,6 +1623,12 @@ export default function ChatView({
     // Promotion ends this active row. A queued/steered continuation must seed
     // its own anchor instead of inheriting a bridged DB key.
     activeAssistantDataKeyRef.current = null
+    // commitMessages publishes through the query cache synchronously. Mark the
+    // exact painted array before that publish so a render in the narrow
+    // publish→clear gap cannot show both the durable row and its retired live
+    // surface. This deliberately records streamItems (painted state), not
+    // latestItemsRef (which may already contain a newer buffered frame).
+    retiredAssistantItemsRef.current = streamItems
     commitMessages(
       prev => promoteAssistantStream(prev, { items, bridgeTs }),
       undefined,
@@ -3454,6 +3470,7 @@ export default function ChatView({
     turnActive,
     messages,
     streamItems,
+    liveItemsRetired: retiredAssistantItemsRef.current === streamItems,
     findBridgeIndex: bridgeHook.findBridgeIndex,
   }), [
     bridgeMountInputs,
