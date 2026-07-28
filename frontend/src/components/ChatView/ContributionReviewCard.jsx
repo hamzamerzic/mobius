@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { X } from '@openai/apps-sdk-ui/components/Icon'
+import X from 'lucide-react/dist/esm/icons/x.mjs'
 import { api } from '../../api/client.js'
 import { appQueries } from '../../hooks/queries.js'
 import {
@@ -8,6 +8,7 @@ import {
   contributeApp as findContributeApp,
   contributeAppId,
   contributeLabel,
+  diffStatSummary,
   isHorizontalSwipe,
   passedDismissThreshold,
   payoffLine,
@@ -63,6 +64,7 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
 
   const storage = typeof localStorage !== 'undefined' ? localStorage : null
   const records = visibleRecords(data, storage)
+  const grouped = records.length > 1
   void dismissRevision
   if (!appId) return null
   if (!records.length && !sent) return null
@@ -103,7 +105,24 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
   }
 
   return (
-    <div className="contrib-card-stack">
+    <div
+      className={`contrib-card-stack${grouped ? ' contrib-card-stack--grouped' : ''}`}
+      role={grouped ? 'region' : undefined}
+      aria-label={grouped ? `${records.length} contributions ready` : undefined}
+    >
+      {grouped && (
+        <div className="contrib-card-stack__heading">
+          <div>
+            <div className="contrib-card-stack__title">
+              {records.length} contributions ready
+            </div>
+            <div className="contrib-card-stack__copy">
+              Review each one separately.
+            </div>
+          </div>
+          <span className="contrib-card-stack__count">{records.length}</span>
+        </div>
+      )}
       {sent && (
         <SentRow
           key={`sent:${sent.id}`}
@@ -252,10 +271,9 @@ function SentRow({ sent, onDismiss }) {
           type="button"
           className="contrib-card__dismiss"
           aria-label="Dismiss"
-          title="Dismiss"
           onClick={() => onDismiss?.()}
         >
-          <X width={13} height={13} aria-hidden="true" />
+          <X size={14} strokeWidth={2} aria-hidden="true" />
         </button>
       </div>
       <p className="contrib-card__summary">
@@ -285,6 +303,7 @@ function ReviewRow({
 }) {
   const [open, setOpen] = useState(false)
   const blocker = sendBlocker(record, { connected })
+  const diffStat = diffStatSummary(record.diff_stat)
   const submitting = record.status === 'submitting'
   const cardRef = useSwipeToDismiss(onDismiss)
 
@@ -302,13 +321,9 @@ function ReviewRow({
           type="button"
           className="contrib-card__dismiss"
           aria-label="Dismiss — keeps it in Contribute"
-          title="Dismiss — keeps it in Contribute"
           onClick={() => onDismiss?.()}
         >
-          {/* The shell's icon set rather than a close CHARACTER: Inter has no
-              glyph for U+2715, so the literal rendered as a tofu box on the
-              real device. */}
-          <X width={13} height={13} aria-hidden="true" />
+          <X size={14} strokeWidth={2} aria-hidden="true" />
         </button>
       </div>
       <p className="contrib-card__summary">
@@ -317,7 +332,7 @@ function ReviewRow({
 
       <p className="contrib-card__meta">
         {record.repo}
-        {record.diff_stat ? <span> · {record.diff_stat}</span> : null}
+        {diffStat ? <span> · {diffStat}</span> : null}
       </p>
 
       {/* The payoff, but never next to a problem: a blocked review needs the
