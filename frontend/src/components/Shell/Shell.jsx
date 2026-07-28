@@ -103,10 +103,12 @@ import * as modeMachine from './modeMachine.js'
 import { undoKeyPressed, isEditableTarget } from './workspaceOnboarding.js'
 import PaneChatView from './PaneChatView.jsx'
 import {
+  BUILDER_CHAT_WORLD,
   STANDARD_CHAT_WORLD,
   deriveChatSurfaceLayers,
   deriveChatSurfaceOwners,
 } from './chatSurfaceModel.js'
+import { deriveWorkspaceVisualState } from './visualReadiness.js'
 import {
   shouldFocusComposerAfterPanePointer,
   supportsDesktopPaneComposerFocus,
@@ -732,7 +734,7 @@ export default function Shell() {
   // a post-commit effect would blank a pane whose newly-activated app was never
   // in the LRU (design §2/§4, finding B). Bounded to keep phone memory
   // predictable (each Three.js / WebGL app can hold tens of MB).
-  const APP_CACHE_MAX = 4
+  const APP_CACHE_MAX = 6
   const warmLruRef = useRef(
     coldRestoredCanvasAppId != null ? [String(coldRestoredCanvasAppId)] : []
   )
@@ -1126,8 +1128,8 @@ export default function Shell() {
   }, [openTabs.length])
   // Dual-write on every workspace commit: the versioned blob is authoritative on
   // boot, and the legacy flat key is mirrored for one release so a rolled-back
-  // client still finds its tabs. readOpenTabs keeps the LAST MAX_TABS, so the
-  // rollback ordering puts the most relevant tabs (focused pane, active last).
+  // client still finds its tabs. The rollback ordering keeps the focused pane
+  // together and its active tab last for older clients.
   useEffect(() => {
     try {
       sessionStorage.setItem(paneModel.STORAGE_KEY, paneModel.serializeWorkspace(workspace))
@@ -1446,13 +1448,24 @@ export default function Shell() {
   const chatPaneLayers = useMemo(() => {
     return deriveChatSurfaceLayers(visibleChatPanes, presentedChatByPane)
   }, [presentedChatByPane, visibleChatPanes])
+  // Shell is the only layer that knows which retained workspace world is
+  // actually painted. Publish one stable readiness contract for visual tools;
+  // they must not learn private handoff classes or compositor attributes.
+  const workspaceVisualState = deriveWorkspaceVisualState({
+    modeTransition: modeState.transition,
+    chatPanesVisible,
+    chatPaneLayers,
+    paintedChatWorld: effectiveViewMode === 'single'
+      ? STANDARD_CHAT_WORLD
+      : BUILDER_CHAT_WORLD,
+  })
 
   // ── Synchronous pinned iframe-cache derivation (design §2/§4) ─────────────
   // renderedAppIds = sortById(visibleAppIds ∪ boundedWarmLRU). Visible ids come
   // from the projection REGARDLESS of LRU membership and are never evicted, so a
   // MOVE_TAB that makes a never-visited app visible materializes its wrapper in
   // the SAME commit — no post-commit effect, no blank pane (finding B). The set is
-  // bounded by APP_CACHE_MAX so it never renders five frames to preserve history
+  // bounded by APP_CACHE_MAX so hidden history never grows without limit
   // (§4.1.4). AppCanvas retires physical history in a layout-effect cleanup as a
   // live frame is swapped or unmounted. Keeping retirement out of this derivation
   // is load-bearing: React may replay or abandon a render, and render-time registry
@@ -1462,8 +1475,8 @@ export default function Shell() {
     for (const id of visibleAppIds) result.add(String(id))
     // TWO-WORLDS mount identity (design risk 1): PIN the single-screen slot app
     // even while builder shows, so a world switch never LRU-evicts its iframe or
-    // retires its history. Added BEFORE the warm cap, so with four visible builder
-    // apps the earned maximum becomes five pinned frames (visible + 1); the warm
+    // retires its history. Added BEFORE the warm cap, so visible builder apps may
+    // earn one extra pinned frame for the slot app; the warm
     // LRU then fills only the remaining capacity.
     const slot = workspace.singleScreen
     if (slot && slot.kind === 'app') result.add(String(slot.id))
@@ -3572,6 +3585,7 @@ export default function Shell() {
       // beat class, so this is the only external signal it is armed). idle otherwise.
       data-mode-phase={modeState.transition ? modeState.transition.phase : 'idle'}
       data-mode-epoch={modeState.transition ? modeState.transition.id : undefined}
+      data-workspace-visual-state={workspaceVisualState}
       // The ONE transient beat class comes from the descriptor (INV 1/4): exactly
       // one of entering/exiting is ever present, and the keyed animationend on
       // this root completes the beat (the controller's listener). No separate

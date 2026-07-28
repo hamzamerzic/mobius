@@ -25,14 +25,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import io
 import json
 import logging
 import os
 import re
 import shutil
 import subprocess
-import warnings as _warnings_mod
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,11 +39,20 @@ from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 from fastapi import HTTPException
-from PIL import Image as _PILImage
 from sqlalchemy import case
 from sqlalchemy.orm import Session
 
-from app import activity, app_git, fs_locks, legacy_platform_apps, models, source_dirs
+from app import (
+  activity,
+  app_git,
+  data_git,
+  fs_locks,
+  icon_assets,
+  icon_ownership,
+  legacy_platform_apps,
+  models,
+  source_dirs,
+)
 from app.app_capabilities import contract_and_digest
 from app.app_source_check import check_app_source
 from app.compiler import (
@@ -84,16 +91,6 @@ from app.routes.apps import (
   _derive_source_dir, _reject_if_source_dir_taken, _slugify_for_source_dir,
   allocate_unique_slug,
 )
-
-# Decompression-bomb defense. PIL's default MAX_IMAGE_PIXELS (~89M)
-# is generous enough that a malicious tiny PNG with a giant declared
-# dimension can still allocate gigabytes during `load()`. 32M pixels
-# (~5657×5657) is enough headroom for any reasonable icon while
-# bounding worst-case allocation. The hard ceiling below (4096×4096)
-# is a second gate on raw width/height — checked BEFORE `load()` so
-# we reject the bomb cheaply via metadata.
-_PILImage.MAX_IMAGE_PIXELS = 32_000_000
-_ICON_MAX_DIM = 4096
 
 log = logging.getLogger("mobius.install")
 
@@ -1068,67 +1065,18 @@ def clear_pending_conflict_update(source_dir: str | Path) -> None:
   )
 
 
-def _process_icon(raw: bytes) -> bytes:
-  """PIL pipeline matches routes/apps.py:update_icon — center-square,
-  resize-to-fit, preserve alpha, re-encode as PNG.
-
-  Decompression-bomb defense lives here: we inspect `img.size` BEFORE
-  calling `img.load()` (PIL reads only the IHDR/header to populate
-  `.size`, so the giant allocation is still avoidable at this point).
-  Anything above _ICON_MAX_DIM × _ICON_MAX_DIM is rejected as 415
-  alongside the PIL-bomb signals.
-  """
-  from PIL import Image
-  try:
-    img = Image.open(io.BytesIO(raw))
-    # PIL emits DecompressionBombWarning when an image's pixel count
-    # exceeds MAX_IMAGE_PIXELS. Locally promote it to an error so the
-    # bomb path goes through our 415 instead of a `warnings.warn` that
-    # silently lets `load()` proceed.
-    with _warnings_mod.catch_warnings():
-      _warnings_mod.simplefilter("error", Image.DecompressionBombWarning)
-      w, h = img.size
-      if w > _ICON_MAX_DIM or h > _ICON_MAX_DIM:
-        raise HTTPException(
-          415,
-          f"Icon dimensions {w}x{h} exceed {_ICON_MAX_DIM}x{_ICON_MAX_DIM} cap.",
-        )
-      img.load()
-  except HTTPException:
-    raise
-  except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
-    raise HTTPException(415, f"Icon rejected as decompression bomb: {exc}")
-  except Exception:
-    raise HTTPException(415, "Icon is not a valid image.")
-  if img.mode not in ("RGB", "RGBA"):
-    # Palette-mode PNGs carry transparency in a tRNS chunk, not in the
-    # mode string — `"A" in img.mode` reads "P" as opaque, and a convert
-    # to RGB flattens every transparent pixel to black. That is exactly
-    # how the catalog's quantized (palette-mode) icons got a baked black
-    # background at install time. Convert to RGBA whenever the image has
-    # any transparency signal; RGB only when provably opaque.
-    has_alpha = (
-      "A" in img.mode
-      or "transparency" in img.info
-      or img.mode == "P"
-    )
-    img = img.convert("RGBA" if has_alpha else "RGB")
-  w, h = img.size
-  if w != h:
-    side = min(w, h)
-    left = (w - side) // 2
-    top = (h - side) // 2
-    img = img.crop((left, top, left + side, top + side))
-  if img.size[0] > 1024:
-    img = img.resize((1024, 1024), Image.LANCZOS)
-  out = io.BytesIO()
-  img.save(out, format="PNG", optimize=True)
-  return out.getvalue()
-
-
 def _register_cron(slug: str, schedule_expr: str, job_path: Path,
-                   app_id: int | None = None) -> None:
+                   app_id: int | None = None,
+                   timezone: str | None = None,
+                   zone_cron: str | None = None) -> None:
   """Runs init-cron-scaffold.sh to install the crontab entry.
+
+  ``timezone``/``zone_cron`` (given together) declare the schedule's durable
+  zone-aware identity. The scaffold writes that identity into the complete
+  durable declaration atomically *before* installing the live entry. This
+  ordering means a persistence failure cannot change live behavior while
+  returning failure; a later live-write failure leaves a durable declaration
+  that boot reconciliation can safely retry.
 
   The scaffold writes both the durable ``init-cron.sh`` declaration and the
   live crontab entry. On restart, lifespan parses that declaration and rewrites
@@ -1158,6 +1106,23 @@ def _register_cron(slug: str, schedule_expr: str, job_path: Path,
       500,
       "Cron mutation is disabled in the test runtime.",
     )
+  if (timezone is None) != (zone_cron is None):
+    raise HTTPException(
+      500, "Cron registration bug: timezone and zone_cron must be paired.",
+    )
+  if timezone is not None:
+    from app import cron_tz
+
+    if app_id is None:
+      raise HTTPException(
+        500, "A timezone-owned schedule requires an app id.",
+      )
+    if not cron_tz.valid_timezone(timezone):
+      raise HTTPException(500, f"Unknown IANA timezone: {timezone!r}")
+    if cron_tz.parse_daily_cron(zone_cron) is None:
+      raise HTTPException(
+        500, f"Zone-owned schedule must be a plain daily cron: {zone_cron!r}",
+      )
   scaffold = _cron_scaffold()
   if not scaffold.exists():
     # In tests we mock this away; in containers it's always present.
@@ -1165,6 +1130,8 @@ def _register_cron(slug: str, schedule_expr: str, job_path: Path,
   cmd = [str(scaffold), slug, schedule_expr, job_path.name]
   if app_id is not None:
     cmd.append(str(app_id))
+  if timezone is not None:
+    cmd.extend([timezone, zone_cron])
   # Cron has a deliberately minimal environment. Materialize the configured
   # backend URL and the active supervisor path into its generated entry so
   # scheduled jobs use the same live runner and server as Run now.
@@ -1234,7 +1201,11 @@ def _crontab_command_path(line: str) -> str:
     return ""
   for i, token in enumerate(toks):
     if token.endswith("/app-job-runner.py") and len(toks) > i + 2:
-      return toks[i + 2]
+      # The supervised runner's job path is always its final argument. A
+      # wall-clock schedule inserts its timezone and source expression before
+      # the app id; using the final argument keeps uninstall parsing aligned
+      # with both ordinary and gated invocations.
+      return toks[-1]
   return toks[0]
 
 
@@ -1339,69 +1310,6 @@ def _storage_path(app_id: int, sub: str) -> Path:
   except ManifestContractError as exc:
     raise HTTPException(400, str(exc)) from exc
   return data_dir / "apps" / str(app_id) / sub
-
-
-# Env vars that would redirect the skill-snapshot git commands away from the
-# /data repo (git exports them into hook environments, where they OVERRIDE
-# `-C`). app_git._git_env is deliberately NOT reused for the snapshot: its
-# GIT_CEILING_DIRECTORIES is designed to STOP repo discovery at /data, which
-# is exactly the repo the snapshot targets.
-_SNAPSHOT_GIT_ENV_DROP = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
-
-
-def _snapshot_shared_skill(
-  data_dir: Path, rel: str, slug: str, version: str,
-) -> tuple[bool, str]:
-  """Commits shared/skills/<rel>'s current bytes into the /data repo.
-
-  Returns (ok, detail). ok=True means the current content is durable in git
-  history — either a fresh pre-install snapshot commit, or the file was
-  already committed clean (the nightly /data safety-net commit got there
-  first, which IS the snapshot). ok=False means durability could not be
-  guaranteed (index.lock, dubious ownership, unborn HEAD, ...) and the
-  caller must NOT overwrite the file.
-
-  `--only` + the pathspec keeps the commit to this one file, so a racing
-  `git add -A` (the nightly pm-commit) can't be swept into it and unrelated
-  staged files stay staged.
-  """
-  env = {
-    k: v for k, v in os.environ.items() if k not in _SNAPSHOT_GIT_ENV_DROP
-  }
-  # Explicit identity: the /data repo normally carries user.name from
-  # entrypoint.sh, but a snapshot must not fail (and thereby block a skill
-  # update) just because that config is missing.
-  base = [
-    "git", "-C", str(data_dir),
-    "-c", "user.name=Mobius", "-c", "user.email=mobius@localhost",
-  ]
-
-  def _run(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-      [*base, *args], capture_output=True, text=True, timeout=30, env=env,
-    )
-
-  def _reason(proc: subprocess.CompletedProcess) -> str:
-    lines = (proc.stderr or proc.stdout or "").strip().splitlines()
-    return lines[0] if lines else f"git exited {proc.returncode}"
-
-  path = f"shared/skills/{rel}"
-  status = _run("status", "--porcelain", "--", path)
-  if status.returncode != 0:
-    return False, _reason(status)
-  if not status.stdout.strip():
-    return True, "already committed"
-  add = _run("add", "--", path)
-  if add.returncode != 0:
-    return False, _reason(add)
-  commit = _run(
-    "commit", "--only",
-    "-m", f"pre-install snapshot of {rel} (app {slug} v{version})",
-    "--", path,
-  )
-  if commit.returncode != 0:
-    return False, _reason(commit)
-  return True, "committed"
 
 
 async def _sync_app_skills(
@@ -1540,7 +1448,10 @@ async def _sync_app_skills(
           if (data_dir / ".git").is_dir():
             try:
               ok, detail = await asyncio.to_thread(
-                _snapshot_shared_skill, data_dir, rel, app.slug, version,
+                data_git.snapshot_path,
+                data_dir,
+                f"shared/skills/{rel}",
+                f"pre-install snapshot of {rel} (app {app.slug} v{version})",
               )
             except Exception as exc:
               ok, detail = False, repr(exc)
@@ -2018,7 +1929,10 @@ async def install_from_manifest(
         icon_raw = await _http_get(
           cli, raw_base + manifest["icon"], _ICON_MAX_BYTES,
         )
-        icon_processed = _process_icon(icon_raw)
+        icon_processed = icon_assets.normalize_icon(icon_raw)
+      except icon_assets.InvalidIcon as exc:
+        icon_warning = f"icon: {exc}"
+        log.info("install: icon skipped — %s", exc)
       except HTTPException as exc:
         # Icon is non-blocking — apps install fine with the auto
         # letter-icon. Surface as a warning, not a hard fail.
@@ -2427,6 +2341,9 @@ async def install_from_manifest(
   try:
     if existing:
       app = existing
+      transition = icon_ownership.split_legacy_icon_ownership(app)
+      if transition.warning:
+        warnings.append(f"icon ownership: {transition.warning}")
       # Reinstalling a tombstoned app REVIVES it: the manifest_url match finds
       # the soft-deleted row (the query is deleted_at-agnostic on purpose), and
       # clearing deleted_at reattaches the SAME id + its preserved storage tree
@@ -3193,8 +3110,11 @@ async def install_from_manifest(
         atomic_write(target, content)
         created_paths.append(target)
 
-    # Icon — re-apply on update so a version bump's new icon lands.
-    if icon_processed:
+    # A successfully resolved manifest declaration owns the package icon.
+    # Omission clears it; a warned fetch/decode failure preserves the last
+    # accepted package icon rather than turning a partial network failure into
+    # destructive state. An explicit owner override is stored separately.
+    if icon_warning is None:
       app.icon_png = icon_processed
 
     # COMMIT FIRST — once the DB row is durable, cron registration

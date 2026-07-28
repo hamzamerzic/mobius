@@ -102,7 +102,7 @@ import {
 import { filePasteNeedsDefaultPrevented, pastedFiles } from './pasteUpload.js'
 import { hasSendablePayload } from './composerSubmission.js'
 import {
-  composerUsesNativeSizing,
+  textareaUsesNativeSizing,
   syncComposerTallClass,
 } from './composerTextareaSizing.js'
 
@@ -586,7 +586,7 @@ export default function ChatInputBar({
     const textarea = inputRef?.current
     if (
       !textarea
-      || !composerUsesNativeSizing()
+      || !textareaUsesNativeSizing()
       || typeof ResizeObserver === 'undefined'
     ) return undefined
     const observer = new ResizeObserver(entries => {

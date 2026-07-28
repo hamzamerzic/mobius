@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
-import { DotsVertical, Moon, Sun } from '@openai/apps-sdk-ui/components/Icon'
+import { Moon, Sun } from '@openai/apps-sdk-ui/components/Icon'
+import GripVertical from 'lucide-react/dist/esm/icons/grip-vertical.mjs'
 import { api, clearQueryCache, clearToken } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
 import { platformVersionIdentity } from '../../lib/platformVersionIdentity.js'
@@ -210,7 +211,8 @@ function BackgroundProviderRow({
             }
           }}
         >
-          <DotsVertical width={18} height={18} aria-hidden="true" />
+          {/* The SDK has no drag/reorder glyph; DotsVertical is a menu action. */}
+          <GripVertical size={18} strokeWidth={2} aria-hidden="true" />
         </button>
       )}
       <div className="settings-bg-row__body">

@@ -11,10 +11,10 @@ export const PLACE_WITH_SOURCE = 'with-source'
 export const PLACE_WITH_FOCUS = 'with-focus'
 export const ACTIVATE_IN_BACKGROUND = 'background'
 export const ACTIVATE_FOREGROUND = 'foreground'
-// A live build preview is visible by definition, but visibility means different
-// things across devices: phones activate the app tab, while wider workspaces
-// activate the app inside a companion pane and keep keyboard focus in the chat.
-// This is an internal lifecycle intent, not an `open_item` wire value.
+// A live build preview is non-displacing: it may reveal the app in a new pane,
+// but it never replaces an already-visible tab. When no separate pane is
+// available it parks beside its source until the owner opens it. This is an
+// internal lifecycle intent, not an `open_item` wire value.
 export const ACTIVATE_LIVE_PREVIEW = 'live-preview'
 
 const PLACEMENTS = new Set([PLACE_BESIDE_SOURCE, PLACE_WITH_SOURCE, PLACE_WITH_FOCUS])
@@ -27,9 +27,9 @@ const REQUEST_ACTIVATIONS = new Set([
 
 // A runnable build preview expresses product intent without naming a tab strip,
 // pane, split direction, or breakpoint. The resolver interprets `beside-source`
-// as a visible companion pane when the device supports one, or an activated tab
-// on a phone. In either case the app is visible as soon as a coherent revision
-// lands, and subsequent app_updated events can live-swap further layers in place.
+// as a visible companion pane only when it can add one without hiding anything;
+// otherwise it parks the app beside its source. Subsequent app_updated events
+// still live-swap an app that is already visible.
 export function builtAppWorkspaceRequest(chatId, appId) {
   const normalizedAppId = Number(appId)
   if (
@@ -158,19 +158,6 @@ function isOpenItemRequest(request) {
   return true
 }
 
-// The eviction-protection set for placing into an existing pane: every visible
-// pane's on-screen tab (background work must never make an on-screen tab vanish —
-// ARCHITECTURE.md's protect-the-on-screen-tab rule), plus the source and item.
-function protectKeys(ws, extraTabs) {
-  const keys = new Set()
-  for (const paneId of paneModel.paneIdsInOrder(ws)) {
-    const active = ws.panes[paneId]?.activeTabKey
-    if (active) keys.add(active)
-  }
-  for (const tab of extraTabs || []) if (tab) keys.add(tabKey(tab))
-  return keys
-}
-
 // The on-screen content of a workspace in a given mode: the active tab key of
 // every leaf the projection actually shows (wide shows all leaves; compact/phone
 // show a limited pair). This is what the user sees — the level the background
@@ -218,15 +205,13 @@ function tryAutoSplit(ws, item, sourcePane, env, { focus, preserveVisible }) {
 }
 
 // Insert the item as a tab directly after its source in the source's pane. The
-// caller controls activation and focus separately: a live preview on a wide
-// screen activates the app while keeping keyboard focus in the building chat.
+// caller controls activation and focus separately.
 function insertBesideSource(ws, item, sourcePane, source, { activate, focus }) {
   return paneModel.openTab(ws, item, {
     paneId: sourcePane.id,
     afterKey: tabKey(source),
     activate,
     focus,
-    protect: protectKeys(ws, [source, item]),
   })
 }
 
@@ -271,8 +256,11 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
   const preview = activation === ACTIVATE_LIVE_PREVIEW
   const foreground = activation === ACTIVATE_FOREGROUND
   const mode = env.mode || 'wide'
-  const activateItem = foreground || preview
-  const focusItem = foreground || (preview && mode === 'phone')
+  // Foreground is the ONLY permission to replace an active tab. A preview can
+  // still become visible by creating a new pane, whose sole tab is naturally
+  // active, but an existing pane keeps whatever the owner is using.
+  const activateItem = foreground
+  const focusItem = foreground
 
   // Two-worlds (finding F4): in the SINGLE world the only visible surface is the
   // slot, so a FOREGROUND agent open must SET THE SLOT — mutating the hidden pane
@@ -287,31 +275,40 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
     return paneModel.setSingleScreen(ws, { kind: item.kind, id: String(item.id) })
   }
 
-  // A live preview owns the transition into Builder. Background placement used
-  // to park the app in the hidden builder tree while Standard remained on screen,
-  // which made a successful build look like nothing happened. Folding the mode
-  // flip into the same pure request keeps reconnect/live delivery idempotent and
-  // lets Shell mirror it into the transition descriptor in one React batch.
-  let working = preview && paneModel.WORKSPACE_SPLITS_ENABLED
+  const sourceKey = source ? tabKey(source) : null
+  const singleShowsSource = (
+    world === 'single'
+    && sourceKey != null
+    && ws.singleScreen != null
+    && tabKey(ws.singleScreen) === sourceKey
+  )
+
+  // A preview may enter Builder when the owner is already looking at its source:
+  // the source remains the foreground surface and the app can bloom beside it.
+  // If the owner has moved elsewhere in Standard, keep that surface untouched
+  // and park the preview in the hidden Builder tree for an explicit later open.
+  let working = (
+    preview
+    && paneModel.WORKSPACE_SPLITS_ENABLED
+    && (world === 'panes' || singleShowsSource)
+  )
     ? paneModel.setViewMode(ws, 'panes')
     : ws
   const itemKey = tabKey(item)
 
-  // A preview is a two-surface workspace on wider screens. Reveal and focus the
-  // building chat first (or add it to the parked builder tree when Standard was
-  // opened from a chat the tree did not yet know). Phone keeps an already-open
-  // app stable; for a new app it still adds the chat tab so switching back works.
+  // Keep the relational source in the Builder tree, but never surface it over
+  // another active tab. The one safe activation is Standard → Builder while
+  // Standard already shows that exact source, preserving what the owner sees.
   let sourcePane = source ? paneModel.paneOf(working, tabKey(source)) : null
-  if (preview && source && (mode !== 'phone' || !sourcePane)) {
+  if (preview && source) {
     if (!sourcePane) {
       working = paneModel.openTab(working, source, {
         paneId: working.focusedPaneId,
-        activate: true,
-        focus: true,
-        protect: protectKeys(working, [source, item]),
+        activate: singleShowsSource,
+        focus: singleShowsSource,
       })
       sourcePane = paneModel.paneOf(working, tabKey(source))
-    } else {
+    } else if (singleShowsSource) {
       working = paneModel.focusPane(
         paneModel.setActiveTab(working, sourcePane.id, tabKey(source)),
         sourcePane.id,
@@ -321,11 +318,10 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
   }
 
   // Already open anywhere → background is a no-op; foreground focuses it. A
-  // live preview activates it but, on wider screens, leaves focus in the chat.
+  // live preview only reveals an inactive app by moving it into a new pane; if
+  // that cannot preserve every visible tab, it remains parked.
   const existing = paneModel.paneOf(working, itemKey)
   if (existing) {
-    if (!activateItem) return working
-
     // If an earlier narrow-screen build parked chat + app in one pane, widen the
     // same relationship into two real panes now instead of hiding the chat behind
     // an activated app tab. Moving an existing tab is the correct primitive;
@@ -337,16 +333,18 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
           paneId: sourcePane.id,
           edge,
         })
-        if (moved !== working) {
+        if (
+          moved !== working
+          && preservesVisibleContent(working, moved, mode, env.contentRect)
+        ) {
           return paneModel.focusPane(moved, sourcePane.id)
         }
       }
     }
 
+    if (!activateItem) return working
     const activated = paneModel.setActiveTab(working, existing.id, itemKey)
-    return focusItem
-      ? paneModel.focusPane(activated, existing.id)
-      : activated
+    return paneModel.focusPane(activated, existing.id)
   }
 
   sourcePane = source ? paneModel.paneOf(working, tabKey(source)) : null
@@ -358,7 +356,6 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
       paneId: working.focusedPaneId,
       activate: activateItem,
       focus: focusItem,
-      protect: protectKeys(working, [item]),
     })
   }
 
@@ -372,8 +369,8 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
 
   // beside-source, the device-aware table.
   if (mode === 'phone') {
-    // Phone stack: a live preview activates the app tab; a generic background
-    // placement remains parked without changing the on-screen item.
+    // Phone stack: previews and generic background placements remain parked;
+    // only an explicit foreground request changes the on-screen item.
     return insertBesideSource(working, item, sourcePane, source, {
       activate: activateItem,
       focus: focusItem,
@@ -382,7 +379,7 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
 
   const splitPolicy = {
     focus: focusItem,
-    preserveVisible: !activateItem,
+    preserveVisible: !foreground,
   }
   const paneCount = paneModel.paneIdsInOrder(working).length
   if (paneCount <= 1) {
@@ -400,13 +397,12 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
   // background tab beside the source (the degradation ladder, design §6.2).
   const companion = companionPaneFor(working, source, env.liveApps)
   if (companion) {
-    // A background request preserves the companion's visible tab. A live preview
-    // activates the new revision there while leaving keyboard focus in the chat.
+    // Background work and live previews preserve the companion's visible tab.
+    // A foreground request is the only path that replaces it.
     return paneModel.openTab(working, item, {
       paneId: companion.id,
       activate: activateItem,
       focus: focusItem,
-      protect: protectKeys(working, [source, item]),
     })
   }
   return tryAutoSplit(working, item, sourcePane, env, splitPolicy)

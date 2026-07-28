@@ -2,10 +2,11 @@
 
 from datetime import UTC, datetime
 from typing import Literal
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from pydantic import (
-  BaseModel, ConfigDict, Field, field_validator, model_validator,
+  BaseModel, ConfigDict, Field, computed_field, field_validator,
+  model_validator,
 )
 
 from app.providers import PROVIDER_NAMES, _model_belongs_to_other_provider
@@ -159,9 +160,10 @@ class AppOut(BaseModel):
   # Optional standalone PWA colors persisted from installed app manifests.
   theme_color: str | None = None
   background_color: str | None = None
-  # True when the raw app-icon endpoint can return stored artwork. Lets shell
-  # chrome avoid using expected 404 responses as an icon-existence probe.
-  has_custom_icon: bool = False
+  # Internal projection of the canonical stored-asset state. It is consumed
+  # while validating ORM rows but deliberately excluded from the wire; callers
+  # receive the usable reference below rather than a second fact to interpret.
+  has_icon: bool = Field(default=False, exclude=True)
   # Optional PWA display mode (web-manifest `display`). Null → "standalone".
   display: str | None = None
   # Offline contract from the manifest `offline` block (P1-D). None when no
@@ -176,6 +178,15 @@ class AppOut(BaseModel):
   capability_contract: dict | None = None
   created_at: datetime
   updated_at: datetime
+
+  @computed_field
+  @property
+  def icon_url(self) -> str | None:
+    """Versioned public reference to the effective accepted icon asset."""
+    if not self.has_icon:
+      return None
+    version = quote(self.updated_at.isoformat(), safe="")
+    return f"/api/apps/{self.id}/icon?v={version}"
 
   model_config = {"from_attributes": True}
 
@@ -258,14 +269,28 @@ class AppInstallOut(AppOut):
 
 
 class AppScheduleUpdate(BaseModel):
-  """Body for updating one installed app's cron schedule."""
+  """Body for updating one installed app's cron schedule.
+
+  When ``timezone`` (an IANA identifier) is set, ``cron`` is a plain daily
+  expression owned in that zone; the platform stores that identity durably
+  and materializes an every-minute gate that resolves the real wall-clock
+  occurrence. Ambiguous times run once at their first occurrence; nonexistent
+  times run at the first valid minute after the gap. Without ``timezone``,
+  ``cron`` is interpreted in the server's local timezone as before.
+  """
 
   cron: str
   job: str | None = None
+  timezone: str | None = None
 
 
 class AppScheduleOut(BaseModel):
-  """Read-only metadata for an installed app's recurring cron job."""
+  """Read-only metadata for an installed app's recurring cron job.
+
+  ``cron`` is always the live crontab cadence. For an IANA-owned schedule it
+  is the every-minute gate; ``timezone``/``zone_cron`` carry the durable wall
+  clock identity. ``server_timezone`` is the server clock's own IANA identity.
+  """
 
   id: int
   name: str
@@ -273,6 +298,9 @@ class AppScheduleOut(BaseModel):
   cron: str
   job: str
   next_run: datetime | None = None
+  timezone: str | None = None
+  zone_cron: str | None = None
+  server_timezone: str = "UTC"
 
 
 class ConflictFile(BaseModel):
