@@ -63,7 +63,8 @@ async function bootSeededWorkspace(page, viewport, ws) {
 // `slotKey` seeds the single-screen slot so an exit can be steered to a promote
 // (slot === a visible pane's active key) or a world reveal (slot tree-absent).
 function twoPaneBuilder(slot) {
-  let ws = paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'aaa' }])
+  let ws = paneModel.setViewMode(
+    paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'aaa' }]), 'panes')
   ws = paneModel.splitPaneWithTab(ws, tabModel.makeTab('chat', 'bbb'), { paneId: ws.focusedPaneId, edge: 'right' })
   const leftId = paneModel.paneOf(ws, 'chat:aaa').id
   ws = paneModel.focusPane(ws, leftId)
@@ -74,7 +75,8 @@ function twoPaneBuilder(slot) {
 // An intentionally asymmetric three-pane tree. Its natural edge vectors differ
 // enough to expose same-duration entry as visibly different pane velocities.
 function unevenThreePaneBuilder(slot) {
-  let ws = paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'aaa' }])
+  let ws = paneModel.setViewMode(
+    paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'aaa' }]), 'panes')
   ws = paneModel.splitPaneWithTab(ws, tabModel.makeTab('chat', 'bbb'), {
     paneId: ws.focusedPaneId, edge: 'right',
   })
@@ -343,7 +345,14 @@ for (const [name, viewport] of [
   })
 
   test(`[${name}] the builder root class always agrees with the logo state (no reducer/render split)`, async ({ page }) => {
-    await bootShell(page, viewport)
+    // Give both worlds real content. An empty Builder workspace correctly has
+    // no tab strip, so using strip presence as its rendered-world witness would
+    // conflate "Builder is active" with "Builder has at least one tab".
+    await bootSeededWorkspace(
+      page,
+      viewport,
+      twoPaneBuilder({ kind: 'chat', id: 'aaa' }),
+    )
     for (let i = 0; i < 6; i += 1) {
       await toggleMode(page)
       await page.waitForTimeout(120)
@@ -755,7 +764,9 @@ test('round4-3: a superseding NULL-slot request drains after the older POST with
 // (logo/builder class) and the emptied tree flip in the SAME commit — never an
 // intermediate frame where builder is still true over an emptied single tree.
 test('v2 auto-return flips the descriptor and the tree atomically (no lagging frame)', async ({ page }) => {
-  await bootSeededWorkspace(page, WIDE, paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'aaa' }]))
+  const builder = paneModel.setViewMode(
+    paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'aaa' }]), 'panes')
+  await bootSeededWorkspace(page, WIDE, builder)
   await expect.poll(() => builderActive(page)).toBe(true)
   await expect(page.locator('.shell__tabstrip, .workspace__strip').first()).toBeVisible()
   // Sample builder-class vs strip-presence on every frame across the close.
@@ -851,8 +862,8 @@ async function beatHeldNow(page) {
 }
 
 test('round4-1: a completed HOLD keeps the logo compressed then springs back at completion', async ({ page }) => {
-  await bootShell(page, WIDE)
-  // Fresh boot = builder; a hold EXITS to single with an animated beat.
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
+  // Explicit builder seed; a hold EXITS to single with an animated beat.
   await expect.poll(() => builderActive(page)).toBe(true)
   const sampler = sampleLogoBeat(page)
   await page.waitForTimeout(30)
@@ -872,7 +883,7 @@ test('round4-1: a completed HOLD keeps the logo compressed then springs back at 
 })
 
 test('round4-1: a standalone Shift+Enter flip never emits a compression class', async ({ page }) => {
-  await bootShell(page, WIDE)
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
   await expect.poll(() => builderActive(page)).toBe(true)
   const sampler = sampleLogoBeat(page)
   await page.waitForTimeout(30)
@@ -897,7 +908,7 @@ test('round4-1: an EARLY logo release is a tap — mode unchanged, no compressio
 })
 
 test('round4-1: rapid hold → keyboard retoggle keeps the logo epoch equal to the mode epoch', async ({ page }) => {
-  await bootShell(page, WIDE)
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
   await expect.poll(() => builderActive(page)).toBe(true)
   const sampler = sampleLogoBeat(page)
   await page.waitForTimeout(30)
@@ -914,7 +925,7 @@ test('round4-1: rapid hold → keyboard retoggle keeps the logo epoch equal to t
 
 test('round4-1: reduced motion keeps direct hold feedback but releases without animation', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
-  await bootShell(page, WIDE)
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
   await expect.poll(() => builderActive(page)).toBe(true)
   await page.evaluate(() => {
     const root = document.querySelector('.shell')

@@ -32,6 +32,10 @@ const PHONE = { width: 412, height: 760 }
 test.use({ serviceWorkers: 'block' })
 attachCleanup()
 
+function builderSeed(tabs) {
+  return paneModel.setViewMode(paneModel.seedFromFlatTabs(tabs), 'panes')
+}
+
 // A short, clean terminal stream: pins the user send with no streamed content.
 const EMPTY_STREAM = [{ type: 'catch_up_done' }, { type: 'done' }]
 // A long streamed reply so a chat can reach + hold FOLLOW_BOTTOM.
@@ -159,23 +163,27 @@ async function seedWorkspace(page, ws) {
   }, ['mobius:workspace-splits', paneModel.STORAGE_KEY, blob, 'mobius-open-tabs', legacy])
 }
 
-/** Boot without a workspace blob and with an EMPTY legacy open-tabs mirror.
- *  The explicit deep link then creates the fallback's one leaf in builder mode
- *  with tabStripEngaged=false — the owner's real "one chat, strip never engaged"
- *  state where builder shows the drag surface and single-screen hides it. */
-async function seedFallbackSingleLeaf(page) {
-  await page.addInitScript(([flagKey, workspaceKey]) => {
+/** Seed one explicit Builder leaf while keeping the legacy strip mirror empty.
+ *  Fresh workspaces now intentionally start in Standard; this fixture owns the
+ *  older "one chat, strip never engaged" Builder state directly. */
+async function seedBuilderSingleLeaf(page, chatId) {
+  const ws = paneModel.setViewMode(
+    paneModel.seedFromFlatTabs([{ kind: 'chat', id: chatId }]),
+    'panes',
+  )
+  const blob = paneModel.serializeWorkspace(ws)
+  await page.addInitScript(([flagKey, workspaceKey, workspaceBlob]) => {
     try {
       localStorage.setItem(flagKey, '1')
-      sessionStorage.removeItem(workspaceKey)
+      sessionStorage.setItem(workspaceKey, workspaceBlob)
       sessionStorage.setItem('mobius-open-tabs', '[]') // empty legacy -> strip not engaged
     } catch { /* private mode */ }
-  }, ['mobius:workspace-splits', paneModel.STORAGE_KEY])
+  }, ['mobius:workspace-splits', paneModel.STORAGE_KEY, blob])
 }
 
 /** Two chat panes side by side: p0 = chatA (focused), p1 = chatB. */
 function twoChatPanes(chatA, chatB) {
-  let ws = paneModel.seedFromFlatTabs([
+  let ws = builderSeed([
     { kind: 'chat', id: chatA }, { kind: 'chat', id: chatB },
   ])
   ws = paneModel.moveTab(ws, `chat:${chatB}`, { root: true, edge: 'right' })
@@ -492,7 +500,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
     await mockApps(page, [])
     await exposeChatsInDrawer(page, [a.id, b.id, c.id, d.id, e.id])
 
-    let ws = paneModel.seedFromFlatTabs([
+    let ws = builderSeed([
       { kind: 'chat', id: a.id }, { kind: 'chat', id: b.id },
       { kind: 'chat', id: c.id }, { kind: 'chat', id: d.id },
       { kind: 'chat', id: e.id },
@@ -548,7 +556,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
 
     // p0 = [chatA, app] (app active), p1 = [chatB]. Moving the app to p1 keeps
     // both panes (chatA survives in p0), so it is a true cross-pane move.
-    let ws = paneModel.seedFromFlatTabs([
+    let ws = builderSeed([
       { kind: 'chat', id: b.id }, { kind: 'chat', id: a.id }, { kind: 'app', id: APP_ID },
     ])
     ws = paneModel.moveTab(ws, `chat:${b.id}`, { root: true, edge: 'right' })
@@ -602,7 +610,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
     // A depth-2 tree row(p0, col(p1, p2)) where p1 holds two tabs. p1 is at the
     // depth cap, so canSplit is false on every edge even though the pane has ≥2
     // tabs (which is what would otherwise offer a split).
-    let ws = paneModel.seedFromFlatTabs([
+    let ws = builderSeed([
       { kind: 'chat', id: a.id }, { kind: 'chat', id: c.id },
       { kind: 'chat', id: d.id }, { kind: 'chat', id: b.id },
     ])
@@ -690,7 +698,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
 // p0 = [chatA, chatC] (focused, C active), p1 = [chatB]. A two-tab source pane
 // so a drag OUT of it leaves the pane alive and the moves are unambiguous.
 function twoPanesThreeTabs(a, b, c) {
-  let ws = paneModel.seedFromFlatTabs([
+  let ws = builderSeed([
     { kind: 'chat', id: a }, { kind: 'chat', id: b }, { kind: 'chat', id: c },
   ])
   ws = paneModel.moveTab(ws, `chat:${b}`, { root: true, edge: 'right' })
@@ -698,7 +706,7 @@ function twoPanesThreeTabs(a, b, c) {
 }
 
 function twoStackedPanesThreeTabs(a, b, c) {
-  let ws = paneModel.seedFromFlatTabs([
+  let ws = builderSeed([
     { kind: 'chat', id: a }, { kind: 'chat', id: b }, { kind: 'chat', id: c },
   ])
   ws = paneModel.moveTab(ws, `chat:${b}`, { root: true, edge: 'bottom' })
@@ -706,7 +714,7 @@ function twoStackedPanesThreeTabs(a, b, c) {
 }
 
 function singlePaneThreeTabs(a, b, c) {
-  return paneModel.seedFromFlatTabs([
+  return builderSeed([
     { kind: 'chat', id: a }, { kind: 'chat', id: b }, { kind: 'chat', id: c },
   ])
 }
@@ -1335,7 +1343,7 @@ test.describe('Workspace view-mode toggle', () => {
   // single-mode + ONE leaf: dragging stays enabled; the drop's shape decides
   // split-vs-join, but ANY drop commits builder mode (point 15).
   function singleLeafTwoTabs(a, b) {
-    let ws = paneModel.seedFromFlatTabs([{ kind: 'chat', id: a }, { kind: 'chat', id: b }])
+    let ws = builderSeed([{ kind: 'chat', id: a }, { kind: 'chat', id: b }])
     return paneModel.setViewMode(paneModel.focusPane(ws, 'p0'), 'single')
   }
 
@@ -1404,9 +1412,9 @@ test.describe('Workspace view-mode toggle', () => {
     await boot(page, PHONE)
     const a = await createTaggedChat(page, 'vmPhoneStrip')
     await mockApps(page, [])
-    await seedFallbackSingleLeaf(page)
-    // The ?chat= deep-link RESET_FLATs the empty-legacy boot into builder ('panes')
-    // with a single leaf and tabStripEngaged=false — the exact case the owner hit.
+    await seedBuilderSingleLeaf(page, a.id)
+    // The explicit Builder blob owns the single leaf while the legacy strip
+    // mirror remains unengaged — the exact case this contract exercises.
     await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
     await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('panes')
@@ -1605,7 +1613,7 @@ test.describe('Logo activation + middle-click', () => {
     const b = await createTaggedChat(page, 'midB')
     await mockApps(page, [])
     // A single-pane workspace with two tabs renders the top strip.
-    await seedWorkspace(page, paneModel.seedFromFlatTabs([
+    await seedWorkspace(page, builderSeed([
       { kind: 'chat', id: a.id }, { kind: 'chat', id: b.id },
     ]))
     await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })

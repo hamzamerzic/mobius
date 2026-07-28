@@ -119,6 +119,7 @@ import useDesktopSidebar, {
   desktopContentWidthAfterSidebarToggle,
 } from './useDesktopSidebar.js'
 import ShellBrand from './ShellBrand.jsx'
+import { HistoryDismissProvider } from '../../hooks/useHistoryDismiss.jsx'
 
 const SHELL_RELOAD_RECHECK_MS = 6000
 // The builder mode beat durations live in workspaceView.js (MODE_MOTION); the
@@ -295,6 +296,7 @@ export default function Shell() {
     drawerOpenRef,
     appNavPush, appNavPop, appNavReset, appNavForwardResult,
     retireAppHistory, tombstoneRoute,
+    openHistoryDismiss, closeHistoryDismiss, unregisterHistoryDismiss,
   } = useNavigation({
     workspace,
     workspaceStateRef,
@@ -1016,7 +1018,7 @@ export default function Shell() {
   // One revision bump after that await releases is enough to drain the latest token;
   // this is event-driven and only renders in that rare collision (no polling loop).
   const [materializeNewChatRevision, setMaterializeNewChatRevision] = useState(0)
-  const [newChatLandingOffline, setNewChatLandingOffline] = useState(false)
+  const [newChatLandingFailure, setNewChatLandingFailure] = useState(null)
   // Live mirror of the mode descriptor so the async materialize can re-check for a
   // beat that started during its await (writing the slot mid-beat would cancel it).
   const modeTransitionRef = useRef(modeState.transition)
@@ -1087,7 +1089,7 @@ export default function Shell() {
     const token = newChatRequestSeqRef.current + 1
     newChatRequestSeqRef.current = token
     pendingNewChatRef.current = { token, candidateId: candidate ? candidate.id : null }
-    setNewChatLandingOffline(false)
+    setNewChatLandingFailure(null)
     setPendingNewChatToken(token)
   }, [workspaceStateRef, activeChatIdRef])
   requestEmptySingleNewChatRef.current = requestEmptySingleNewChat
@@ -3061,8 +3063,8 @@ export default function Shell() {
       const candidate = pending.candidateId != null
         ? (chatsRef.current.find(c => String(c.id) === String(pending.candidateId)) || null)
         : null
-      const { chatId } = pending.resolvedChatId != null
-        ? { chatId: pending.resolvedChatId }
+      const { chatId, reason } = pending.resolvedChatId != null
+        ? { chatId: pending.resolvedChatId, reason: null }
         : await resolveNewChatId({ candidate })
       // Stale-guard: if a newer empty-single request arrived during the await, hand
       // it this already-validated/created untouched row. That preserves latest-token
@@ -3093,11 +3095,11 @@ export default function Shell() {
       if (modeTransitionRef.current) return
       if (chatId == null) {
         // offline / failed — keep the landing + the pending request for a retry.
-        setNewChatLandingOffline(true)
+        setNewChatLandingFailure(reason === 'offline' ? 'offline' : 'error')
         return
       }
       pendingNewChatRef.current = null
-      setNewChatLandingOffline(false)
+      setNewChatLandingFailure(null)
       // Guarded, history-free slot write: applyModeDestination never pushes history;
       // preserveSettings so a background repair doesn't yank an open Settings takeover;
       // no composer focus — a mode toggle must not summon the mobile keyboard.
@@ -3477,6 +3479,11 @@ export default function Shell() {
       chatsQuery.isFetchedAfterMount, requestEmptySingleNewChat, workspaceStateRef])
 
   return (
+    <HistoryDismissProvider
+      openHistoryDismiss={openHistoryDismiss}
+      closeHistoryDismiss={closeHistoryDismiss}
+      unregisterHistoryDismiss={unregisterHistoryDismiss}
+    >
     <div
       ref={shellRootRef}
       // The logo-release timing vars for the live beat (round 4 item 1); absent when
@@ -3785,7 +3792,14 @@ export default function Shell() {
             removing the bounded cover never reparents another chat wrapper. */}
         {chatPaneLayers.map(({ paneId, chatId, role }) => {
           const tabKey = `chat:${chatId}`
-          const paneActiveKey = workspace.panes[paneId]?.activeTabKey || tabKey
+          const paneActiveKey = paneModel.activeKeyForOwner(workspace, paneId) || tabKey
+          // A retained chat owner may exist in the hidden workspace world. Its
+          // layers stay mounted for continuity, but must never borrow the
+          // handoff classes that make the painted world's held/staging pair
+          // visible. Key this by the owner's current active content rather than
+          // by an individual layer: the held layer intentionally has the old
+          // chat id while its owner is already painting the destination.
+          const ownerPaints = visibleChatKeys.has(paneActiveKey)
           const isActiveLayer = role === 'active'
           // Beat motion + underlay apply only to the ACTIVE layer (a held/staging
           // handoff cover is orthogonal to a mode beat). Keyed by the pane's active
@@ -3795,7 +3809,7 @@ export default function Shell() {
           const fullBleed = !underlay && !paned && paneActiveKey === fullBleedKey
           const motion = isActiveLayer ? wrapperMotion(paneActiveKey) : null
           const tabPanel = role !== 'held' && paned
-          const handoffClass = !settingsOverlay && role !== 'active'
+          const handoffClass = !settingsOverlay && ownerPaints && role !== 'active'
             ? ` shell__chat-view--${role}`
             : ''
           const posStyle = paned ? { top: paned.y, left: paned.x, width: paned.w, height: paned.h } : null
@@ -3807,6 +3821,12 @@ export default function Shell() {
               aria-labelledby={tabPanel ? paneTabDomId(paneId, tabKey) : undefined}
               data-tab-key={(multiPane || focusedPaneViewId != null) && role !== 'held' && !underlay
                 ? tabKey : undefined}
+              // A ChatView can stay mounted in the parked workspace world so its
+              // stream, draft, and scroll controller survive a world flip. Expose
+              // one explicit page-level selector for the settled surface that is
+              // actually interactive; browser contracts must not accidentally
+              // target a retained hidden world or an in-flight handoff layer.
+              data-chat-surface={ownerPaints && role === 'active' ? 'painted' : undefined}
               // Compositor-only beat motion (v2): see the app wrapper. The world-
               // reveal underlay chat paints full-bleed beneath the deal.
               data-mode-motion={motion ? motion.motion : undefined}
@@ -3818,8 +3838,11 @@ export default function Shell() {
               style={motion ? { ...(posStyle || {}), ...motion.vars } : (posStyle || undefined)}
               // Inert while covered/handing-off OR while participating in / underlying
               // the exit beat (INV 9 inert beat).
-              inert={settingsOverlay || role !== 'active' || (modeBeatActive && (!!motion || underlay))}
-              aria-hidden={settingsOverlay || role !== 'active' ? 'true' : undefined}
+              inert={settingsOverlay || !ownerPaints || role !== 'active'
+                || (modeBeatActive && (!!motion || underlay))}
+              aria-hidden={settingsOverlay || !ownerPaints || role !== 'active'
+                ? 'true'
+                : undefined}
               onPointerDownCapture={paned && role === 'active' && !modeBeatActive
                 ? () => dispatchWorkspace({ type: 'FOCUS', paneId })
                 : undefined}
@@ -3974,7 +3997,7 @@ export default function Shell() {
             >
               <NewChatLanding
                 // Retry state only on the resting surface — never mid-reveal.
-                offline={newChatSurface && newChatLandingOffline}
+                failure={newChatSurface ? newChatLandingFailure : null}
                 onRetry={requestEmptySingleNewChat}
               />
             </div>
@@ -4124,5 +4147,6 @@ export default function Shell() {
         )
       })()}
     </div>
+    </HistoryDismissProvider>
   )
 }

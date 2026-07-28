@@ -30,6 +30,7 @@ import AgentContextInspector from './AgentContextInspector.jsx'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
 import ComposerPopover from './ComposerPopover.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
+import ProgressRail from './ProgressRail.jsx'
 import ActiveAssistantSurface from './ActiveAssistantSurface.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import ContributionReviewCard from './ContributionReviewCard.jsx'
@@ -78,6 +79,7 @@ import {
   stopConfirmedIdle,
   stopRequestSucceeded,
   serverSnapshotBehindLocal,
+  shouldFreezeStreamingReturn,
   startedMessagesFromResponse,
   stripInternalUserMessageFields,
   systemEventForChat,
@@ -105,6 +107,11 @@ import {
   latestBuildPhaseAnnouncement,
   railAtRunStart,
 } from './buildPhaseRail.js'
+import {
+  goalObjectiveFromText,
+  latestGoalObjective,
+  progressRailViewModel,
+} from './goalProgress.js'
 import './ChatView.css'
 
 
@@ -451,6 +458,19 @@ export default function ChatView({
   const [buildPhases, setBuildPhases] = useState(EMPTY_BUILD_PHASE_RAIL)
   const [buildPhaseStatus, setBuildPhaseStatus] = useState('')
   const lastAnnouncedPhaseRef = useRef(null)
+  // The active goal is run-scoped, just like build phases. It is set at every
+  // real run-start seam and left intact across mid-turn steers; a fresh mount
+  // can recover it from the visible run-start message once liveness is known.
+  const [activeGoalObjective, setActiveGoalObjective] = useState(
+    () => cached?.running ? (cached?.activeGoalObjective ?? '') : '',
+  )
+  const setActiveGoalState = useCallback((objective) => {
+    setActiveGoalObjective(objective)
+    queryClient.setQueryData(chatMessagesQueryKey(chatId), existing => {
+      if (existing?.activeGoalObjective === objective) return existing
+      return { ...(existing || {}), activeGoalObjective: objective }
+    })
+  }, [chatId, queryClient])
 
   useEffect(() => () => {
     if (timestampTimerRef.current) clearTimeout(timestampTimerRef.current)
@@ -530,7 +550,11 @@ export default function ChatView({
     restartResumeSavingRef.current = false
     setRestartResumeSaving(false)
     setRestartResumeError('')
-  }, [chatId])
+    setActiveGoalObjective(
+      queryClient.getQueryData(chatMessagesQueryKey(chatId))
+        ?.activeGoalObjective ?? '',
+    )
+  }, [chatId, queryClient])
 
   const handleAutoResumeChange = useCallback(async (next, source = 'card') => {
     if (autoResumeSavingRef.current) return
@@ -1250,6 +1274,7 @@ export default function ChatView({
       // position the live stream did (old-run phases, then reset) and the
       // rail always lands on the run being displayed.
       setBuildPhases(railAtRunStart())
+      setActiveGoalState(goalObjectiveFromText(message?.content))
       const consumedCids = message?._consumed_cids
       const serverRows = Array.isArray(message?._messages)
         ? message._messages.map(stripInternalUserMessageFields).filter(Boolean)
@@ -2005,6 +2030,11 @@ export default function ChatView({
   // synchronously so repeated keydowns cannot submit a duplicate before the
   // request settles.
   const submitSteerInFlightRef = useRef(false)
+  // Queue POSTs are optimistic: the tray row exists before the backend has
+  // confirmed it. The primary Steer control is visible immediately, and one
+  // early tap waits on these exact requests rather than becoming an inert
+  // click or briefly showing Stop.
+  const queuedSendRequestsRef = useRef(new Map())
 
   const doSend = useCallback(async (text, opts = {}) => {
     if (isProviderSwitchBlocking(chatId)) return
@@ -2149,14 +2179,17 @@ export default function ChatView({
         // on each committed value, but the synchronous reset keeps the
         // send transition correct before React commits the empty value.
       }
+      let queueRequest = null
       try {
-        const result = await streamSend(
+        queueRequest = streamSend(
           text,
           attachments.length > 0 ? attachments : undefined,
           directSteer
             ? { directSteer: true, cid }
             : { queueOnly: true, cid },
         )
+        if (!directSteer) queuedSendRequestsRef.current.set(cid, queueRequest)
+        const result = await queueRequest
         clearFailedAttempt()
         releaseComposerFilesAfterAccepted()
         if (result?.status === 'duplicate') {
@@ -2230,6 +2263,7 @@ export default function ChatView({
             // the rail resets. A plain enqueue (started falsy) must NOT
             // touch the in-flight build's rail.
             setBuildPhases(railAtRunStart())
+            setActiveGoalState(goalObjectiveFromText(text))
             setSending(true)
             setServerRunningState(true)
             // The queued send was promoted straight into the active turn, so
@@ -2307,6 +2341,7 @@ export default function ChatView({
           // Same run-start semantics as the branch above: this send became
           // the first message of a NEW run, so the rail resets here too.
           setBuildPhases(railAtRunStart())
+          setActiveGoalState(goalObjectiveFromText(text))
           // Apply the send rule before appending — see shouldPinSend and
           // the fresh-send path. A message that raced into a started turn
           // is still a new send becoming the active turn, so it pins only
@@ -2371,6 +2406,11 @@ export default function ChatView({
         })
         restoreComposerAfterFailedSend()
         setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
+      } finally {
+        if (!directSteer
+            && queuedSendRequestsRef.current.get(cid) === queueRequest) {
+          queuedSendRequestsRef.current.delete(cid)
+        }
       }
       return
     }
@@ -2384,6 +2424,7 @@ export default function ChatView({
     // above) wiped the in-flight build's rail, which the next catch-up
     // replay then silently repopulated (see buildPhaseRail.js).
     setBuildPhases(railAtRunStart())
+    setActiveGoalState(goalObjectiveFromText(text))
 
     // Direct sends use the same submit-time decision as queued/steered sends.
     // A legitimate pin changes FOLLOW_BOTTOM to PIN_USER_MSG, so reply growth
@@ -2572,6 +2613,7 @@ export default function ChatView({
     restoreFiles,
     releaseFiles,
     online,
+    setActiveGoalState,
   ])
 
   useEffect(() => {
@@ -3220,15 +3262,21 @@ export default function ChatView({
     handlingSteerRef.current = true
     setSteerBusy(true)
     try {
+      // The UI changes Send → Steer in the same render that adds the
+      // optimistic queue row. If the owner taps during its persistence
+      // round-trip, wait for those exact writes; doSend's continuation
+      // confirms/removes each row before this continuation reads the queue.
+      const queueWrites = [...queuedSendRequestsRef.current.values()]
+      if (queueWrites.length > 0) await Promise.allSettled(queueWrites)
       const snapshot = pendingQueue.pendingMessagesRef.current
       // Only server-confirmed entries can be force-steered: the backend
       // reconstructs the durable rows from chat.pending_messages, so an
       // optimistic-only entry whose queue-POST hasn't acked yet is not visible
       // there and its cid selects nothing. We take the simpler-correct option:
       // only steer when EVERY queued entry is serverTs-confirmed (usePendingQueue
-      // sets that flag on the confirmQueued / hydrate paths). The button gate
-      // (canSteer below) keeps the fast-forward hidden until then, so this
-      // is belt-and-suspenders — if a stray optimistic entry slips in, bail
+      // sets that flag on the confirmQueued / hydrate paths). The awaited writes
+      // above should establish that state, so this is belt-and-suspenders — if a
+      // rejected or otherwise stray optimistic entry slips in, bail
       // and leave the queue intact (it drains at turn-end as usual).
       // Before bailing, run one forced runtime reconcile: a mounted mobile
       // client can have visible queued rows whose serverTs flag is stale
@@ -3285,16 +3333,33 @@ export default function ChatView({
   // NEW tail that grew while hidden, even if it had been following before it
   // left. Returning freezes hold; only a later manual bottom gesture can
   // re-enter FOLLOW_BOTTOM. No-op when the turn isn't active or the tab is hidden.
-  // (The fast-forward affordance is computed separately at `canSteer` below.)
+  // (The fast-forward identity/readiness gates are computed separately below.)
   const turnActive = sending || isStreaming || serverRunning
   useEffect(() => {
-    function freezeStreamingReturn() {
-      if (typeof document !== 'undefined'
-          && document.visibilityState
-          && document.visibilityState !== 'visible') {
-        return
-      }
-      if (!turnActive) return
+    if (!turnActive) {
+      if (activeGoalObjective) setActiveGoalState('')
+      return
+    }
+    // Ordinary live turns set this synchronously at their run-start seam. This
+    // branch is the cold remount/reconnect recovery path. The query cache
+    // retains a known goal across keyed chat switches, including after a
+    // steer; latestGoalObjective covers a truly cold attach before this client
+    // has seen that run.
+    if (!activeGoalObjective) {
+      const recovered = latestGoalObjective(messages)
+      if (recovered) setActiveGoalState(recovered)
+    }
+  }, [turnActive, messages, activeGoalObjective, setActiveGoalState])
+  useEffect(() => {
+    function freezeStreamingReturn(event) {
+      if (!shouldFreezeStreamingReturn({
+        eventType: event?.type,
+        pagePersisted: event?.persisted === true,
+        visibilityState: typeof document !== 'undefined'
+          ? document.visibilityState
+          : 'visible',
+        turnActive,
+      })) return
       freezeForegroundReturn()
     }
 
@@ -3520,15 +3585,17 @@ export default function ChatView({
   // steer button here is a dead end. Keep the existing deterministic Stop path
   // available instead: Stop cancels the question first, interrupts the turn,
   // and re-sends the queued rows as one fresh continuation.
-  const canSteer = !hasPendingQuestion
-    && connectionError !== 'disconnected' && !steerBusy
+  const showSteer = !hasPendingQuestion
+    && connectionError !== 'disconnected'
+    && turnActive
+    && pendingQueue.pendingMessages.length > 0
+  const canRequestSteer = showSteer && !steerBusy
+  const canSteer = canRequestSteer
     && canFastForwardQueue(pendingQueue.pendingMessages, turnActive)
   const canSubmitSteer = !hasPendingQuestion
     && connectionError !== 'disconnected'
     && !steerBusy
     && turnActive
-  const canRequestSteer = canSubmitSteer
-    && pendingQueue.pendingMessages.length > 0
 
   // ── Sticky "tap to resume" affordance ──────────────────────────────
   // A turn paused by a drain-gated restart, a stall, or a provider-limit park
@@ -3695,7 +3762,9 @@ export default function ChatView({
     return 'Turn paused — Resume available.'
   })()
   const ariaStatus = turnActive
-    ? 'Assistant is responding…'
+    ? (activeGoalObjective
+        ? `Following goal: ${activeGoalObjective}.`
+        : 'Assistant is responding…')
     : (resumeStatus
         ?? (messages.length > 0
             && messages[messages.length - 1]?.role === 'assistant'
@@ -3707,6 +3776,11 @@ export default function ChatView({
     .map(app => ({ app, vm: openAppCtaViewModel(app, turnActive) }))
     .filter(entry => entry.vm)
   const buildPhaseRail = buildPhaseRailViewModel(buildPhases)
+  const visibleGoalObjective = turnActive ? activeGoalObjective : ''
+  const progressRail = progressRailViewModel(
+    visibleGoalObjective,
+    buildPhaseRail,
+  )
   let lastVisibleMessageIndex = -1
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     if (!messages[i].hidden) {
@@ -4084,21 +4158,10 @@ export default function ChatView({
                 : 'Turn paused — tap to resume'}
             </button>
           )}
-          {buildPhaseRail.length > 0 && (
-            <div className="chat__build-rail" role="group" aria-label="Build progress">
-              {buildPhaseRail.map(phase => (
-                <span
-                  key={phase.ts}
-                  className={`chat__build-phase${
-                    phase.current ? ' chat__build-phase--current' : ''
-                  }`}
-                  aria-current={phase.current ? 'step' : undefined}
-                >
-                  <span className="chat__build-phase-label">{phase.label}</span>
-                </span>
-              ))}
-            </div>
-          )}
+          <ProgressRail
+            items={progressRail}
+            ariaLabel={visibleGoalObjective ? 'Goal progress' : 'Build progress'}
+          />
           </>
         )}
         {/* Contribution staged from THIS chat: approve it where the work
@@ -4143,6 +4206,8 @@ export default function ChatView({
           onStop={handleStop}
           onSteer={handleSteer}
           canSteer={canSteer}
+          showSteer={showSteer}
+          steerReady={!steerBusy}
           canRequestSteer={canRequestSteer}
           canSubmitSteer={canSubmitSteer}
           offline={!online}

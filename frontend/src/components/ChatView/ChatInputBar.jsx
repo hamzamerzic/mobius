@@ -80,6 +80,7 @@
 import { useRef, useState, useEffect, useLayoutEffect } from 'react'
 import { createPortal } from 'react-dom'
 import ImageLightbox from './markdown/ImageLightbox.jsx'
+import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import { ArrowUp, Mic, DoubleChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import { BASE } from '../../api/client.js'
 import { mediaTokenParam } from '../../api/mediaToken.js'
@@ -105,30 +106,31 @@ let _isTouchPrimary = _touchMql?.matches ?? false
 _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
 
 
-/** The primary action button — FastForward / Send / Stop / Mic —
+/** The primary action button — Steer / Send / Stop / Mic —
  *  auto-resolved from the bar's input/sending/listening/uploading state.
  *
- *  When there are queued messages ready to try (`canSteer`), the Stop square
- *  is swapped for a fast-forward button. The handler reconciles server state
- *  before acting: if a live turn exists, it injects the queued messages into
- *  that turn; if local running state was stale, this still gives the user one
- *  immediate affordance instead of waiting for focus/remount to reveal it.
- *  Stop is NOT lost: clearing the queue (the tray's X) flips canSteer back to
+ *  When queued work exists (`showSteer`), the Stop square is swapped for a
+ *  fast-forward button immediately — including the brief persistence
+ *  round-trip. Its handler waits for that write before acting, so the semantic
+ *  control does not flash Send → Stop → Steer while the server confirms it.
+ *  Stop is NOT lost: clearing the queue (the tray's X) flips showSteer back to
  *  false and the Stop square returns, and while the composer has text the Send
  *  button (queue-another) still wins over both.
  *
- *  Each state's button carries a distinct `key`, and that is load-bearing:
- *  state swaps replace the semantic control, while the shared `.chat__action`
- *  base keeps geometry and box model stable across Send / Stop / Steer / Mic. */
+ *  Send, Steer, and Stop are states of the same primary action. They
+ *  deliberately share the `primary` key so React preserves the 40px action
+ *  target and swaps only its icon, label, handler, and semantic colour—there
+ *  must be no empty/black replacement frame between any of them. Mic remains
+ *  distinct because it is the idle input affordance rather than a turn action. */
 function PrimaryAction({
-  sending, listening, hasInput, hasUploading, offline, canSteer,
+  sending, listening, hasInput, hasUploading, offline, showSteer, steerReady,
   submissionBlocked,
   onSubmit, onStop, onSteer, onToggleVoice,
 }) {
-  if (sending && !hasInput && canSteer) {
+  if (sending && !hasInput && showSteer) {
     return (
       <button
-        key="steer"
+        key="primary"
         className="chat__action chat__steer"
         type="button"
         // Keep focus stable through pointerdown, then let ChatView dismiss
@@ -138,6 +140,8 @@ function PrimaryAction({
         onTouchEnd={(e) => { e.preventDefault(); onSteer() }}
         onClick={onSteer}
         aria-label="Send queued message now"
+        aria-busy={!steerReady}
+        disabled={!steerReady}
       >
         <DoubleChevronRight width={20} height={20} />
       </button>
@@ -146,7 +150,7 @@ function PrimaryAction({
   if (sending && !hasInput) {
     return (
       <button
-        key="stop"
+        key="primary"
         className="chat__action chat__stop"
         type="button"
         // Match Send's touch handling: the composer keeps focus on
@@ -167,7 +171,7 @@ function PrimaryAction({
   if (hasInput && !listening) {
     return (
       <button
-        key="send"
+        key="primary"
         className="chat__action chat__send"
         type="button"
         // Keep the textarea focused until ChatView snapshots the scroll
@@ -247,6 +251,7 @@ function FileChips({ files, onRemove, chatId }) {
   })
   // Index into the attached-image gallery currently shown full-screen.
   const [lightboxIndex, setLightboxIndex] = useState(null)
+  const historyDismiss = useHistoryDismiss(() => setLightboxIndex(null))
   const hasRestoredImage = files?.some(file => (
     file.mime_type?.startsWith('image/') && !file.objectUrl
   ))
@@ -329,7 +334,10 @@ function FileChips({ files, onRemove, chatId }) {
                 // lightbox then moves focus into itself deliberately and
                 // restores this button/text-entry context when it closes.
                 onPointerDown={(e) => e.preventDefault()}
-                onClick={() => setLightboxIndex(galleryIndex)}
+                onClick={() => {
+                  historyDismiss.open()
+                  setLightboxIndex(galleryIndex)
+                }}
                 aria-label={`View ${chip.name} full screen`}
               >
                 <img className="chat__attach-card-thumb" src={previewSrc} alt="" />
@@ -373,7 +381,7 @@ function FileChips({ files, onRemove, chatId }) {
           items={gallery}
           index={openIndex}
           onNavigate={setLightboxIndex}
-          onClose={() => setLightboxIndex(null)}
+          onClose={historyDismiss.close}
         />,
         document.body,
       )}
@@ -405,10 +413,11 @@ function FileChips({ files, onRemove, chatId }) {
  *   onStop             — stop button handler
  *   onSteer            — fast-forward handler (steer queued msgs into the
  *                        live turn). Shown in place of Stop while a turn
- *                        is streaming AND `canSteer` is true.
- *   canSteer           — true when there are queued messages that can be
- *                        steered right now (all server-confirmed). Drives
- *                        the FastForward-vs-Stop choice in PrimaryAction.
+ *                        is streaming AND `showSteer` is true.
+ *   showSteer          — true as soon as queued work exists for a live turn;
+ *                        drives the Steer-vs-Stop identity without waiting for
+ *                        the queue persistence round-trip.
+ *   steerReady         — false only while a steer tap is already in flight.
  *   canRequestSteer    — true when the keyboard shortcut may ask the
  *                        existing steer handler to reconcile/steer queued
  *                        messages, even before the visual fast-forward gate
@@ -453,6 +462,8 @@ export default function ChatInputBar({
   onStop,
   onSteer,
   canSteer,
+  showSteer = canSteer,
+  steerReady = true,
   canRequestSteer = canSteer,
   canSubmitSteer = canRequestSteer,
   offline,
@@ -739,7 +750,8 @@ export default function ChatInputBar({
               hasInput={hasInput}
               hasUploading={hasUploading}
               offline={offline}
-              canSteer={canSteer}
+              showSteer={showSteer}
+              steerReady={steerReady}
               submissionBlocked={submissionBlocked}
               onSubmit={handleSubmit}
               onStop={onStop}
