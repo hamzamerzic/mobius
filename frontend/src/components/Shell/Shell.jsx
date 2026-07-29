@@ -834,6 +834,19 @@ export default function Shell() {
     requestComposer(chatId, { focus: true })
   }
 
+  // A restored single-screen chat has no click handler to request focus. Keep
+  // that one startup intent separate from later workspace projection changes:
+  // entering Standard mode must not turn a mode toggle into composer focus.
+  const startupChatComposerFocusPendingRef = useRef(
+    activeView === 'chat' && effectiveViewMode === 'single',
+  )
+  useEffect(() => {
+    if (!startupChatComposerFocusPendingRef.current) return
+    if (activeView !== 'chat' || activeChatId == null) return
+    startupChatComposerFocusPendingRef.current = false
+    focusDesktopChatPaneComposer(activeChatId)
+  }, [activeView, activeChatId])
+
   const handleComposerRequestHandled = useCallback((token) => {
     setComposerRequest(prev => (
       prev?.token === token ? null : prev
@@ -3333,6 +3346,7 @@ export default function Shell() {
   function selectChat(id) {
     clearChatAttention(id)
     navTo('chat', { chatId: id })
+    focusDesktopChatPaneComposer(id)
   }
 
   async function deleteChat(id) {
@@ -3797,6 +3811,7 @@ export default function Shell() {
                 onActivate={() => {
                   const { view, opts } = tabModel.tabNavTarget(tab)
                   navTo(view, opts)
+                  if (tab.kind === 'chat') focusDesktopChatPaneComposer(tab.id)
                 }}
                 onClose={() => closeTab(tab)}
                 onContextMenu={paneModel.WORKSPACE_SPLITS_ENABLED
