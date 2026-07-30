@@ -358,7 +358,12 @@ function MsgContentInner({
         {/* Web sources collected from the turn's tool blocks and shown once
             after the answer. Memory keeps its own richer lookup card inline. */}
         {msg.role === 'assistant' && !isStreaming && (
-          <MessageSources blocks={msg.blocks} />
+          <MessageSources
+            blocks={msg.blocks}
+            chatId={chatId}
+            sourceRef={msg.source_ref}
+            disclosureKey={`${messageKey}:references`}
+          />
         )}
         {copyableText && (
           <div className="chat__msg-actions">
