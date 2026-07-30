@@ -43,9 +43,9 @@ export function prefersReducedMotion() {
 
 export function useLogoModeGesture({
   onToggleMode, brandRef, enabled = true, drawerOpen = false, builderModeActive = false,
-  // The live mode descriptor (modeMachine transition) or null. The hold hands its
-  // compression off to this descriptor: while an animated enter/exit beat owns the
-  // logo, the mark holds .84 and springs back at the beat's completion instead of
+  // The live captured-scene descriptor or null. The hold hands its compression off
+  // to this descriptor: while an animated mode change owns the logo, the mark holds
+  // .84 and springs back at the scene's completion instead of
   // flashing its own ignite/snap (round 4 item 1). The gesture only READS it — to
   // know when the animated beat has settled so the hold's ownership latch can clear.
   transition = null,
@@ -55,8 +55,8 @@ export function useLogoModeGesture({
   // one-shot completion animation class for an INSTANT flip (reduced motion, an empty
   // tree). An ANIMATED beat suppresses it: the descriptor owns the spring instead.
   const [flourish, setFlourish] = useState('')
-  // True once a completed HOLD started an animated beat, so the logo's compression is
-  // handed to the descriptor's release rather than an immediate ignite/snap. It
+  // True once a completed HOLD started an animated scene, so the logo's compression
+  // is handed to the descriptor's release rather than an immediate ignite/snap. It
   // persists across epoch SUPERSESSION (a keyboard/swipe retoggle during a hold-owned
   // beat inherits the compression against the newest epoch) and is cleared only when
   // no animated enter/exit descriptor remains — never merely because the epoch

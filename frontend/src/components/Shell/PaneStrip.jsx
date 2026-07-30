@@ -192,22 +192,23 @@ export function PaneFocusButton({ paneId, focused, onToggle }) {
 // before navTo snapshots the source route (see WorkspaceChrome.activateTab).
 export function PaneStrip({
   pane, paneRect, focused, labelForTab,
-  onActivate, onClose, onFocus, onTabContextMenu, motion = null,
+  onActivate, onClose, onFocus, onTabContextMenu,
+  viewTransitionStyle = null,
   canFocusPane = false, paneFocused = false, onTogglePaneFocus,
   revealKey = 0,
 }) {
-  // The strip deals WITH its pane during a mode beat (exit-design v2): the same
-  // compositor-only data-mode-motion + --mode-duration/--mode-delay the pane wrapper
-  // carries, merged into the strip's absolute-position style. A promote (survivor)
-  // strip clears upward; a deal-out/deal-in strip moves with its pane.
-  const style = motion
-    ? { left: paneRect.x, top: paneRect.y, width: paneRect.w, height: STRIP_H, ...motion.vars }
-    : { left: paneRect.x, top: paneRect.y, width: paneRect.w, height: STRIP_H }
+  const style = {
+    left: paneRect.x,
+    top: paneRect.y,
+    width: paneRect.w,
+    height: STRIP_H,
+    ...(viewTransitionStyle || {}),
+  }
   return (
     <div
       className={`workspace__strip shell__tabstrip${focused ? ' workspace__strip--focused' : ''}`}
       data-pane-strip={pane.id}
-      data-mode-motion={motion ? motion.motion : undefined}
+      data-mode-pane-vt={viewTransitionStyle ? pane.id : undefined}
       role="tablist"
       aria-label="Pane tabs"
       style={style}
