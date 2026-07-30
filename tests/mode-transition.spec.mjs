@@ -89,138 +89,46 @@ function unevenThreePaneBuilder(slot) {
   return paneModel.setSingleScreen(ws, slot)
 }
 
-// Frame-sample the exit beat: on every animation frame while .shell--builder-exiting
-// is present, record each motion wrapper's LAYOUT box (offset*, transform-independent)
-// + its computed transform + a stable node marker. Start this BEFORE triggering the
-// toggle so the first exit frame is captured.
-async function sampleExitBeat(page) {
+// Capture the custom pseudo-element animations created for one native View
+// Transition. The live DOM commits immediately; the moving surfaces are browser
+// snapshots, so the durable contract lives on the document timeline rather than
+// transient wrapper classes or transforms.
+async function sampleSceneTransition(page) {
   return page.evaluate(async () => {
-    const root = document.querySelector('.shell')
-    const byKey = new Map() // data-tab-key → { boxes:Set, transforms:Set, node }
-    let started = false
-    let dualClass = false
-    let underlaySeen = false
-    await new Promise((resolve) => {
-      let frames = 0
-      const tick = () => {
-        const cls = root.className
-        if (cls.includes('shell--builder-entering') && cls.includes('shell--builder-exiting')) dualClass = true
-        const exiting = cls.includes('shell--builder-exiting')
-        if (exiting) {
-          started = true
-          if (document.querySelector('.shell__view--exit-underlay')) underlaySeen = true
-          for (const el of document.querySelectorAll('.shell__view[data-mode-motion]')) {
-            const key = el.getAttribute('data-tab-key') || el.dataset.modeMotion
-            let rec = byKey.get(key)
-            if (!rec) {
-              rec = {
-                boxes: new Set(), transforms: new Set(), node: el,
-                motion: el.dataset.modeMotion,
-                offsetX: parseFloat(el.style.getPropertyValue('--mode-offset-x')) || 0,
-                offsetY: parseFloat(el.style.getPropertyValue('--mode-offset-y')) || 0,
-              }
-              byKey.set(key, rec)
-            }
-            rec.boxes.add(`${el.offsetWidth}x${el.offsetHeight}@${el.offsetLeft},${el.offsetTop}`)
-            rec.transforms.add(getComputedStyle(el).transform)
-          }
-        }
-        frames += 1
-        if ((started && !exiting) || frames > 90) { resolve(); return }
-        requestAnimationFrame(tick)
-      }
-      requestAnimationFrame(tick)
-    })
-    const wrappers = [...byKey.entries()].map(([key, r]) => ({
-      key,
-      // Motion attributes and variables clear with the descriptor, so report the
-      // values latched on the first sampled frame rather than reading the idle DOM.
-      motion: r.motion,
-      offsetX: r.offsetX,
-      offsetY: r.offsetY,
-      distinctBoxes: r.boxes.size,
-      distinctTransforms: r.transforms.size,
-      transformsMatrix: [...r.transforms].every(t => t === 'none' || t.startsWith('matrix')),
-      survived: r.node.isConnected,
-    }))
-    return { started, dualClass, underlaySeen, wrappers }
-  })
-}
-
-// Capture the latched inline geometry on the first frame of either directional
-// beat. These are the pure projection outputs that tell each pane which edge owns it.
-async function captureBeatPlan(page, rootClass) {
-  return page.evaluate(async (wantedClass) => {
-    const root = document.querySelector('.shell')
-    for (let frames = 0; frames < 120; frames += 1) {
-      if (root.classList.contains(wantedClass)) {
-        const participants = [...document.querySelectorAll('.shell__view[data-mode-motion]')]
-          .map(el => ({
-            key: el.getAttribute('data-tab-key'),
-            motion: el.dataset.modeMotion,
-            x: parseFloat(el.style.getPropertyValue('--mode-offset-x')) || 0,
-            y: parseFloat(el.style.getPropertyValue('--mode-offset-y')) || 0,
-            duration: parseFloat(el.style.getPropertyValue('--mode-duration')) || 0,
-            delay: parseFloat(el.style.getPropertyValue('--mode-delay')) || 0,
-          }))
-        if (participants.length) {
-          return {
-            participants,
-            underlay: !!document.querySelector('.shell__view--exit-underlay'),
-          }
-        }
-      }
+    let direction = null
+    let records = []
+    for (let frames = 0; frames < 180; frames += 1) {
+      direction ||= document.documentElement.dataset.modeViewTransition || null
+      const animations = document.documentElement.getAnimations({ subtree: true })
+      records = animations.flatMap((animation) => {
+        const effect = animation.effect
+        const pseudo = effect?.pseudoElement || ''
+        if (!pseudo.startsWith('::view-transition-')) return []
+        const frames = effect.getKeyframes?.() || []
+        return [{
+          pseudo,
+          startTime: animation.startTime,
+          duration: effect.getTiming?.().duration,
+          frames: frames.map(frame => ({
+            opacity: frame.opacity ?? null,
+            transform: frame.transform ?? null,
+          })),
+        }]
+      })
+      if (direction && records.some(record => record.pseudo.includes('mode-pane-'))) break
       await new Promise(resolve => requestAnimationFrame(resolve))
     }
-    return { participants: [], underlay: false }
-  }, rootClass)
+    return { direction, records }
+  })
 }
 
-// Sample the actual entry paint order. Incoming panes must remain fully opaque so
-// they cover the retained single screen physically, while structure-only chrome
-// (dividers/chip) stays absent during the first half of the travel.
-async function sampleEnterPaint(page) {
-  return page.evaluate(async () => {
-    const root = document.querySelector('.shell')
-    let started = false
-    let minPaneOpacity = 1
-    let earlyChromeOpacity = 0
-    let paneFrames = 0
-    await new Promise((resolve) => {
-      let frames = 0
-      const tick = () => {
-        const entering = root.classList.contains('shell--builder-entering')
-        if (entering) {
-          started = true
-          const panes = [...document.querySelectorAll(
-            '.shell__view[data-mode-motion="deal-in"]',
-          )]
-          if (panes.length) {
-            paneFrames += 1
-            for (const pane of panes) {
-              minPaneOpacity = Math.min(minPaneOpacity, parseFloat(getComputedStyle(pane).opacity))
-            }
-            const progress = panes[0].getAnimations()[0]?.effect?.getComputedTiming?.().progress
-            if (progress != null && progress < 0.5) {
-              for (const chrome of document.querySelectorAll(
-                '.workspace__divider',
-              )) {
-                earlyChromeOpacity = Math.max(
-                  earlyChromeOpacity,
-                  parseFloat(getComputedStyle(chrome).opacity),
-                )
-              }
-            }
-          }
-        }
-        frames += 1
-        if ((started && !entering) || frames > 120) { resolve(); return }
-        requestAnimationFrame(tick)
-      }
-      requestAnimationFrame(tick)
-    })
-    return { started, minPaneOpacity, earlyChromeOpacity, paneFrames }
-  })
+function paneAnimations(scene, side) {
+  return scene.records.filter(record => record.pseudo.startsWith(`::view-transition-${side}(mode-pane-`))
+}
+
+function translation(frame) {
+  const match = /translate3d\((-?[\d.]+)px,\s*(-?[\d.]+)px/.exec(frame?.transform || '')
+  return match ? { x: Number(match[1]), y: Number(match[2]) } : { x: 0, y: 0 }
 }
 
 // Focus the brand toggle and flip the mode via the keyboard path.
@@ -236,13 +144,11 @@ async function builderActive(page) {
 // Start recording any frame where BOTH beat classes coexist (INV 1 violation).
 async function armOneBeatObserver(page) {
   await page.evaluate(() => {
-    const root = document.querySelector('.shell')
+    const root = document.documentElement
     window.__modeViolations = []
     window.__modeObs = new MutationObserver(() => {
-      const c = root.className
-      if (c.includes('shell--builder-entering') && c.includes('shell--builder-exiting')) {
-        window.__modeViolations.push(c)
-      }
+      const direction = root.dataset.modeViewTransition
+      if (direction && direction !== 'enter' && direction !== 'exit') window.__modeViolations.push(direction)
     })
     window.__modeObs.observe(root, { attributes: true, attributeFilter: ['class'] })
   })
@@ -269,8 +175,7 @@ async function openNavigation(page) {
 
 async function transientClassCount(page) {
   return page.evaluate(() => {
-    const c = document.querySelector('.shell').className
-    return ['shell--builder-entering', 'shell--builder-exiting'].filter(k => c.includes(k)).length
+    return document.documentElement.dataset.modeViewTransition ? 1 : 0
   })
 }
 
@@ -384,248 +289,93 @@ for (const [name, viewport] of [
 // stay constant while their transforms animate, and the same nodes must survive.
 const WIDE = { width: 1280, height: 900 }
 
-test('v3 scatter is compositor-only: layout boxes constant while transforms animate, nodes survive', async ({ page }) => {
-  // Standard and Builder now retain independent owners even for the same chat.
-  // The full-bleed Standard owner remains underneath while both Builder pane
-  // owners deal toward their durable edges.
+test('captured Builder panes scatter toward their durable edges on one timeline', async ({ page }) => {
   await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
-  await expect.poll(() => builderActive(page)).toBe(true)
-  await expect(page.locator('.workspace__strip')).toHaveCount(2)
-  const sampler = sampleExitBeat(page)
-  await page.waitForTimeout(30) // let the rAF sampler install before the toggle
+  const sampler = sampleSceneTransition(page)
+  await page.waitForTimeout(30)
   await toggleMode(page)
-  const r = await sampler
-  expect(r.started, 'an exit beat ran').toBe(true)
-  expect(r.dualClass, 'INV 1: never both beat classes at once').toBe(false)
-  expect(r.wrappers.length, 'the participant wrappers were sampled').toBeGreaterThanOrEqual(2)
-  // INV 5 (compositor-only): every participant's computed LAYOUT box (offset*,
-  // transform-independent) stayed constant across the whole beat.
-  for (const w of r.wrappers) expect(w.distinctBoxes, 'layout box constant during the beat').toBe(1)
-  // Only transform/opacity animated — every observed transform is a matrix (or none),
-  // and at least one participant's transform actually CHANGED across frames.
-  for (const w of r.wrappers) expect(w.transformsMatrix, 'only matrix transforms').toBe(true)
-  expect(r.wrappers.some(w => w.distinctTransforms > 1), 'a transform animated').toBe(true)
-  const departing = r.wrappers.filter(w => w.motion === 'deal-out')
-  expect(departing).toHaveLength(2)
-  expect(departing.some(w => w.offsetX < 0 && w.offsetY === 0),
-    'the left Builder owner scatters toward the left edge').toBe(true)
-  expect(departing.some(w => w.offsetX > 0 && w.offsetY === 0),
-    'the right Builder owner scatters toward the right edge').toBe(true)
-  // INV 4 (stable identity): the same DOM nodes survived completion.
-  for (const w of r.wrappers) expect(w.survived, 'same node survives completion').toBe(true)
-  // The beat settled clean.
+  const scene = await sampler
+  const panes = paneAnimations(scene, 'old')
+  expect(scene.direction).toBe('exit')
+  expect(panes).toHaveLength(2)
+  const destinations = panes.map(record => translation(record.frames.at(-1)))
+  expect(destinations.some(({ x, y }) => x < 0 && y === 0), 'left pane scatters left').toBe(true)
+  expect(destinations.some(({ x, y }) => x > 0 && y === 0), 'right pane scatters right').toBe(true)
+  expect(new Set(panes.map(record => record.startTime)).size, 'one shared start time').toBe(1)
+  expect(new Set(panes.map(record => record.duration)).size, 'one shared duration').toBe(1)
+  expect(panes.every(record => record.frames.every(frame => frame.opacity === 1 || frame.opacity === '1')),
+    'captured panes remain opaque').toBe(true)
   await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
   await expect.poll(() => builderActive(page)).toBe(false)
 })
 
-test('focused pane retains its durable edge during a mode exit', async ({ page }) => {
-  // Standard targets left chat aaa; focus the right builder pane bbb before exit.
-  // The focused presentation is centred/full-size, but its durable pane identity
-  // is still RIGHT, so it must leave right and fully clear the viewport—not fall
-  // back to the old arbitrary top exit.
+test('focused pane retains its durable right edge during a mode exit', async ({ page }) => {
   await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
-  await expect.poll(() => builderActive(page)).toBe(true)
-  await page.locator('[data-pane-strip="p1"]')
-    .getByRole('button', { name: 'Focus pane' }).click()
+  await page.locator('[data-pane-strip="p1"]').getByRole('button', { name: 'Focus pane' }).click()
   await expect(page.locator('[data-pane-strip]')).toHaveCount(1)
   const content = await page.locator('.shell__content').boundingBox()
-
-  const sampler = captureBeatPlan(page, 'shell--builder-exiting')
-  await page.waitForTimeout(30)
+  const sampler = sampleSceneTransition(page)
   await toggleMode(page)
-  const r = await sampler
-  expect(r.underlay, 'the left Standard chat is ready beneath the focused pane').toBe(true)
-  expect(r.participants).toHaveLength(1)
-  expect(r.participants[0].motion).toBe('deal-out')
-  expect(r.participants[0].x, 'a full-size focused pane clears beyond the right edge')
-    .toBeGreaterThan(content.width)
-  expect(r.participants[0].y).toBe(0)
-  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+  const scene = await sampler
+  const panes = paneAnimations(scene, 'old')
+  expect(panes).toHaveLength(1)
+  const destination = translation(panes[0].frames.at(-1))
+  expect(destination.x).toBeGreaterThan(content.width)
+  expect(destination.y).toBe(0)
 })
 
-test('v3 world-reveal scatter paints the mounted destination underlay beneath the panes', async ({ page }) => {
-  // slot === a tree-absent chat → WORLD REVEAL: every painted pane deals out over the
-  // mounted underlay (INV 3 honest destination), no false promotion.
+test('captured panes assemble from corresponding edges and land together', async ({ page }) => {
+  await bootSeededWorkspace(page, WIDE, unevenThreePaneBuilder({ kind: 'chat', id: 'ghost' }))
+  await toggleMode(page)
+  await expect.poll(() => modePhase(page)).toBe('idle')
+  const sampler = sampleSceneTransition(page)
+  await toggleMode(page)
+  const scene = await sampler
+  const panes = paneAnimations(scene, 'new')
+  expect(scene.direction).toBe('enter')
+  expect(panes).toHaveLength(3)
+  const origins = panes.map(record => translation(record.frames[0]))
+  expect(origins.some(({ x, y }) => x < 0 && y === 0), 'a pane enters from the left').toBe(true)
+  expect(origins.some(({ x }) => x > 0), 'a pane enters from the right').toBe(true)
+  expect(panes.every(record => translation(record.frames.at(-1)).x === 0
+    && translation(record.frames.at(-1)).y === 0), 'all panes land in place').toBe(true)
+  expect(new Set(panes.map(record => record.startTime)).size, 'every pane starts together').toBe(1)
+  expect(new Set(panes.map(record => record.duration)).size, 'every pane lands together').toBe(1)
+  await expect.poll(() => builderActive(page)).toBe(true)
+})
+
+test('world reveal keeps the ready Standard snapshot stationary beneath scattering panes', async ({ page }) => {
   await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'ghost' }))
-  await expect.poll(() => builderActive(page)).toBe(true)
-  const sampler = sampleExitBeat(page)
-  await page.waitForTimeout(30)
+  const sampler = sampleSceneTransition(page)
   await toggleMode(page)
-  const r = await sampler
-  expect(r.started).toBe(true)
-  expect(r.underlaySeen, 'the reveal underlay was painted beneath the deal').toBe(true)
-  // Every participant deals out (a transform animates) with a constant layout box.
-  for (const w of r.wrappers) {
-    expect(w.distinctBoxes).toBe(1)
-    expect(w.transformsMatrix).toBe(true)
-  }
-  expect(r.wrappers.some(w => w.distinctTransforms > 1)).toBe(true)
-  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
-})
-
-test('v3 panes assemble from their corresponding edges on one coordinated beat', async ({ page }) => {
-  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'ghost' }))
-  await toggleMode(page)
-  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+  const scene = await sampler
+  const panes = paneAnimations(scene, 'old')
+  const workspace = scene.records.find(record => record.pseudo === '::view-transition-new(mode-workspace)')
+  expect(panes).toHaveLength(2)
+  expect(workspace, 'the destination workspace has an explicit snapshot animation').toBeTruthy()
+  expect(workspace.frames.every(frame => frame.opacity === 1 || frame.opacity === '1')).toBe(true)
+  expect(workspace.frames.every(frame => !frame.transform || frame.transform === 'none'),
+    'the destination snapshot stays still').toBe(true)
+  expect(workspace.startTime, 'destination and panes share one clock').toBe(panes[0].startTime)
+  expect(workspace.duration).toBe(panes[0].duration)
   await expect.poll(() => builderActive(page)).toBe(false)
-
-  const sampler = captureBeatPlan(page, 'shell--builder-entering')
-  const paintSampler = sampleEnterPaint(page)
-  await page.waitForTimeout(30)
-  await toggleMode(page)
-  const r = await sampler
-  const paint = await paintSampler
-  expect(r.underlay, 'the current single screen remains beneath the assembly').toBe(true)
-  expect(r.participants).toHaveLength(2)
-  expect(r.participants.every(p => p.motion === 'deal-in')).toBe(true)
-  expect(r.participants.some(p => p.x < 0 && p.y === 0), 'left pane enters from left').toBe(true)
-  expect(r.participants.some(p => p.x > 0 && p.y === 0), 'right pane enters from right').toBe(true)
-  expect(paint.started).toBe(true)
-  expect(paint.paneFrames).toBeGreaterThan(2)
-  expect(paint.minPaneOpacity, 'pane content never fades in over visible structure').toBeGreaterThan(0.99)
-  expect(paint.earlyChromeOpacity, 'structure waits until pane content has arrived').toBeLessThan(0.05)
-  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
-  await expect.poll(() => builderActive(page)).toBe(true)
 })
 
-test('uneven panes start and land together on one coordinated progress clock', async ({ page }) => {
-  await bootSeededWorkspace(
-    page,
-    WIDE,
-    unevenThreePaneBuilder({ kind: 'chat', id: 'ghost' }),
-  )
-  await toggleMode(page)
-  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
-  await expect.poll(() => builderActive(page)).toBe(false)
-
-  const sampler = captureBeatPlan(page, 'shell--builder-entering')
-  await page.waitForTimeout(30)
-  await toggleMode(page)
-  const r = await sampler
-
-  expect(r.participants).toHaveLength(3)
-  expect(r.participants.every(p => p.delay === 0),
-    'every pane starts on the same frame').toBe(true)
-  const arrivals = r.participants.map(p => p.delay + p.duration)
-  expect(new Set(arrivals).size, 'all panes land on the same frame').toBe(1)
-  expect(new Set(r.participants.map(p => p.duration)).size,
-    'every pane shares one progress duration').toBe(1)
-  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
-  await expect.poll(() => builderActive(page)).toBe(true)
-})
-
-test('shared Standard chat stays still while both Builder owners assemble above it', async ({ page }) => {
-  // slot === the focused LEFT pane's chat. Standard keeps a separate full-bleed
-  // owner, so neither Builder owner borrows or transforms that DOM: both pane
-  // owners assemble above it and Standard retires only after the beat.
+test('shared Standard chat stays stationary while both captured Builder owners assemble above it', async ({ page }) => {
   await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
   await toggleMode(page)
-  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
-  await expect.poll(() => builderActive(page)).toBe(false)
-
-  const sampler = page.evaluate(async () => {
-    const root = document.querySelector('.shell')
-    let started = false
-    let minUnderlayOpacity = 1
-    const underlayTransforms = new Set()
-    const participants = []
-    await new Promise(resolve => {
-      let frames = 0
-      const tick = () => {
-        const entering = root.classList.contains('shell--builder-entering')
-        if (entering) {
-          started = true
-          const underlay = document.querySelector('.shell__view--exit-underlay')
-          if (underlay) {
-            const style = getComputedStyle(underlay)
-            minUnderlayOpacity = Math.min(minUnderlayOpacity, parseFloat(style.opacity))
-            underlayTransforms.add(style.transform)
-          }
-          if (participants.length === 0) {
-            for (const pane of document.querySelectorAll(
-              '.shell__view[data-mode-motion="deal-in"]',
-            )) {
-              participants.push({
-                x: parseFloat(pane.style.getPropertyValue('--mode-offset-x')) || 0,
-                y: parseFloat(pane.style.getPropertyValue('--mode-offset-y')) || 0,
-              })
-            }
-          }
-        }
-        frames += 1
-        if ((started && !entering) || frames > 120) { resolve(); return }
-        requestAnimationFrame(tick)
-      }
-      requestAnimationFrame(tick)
-    })
-    return {
-      started,
-      minUnderlayOpacity,
-      underlayTransforms: [...underlayTransforms],
-      participants,
-    }
-  })
-  await page.waitForTimeout(30)
+  await expect.poll(() => modePhase(page)).toBe('idle')
+  const sampler = sampleSceneTransition(page)
   await toggleMode(page)
-  const r = await sampler
-
-  expect(r.started).toBe(true)
-  expect(r.underlayTransforms, 'the Standard chat never scales or translates').toEqual(['none'])
-  expect(r.minUnderlayOpacity, 'the Standard chat never fades').toBeGreaterThanOrEqual(0.99)
-  expect(r.participants).toHaveLength(2)
-  expect(r.participants.some(p => p.x < 0 && p.y === 0),
-    'the left Builder owner enters from the left edge').toBe(true)
-  expect(r.participants.some(p => p.x > 0 && p.y === 0),
-    'the right Builder owner enters from the right edge').toBe(true)
-  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+  const scene = await sampler
+  const panes = paneAnimations(scene, 'new')
+  const workspace = scene.records.find(record => record.pseudo === '::view-transition-old(mode-workspace)')
+  expect(panes).toHaveLength(2)
+  expect(workspace).toBeTruthy()
+  expect(workspace.frames.every(frame => !frame.transform || frame.transform === 'none')).toBe(true)
+  expect(workspace.frames.every(frame => frame.opacity === 1 || frame.opacity === '1')).toBe(true)
+  expect(workspace.startTime).toBe(panes[0].startTime)
   await expect.poll(() => builderActive(page)).toBe(true)
-})
-
-// Frame-sample the destination across a world reveal. It is ready and stationary
-// beneath one short leftward departure; there is no delayed second phase.
-async function sampleStationaryUnderlay(page) {
-  return page.evaluate(async () => {
-    const root = document.querySelector('.shell')
-    let started = false
-    let cardsPresent = false
-    let minOpacity = 1
-    const transforms = new Set()
-    await new Promise((resolve) => {
-      let frames = 0
-      const tick = () => {
-        const exiting = root.className.includes('shell--builder-exiting')
-        const underlay = document.querySelector('.shell__view--exit-underlay')
-        if (exiting && underlay) {
-          started = true
-          const style = getComputedStyle(underlay)
-          minOpacity = Math.min(minOpacity, parseFloat(style.opacity))
-          transforms.add(style.transform)
-          const cards = [...document.querySelectorAll('.shell__view[data-mode-motion="deal-out"]')]
-          cardsPresent ||= cards.some(c => parseFloat(getComputedStyle(c).opacity) > 0.05)
-        }
-        frames += 1
-        if ((started && !exiting && frames > 4) || frames > 240) { resolve(); return }
-        requestAnimationFrame(tick)
-      }
-      requestAnimationFrame(tick)
-    })
-    return { started, cardsPresent, minOpacity, transforms: [...transforms] }
-  })
-}
-
-test('world reveal is one short scatter over a stationary, ready destination', async ({ page }) => {
-  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'ghost' }))
-  await expect.poll(() => builderActive(page)).toBe(true)
-  const sampler = sampleStationaryUnderlay(page)
-  await page.waitForTimeout(30)
-  await toggleMode(page)
-  const r = await sampler
-  expect(r.started, 'a world-reveal exit ran').toBe(true)
-  expect(r.cardsPresent, 'departing panes painted above the destination').toBe(true)
-  expect(r.minOpacity, 'the destination never waits behind a veil').toBeGreaterThanOrEqual(0.99)
-  expect(r.transforms, 'the destination itself stays still').toEqual(['none'])
-  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
-  await expect.poll(() => builderActive(page)).toBe(false)
 })
 
 test('reduced motion has no intermediate exit phase (instant world flip)', async ({ page }) => {
@@ -639,8 +389,7 @@ test('reduced motion has no intermediate exit phase (instant world flip)', async
     await new Promise((resolve) => {
       let frames = 0
       const tick = () => {
-        if (root.className.includes('shell--builder-exiting')
-          || document.querySelector('.shell__view--exit-underlay')) sawExitPhase = true
+        if (document.documentElement.dataset.modeViewTransition) sawExitPhase = true
         frames += 1
         if (frames > 60) { resolve(); return }
         requestAnimationFrame(tick)
@@ -840,7 +589,7 @@ async function sampleLogoBeat(page) {
       let frames = 0
       const tick = () => {
         const cls = root.className
-        const beatClass = cls.includes('shell--builder-entering') || cls.includes('shell--builder-exiting')
+        const beatClass = !!document.documentElement.dataset.modeViewTransition
         if (beatClass) sawBeatClass = true
         if (brand.classList.contains('is-beat-held')) {
           beatHeldSeen = true
@@ -933,13 +682,10 @@ test('round4-1: reduced motion keeps direct hold feedback but releases without a
   await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
   await expect.poll(() => builderActive(page)).toBe(true)
   await page.evaluate(() => {
-    const root = document.querySelector('.shell')
+    const root = document.documentElement
     window.__reducedMotionBeatSeen = false
     window.__reducedMotionObserver = new MutationObserver(() => {
-      const cls = root.className
-      if (cls.includes('shell--builder-entering') || cls.includes('shell--builder-exiting')) {
-        window.__reducedMotionBeatSeen = true
-      }
+      if (root.dataset.modeViewTransition) window.__reducedMotionBeatSeen = true
     })
     window.__reducedMotionObserver.observe(root, { attributes: true, attributeFilter: ['class'] })
   })
