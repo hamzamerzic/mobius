@@ -102,6 +102,7 @@ import './workspace.css'
 import WorkspaceChrome from './WorkspaceChrome.jsx'
 import useWorkspaceDrag from './useWorkspaceDrag.js'
 import useModeController from './useModeController.js'
+import useModeViewTransition, { modeViewTransitionStyle } from './useModeViewTransition.js'
 import * as modeMachine from './modeMachine.js'
 import { undoKeyPressed, isEditableTarget } from './workspaceOnboarding.js'
 import PaneChatView from './PaneChatView.jsx'
@@ -122,8 +123,8 @@ import {
 } from './builtAppState.js'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import {
-  deriveContentVisibility, deriveExitPlan, deriveEnterPlan, projectFocusedPane,
-  transitionSignature, MODE_MOTION, EMPTY_SINGLE_SURFACE_KEY,
+  deriveContentVisibility, deriveModeSnapshotPlan, projectFocusedPane,
+  MODE_MOTION, EMPTY_SINGLE_SURFACE_KEY,
 } from './workspaceView.js'
 import NewChatLanding from './NewChatLanding.jsx'
 import { recentChatsToPrefetch } from './chatPrefetch.js'
@@ -143,10 +144,8 @@ const APP_SETTINGS_SECTIONS = new Set([
   'background-agents',
   'models',
 ])
-// The builder mode beat durations live in workspaceView.js (MODE_MOTION); the
-// reconcile clock reads the latched plan's totalMs, and completion is keyed to the
-// beat's Web-Animations `finished` promises, not a bare timer — so no BUILDER_ENTER
-// / BUILDER_EXIT Shell constants exist (exit-design v2; INV 7/14).
+// Mode timing lives with the pure snapshot geometry in workspaceView.js; browser
+// transition completion owns its lifetime, so Shell has no animation timers.
 const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
 
 export default function Shell() {
@@ -395,32 +394,28 @@ export default function Shell() {
   // Builder mode is the tiled 'panes' view-mode (only meaningful when splits can
   // exist). The logo itself is the persistent mode indicator and gesture surface;
   // there is deliberately no separate header control.
-  // ── Mode transition machine (modeMachine.js / useModeController) ───────────
-  // The ONE descriptor { committedMode, transition } that replaces the old
-  // dragPreviewBuilder / builderExiting / builderEntering booleans, their two
-  // bare timers, and the ad-hoc effectiveViewMode expression. workspace.viewMode
-  // stays the persisted authority; the controller mirrors it and owns only the
-  // transient beat, driving completion by epoch (INV 12/15) rather than a timer.
-  // Codex review §3: EVERY mode-dependent render fact below derives from
-  // mode.state (INV 4), so the reducer and the render can never disagree past one
-  // beat — the P0 wedge the review opened with.
+  // Durable mode and drag-preview stay in the small mode reducer. The visual
+  // Standard ↔ Builder scene belongs independently to the browser transition.
   const SPLITS = paneModel.WORKSPACE_SPLITS_ENABLED
   const shellRootRef = useRef(null)
   const mode = useModeController({
     committedMode: workspace.viewMode,
     splitsEnabled: SPLITS,
+  })
+  const modeView = useModeViewTransition({
     rootRef: shellRootRef,
+    durationMs: MODE_MOTION.slideMs,
   })
   const modeState = mode.state
-  // Keep the focused presentation through a Builder -> Standard exit so the
-  // latched beat animates exactly what the user saw. Once the descriptor idles,
+  // Keep the focused presentation through a Builder -> Standard scene so the
+  // captured old world is exactly what the user saw. Once the scene idles,
   // discard it; Standard mode has no pane-focus presentation to restore.
   useEffect(() => {
-    if (workspace.viewMode === 'single' && !modeState.transition
+    if (workspace.viewMode === 'single' && !modeView.active && !modeState.transition
         && focusedPaneViewIdRef.current != null) {
       setFocusedPaneViewId(null)
     }
-  }, [workspace.viewMode, modeState.transition, setFocusedPaneViewId])
+  }, [workspace.viewMode, modeView.active, modeState.transition, setFocusedPaneViewId])
 
   // Persist the maximized-pane presentation to its own key on every change so it
   // survives the apply-on-idle reload (and a browser tab discard). Removing the
@@ -448,74 +443,36 @@ export default function Shell() {
   // chrome), clamped off by the splits kill switch (INV 16). Flips synchronously
   // with the toggle, matching the gesture's own spring/snap.
   const builderModeActive = modeMachine.builderModeActive(modeState, { splitsEnabled: SPLITS })
-  // The mode the render paints: 'panes' while an exit beat OR a single-mode drag
-  // preview holds the tiled world; the committed mode otherwise. The single source
-  // (INV 4) — no scattered override.
+  // Drag-preview alone may project the tiled world before it is committed.
   const effectiveViewMode = modeMachine.effectiveViewMode(modeState, { splitsEnabled: SPLITS })
   const multiPaneBuilderVisible = effectiveViewMode === 'panes'
     && paneModel.paneIdsInOrder(workspace).length > 1
   const multiPaneBuilderVisibleRef = useRef(multiPaneBuilderVisible)
   multiPaneBuilderVisibleRef.current = multiPaneBuilderVisible
-  // The latched presentation plan for the live animated beat. Either direction may
-  // carry a stationary single-world underlay while panes scatter or assemble over it.
-  const beatPlan = modeMachine.transitionPresentation(modeState)
-  // A mode beat is live: moving surfaces are inert and app frames cannot intercept
-  // input while their compositor layer is in flight.
-  const modeBeatActive = !!beatPlan
-  const modeUnderlayKey = beatPlan ? beatPlan.underlayKey : null
-  // The logo spring-back window on the shell root while an animated beat is live
+  // The final React world is already committed during this window; only browser
+  // snapshots move. Shield that settled DOM until the scene transaction ends.
+  const modeBeatActive = !!modeView.active
+  // The logo spring-back window on ShellBrand while an animated beat is live
   // (round 4 item 1): the mark holds .84 through the beat and releases over the
   // terminal logoReleaseMs so its first full-size frame lands at completion. `both`
   // fill on the CSS keyframe holds .84 through the release DELAY. The twist rides
   // --mode-total so rotation, panes, and logo settle together. A short plan clamps
   // the release to the whole beat. Null (no vars) when idle.
-  const beatRootVars = useMemo(() => {
-    if (!beatPlan) return null
-    const total = beatPlan.totalMs
+  const brandBeatStyle = useMemo(() => {
+    const visualBeat = modeView.active
+    if (!visualBeat) return null
+    const total = visualBeat.totalMs
     const release = Math.min(MODE_MOTION.logoReleaseMs, total)
     return {
       '--mode-total': `${total}ms`,
       '--logo-release-ms': `${release}ms`,
       '--logo-release-delay': `${Math.max(0, total - MODE_MOTION.logoReleaseMs)}ms`,
     }
-  }, [beatPlan])
+  }, [modeView.active])
   const shellRootStyle = useMemo(() => ({
-    ...(beatRootVars || {}),
     '--desktop-sidebar-width': `${desktopSidebarWidth}px`,
     '--shell-tabstrip-height': `${paneModel.STRIP_H}px`,
-  }), [beatRootVars, desktopSidebarWidth])
-  // The key SINGLE mode paints beneath / within either directional beat. It drives
-  // destination AppCanvas insets before the first frame so neither direction jumps.
-  const beatTargetKey = beatPlan ? beatPlan.target : null
-  // key → latched participant, for the render's data-mode-motion + inline vars.
-  const beatParticipants = useMemo(() => {
-    const m = new Map()
-    if (beatPlan) for (const p of beatPlan.participants) m.set(p.key, p)
-    return m
-  }, [beatPlan])
-  // The inline compositor-motion attrs a wrapper (or its strip) carries THIS beat,
-  // or null. Only transform/opacity + FLIP variables — never a layout property.
-  const wrapperMotion = useCallback((key) => {
-    const p = beatParticipants.get(key)
-    if (!p) return null
-    const vars = { '--mode-duration': `${p.durationMs}ms`, '--mode-delay': `${p.delayMs}ms` }
-    if (p.motion === 'promote' && p.flip) {
-      vars['--flip-x'] = `${p.flip.x}px`
-      vars['--flip-y'] = `${p.flip.y}px`
-      vars['--flip-sx'] = p.flip.sx
-      vars['--flip-sy'] = p.flip.sy
-    }
-    if ((p.motion === 'deal-in' || p.motion === 'deal-out') && p.offset) {
-      vars['--mode-offset-x'] = `${p.offset.x}px`
-      vars['--mode-offset-y'] = `${p.offset.y}px`
-    }
-    return { motion: p.motion, vars }
-  }, [beatParticipants])
-  // The wrapper matching the stationary world underlay paints full-bleed beneath.
-  const isUnderlay = useCallback(
-    (key) => modeBeatActive && modeUnderlayKey != null && key === modeUnderlayKey,
-    [modeBeatActive, modeUnderlayKey],
-  )
+  }), [desktopSidebarWidth])
   // Immersive mode (moebius:immersive, .pm/128). The state is the id of the app
   // holding an immersive request (or null); it's APPLIED — bar hidden, canvas
   // full-viewport — only while that app is the active canvas of the FOCUSED
@@ -544,34 +501,6 @@ export default function Shell() {
     const drawer = document.getElementById('navigation-drawer')
     if (drawer?.contains(document.activeElement)) immersiveExitRef.current?.focus()
   }, [immersiveActive])
-  // HONEST EXIT DESTINATION (M2): the exit-plan classifier needs to know what the
-  // SINGLE world will actually paint on completion, not just the slot the tree
-  // seeds. A suspended single-world takeover (settingsOpenRaw) paints Settings over
-  // the slot; a retained immersive request (immersiveAppId) solos the holder over
-  // the viewport. Mirrored into refs so the toggle callback (stable identity, no
-  // dep churn) and the undo keydown handler (deps [dispatchWorkspace, mode]) both
-  // read the LIVE values without a stale closure or re-registering their listeners.
-  const settingsDestinationRef = useRef(settingsOpenRaw)
-  settingsDestinationRef.current = settingsOpenRaw
-  const immersiveHolderRef = useRef(immersiveAppId)
-  immersiveHolderRef.current = immersiveAppId
-
-  // INV 10 / H2: a topology, geometry, OR DESTINATION change DURING either animated
-  // beat makes its latched FLIP/edge transforms stale. Cancel rather than retarget a
-  // live transform: recompute the shared transition signature from the same projection
-  // authority and overlay classification both plan builders use. The live overlay state
-  // is in the deps, so a mid-beat Settings/immersive destination change also snaps.
-  useEffect(() => {
-    const t = modeState.transition
-    if (!t?.presentation) return
-    const live = transitionSignature({
-      workspace, projection, contentRect,
-      settingsDestination: settingsOpenRaw,
-      immersiveHolderId: immersiveAppId,
-    })
-    if (live !== t.presentation.snapshotSignature) mode.cancelBeat()
-  }, [workspace, projection, contentRect, settingsOpenRaw, immersiveAppId, modeState, mode])
-
   // The single derivation of what content the render paints and where (design
   // §2/§4/§5). Pure + memoized so the immersive-solo and Settings-overlay
   // branches are unit-tested in workspaceView.test.js, and so one commit flips
@@ -581,18 +510,15 @@ export default function Shell() {
       workspace, projection, settingsOverlayOpen: settingsActive,
       immersiveActive, immersiveAppId,
       viewMode: effectiveViewMode, // 'panes' during a single-mode drag preview
-      // World-reveal exit: paint the mounted destination beneath the deal (adds its
-      // app to visibleAppIds so the underlay is not a blank frame).
-      exitUnderlayKey: modeUnderlayKey,
       focusedPaneView: focusedPaneViewId != null,
     }),
     [workspace, projection, settingsActive, immersiveActive, immersiveAppId,
-      effectiveViewMode, modeUnderlayKey, focusedPaneViewId],
+      effectiveViewMode, focusedPaneViewId],
   )
   const { multiPane, single, focusedActiveKey, fullBleedKey, visibleAppIds } = contentVisibility
   // The EFFECTIVE-mode-gated Settings takeover flag (finding F3): true only when the
   // takeover actually PAINTS — false in builder AND during a single-mode drag
-  // preview / exit beat (effectiveViewMode 'panes'). Every PAINT gate below reads
+  // preview (effectiveViewMode 'panes'). Every PAINT gate below reads
   // THIS, not the committed-gated `settingsActive` (which is only the derivation
   // INPUT now), so those transient windows paint the tiled world with Settings
   // suspended exactly as the derived flags assume. MOUNT keys off `settingsOpenRaw`.
@@ -1147,8 +1073,8 @@ export default function Shell() {
   const recoveredChatIdsRef = useRef(new Set())
   // ── Deferred New Chat materialization (round 4 item 3) ─────────────────────
   // A null single-screen slot renders the New Chat landing NOW; the reusable-empty
-  // validation + creation runs only AFTER the mode descriptor idles, so the slot write
-  // never drifts a live exit signature and cancels its own beat. The request is a
+  // validation + creation runs only AFTER the visual scene idles, so its settled
+  // pixels cannot be replaced beneath a captured transition. The request is a
   // monotonic token + a candidate captured from the pre-transition active chat; a
   // watcher effect materializes it once the descriptor is idle, stale-guarded on token
   // + still-single + still-null. offline/failed creation leaves the landing with a
@@ -1162,10 +1088,10 @@ export default function Shell() {
   // this is event-driven and only renders in that rare collision (no polling loop).
   const [materializeNewChatRevision, setMaterializeNewChatRevision] = useState(0)
   const [newChatLandingFailure, setNewChatLandingFailure] = useState(null)
-  // Live mirror of the mode descriptor so the async materialize can re-check for a
-  // beat that started during its await (writing the slot mid-beat would cancel it).
-  const modeTransitionRef = useRef(modeState.transition)
-  modeTransitionRef.current = modeState.transition
+  // Live mirror so async materialization cannot replace the captured New Chat
+  // landing while a browser scene transition is still displaying it.
+  const modeTransitionRef = useRef(modeView.active || modeState.transition)
+  modeTransitionRef.current = modeView.active || modeState.transition
   // Every mounted chat pane derives its OWN built-app CTA list per chatId inside
   // PaneChatView (builtAppState.js), so Shell no longer holds a global builtApps
   // bound to a single activeChatId.
@@ -1212,8 +1138,7 @@ export default function Shell() {
   // slot is a DEFINITE New Chat destination now — never the freshest chat — so this
   // leaves the slot null (the render paints the New Chat surface) and records a
   // tokenized pending request. The reusable-empty validation + creation runs only
-  // AFTER the mode descriptor idles (the materialize watcher below), so the slot write
-  // never drifts a live exit signature and cancels its own beat. The candidate is
+  // AFTER the visual scene idles (the materialize watcher below). The candidate is
   // captured from the PRE-transition active chat but NOT targeted synchronously — the
   // reuse policy (newChatPolicy) is deliberately provisional (has_messages can be
   // stale cross-client), so it must survive its detail validation before it becomes
@@ -1241,10 +1166,10 @@ export default function Shell() {
     const ws = workspaceStateRef.current.ws
     // R3 (auto-return through the descriptor): a user close that EMPTIES the builder
     // tree auto-returns to single (the reducer's autoReturnIfEmptied). Arm the SAME
-    // flip on the mode descriptor in the SAME batch (cause 'auto') so committedMode
+    // mirror the durable flip in the small mode controller in the SAME batch so
     // flips to single NOW — not a frame later via the passive sync-committed
     // reconcile, which left the logo twisted for one intermediate frame. An emptied
-    // tree has no pane to deal out, so the exit is instant (null presentation); the
+    // tree has no pane to animate, so the exit is instant; the
     // tree's coupled undo re-enters builder as one gesture. A sole Settings tab is
     // no exception — closing it empties the tree the same way. reason:'deleted' does
     // not auto-return (the reducer skips it), so it is excluded here too.
@@ -1315,8 +1240,8 @@ export default function Shell() {
   // EFFECTIVE builder world exactly — always present in builder (even at a
   // single leaf, where this single-pane .shell__tabstrip stands in for the
   // tiled WorkspaceChrome strips, giving phone users the drag source), riding
-  // an exit beat or a single-mode drag preview with the rest of the tiled
-  // presentation, and NEVER rendered in single mode OR over an immersive lease
+  // a single-mode drag preview with the rest of the tiled presentation, and NEVER
+  // rendered in single mode OR over an immersive lease
   // (the shell exit replaces every builder navigation surface). The legacy
   // tabStripEngaged latch is
   // the KILL-SWITCH world's rule only (engaged after 2+ tabs) — letting it
@@ -1383,12 +1308,6 @@ export default function Shell() {
     return map
   }, [projection, workspace])
 
-  // (v2: the exit-beat wrapper-rect substitution is DELETED. Panes hold their tiled
-  // content rect through the beat; a promote pane FLIPs via transform to cover the
-  // full box while departures deal out, so computed top/left/width/height never
-  // change until the descriptor clears and the destination snaps to full-bleed in
-  // one commit. visibleTabRects is now the sole tiled-geometry authority.)
-
   // ── The ONE Settings wrapper (design §4: overlay-or-pane geometry) ─────────
   // A single, stable SettingsView mount that is positioned like any chat/app
   // content when Settings is a visible builder tab, and full-bleed when the
@@ -1397,9 +1316,9 @@ export default function Shell() {
   // scroll position and transient Settings state survive the flip.
   const SETTINGS_KEY = tabModel.SETTINGS_TAB_KEY
   // Visible as a builder TAB: the takeover is not PAINTING AND some visible pane has
-  // the Settings tab active. Gated on the effective `settingsOverlay` (finding F3),
-  // so a single-mode drag preview / exit beat can paint a stray Settings tab as a
-  // pane. (Blind to a BACKGROUND Settings tab — not painted.)
+  // the Settings tab active. Gated on the effective `settingsOverlay` so a
+  // single-mode drag preview cannot paint a stray Settings tab as a pane. (Blind to
+  // a BACKGROUND Settings tab — not painted.)
   const settingsVisibleAsTab = !settingsOverlay
     && projection.visibleLeaves.some(id => workspace.panes[id]?.activeTabKey === SETTINGS_KEY)
   // MOUNT (finding F3): keyed off the RAW suspended overlay intent, NOT the
@@ -1509,7 +1428,7 @@ export default function Shell() {
   // actually painted. Publish one stable readiness contract for visual tools;
   // they must not learn private handoff classes or compositor attributes.
   const workspaceVisualState = deriveWorkspaceVisualState({
-    modeTransition: modeState.transition,
+    modeTransition: modeView.active || modeState.transition,
     chatPanesVisible,
     chatPaneLayers,
     paintedChatWorld: effectiveViewMode === 'single'
@@ -1738,40 +1657,24 @@ export default function Shell() {
   const handleToggleViewMode = useCallback((cause) => {
     const ws = workspaceStateRef.current.ws
     const leavingBuilder = ws.viewMode !== 'single'
-    // Build the latched presentation plan from the PROJECTION authority (exit-design
-    // v2). The plan owns ALL of the classification the old handler computed inline:
-    // promote a genuinely-shared pane vs reveal the single world underneath, the
-    // FLIP rects, shared short timing, and the completion contract. The machine treats
-    // it opaquely; the controller drops it under reduced motion (commit directly). A
-    // null plan (empty tree) is an instant flip. Settings needs no conversion — its
-    // tab SURVIVES the flip and single mode paints its own slot (never Settings).
-    // Durable flip FIRST. The synchronous dispatch boundary requests the New Chat
-    // landing if this enters a null slot (e.g. a Settings-focused builder never
-    // seeded one). The slot stays null through the beat, so exitTargetKey reveals
-    // home:new-chat and materialization waits for the descriptor to idle. THEN derive
-    // the plan from the already-advanced workspace (INV 2/3).
-    dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: 'toggle' })
-    const settled = workspaceStateRef.current.ws
-    const presentation = leavingBuilder
-      ? deriveExitPlan({
-        // The tree is identical across the flip; only viewMode/slot advanced.
-        workspace: settled, projection, contentRect,
-        // M2: reveal to Settings / classify immersive instant, not the slot the
-        // takeover or immersive-solo covers at completion.
-        settingsDestination: settingsDestinationRef.current,
-        immersiveHolderId: immersiveHolderRef.current,
-      })
-      : deriveEnterPlan({
-        workspace: settled, projection, contentRect,
-        settingsDestination: settingsDestinationRef.current,
-        immersiveHolderId: immersiveHolderRef.current,
-      })
-    // The honest `cause` ('hold'|'swipe'|'keyboard') threads from the caller;
-    // an omitted cause falls back to 'toggle'. RETURN the
-    // toggle receipt so the logo gesture can tell an animated beat from an instant
-    // flip and hand its compression to the descriptor (round 4 item 1).
-    return mode.toggle({ cause, presentation })
-  }, [dispatchWorkspace, mode, projection, contentRect])
+    const to = leavingBuilder ? 'single' : 'panes'
+    const plan = deriveModeSnapshotPlan({ workspace: ws, projection, contentRect })
+
+    // One browser-owned scene transaction commits BOTH durable authorities. The
+    // old world is captured first; React then renders the final world once, and the
+    // browser animates settled snapshots. No temporary underlay, live FLIP, divider
+    // fade, or second projection commit exists for the panes to race against.
+    return modeView.run({
+      direction: leavingBuilder ? 'exit' : 'enter',
+      to,
+      cause,
+      plan,
+      update: () => {
+        dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: to })
+        mode.toggle({ cause, to })
+      },
+    })
+  }, [dispatchWorkspace, mode, modeView, projection, contentRect])
   // The single-tap navigation toggle passed to ShellBrand (which owns the logo
   // gesture and static Builder cue). The HOLD / swipe / Shift+Enter mode toggle is
   // handleToggleViewMode above, passed to ShellBrand as onToggleMode.
@@ -1837,29 +1740,33 @@ export default function Shell() {
           ? undoSlot.ws.viewMode : wsState.ws.viewMode
         if (restoredMode !== wsState.ws.viewMode) {
           const scene = sceneInputsRef.current
-          const presentation = restoredMode === 'panes'
-            ? deriveEnterPlan({
-              workspace: undoSlot.ws,
-              projection: paneModel.projectLayout(undoSlot.ws, scene.mode, scene.contentRect),
-              contentRect: scene.contentRect,
-              settingsDestination: settingsDestinationRef.current,
-              immersiveHolderId: immersiveHolderRef.current,
-            })
-            : deriveExitPlan({
-              workspace: wsState.ws, projection: scene.projection, contentRect: scene.contentRect,
-              // M2: same honest-destination classification for an undo that exits
-              // builder — Settings/immersive still own the single world it lands in.
-              settingsDestination: settingsDestinationRef.current,
-              immersiveHolderId: immersiveHolderRef.current,
-            })
-          mode.undo({ restoredMode, presentation })
+          const paneWorld = restoredMode === 'panes' ? undoSlot.ws : wsState.ws
+          const paneProjection = restoredMode === 'panes'
+            ? paneModel.projectLayout(paneWorld, scene.mode, scene.contentRect)
+            : scene.projection
+          const plan = deriveModeSnapshotPlan({
+            workspace: paneWorld,
+            projection: paneProjection,
+            contentRect: scene.contentRect,
+          })
+          modeView.run({
+            direction: restoredMode === 'panes' ? 'enter' : 'exit',
+            to: restoredMode,
+            cause: 'undo',
+            plan,
+            update: () => {
+              mode.undo({ restoredMode })
+              dispatchWorkspace({ type: 'UNDO_LAST' })
+            },
+          })
+          return
         }
       }
       dispatchWorkspace({ type: 'UNDO_LAST' })
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [dispatchWorkspace, mode])
+  }, [dispatchWorkspace, mode, modeView])
 
   // No per-mutation undo toast: the reducer still mints a fresh undo slot on
   // every workspace mutation (its `toast` label included, for the reducer's own
@@ -3170,8 +3077,7 @@ export default function Shell() {
   }
 
   // Materialize the deferred New Chat landing into a real chat slot (round 4 item 3).
-  // Runs ONLY after the mode descriptor idles (the watcher below gates it), so the slot
-  // write never drifts a live exit signature and cancels its own beat. Stale-guarded
+  // Runs ONLY after the visual scene idles (the watcher below gates it). Stale-guarded
   // against a superseding request, a re-toggle back to builder, and a slot filled by
   // another path. On offline/failed creation it leaves the New Chat landing visible
   // with a retry affordance — never a blank <main>, never chats[0].
@@ -3337,12 +3243,10 @@ export default function Shell() {
 
   // ── Deferred New Chat materialization watcher (round 4 item 3) ─────────────
   // A pending New Chat request (recorded by requestEmptySingleNewChat) materializes
-  // only once the mode descriptor is IDLE and the slot is still an empty single — so
-  // the slot write can never drift a live exit signature and cancel its own beat. When
-  // the beat completes, modeState.transition flips to null and this re-runs.
+  // only once the visual scene is IDLE and the slot is still an empty single.
   useEffect(() => {
     if (!pendingNewChatToken) return
-    if (modeState.transition) return // wait for the descriptor to idle
+    if (modeView.active || modeState.transition) return
     const pending = pendingNewChatRef.current
     if (!pending || pending.token !== pendingNewChatToken) return
     const ws = workspaceStateRef.current.ws
@@ -3354,7 +3258,7 @@ export default function Shell() {
       return
     }
     materializeNewChatHomeRef.current?.(pending)
-  }, [pendingNewChatToken, materializeNewChatRevision, modeState.transition,
+  }, [pendingNewChatToken, materializeNewChatRevision, modeView.active, modeState.transition,
       workspace.viewMode, workspace.singleScreen, workspaceStateRef])
 
   function selectChat(id) {
@@ -3609,24 +3513,14 @@ export default function Shell() {
     >
     <div
       ref={shellRootRef}
-      // The logo-release timing vars for the live beat (round 4 item 1); absent when
-      // idle so the .shell__logo rotate/scale transitions fall back to their defaults.
+      // Stable shell geometry only. Beat-local custom properties live on the header
+      // or moving pane itself, never this ancestor of every retained transcript.
       style={shellRootStyle}
-      // The live transition phase + epoch, surfaced for observability + tests: the
-      // completion is epoch-keyed in the controller closure (INV 12/15), and this
-      // data-epoch documents which beat the DOM belongs to (a drag preview has no
-      // beat class, so this is the only external signal it is armed). idle otherwise.
-      data-mode-phase={modeState.transition ? modeState.transition.phase : 'idle'}
-      data-mode-epoch={modeState.transition ? modeState.transition.id : undefined}
+      data-mode-phase={modeView.active?.phase || modeState.transition?.phase || 'idle'}
+      data-mode-epoch={modeView.active?.id || modeState.transition?.id || undefined}
       data-workspace-visual-state={workspaceVisualState}
-      // The ONE transient beat class comes from the descriptor (INV 1/4): exactly
-      // one of entering/exiting is ever present, and the keyed animationend on
-      // this root completes the beat (the controller's listener). No separate
-      // entering/exiting booleans emit here anymore.
       className={`shell${immersiveActive ? ' shell--immersive' : ''}`
       + `${desktopSidebarReserved ? ' shell--drawer-docked' : ''}`
-      + `${modeMachine.transitionRootClass(modeState, { splitsEnabled: SPLITS })
-        ? ` ${modeMachine.transitionRootClass(modeState, { splitsEnabled: SPLITS })}` : ''}`
       + `${builderModeActive && paneModel.BUILDER_POWER_CHROME ? ' shell--builder-power' : ''}`}>
       <a
         className="shell__skip-link"
@@ -3642,7 +3536,11 @@ export default function Shell() {
           mobile drawer is modal. Keep the workspace inert below, but do not inert
           the header: doing so lets the scrim intercept the toggle and strands the
           drawer without the close path its label and aria-expanded state promise. */}
-      <header className="shell__bar">
+      <header
+        className="shell__bar"
+        style={brandBeatStyle || undefined}
+        data-mode-phase={modeView.active?.phase || undefined}
+      >
         <ShellBrand
           brandRef={brandButtonRef}
           splitsEnabled={paneModel.WORKSPACE_SPLITS_ENABLED}
@@ -3651,7 +3549,7 @@ export default function Shell() {
           // The live descriptor drives the logo's hold→completion spring (round 4
           // item 1): a hold-owned animated beat holds the mark compressed and releases
           // it as the beat completes, instead of an immediate ignite/snap.
-          transition={modeState.transition}
+          transition={modeView.active || modeState.transition}
           backFiredRef={backFiredRef}
           onToggleMode={handleToggleViewMode}
           onToggleNavigation={handleToggleNavigation}
@@ -3772,16 +3670,16 @@ export default function Shell() {
           reset the send-reservation and freeze stream-follow (the reason the
           bespoke split view was parked). */}
       {tabStripVisible && !workspaceChromeActive && (() => {
-        // Single-leaf beat: the sole strip deals in / out / clears WITH its pane
-        // (there is no WorkspaceChrome at one leaf). Its active key is the beat
-        // participant key.
-        const navMotion = wrapperMotion(focusedActiveKey)
+        const navPaneId = workspace.focusedPaneId
+        const navViewStyle = navPaneId
+          ? modeViewTransitionStyle('strip', navPaneId, 'single')
+          : null
         return (
         <nav
           className="shell__tabstrip"
           onWheel={scrollStripWheel}
           // INV 9 (inert beat): the single-pane strip clears WITH its pane during
-          // an exit beat, so it is pointer/keyboard inert throughout — not just under
+          // a mode scene, so it is pointer/keyboard inert throughout — not just under
           // the drawer (M4). It matches the WorkspaceChrome strips, which already go
           // inert for the full mode beat.
           inert={navigationSurfaceOpen || modeBeatActive}
@@ -3791,8 +3689,8 @@ export default function Shell() {
           // source pane exactly as it does for a WorkspaceChrome strip; dragging
           // a tab out with ≥2 tabs present splits the pane.
           data-pane-strip={paneModel.WORKSPACE_SPLITS_ENABLED ? workspace.focusedPaneId : undefined}
-          data-mode-motion={navMotion ? navMotion.motion : undefined}
-          style={navMotion ? navMotion.vars : undefined}
+          data-mode-pane-vt={navViewStyle ? navPaneId : undefined}
+          style={navViewStyle || undefined}
           onKeyDown={(e) => stripKeyDown(e, openTabs, (tab) => closeTab(tab))}
         >
           {openTabs.map(tab => {
@@ -3838,11 +3736,17 @@ export default function Shell() {
             reload). */}
         {renderedAppIds.map(id => {
           const tabKey = `app:${id}`
-          const underlay = isUnderlay(tabKey)
-          const paned = !underlay && workspaceChromeActive ? visibleTabRects.get(tabKey) : null
-          const fullBleed = !underlay && !paned && tabKey === fullBleedKey
-          const motion = wrapperMotion(tabKey)
-          const posStyle = paned ? { top: paned.y, left: paned.x, width: paned.w, height: paned.h } : null
+          const paned = workspaceChromeActive ? visibleTabRects.get(tabKey) : null
+          const fullBleed = !paned && tabKey === fullBleedKey
+          const surfaceVisible = !!(paned || fullBleed)
+          const appSurfaceInert = !surfaceVisible
+          const posStyle = paned ? {
+            top: paned.y,
+            left: paned.x,
+            width: paned.w,
+            height: paned.h,
+            ...modeViewTransitionStyle('pane', paned.paneId, tabKey),
+          } : null
           const app = apps.find(a => String(a.id) === String(id))
           return (
           <div
@@ -3850,27 +3754,18 @@ export default function Shell() {
             id={paned ? panePanelDomId(paned.paneId, tabKey) : undefined}
             role={paned ? 'tabpanel' : undefined}
             aria-labelledby={paned ? paneTabDomId(paned.paneId, tabKey) : undefined}
-            data-tab-key={(multiPane || focusedPaneViewId != null) && !underlay ? tabKey : undefined}
-            // COMPOSITOR-ONLY beat motion (v2): the wrapper HOLDS its tiled content
-            // rect and animates only transform/opacity via data-mode-motion + the
-            // latched --flip/--mode vars. A mid-beat focus change cannot retarget it
-            // (the plan is latched, INV 2/10). The world-reveal underlay paints
-            // full-bleed beneath the deal (INV 5).
-            data-mode-motion={motion ? motion.motion : undefined}
-            className={underlay
-              ? 'shell__view shell__app-view shell__view--exit-underlay'
-              : (paned
-                ? 'shell__view shell__app-view shell__view--paned'
-                : `shell__view shell__app-view ${fullBleed ? 'shell__view--active' : ''}`)}
-            style={motion ? { ...(posStyle || {}), ...motion.vars } : (posStyle || undefined)}
-            // INV 9 (inert beat): every moving surface — a participant pane OR the
-            // underlay — is pointer/keyboard inert so a tap on an in-flight / covered
-            // surface cannot dispatch FOCUS mid-animation.
-            inert={(modeBeatActive && (!!motion || underlay)) || undefined}
+            data-tab-key={(multiPane || focusedPaneViewId != null) ? tabKey : undefined}
+            data-mode-pane-vt={paned ? paned.paneId : undefined}
+            className={paned
+              ? 'shell__view shell__app-view shell__view--paned'
+              : `shell__view shell__app-view ${fullBleed ? 'shell__view--active' : ''}`}
+            style={posStyle || undefined}
+            inert={appSurfaceInert || undefined}
+            aria-hidden={appSurfaceInert ? 'true' : undefined}
             // Clicking a visible pane focuses it (chat panes are not opaque; app
             // iframes swallow interior clicks, so this catches wrapper padding —
             // interior app focus rides the runtime bridge later). Only in the
-            // tiled path (finding D-i), and never during the exit beat.
+            // tiled path (finding D-i), and never during a mode scene.
             onPointerDownCapture={paned && !modeBeatActive
               ? () => dispatchWorkspace({ type: 'FOCUS', paneId: paned.paneId }) : undefined}
           >
@@ -3878,17 +3773,15 @@ export default function Shell() {
             <AppCanvas
               appId={id}
               // Focused-pane-only: gates safe-area insets + the immersive holder
-              // (global last-writer-wins). During the exit beat the DESTINATION
-              // (beatTargetKey) is also driven active so its insets are correct
-              // before completion, not jumping only after (exit-design §Visibility).
-              active={tabKey === focusedActiveKey || (modeBeatActive && tabKey === beatTargetKey)}
+              // (global last-writer-wins).
+              active={tabKey === focusedActiveKey}
               // Visible in ANY pane: gates frame-visibility + nav-push (§5). A
               // background split's app keeps running and can install sentinels;
               // Settings/immersive-solo/hidden panes exclude it (visibleAppIds).
               visible={visibleAppIds.has(String(id))}
               // Every visible pane remains painted beneath the modal scrim, but
               // suspend its iframe interaction while the drawer is open OR during any
-              // exit beat (INV 9: cross-origin app interaction is inert throughout).
+              // mode scene (cross-origin app interaction is inert throughout).
               interactive={visibleAppIds.has(String(id)) && !navigationSurfaceOpen && !modeBeatActive}
               version={versionForApp(id)}
               appName={app?.name}
@@ -3920,26 +3813,16 @@ export default function Shell() {
           const tabKey = `chat:${chatId}`
           const standardOwner = world === STANDARD_CHAT_WORLD
           const paneActiveKey = paneModel.activeKeyForOwner(workspace, paneId) || tabKey
-          const isActiveLayer = role === 'active'
-          // The Standard owner alone may be the stationary world underlay. Every
-          // Builder chat — including one for the SAME chat id — is an independent
-          // moving participant, so the Standard DOM never changes geometry.
-          const underlay = standardOwner && isActiveLayer && isUnderlay(paneActiveKey)
           const builderRect = standardOwner ? null : builderChatTabRects.get(paneActiveKey)
           const builderPainted = !standardOwner
             && effectiveViewMode === 'panes'
             && chatPanesVisible
-          const paned = !underlay && builderPainted ? builderRect : null
-          const fullBleed = !underlay && paneActiveKey === fullBleedKey
+          const paned = builderPainted ? builderRect : null
+          const fullBleed = paneActiveKey === fullBleedKey
             && (standardOwner
               ? effectiveViewMode === 'single'
               : (builderPainted && !paned))
-          const surfaceVisible = !!(underlay || paned || fullBleed)
-          // A Standard surface never receives Builder motion. Its separate
-          // full-bleed owner sits still beneath the assembling/dealing panes.
-          const motion = !standardOwner && isActiveLayer
-            ? wrapperMotion(paneActiveKey)
-            : null
+          const surfaceVisible = !!(paned || fullBleed)
           const tabPanel = role !== 'held' && paned
           // A retained owner may belong to the hidden workspace world. Its
           // layers stay mounted for continuity, but only a surface painted by
@@ -3960,6 +3843,12 @@ export default function Shell() {
               bottom: 'auto',
             }
             : null
+          const chatViewStyle = paned
+            ? {
+              ...posStyle,
+              ...modeViewTransitionStyle('pane', paneId, surfaceKey),
+            }
+            : undefined
           return (
             <div
               key={surfaceKey}
@@ -3968,8 +3857,9 @@ export default function Shell() {
               aria-labelledby={tabPanel ? paneTabDomId(paneId, tabKey) : undefined}
               data-chat-world={world}
               data-chat-id={chatId}
+              data-mode-pane-vt={paned ? paneId : undefined}
               data-tab-key={!standardOwner && (multiPane || focusedPaneViewId != null)
-                && role !== 'held' && !underlay
+                && role !== 'held'
                 ? tabKey : undefined}
               // A ChatView can stay mounted in the parked workspace world so its
               // stream, draft, and scroll controller survive a world flip. Expose
@@ -3977,20 +3867,13 @@ export default function Shell() {
               // actually interactive; browser contracts must not accidentally
               // target a retained hidden world or an in-flight handoff layer.
               data-chat-surface={surfaceVisible && role === 'active' ? 'painted' : undefined}
-              // Compositor-only beat motion (v2): see the app wrapper. The world-
-              // reveal underlay chat paints full-bleed beneath the deal.
-              data-mode-motion={motion ? motion.motion : undefined}
-              className={underlay
-                ? `shell__view shell__view--exit-underlay shell__chat-view${handoffClass}`
-                : (paned
-                  ? `shell__view shell__view--paned shell__chat-view${handoffClass}`
-                  : `shell__view shell__chat-view ${fullBleed ? 'shell__view--active' : ''}${handoffClass}`)}
-              style={motion ? { ...(posStyle || {}), ...motion.vars } : (posStyle || undefined)}
+              className={paned
+                ? `shell__view shell__view--paned shell__chat-view${handoffClass}`
+                : `shell__view shell__chat-view ${fullBleed ? 'shell__view--active' : ''}${handoffClass}`}
+              style={chatViewStyle}
               // A retained owner that belongs to the other world is physically
-              // inert as well as visibility-hidden. Moving/underlay surfaces stay
-              // inert for the whole mode beat (INV 9).
-              inert={!surfaceVisible || settingsOverlay || role !== 'active'
-                || (modeBeatActive && (!!motion || underlay))}
+              // inert as well as visibility-hidden.
+              inert={!surfaceVisible || settingsOverlay || role !== 'active' || undefined}
               aria-hidden={!surfaceVisible || settingsOverlay || role !== 'active'
                 ? 'true' : undefined}
               onPointerDownCapture={paned && role === 'active' && !modeBeatActive
@@ -4050,12 +3933,18 @@ export default function Shell() {
             Drawer owns the launcher interactions and portals them into this
             stable host so app management remains one implementation. */}
         {(() => {
-          const appsUnderlay = isUnderlay(APPS_KEY)
-          const appsMotion = appsUnderlay ? null : wrapperMotion(APPS_KEY)
-          const appsPos = (!appsUnderlay && appsPaned)
-            ? { top: appsPaned.y, left: appsPaned.x, width: appsPaned.w, height: appsPaned.h }
+          const appsPos = appsPaned
+            ? {
+              top: appsPaned.y,
+              left: appsPaned.x,
+              width: appsPaned.w,
+              height: appsPaned.h,
+              ...modeViewTransitionStyle('pane', appsPaned.paneId, APPS_KEY),
+            }
             : null
-          const appsTabPanel = !appsUnderlay && appsPaned
+          const appsTabPanel = appsPaned
+          const appsSurfaceVisible = !!(appsPaned || appsFullBleed)
+          const appsSurfaceInert = !appsSurfaceVisible
           return (
             <div
               key="apps"
@@ -4063,17 +3952,14 @@ export default function Shell() {
               role={appsTabPanel ? 'tabpanel' : undefined}
               aria-labelledby={appsTabPanel ? paneTabDomId(appsPaned.paneId, APPS_KEY) : undefined}
               data-tab-key={appsTabPanel ? APPS_KEY : undefined}
-              data-mode-motion={appsMotion ? appsMotion.motion : undefined}
-              className={appsUnderlay
-                ? 'shell__view shell__view--exit-underlay shell__apps-view'
-                : (appsPaned
-                  ? 'shell__view shell__view--paned shell__apps-view'
-                  : `shell__view shell__apps-view ${appsFullBleed ? 'shell__view--active' : ''}`)}
-              style={appsMotion
-                ? { ...(appsPos || {}), ...appsMotion.vars }
-                : (appsPos || undefined)}
-              inert={(modeBeatActive && (!!appsMotion || appsUnderlay)) || undefined}
-              onPointerDownCapture={appsPaned && !appsUnderlay && !modeBeatActive
+              data-mode-pane-vt={appsPaned ? appsPaned.paneId : undefined}
+              className={appsPaned
+                ? 'shell__view shell__view--paned shell__apps-view'
+                : `shell__view shell__apps-view ${appsFullBleed ? 'shell__view--active' : ''}`}
+              style={appsPos || undefined}
+              inert={appsSurfaceInert || undefined}
+              aria-hidden={appsSurfaceInert ? 'true' : undefined}
+              onPointerDownCapture={appsPaned && !modeBeatActive
                 ? () => dispatchWorkspace({ type: 'FOCUS', paneId: appsPaned.paneId })
                 : undefined}
             >
@@ -4087,19 +3973,18 @@ export default function Shell() {
             regardless of the sibling app/chat arrays' lengths, preserving
             SettingsView identity across the tab<->overlay conversion. */}
         {settingsMounted && (() => {
-          // Settings plays TWO possible exit-beat roles. As a builder Settings TAB
-          // it is a DEAL-OUT participant (settingsMotion). As the honest destination
-          // of a suspended single-world takeover (M2) it is the world-reveal
-          // UNDERLAY: the mounted-hidden surface painted full-bleed BENEATH the
-          // dealing tree, so the takeover no longer snaps over a revealed slot at
-          // completion. The classifier excludes the settings leaf from participants
-          // when it is the underlay, so these two roles never coincide.
-          const settingsUnderlay = isUnderlay(SETTINGS_KEY)
-          const settingsMotion = settingsUnderlay ? null : wrapperMotion(SETTINGS_KEY)
-          const settingsPos = (!settingsUnderlay && settingsPaned)
-            ? { top: settingsPaned.y, left: settingsPaned.x, width: settingsPaned.w, height: settingsPaned.h }
+          const settingsPos = settingsPaned
+            ? {
+              top: settingsPaned.y,
+              left: settingsPaned.x,
+              width: settingsPaned.w,
+              height: settingsPaned.h,
+              ...modeViewTransitionStyle('pane', settingsPaned.paneId, SETTINGS_KEY),
+            }
             : null
-          const settingsTabPanel = !settingsUnderlay && settingsPaned
+          const settingsTabPanel = settingsPaned
+          const settingsSurfaceVisible = !!(settingsPaned || settingsFullBleed)
+          const settingsSurfaceInert = !settingsSurfaceVisible
           return (
           <div
             key="settings"
@@ -4110,18 +3995,15 @@ export default function Shell() {
             aria-labelledby={settingsTabPanel
               ? paneTabDomId(settingsPaned.paneId, SETTINGS_KEY)
               : undefined}
-            data-tab-key={(!settingsUnderlay && settingsPaned) ? SETTINGS_KEY : undefined}
-            data-mode-motion={settingsMotion ? settingsMotion.motion : undefined}
-            className={settingsUnderlay
-              ? 'shell__view shell__view--exit-underlay shell__settings-view'
-              : (settingsPaned
-                ? 'shell__view shell__view--paned shell__settings-view'
-                : `shell__view shell__settings-view ${settingsFullBleed ? 'shell__view--active' : ''}`)}
-            style={settingsMotion
-              ? { ...(settingsPos || {}), ...settingsMotion.vars }
-              : (settingsPos || undefined)}
-            inert={(modeBeatActive && (!!settingsMotion || settingsUnderlay)) || undefined}
-            onPointerDownCapture={settingsPaned && !settingsUnderlay && !modeBeatActive
+            data-tab-key={settingsPaned ? SETTINGS_KEY : undefined}
+            data-mode-pane-vt={settingsPaned ? settingsPaned.paneId : undefined}
+            className={settingsPaned
+              ? 'shell__view shell__view--paned shell__settings-view'
+              : `shell__view shell__settings-view ${settingsFullBleed ? 'shell__view--active' : ''}`}
+            style={settingsPos || undefined}
+            inert={settingsSurfaceInert || undefined}
+            aria-hidden={settingsSurfaceInert ? 'true' : undefined}
+            onPointerDownCapture={settingsPaned && !modeBeatActive
               ? () => dispatchWorkspace({ type: 'FOCUS', paneId: settingsPaned.paneId })
               : undefined}
           >
@@ -4134,7 +4016,7 @@ export default function Shell() {
                 onThemeChange={loadTheme}
                 onOpenChat={selectChat}
                 focusTarget={settingsFocusTarget}
-                active={!settingsUnderlay && (settingsFullBleed || !!settingsPaned)}
+                active={settingsFullBleed || !!settingsPaned}
                 refreshToken={settingsRefreshToken}
               />
             </Suspense>
@@ -4142,22 +4024,14 @@ export default function Shell() {
           )
         })()}
         {/* New Chat landing (round 4 item 3) — the first-class surface a null single
-            slot paints, and the stationary world-reveal underlay while an exit beat lands
-            on it. Rendered only when it is actually the surface (fullBleedKey) or the
-            reveal underlay, so it never sits mounted-hidden behind real content. The row
-            materializes into a real chat after the descriptor idles; until then this is
-            the honest destination (never chats[0], never a blank <main>). */}
+            slot paints (never chats[0], never a blank <main>). */}
         {(() => {
-          const newChatUnderlay = isUnderlay(EMPTY_SINGLE_SURFACE_KEY)
           const newChatSurface = fullBleedKey === EMPTY_SINGLE_SURFACE_KEY
-          if (!newChatUnderlay && !newChatSurface) return null
+          if (!newChatSurface) return null
           return (
             <div
               key="home-new-chat"
-              className={newChatUnderlay
-                ? 'shell__view shell__view--exit-underlay shell__chat-view'
-                : 'shell__view shell__view--active shell__chat-view'}
-              inert={(modeBeatActive && newChatUnderlay) || undefined}
+              className="shell__view shell__view--active shell__chat-view"
             >
               <NewChatLanding
                 // Retry state only on the resting surface — never mid-reveal.
@@ -4176,7 +4050,7 @@ export default function Shell() {
             // INV 9 / finding 10: during the exit deal the chrome is not just
             // pointer-transparent (CSS) but fully INERT — keyboard-unfocusable and
             // aria-hidden — so a tab/divider that already held focus can't process
-            // Enter/arrow input while invisibly dealing away.
+            // Enter/arrow input while its captured scene is moving.
             inert={navigationSurfaceOpen || modeBeatActive}
             workspace={workspace}
             projection={projection}
@@ -4187,15 +4061,13 @@ export default function Shell() {
             navTo={navTo}
             labelForTab={labelForTab}
             onTabContextMenu={openTabMenu}
-            // The ONE shared user-close action (INV 13) + the per-pane beat motion
-            // (each strip deals with its pane) — WorkspaceChrome owns no private
-            // close dispatcher and no motion knowledge of its own.
+            // The ONE shared user-close action — WorkspaceChrome owns no private
+            // close dispatcher or transition timing.
             onCloseTab={closeTab}
             focusedPaneViewId={focusedPaneViewId}
             onTogglePaneFocus={toggleFocusedPaneView}
             onChatPaneSelected={focusDesktopChatPaneComposer}
             revealKey={tabRevealRevision}
-            stripMotion={wrapperMotion}
           />
         )}
       </main>

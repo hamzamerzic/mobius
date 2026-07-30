@@ -15,18 +15,10 @@ import { modeReducer } from '../modeMachine.js'
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
 const nav = readFileSync(new URL('../../../hooks/useNavigation.js', import.meta.url), 'utf8')
 const controller = readFileSync(new URL('../useModeController.js', import.meta.url), 'utf8')
+const scene = readFileSync(new URL('../useModeViewTransition.js', import.meta.url), 'utf8')
 const gesture = readFileSync(new URL('../useLogoModeGesture.js', import.meta.url), 'utf8')
 const brand = readFileSync(new URL('../ShellBrand.jsx', import.meta.url), 'utf8')
 const paneSrc = readFileSync(new URL('../paneModel.js', import.meta.url), 'utf8')
-
-// A minimal v2 exit plan for the reducer's behavioral cases (a plan arms a beat).
-function planFor(name = 'shell-mode-deal-out', totalMs = 180) {
-  return {
-    kind: name === 'shell-mode-deal-in' ? 'enter' : 'exit',
-    participants: [{ key: 'chat:2', paneId: 'p2', motion: name === 'shell-mode-deal-in' ? 'deal-in' : 'deal-out', delayMs: 0, durationMs: totalMs }],
-    completionNames: [name], totalMs, underlayKey: null, target: null, snapshotSignature: 'sig',
-  }
-}
 
 const { makeTab } = tabModel
 function reduce(state, action) { return paneModel.workspaceReducer(state, action) }
@@ -37,7 +29,7 @@ test('finding 1: dragArm returns the epoch it WILL assign, computed before dispa
   // Reading stateRef AFTER an async useReducer dispatch returns the stale
   // pre-dispatch epoch, so cancel/blur would carry the wrong id and never clear the
   // preview -- the wedge reincarnated. The id is read from nextId before dispatch.
-  assert.match(controller, /const id = s\.nextId\s*\n\s*dispatch\(\{ type: 'drag-arm'/)
+  assert.match(controller, /const id = current\.committedMode === 'single' \? current\.nextId : null\s*\n\s*dispatch\(\{ type: 'drag-arm'/)
   // The reducer really assigns nextId as the transition id, so that pre-computed id
   // is exactly what a later cancel/commit must carry.
   const armed = modeReducer({ committedMode: 'single', transition: null, nextId: 7 },
@@ -124,55 +116,35 @@ test('finding F9: historical-chat repair is builder-only; single mode requests N
   assert.doesNotMatch(shell, /type: 'OPEN_TAB', paneId: ws\.focusedPaneId,\s*\n\s*tab: tabModel\.makeTab\('chat', chats\[0\]\.id\)/)
 })
 
-// -- Finding 5: completion is epoch-keyed (captured epoch, not inferred) --------
-test('finding 5: completion captures the originating epoch, not the current transition id', () => {
-  assert.match(controller, /const epoch = contract\.id/)
-  assert.match(controller, /dispatch\(\{ type: 'complete', id: epoch \}\)/)
-  assert.match(controller, /Promise\.allSettled\(anims\.map\(a => a\.finished\)\)/)
-  assert.doesNotMatch(controller, /addEventListener\('animationend'/)
-  // The completion contract is computed from the COMMITTED render closure, not the
-  // render-written ref (W3): the collection effect reads completionContract(state).
-  assert.match(controller, /const contract = completionContract\(state\)/)
-  // One rAF collection (v2), not two chained frames.
-  assert.match(controller, /raf = requestAnimationFrame\(collect\)/)
-  // The reducer's id guard rejects a superseded epoch's completion (enter1 -> exit2
-  // -> enter3: a delayed complete{enter1} cannot clear enter3).
-  let s = { committedMode: 'single', transition: null, nextId: 1 }
-  s = modeReducer(s, { type: 'toggle', to: 'panes', presentation: planFor('shell-mode-deal-in'), now: 0 }) // enter, id 1
-  const e1 = s.transition.id
-  s = modeReducer(s, { type: 'toggle', to: 'single', presentation: planFor('shell-mode-deal-out'), now: 1 }) // exit, id 2
-  s = modeReducer(s, { type: 'toggle', to: 'panes', presentation: planFor('shell-mode-deal-in'), now: 2 }) // enter, id 3
-  const e3 = s.transition.id
-  assert.notEqual(e1, e3)
-  assert.equal(modeReducer(s, { type: 'complete', id: e1 }).transition.id, e3, 'stale epoch rejected')
+// -- Finding 5: scene completion is epoch-keyed -------------------------------
+test('finding 5: completion settles only the originating browser scene', () => {
+  assert.match(scene, /const id = nextIdRef\.current\+\+/)
+  assert.match(scene, /if \(liveRef\.current\?\.descriptor\.id !== id\) return/)
+  assert.match(scene, /transition\.finished\.then\([\s\S]*?settle\(id\)/)
+  assert.doesNotMatch(scene, /animationend|setTimeout/)
 })
 
-// -- Finding 6 / INV 10 / H2: cancelBeat is wired to either plan's signature drift --
-test('finding 6: topology/geometry/destination drift during either beat cancels it (INV 10 / H2)', () => {
-  assert.match(shell, /mode\.cancelBeat\(\)/)
-  // The watcher recomputes one signature for both enter and exit plans. There is no
-  // phase-only gate that would leave geometry-dependent entry transforms stale.
-  assert.match(shell, /if \(!t\?\.presentation\) return/)
-  assert.doesNotMatch(shell, /t\.phase !== 'exiting'/)
-  assert.match(shell, /const live = transitionSignature\(\{/)
-  assert.match(shell, /settingsDestination: settingsOpenRaw/)
-  assert.match(shell, /immersiveHolderId: immersiveAppId/)
-  assert.match(shell, /\}, \[workspace, projection, contentRect, settingsOpenRaw, immersiveAppId, modeState, mode\]\)/)
-  assert.match(shell, /if \(live !== t\.presentation\.snapshotSignature\) mode\.cancelBeat\(\)/)
-  // The reducer's cancel-beat clears the descriptor without touching committedMode.
-  let s = modeReducer({ committedMode: 'panes', transition: null, nextId: 1 },
-    { type: 'toggle', to: 'single', presentation: planFor('shell-mode-deal-out'), now: 0 })
-  s = modeReducer(s, { type: 'cancel-beat' })
-  assert.equal(s.transition, null)
-  assert.equal(s.committedMode, 'single')
+// -- Finding 6: scene geometry is captured once, never retargeted live ---------
+test('finding 6: participant snapshots are collected once at the world boundary', () => {
+  assert.match(scene, /let snapshots = direction === 'exit'\s*\n\s*\? participantSnapshots/)
+  assert.match(scene, /if \(direction === 'enter'\) snapshots = participantSnapshots/)
+  assert.doesNotMatch(shell, /transitionSignature|cancelBeat|snapshotSignature/)
+})
+
+test('finding 6: exit enables capture names before collecting departing panes', () => {
+  const enableAt = scene.indexOf('html.dataset.modeViewTransition = direction')
+  const collectAt = scene.indexOf("let snapshots = direction === 'exit'")
+  assert.ok(enableAt >= 0, 'root capture attribute should be enabled')
+  assert.ok(collectAt >= 0, 'departing pane snapshots should be collected')
+  assert.ok(enableAt < collectAt, 'capture names must exist before exit reads them')
 })
 
 // -- Finding 7: mode-restoring Undo routes through the controller --------------
 test('finding 7: undo routes the mode restoration through mode.undo before UNDO_LAST', () => {
-  assert.match(shell, /mode\.undo\(\{ restoredMode, presentation \}\)/)
+  assert.match(shell, /modeView\.run\(\{[\s\S]*?cause: 'undo'/)
+  assert.match(shell, /update: \(\) => \{\s*\n\s*mode\.undo\(\{ restoredMode \}\)\s*\n\s*dispatchWorkspace\(\{ type: 'UNDO_LAST' \}\)/)
   assert.match(shell, /const restoredMode = undoSlot\.restoreViewMode\s*\n\s*\? undoSlot\.ws\.viewMode : wsState\.ws\.viewMode/)
-  // The undo presentation is derived from the tree the beat animates (v2).
-  assert.match(shell, /const presentation = restoredMode === 'panes'\s*\n\s*\? deriveEnterPlan/)
+  assert.match(shell, /const plan = deriveModeSnapshotPlan\(\{/)
 })
 
 // -- Finding R3: the last-tab-close auto-return arms the descriptor same-batch ---
@@ -180,13 +152,13 @@ test('finding R3: an emptying close arms the auto-return flip in the SAME batch,
   // The auto-return no longer lags a frame: closeTab detects the close will empty
   // the builder tree and dispatches an INSTANT mode flip (cause 'auto') alongside
   // CLOSE_TAB, so committedMode flips to single WITH the tree — not a render later
-  // via the passive sync-committed reconcile. It is a normal planned exit, not a
+  // via the passive sync-committed reconcile. It is a normal mode change, not a
   // separate autoFlip event (that orphaned API was deleted).
   assert.match(shell, /paneModel\.isEmptyTree\(paneModel\.closeTab\(ws, key\)\)\) \{\s*\n\s*mode\.toggle\(\{ cause: 'auto', to: 'single' \}\)/)
   assert.doesNotMatch(controller, /autoFlip/)
-  // An emptied-tree flip carries no plan → the machine flips instantly (no beat).
+  // An emptied-tree flip is ordinary state with no visual scene to capture.
   const flipped = modeReducer({ committedMode: 'panes', transition: null, nextId: 1 },
-    { type: 'toggle', cause: 'auto', to: 'single', presentation: null })
+    { type: 'toggle', cause: 'auto', to: 'single' })
   assert.equal(flipped.committedMode, 'single')
   assert.equal(flipped.transition, null)
 })
@@ -210,18 +182,18 @@ test('finding R2: a foreground single-world placement dismisses the Settings tak
   assert.match(nav, /const dismissSettings = useCallback\(\(\) => \{\s*\n\s*if \(!settingsOpenRef\.current\) return/)
 })
 
-// -- Finding W1: an epoch-keyed completion watchdog bounds a stuck beat ---------
-test('finding W1: a bounded completion watchdog force-completes a stranded epoch (INV 7/14)', () => {
-  // A finished promise that never resolves while the page stays visible would strand
-  // the descriptor (the visibility reconcile only runs on visibilitychange). The
-  // watchdog is armed inside the same completion effect, bounded by the plan's
-  // totalMs + margin, dispatching complete{captured epoch}; the reducer's stale-epoch
-  // guard makes a late fire safe. It is the ONLY correctness timer.
-  assert.match(controller, /const watchdog = setTimeout\(settle, contract\.maxMs \+ RECONCILE_SLACK_MS\)/)
-  assert.match(controller, /clearTimeout\(watchdog\)/)
-  // No other bare setTimeout/setInterval correctness timer lives in the controller.
-  const timers = controller.match(/set(Timeout|Interval)\(/g) || []
-  assert.equal(timers.length, 1, 'exactly one timer — the watchdog')
+// -- Finding W1: browser completion replaces a guessed watchdog ----------------
+test('finding W1: transition.finished owns completion with no correctness timer', () => {
+  assert.match(scene, /transition\.finished\.then\([\s\S]*?settle\(id\)/)
+  assert.match(scene, /transition\.skipTransition\(\)/)
+  assert.doesNotMatch(scene, /setTimeout|setInterval/)
+  assert.doesNotMatch(controller, /setTimeout|setInterval|getAnimations/)
+})
+
+test('mode preparation is hidden behind the captured old scene', () => {
+  assert.match(scene, /html\.dataset\.modeViewTransition = direction[\s\S]*?let snapshots[\s\S]*?let transition/)
+  assert.match(scene, /document\.startViewTransition\(\(\) => \{[\s\S]*?flushSync/)
+  assert.match(scene, /transition\.ready\.then\(\(\) => \{/)
 })
 
 // -- Finding 8: slot-only app gets a synthetic history owner -------------------
@@ -277,20 +249,20 @@ test('finding 12: Shift+Enter ignores auto-repeat and clears its click-suppressi
 // -- Finding F13 (expanding review): the beat carries an HONEST cause -----------
 test('finding F13: cause threads from the gesture/keyboard, never a hardcoded hold', () => {
   // The controller forwards the caller's cause instead of hardcoding 'hold'.
-  assert.match(controller, /const toggle = useCallback\(\(\{ cause, to, presentation \} = \{\}\)/)
-  assert.match(controller, /type: 'toggle', cause, to: dest, from, presentation: plan/)
+  assert.match(controller, /const toggle = useCallback\(\(\{ cause, to \} = \{\}\)/)
+  assert.match(controller, /dispatch\(\{ type: 'toggle', cause, to: dest \}\)/)
   assert.doesNotMatch(controller, /type: 'toggle', cause: 'hold'/)
-  // Shell forwards the caller's cause into mode.toggle alongside the latched plan.
-  assert.match(shell, /mode\.toggle\(\{ cause, presentation \}\)/)
+  assert.match(shell, /cause,\s*\n\s*plan,\s*\n\s*update:/)
+  assert.match(shell, /mode\.toggle\(\{ cause, to \}\)/)
   // Each source layer names its own beat honestly.
   assert.match(gesture, /onToggleMode\?\.\('hold'\)/)
   assert.match(gesture, /onToggleMode\?\.\('swipe'\)/)
   assert.match(brand, /onToggleMode\('keyboard'\)/)
 })
 
-// -- Finding 13: reduced motion is reactive -----------------------------------
-test('finding 13: reduced-motion changes settle a live beat; the brand has no perpetual rAF', () => {
-  assert.match(controller, /matchMedia\('\(prefers-reduced-motion: reduce\)'\)/)
-  assert.match(controller, /if \(t && t\.phase !== 'drag-preview'\) dispatch\(\{ type: 'complete', id: t\.id \}\)/)
+// -- Finding 13: reduced motion takes the instant scene path ------------------
+test('finding 13: reduced motion bypasses capture; the brand has no perpetual rAF', () => {
+  assert.match(scene, /!prefersReducedMotion\(\)/)
+  assert.match(scene, /if \(!supported\) \{\s*\n\s*flushSync\(update\)/)
   assert.doesNotMatch(brand, /requestAnimationFrame|useLivingHalo|logo-halo/)
 })

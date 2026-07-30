@@ -1,11 +1,11 @@
 /**
  * The first-class New Chat landing painted for a null single-screen slot
  * (round 4 item 3). A null slot is a DEFINITE New Chat destination now — never the
- * freshest transcript — so the honest beat destination is this cheap, always-available
+ * freshest transcript — so the destination is this cheap, always-available
  * surface. It shares ChatView's empty-treatment visuals (the same .chat__empty-wrap /
  * .chat__empty glyph + title) so the swap to a real empty ChatView, once the row
- * materializes, is visually seamless. It also doubles as the stationary world-reveal
- * underlay while the panes slide away.
+ * materializes, is visually seamless. The browser can capture it as the settled
+ * Standard scene while Builder panes slide away.
  *
  * It is deliberately NOT a live composer: drafts, attachments, provider state, and the
  * send pipeline are all chat-ID-bound, so the row is materialized AFTER the descriptor

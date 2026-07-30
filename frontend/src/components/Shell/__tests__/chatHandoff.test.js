@@ -97,7 +97,7 @@ test('only the painted workspace world can expose its handoff layers', () => {
   )
   assert.match(
     shell,
-    /const surfaceVisible = !!\(underlay \|\| paned \|\| fullBleed\)/,
+    /const surfaceVisible = !!\(paned \|\| fullBleed\)/,
     'a retained owner in the hidden world must remain mounted without becoming visible',
   )
   assert.match(

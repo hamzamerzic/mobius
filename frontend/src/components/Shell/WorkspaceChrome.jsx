@@ -5,6 +5,7 @@ import {
 } from './paneModel.js'
 import { ARROW_STEP_RATIO } from '../../lib/splitHelper.js'
 import { PaneStrip } from './PaneStrip.jsx'
+import { modeViewTransitionStyle } from './useModeViewTransition.js'
 
 // The chrome layer for a tiled (≥2 visible leaves) workspace (design §2). It is
 // a sibling AFTER the flat content wrappers, absolute inset:0, pointer-events
@@ -94,9 +95,6 @@ export default function WorkspaceChrome({
   onTogglePaneFocus,
   onChatPaneSelected,
   revealKey = 0,
-  // key → { motion, vars } for the live mode beat, so each strip deals WITH its pane
-  // (Shell's wrapperMotion). Null/absent when no beat is live.
-  stripMotion = null,
 }) {
   const focusPane = useCallback((paneId) => {
     const newlyFocused = workspace.focusedPaneId !== paneId
@@ -268,8 +266,7 @@ export default function WorkspaceChrome({
             paneFocused={focusedPaneViewId === paneId}
             onTogglePaneFocus={onTogglePaneFocus}
             revealKey={revealKey}
-            // The strip deals WITH its pane this beat (motion keyed by its active tab).
-            motion={stripMotion ? stripMotion(pane.activeTabKey) : null}
+            viewTransitionStyle={modeViewTransitionStyle('strip', paneId, paneId)}
           />
         )
       })}
