@@ -151,7 +151,6 @@ export default function Shell() {
   } = useDesktopSidebar()
 
   const {
-    legacyOpenTabs,
     workspace,
     workspaceStateRef,
     dispatchWorkspace,
@@ -730,25 +729,18 @@ export default function Shell() {
   // A single implicit home tab on a fresh session stays visually identical to
   // the pre-workspace shell. State (rather than a render-time ref mutation) keeps
   // this safe under replayed or abandoned concurrent renders.
-  const [tabStripEngaged, setTabStripEngaged] = useState(legacyOpenTabs.length > 0)
+  const [tabStripEngaged, setTabStripEngaged] = useState(openTabs.length >= 2)
   useEffect(() => {
     if (openTabs.length >= 2) setTabStripEngaged(true)
     else if (openTabs.length === 0) setTabStripEngaged(false)
   }, [openTabs.length])
-  // Dual-write on every workspace commit: the versioned blob is authoritative on
-  // boot, and the legacy flat key is mirrored for one release so a rolled-back
-  // client still finds its tabs. The rollback ordering keeps the focused pane
-  // together and its active tab last for older clients.
+  // Persist only the versioned workspace. The former flat-tab rollback mirror
+  // completed its release window and was removed so every boot has one owner.
   useEffect(() => {
     try {
       sessionStorage.setItem(paneModel.STORAGE_KEY, paneModel.serializeWorkspace(workspace))
     } catch { /* private mode / quota — workspace stays in memory only */ }
-    tabModel.writeOpenTabs(
-      tabStripEngaged
-        ? paneModel.flattenRollbackPriority(workspace)
-        : [],
-    )
-  }, [tabStripEngaged, workspace])
+  }, [workspace])
   // Pointer events inside an iframe do not bubble to its positioned shell
   // wrapper. The verified live frame sends a tiny focus signal so app panes have
   // the same click-to-focus semantics as native chat panes.

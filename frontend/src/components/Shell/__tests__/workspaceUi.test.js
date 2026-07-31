@@ -71,15 +71,15 @@ test('an implicit home tab does not engage the single-pane tab strip', () => {
   // Only a fallback workspace may be treated as implicit. A valid one-leaf
   // single-screen blob intentionally has an empty legacy mirror; resetting it
   // on a deep link would silently change its view mode back to builder.
-  assert.match(workspaceSession, /const replaceImplicitBootTab = !blobValid\s*\n?\s*&& legacyOpenTabs\.length === 0/)
-  assert.match(shell, /const \[tabStripEngaged, setTabStripEngaged\] = useState\(legacyOpenTabs\.length > 0\)/)
+  assert.match(workspaceSession, /const replaceImplicitBootTab = !blobValid\s*\n?\s*&& Object\.keys\(workspace\.panes\)\.length === 1/)
+  assert.match(shell, /const \[tabStripEngaged, setTabStripEngaged\] = useState\(openTabs\.length >= 2\)/)
   assert.match(shell, /if \(openTabs\.length >= 2\) setTabStripEngaged\(true\)/)
   assert.match(shell, /else if \(openTabs\.length === 0\) setTabStripEngaged\(false\)/)
   // With splits ON the strip follows the EFFECTIVE builder world only (never
   // single mode or an immersive takeover); the engaged latch is the kill-switch
   // world's legacy rule.
   assert.match(shell, /const tabStripVisible = !immersiveActive\s*\n?\s*&& \(SPLITS \? effectiveViewMode === 'panes' : tabStripEngaged\)\s*\n?\s*&& openTabs\.length >= 1/)
-  assert.match(shell, /tabStripEngaged[\s\S]*?paneModel\.flattenRollbackPriority\(workspace\)[\s\S]*?: \[\]/)
+  assert.doesNotMatch(shell, /mobius-open-tabs|flattenRollbackPriority|writeOpenTabs/)
   // v2 DELETED the legacy sole-tab "unpin" shortcut (deletion list): the sole-tab
   // close is always a real CLOSE_TAB now, so an emptied builder auto-returns to
   // single. The ONE unified close takes a tab object + opts (INV 13).

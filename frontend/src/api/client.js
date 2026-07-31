@@ -176,7 +176,6 @@ function delDatabase(name, label) {
       const req = indexedDB.deleteDatabase(name)
       req.onsuccess = req.onerror = () => resolve()
       req.onblocked = () => {
-        // eslint-disable-next-line no-console
         console.warn(`mobius: ${label} DB delete blocked by an open connection on logout`)
         resolve()
       }

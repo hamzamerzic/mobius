@@ -757,12 +757,6 @@ def _converge_legacy_schema(eng) -> None:
       # deleted app leaving a stale id behind just reads as "no live
       # owner app," which the route tolerates). See models.Chat.
       _add.append("ALTER TABLE chats ADD COLUMN created_by_app_id INTEGER NULL")
-    if "agent_id" not in chats_cols:
-      # Vestigial column from the removed named-agent feature. Kept
-      # nullable so the model and any pre-removal DBs agree on the
-      # schema without a table rebuild. Nothing reads or writes it.
-      # See models.Chat.agent_id.
-      _add.append("ALTER TABLE chats ADD COLUMN agent_id VARCHAR(64) NULL")
     if "activity_at" not in chats_cols:
       # Drawer ordering key that advances only on owner-send. Backfill
       # existing rows to updated_at so their current order is preserved
