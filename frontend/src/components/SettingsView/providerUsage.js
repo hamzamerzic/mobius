@@ -27,12 +27,13 @@ export function formatUsageReset(value, now = new Date()) {
     && reset.getDate() === now.getDate()
   )
   const time = new Intl.DateTimeFormat(undefined, {
-    hour: 'numeric',
+    hour: '2-digit',
     minute: '2-digit',
+    hourCycle: 'h23',
   }).format(reset)
-  if (sameDay) return `resets ${time}`
+  if (sameDay) return `Resets ${time}`
   const day = new Intl.DateTimeFormat(undefined, { weekday: 'short' }).format(reset)
-  return `resets ${day} ${time}`
+  return `Resets ${day} ${time}`
 }
 
 export function visibleUsageWindows(snapshot) {
