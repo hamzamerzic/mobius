@@ -2511,6 +2511,162 @@ async def _prepare_app_row(
   db.flush()
   return app
 
+@dataclass(frozen=True)
+class ActivationPlan:
+  """Source and manifest state selected by reconciliation for activation."""
+
+  source_tree: dict[str, bytes]
+  static_assets: dict[str, bytes]
+  dropped_source_paths: set[str]
+  exec_paths: frozenset[str]
+  git_exec_paths: frozenset[str]
+  entry_key: str
+  job_name: str | None
+  cloned_install: bool
+  cloned_update: bool
+  merge_applied: bool
+  updating: bool
+  canonical_manifest_url: str
+  capability_contract: dict
+
+
+async def _activate_install_source(
+  db: Session,
+  *,
+  app: models.App,
+  manifest: dict,
+  plan: ActivationPlan,
+  journal: InstallJournal,
+  data_dir: Path,
+) -> str | None:
+  """Publish the reconciled source tree while its source-dir lock is held.
+
+  Returns the upstream equivalence ref that becomes safe to retire only after
+  the caller commits the row. Every filesystem mutation is registered with the
+  journal before this function returns, so the outer transaction retains one
+  rollback boundary.
+  """
+  app.version = str(manifest.get("version", "")).strip() or None
+  app.theme_color = _manifest_color(manifest.get("theme_color"))
+  app.background_color = (
+    _manifest_color(manifest.get("background_color")) or app.theme_color
+  )
+  app.display = _manifest_display(manifest.get("display"))
+
+  entry_source = plan.source_tree[plan.entry_key].decode("utf-8")
+  if plan.updating:
+    permissions = manifest.get("permissions") or {}
+    app.jsx_source = entry_source
+    app.manifest_url = plan.canonical_manifest_url
+    app.cross_app_access = permissions.get(
+      "cross_app_access", app.cross_app_access,
+    )
+    app.share_with_apps = permissions.get(
+      "share_with_apps", app.share_with_apps,
+    )
+    app.chat_log_access = permissions.get(
+      "chat_log_access", app.chat_log_access,
+    )
+    # Privileged grants are opt-in on every version; omission revokes them.
+    app.manage_apps = bool(permissions.get("manage_apps", False))
+    app.manage_skills = bool(permissions.get("manage_skills", False))
+    app.github_access = bool(permissions.get("github_access", False))
+    app.github_connect = bool(permissions.get("github_connect", False))
+    app.filesystem_access = bool(permissions.get("filesystem_access", False))
+    if "offline_capable" in manifest:
+      app.offline_capable = bool(manifest["offline_capable"])
+    if "embeds_agent" in manifest:
+      app.embeds_agent = bool(manifest["embeds_agent"])
+    app.offline_contract = manifest.get("offline") or None
+    app.system_prompt_file = manifest.get("system_prompt") or None
+    app.system_app = bool(manifest.get("system_app", False))
+    app.capability_contract = plan.capability_contract
+
+  staged_bundle = data_dir / "compiled" / f"app-{app.id}.js.staging"
+  source_dir = Path(app.source_dir) if app.source_dir else None
+  if source_dir is None:
+    await compile_jsx(app.id, entry_source, out_path=staged_bundle)
+    _publish_install_bundle(
+      app, staged_bundle, journal.rollback_actions, journal.commit_actions,
+    )
+    return None
+
+  _reject_if_source_dir_taken(db, str(source_dir), exclude_id=app.id)
+  source_dir.mkdir(parents=True, exist_ok=True)
+  jsx_file = source_dir / "index.jsx"
+  if not plan.cloned_install:
+    for rel, content in plan.source_tree.items():
+      target = source_dir / rel
+      backup = (
+        jsx_file.with_suffix(".jsx.bak")
+        if rel == "index.jsx"
+        else target.with_name(target.name + ".bak")
+      )
+      target.parent.mkdir(parents=True, exist_ok=True)
+      _assert_within(source_dir, target, f"source_files {rel}")
+      _write_source_file(
+        target,
+        content,
+        backup,
+        journal.created_paths,
+        journal.rollback_actions,
+        journal.commit_actions,
+      )
+      if rel in plan.exec_paths or rel in plan.git_exec_paths:
+        target.chmod(0o755)
+    _prune_dropped_source_files(
+      source_dir,
+      plan.dropped_source_paths,
+      journal.rollback_actions,
+      journal.commit_actions,
+    )
+    if not plan.cloned_update:
+      _check_source_completeness(
+        app_name=str(manifest.get("name") or app.slug),
+        manifest=manifest,
+        source_tree=plan.source_tree,
+        entry_key=plan.entry_key,
+        static_dests=list(plan.static_assets),
+        job_name=plan.job_name,
+      )
+
+  _write_static_assets(
+    source_dir,
+    plan.static_assets,
+    journal.created_paths,
+    journal.rollback_actions,
+    journal.commit_actions,
+  )
+  await compile_jsx(
+    app.id,
+    entry_source,
+    out_path=staged_bundle,
+    source_path=source_dir / plan.entry_key,
+  )
+  _publish_install_bundle(
+    app, staged_bundle, journal.rollback_actions, journal.commit_actions,
+  )
+
+  commit_message = (
+    f"install: {manifest.get('name', app.slug)} "
+    f"v{manifest.get('version', 'unknown')}"
+  )
+  equivalence_target = None
+  if plan.merge_applied and app.upstream_commit:
+    await asyncio.to_thread(
+      app_git.commit_replay,
+      source_dir,
+      app.upstream_commit,
+      commit_message,
+    )
+    equivalence_target = app.upstream_commit
+  else:
+    await asyncio.to_thread(app_git.commit_local, source_dir, commit_message)
+  app.source_commit = await asyncio.to_thread(
+    app_git.head_sha, source_dir, app_git.LOCAL_BRANCH,
+  )
+  return equivalence_target
+
 
 async def install_from_manifest(
   db: Session,
@@ -3067,208 +3223,28 @@ async def install_from_manifest(
       # conflict skips it (the source stays the local edits, served by the prior
       # bundle). The no-source_dir legacy path falls through with no lock.
       if mode != "conflict":
-        # Stamp the installed version on the row now that we know the source is
-        # actually being applied (the conflict path skips this with the old
-        # version intact). This is what GET /api/apps/ exposes, so the store and
-        # any out-of-band caller read the installed version without a side-map.
-        app.version = str(manifest.get("version", "")).strip() or None
-        app.theme_color = _manifest_color(manifest.get("theme_color"))
-        app.background_color = _manifest_color(manifest.get("background_color")) or app.theme_color
-        app.display = _manifest_display(manifest.get("display"))
-
-        # `app.jsx_source` mirrors the entry the tree carries (the merged
-        # entry on a clean update, the upstream bytes otherwise).
-        entry_source = source_tree[entry_key].decode("utf-8")
-        if existing:
-          # Apply the (possibly merged) source AND the new manifest's capability /
-          # offline fields now that the merge decision is made and the conflict
-          # short-circuit above has been skipped. Deferring these past the
-          # conflict skip keeps a served-old-code conflict from jumping
-          # capabilities or offline semantics ahead of the code actually running.
-          # Without local divergence (or for an app with no source_dir),
-          # the entry is just the upstream bytes.
-          app.jsx_source = entry_source
-          # Re-stamp the canonical identity. A no-op for a plain re-install (the
-          # row already matched on this exact value), but LOAD-BEARING for an
-          # adopted predecessor: a rename carried the predecessor's OLD canonical
-          # url and a legacy adoption carried NULL/"" — without this, the next
-          # install of the new id would miss the manifest_url match and mint a
-          # duplicate, defeating the adoption. Deferred past the conflict skip so
-          # a served-old-code conflict keeps its old provenance.
-          app.manifest_url = canonical_manifest_url
-          app.cross_app_access = perms.get("cross_app_access", app.cross_app_access)
-          app.share_with_apps = perms.get("share_with_apps", app.share_with_apps)
-          app.chat_log_access = perms.get("chat_log_access", app.chat_log_access)
-          # Privileged grants are opt-in on EVERY published version: an update
-          # that omits the key REVOKES it, never preserves a stale privileged
-          # bit from an older manifest. This must match the capability contract
-          # (app_capabilities builds each as `perms.get(key, False)`) and the
-          # fresh-install path above — retaining an omitted grant here diverged
-          # the durable row from its own contract (e.g. `manage_skills=true`
-          # while the contract recorded false), leaving authorization to trust a
-          # capability the new manifest never asked for.
-          app.manage_apps = bool(perms.get("manage_apps", False))
-          app.manage_skills = bool(perms.get("manage_skills", False))
-          app.github_access = bool(perms.get("github_access", False))
-          app.github_connect = bool(perms.get("github_connect", False))
-          app.filesystem_access = bool(perms.get("filesystem_access", False))
-          if "offline_capable" in manifest:
-            app.offline_capable = bool(manifest["offline_capable"])
-          if "embeds_agent" in manifest:
-            app.embeds_agent = bool(manifest["embeds_agent"])
-          # P1-D: persist the offline contract block (replaces on update to match
-          # the new manifest; None if the key is absent in the new manifest).
-          app.offline_contract = manifest.get("offline") or None
-          app.system_prompt_file = manifest.get("system_prompt") or None
-          app.system_app = bool(manifest.get("system_app", False))
-          app.capability_contract = capability_contract
-
-        # The compiled bundle is written OUT OF PLACE to a staging file, then
-        # atomically published under its SHA-256 name BEFORE the DB commit. The
-        # row keeps referencing its prior immutable bundle until commit, so a
-        # concurrent module read can observe neither a half-write nor
-        # uncommitted code; after commit, the new path necessarily exists. A
-        # rollback removes the new orphan and a successful commit removes the
-        # superseded path. Startup reaps either artifact after a process crash.
-        # The actual compile happens below, AFTER the source files are on disk,
-        # so esbuild can bundle a multi-file app's sibling imports from the real
-        # source tree — a syntax error there raises and the outer except rolls
-        # everything back. Explicit apply uses the same artifact transaction.
-        staged_bundle = data_dir / "compiled" / f"app-{app.id}.js.staging"
-
-        # Guard on the raw string, not the Path: Path("") is PosixPath('.'),
-        # which is truthy — a legacy sourceless app (source_dir NULL/"") would
-        # slip into this branch and write index.jsx into the process cwd.
-        source_dir_path = Path(app.source_dir) if app.source_dir else None
-        if source_dir_path is not None:
-          # The per-source-dir lock is ALREADY held (acquired above for the merge
-          # decision and kept across this write), so another source commit can't
-          # interleave and the merge result we computed is exactly what lands.
-          # Every file is written atomically, and on an UPDATE the prior copy is
-          # snapshotted to a .bak so a later rollback restores it. A multi-file
-          # app's siblings must be on disk before esbuild bundles them.
-          _reject_if_source_dir_taken(
-            db, str(source_dir_path), exclude_id=app.id
-          )
-          source_dir_path.mkdir(parents=True, exist_ok=True)
-          jsx_file = source_dir_path / "index.jsx"
-          # Write the WHOLE source tree: index.jsx + every sibling + the job
-          # script, all just keys. index.jsx keeps its historical
-          # `index.jsx.bak` snapshot name (so the existing rollback expectations
-          # hold); every other file uses `<name>.bak`. Nested paths get their
-          # parent dirs created first; the job script is staged executable.
-          if not cloned_install:
-            for rel, content in source_tree.items():
-              target = source_dir_path / rel
-              if rel == "index.jsx":
-                backup = jsx_file.with_suffix(".jsx.bak")
-              else:
-                backup = target.with_name(target.name + ".bak")
-              # Create parent dirs first so the realpath check sees the actual
-              # on-disk shape (a symlinked existing parent resolves to its
-              # target), then reject any write whose resolved path escapes the
-              # source dir.
-              target.parent.mkdir(parents=True, exist_ok=True)
-              _assert_within(source_dir_path, target, f"source_files {rel}")
-              _write_source_file(
-                target, content, backup,
-                created_paths, rollback_actions, commit_actions,
-              )
-              if rel in exec_paths or rel in git_exec_paths:
-                target.chmod(0o755)
-            # Reconcile the worktree to the source tree: a file the new version
-            # dropped (a sibling, an old job) must be deleted, not left on disk
-            # to be re-recorded onto `main` as permanent local divergence. The
-            # explicit upstream-diff delete set keeps local-only tracked source
-            # files out of prune's reach.
-            _prune_dropped_source_files(
-              source_dir_path, dropped_source_paths,
-              rollback_actions, commit_actions,
-            )
-            # On the synthetic-fetch path the on-disk tree is EXACTLY what the
-            # manifest declared (entry + source_files + job), so an entry that
-            # imports an undeclared sibling ships an incomplete tree that can't
-            # load — the Editor launch bug. Reject it here with a precise 422
-            # (esbuild would too, but with a cryptic "Could not resolve"). A
-            # git-origin-backed tree (`cloned_install` fresh clone, or
-            # `cloned_update` origin fetch) is skipped: it carries the whole
-            # repo, complete by construction, so source_files completeness is
-            # moot for it — the standalone CLI (scripts/validate-app.py) is the
-            # pre-push gate that holds a cloned app's manifest to the same bar
-            # for OTHER install paths. Errors raise HTTPException(422) → the
-            # outer handler rolls the source writes back.
-            if not cloned_update:
-              _check_source_completeness(
-                app_name=str(manifest.get("name") or app.slug),
-                manifest=manifest,
-                source_tree=source_tree,
-                entry_key=entry_key,
-                static_dests=list(static_assets_fetched.keys()),
-                job_name=job_name,
-              )
-          # Materialize declared static destinations before compilation: an app
-          # may import a generated same-origin module from `./static/...`, and
-          # the source completeness contract already treats those destinations
-          # as valid graph nodes. Rollback actions keep a failed compile atomic.
-          _write_static_assets(
-            source_dir_path,
-            static_assets_fetched,
-            created_paths,
-            rollback_actions,
-            commit_actions,
-          )
-          # Compile now that the whole source tree is on disk. Passing the real
-          # entry path makes esbuild resolve `./cards.js`-style sibling imports
-          # from the files just written; publication of the staged bundle is
-          # content-addressed and precedes the row commit. A compile failure
-          # raises into the outer except, which runs the source rollback actions
-          # appended above (restoring every .bak). `entry_key` is the entry's
-          # on-disk name on every path that reaches here: synthetic trees
-          # write it as the root index.jsx, cloned trees keep the repo's own
-          # filename (a cloned install skipped the write loop entirely).
-          await compile_jsx(
-            app.id, entry_source,
-            out_path=staged_bundle, source_path=source_dir_path / entry_key,
-          )
-          _publish_install_bundle(
-            app, staged_bundle, rollback_actions, commit_actions,
-          )
-          # On the Git path, commit the working-tree source onto the local
-          # `main` branch so future explicit applies build on a known base.
-          # When this update folded upstream into the served source, record it
-          # as a single-parent replay on the upstream tip (commit_replay) so the
-          # merge base advances and history stays linear — otherwise the NEXT
-          # update re-merges from the install point and conflicts spuriously
-          # even on disjoint changes. A plain local commit otherwise (fresh
-          # install, or a conflict that left local untouched). No-op when the
-          # source is unchanged.
-          if git_source_dir:
-            commit_msg = (
-              f"install: {manifest.get('name', app.slug)} "
-              f"v{manifest.get('version', 'unknown')}"
-            )
-            if merge_applied and app.upstream_commit:
-              await asyncio.to_thread(
-                app_git.commit_replay, source_dir_path,
-                app.upstream_commit, commit_msg,
-              )
-              equivalence_target_to_retire = app.upstream_commit
-            else:
-              await asyncio.to_thread(
-                app_git.commit_local, source_dir_path, commit_msg,
-              )
-            app.source_commit = await asyncio.to_thread(
-              app_git.head_sha, source_dir_path, app_git.LOCAL_BRANCH,
-            )
-        else:
-          # No source_dir (legacy app): there is no sibling tree on disk, so
-          # compile the bare entry string with no source_path — esbuild writes it
-          # to a temp file and bundles that. The staged bundle still promotes
-          # into its immutable content path before commit.
-          await compile_jsx(app.id, entry_source, out_path=staged_bundle)
-          _publish_install_bundle(
-            app, staged_bundle, rollback_actions, commit_actions,
-          )
+        equivalence_target_to_retire = await _activate_install_source(
+          db,
+          app=app,
+          manifest=manifest,
+          plan=ActivationPlan(
+            source_tree=source_tree,
+            static_assets=static_assets_fetched,
+            dropped_source_paths=dropped_source_paths,
+            exec_paths=exec_paths,
+            git_exec_paths=git_exec_paths,
+            entry_key=entry_key,
+            job_name=job_name,
+            cloned_install=cloned_install,
+            cloned_update=cloned_update,
+            merge_applied=merge_applied,
+            updating=existing is not None,
+            canonical_manifest_url=canonical_manifest_url,
+            capability_contract=capability_contract,
+          ),
+          journal=journal,
+          data_dir=data_dir,
+        )
     finally:
       # Release the per-source-dir lock (held across the merge + write for the
       # git path) BEFORE the seeds block takes app_storage_lock, preserving the
