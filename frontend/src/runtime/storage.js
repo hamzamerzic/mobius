@@ -715,7 +715,6 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
           // Poison op — a malformed/forbidden request that will never
           // succeed on replay. Drop it (dead-letter) and keep draining
           // so it can't head-of-line-block every later write forever.
-          // eslint-disable-next-line no-console
           console.warn('mobius: dropping un-syncable write', op.method, op.path, e.message)
           const rejected = outcomeFromOp(op, 'rejected', { status: e.status })
           await recordWriteOutcome(rejected)
