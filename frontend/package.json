@@ -7,6 +7,9 @@
     "dev": "vite",
     "build": "node scripts/safe-build.mjs",
     "preview": "vite preview",
+    "runtime:build": "node scripts/build-runtime.mjs",
+    "runtime:check": "node scripts/build-runtime.mjs --check",
+    "pretest:lib": "npm run runtime:check",
     "test": "npm run test:lib && npm run test:hooks",
     "test:lib": "node --loader=./src/lib/__tests__/vite-env-loader.mjs --test $(find src/lib src/utils src/hooks src/components/DiffView src/components/ProviderAuth src/components/NotificationsView src/components/ChatView/__tests__ src/components/Shell/__tests__ -name '*.test.js')",
     "test:hooks": "node --loader=./src/components/ChatView/hooks/__tests__/react-loader.mjs --test $(find src/components/ChatView/hooks -name '*.test.js') $(find src/components/Shell/__tests__ -name '*.hooktest.js')"
