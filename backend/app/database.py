@@ -497,12 +497,11 @@ def _converge_legacy_schema(eng) -> None:
   # already-populated rows are filtered out by the WHERE clause and
   # their slugs are read into `taken` so we don't collide with them.
   #
-  # _slugify_for_source_dir is intentionally inlined here rather than
-  # imported from app.routes.apps.  routes/apps.py is on the agent's
-  # write surface (chmod 664) — importing it into the migration path
-  # would mean a broken or agent-edited apps.py prevents the DB from
-  # booting.  The implementation is frozen to this copy; if the slug
-  # algorithm ever changes in apps.py, update both together.
+  # The app_identity slug algorithm is intentionally inlined here. Importing
+  # application lifecycle code into the frozen baseline migration would let a
+  # later app edit prevent the database from booting. The implementation is
+  # frozen to this copy; if the live algorithm changes, decide explicitly
+  # whether old rows should retain their historical identity.
   def _slugify_for_source_dir(name: str) -> str:
     slug = "".join(
       ch if ch.isalnum() else "-" for ch in (name or "").lower()

@@ -89,9 +89,7 @@ from app.net_utils import validate_url_safe as _validate_url_safe
 from app.storage_io import atomic_write
 from app.app_identity import (
   allocate_unique_slug,
-  derive_source_dir as _derive_source_dir,
   reject_if_source_dir_taken as _reject_if_source_dir_taken,
-  slugify_for_source_dir as _slugify_for_source_dir,
 )
 
 log = logging.getLogger("mobius.install")
@@ -1162,7 +1160,7 @@ def _reconcile_cron_after_install_rollback() -> None:
   """
   try:
     from app.database import SessionLocal
-    from app.routes.apps import reconcile_app_cron_supervision
+    from app.routes.app_schedules import reconcile_app_cron_supervision
     cron_db = SessionLocal()
     try:
       _count, warnings = reconcile_app_cron_supervision(cron_db)

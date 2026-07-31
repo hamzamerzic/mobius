@@ -449,7 +449,7 @@ def test_reconcile_restores_zone_schedule_as_wall_clock_gate(client, auth, db):
     source_dir=source_dir,
   )["id"]
 
-  from app.routes import apps as apps_module
+  from app.routes import app_schedules as apps_module
   calls = []
 
   def fake_register(slug, schedule_expr, job_path, app_id=None,
@@ -483,7 +483,7 @@ def test_reconcile_fails_closed_on_malformed_zone_declaration(
     source_dir=source_dir,
   )
 
-  from app.routes import apps as apps_module
+  from app.routes import app_schedules as apps_module
   with patch("app.install._register_cron") as register:
     count, warnings = apps_module.reconcile_app_cron_supervision(db)
 
@@ -630,7 +630,7 @@ def test_app_schedules_resolve_supervised_runner_job(client, auth):
     source_dir=source_dir,
   )["id"]
 
-  from app.routes import apps as apps_module
+  from app.routes import app_schedules as apps_module
   supervised = (
     "15 4 * * * python3 /app/scripts/app-job-runner.py "
     f"{app_id} {source_dir}/fetch.sh"
@@ -660,7 +660,7 @@ def test_boot_reconciles_legacy_direct_cron_through_runner(client, db):
   db.commit()
   db.refresh(app)
 
-  from app.routes import apps as apps_module
+  from app.routes import app_schedules as apps_module
   direct = f"15 4 * * * {source_dir}/fetch.sh {app.id}"
   with patch.object(apps_module, "_read_live_crontab", return_value=direct), \
        patch("app.install._register_cron") as register:
