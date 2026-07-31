@@ -1134,7 +1134,7 @@ def test_pr_labels_apply_only_existing_names_and_preserve_missing(
       return _cp("bug\narea: ui\n")
     return _cp("[]")
 
-  monkeypatch.setattr(github_routes, "_gh", fake_gh)
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
   patch = github_routes._apply_reviewed_pr_labels(
     tmp_path,
     "mobius-os/mobius",
@@ -1160,7 +1160,7 @@ def test_pr_label_permission_failure_does_not_fail_an_open_pr(
       return _cp("bug\n")
     return _cp("forbidden", returncode=1)
 
-  monkeypatch.setattr(github_routes, "_gh", fake_gh)
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
   patch = github_routes._apply_reviewed_pr_labels(
     tmp_path,
     "someone/example",
@@ -1188,7 +1188,7 @@ def test_pr_label_apply_transport_failure_is_nonfatal(
       return _cp("bug\n")
     raise label_failure
 
-  monkeypatch.setattr(github_routes, "_gh", fake_gh)
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
   patch = github_routes._apply_reviewed_pr_labels(
     tmp_path,
     "someone/example",
@@ -1490,13 +1490,13 @@ def test_push_topic_branch_does_not_retry_deterministic_rejections(
   calls = []
   sleeps = []
   monkeypatch.setattr(
-    "app.routes.github._git",
+    "app.github_contribution_git._git",
     lambda _repo, *args, **kwargs: calls.append(args) or _cp(
       stderr="remote: error: GH006: Protected branch update failed",
       returncode=1,
     ),
   )
-  monkeypatch.setattr("app.routes.github.time.sleep", sleeps.append)
+  monkeypatch.setattr("app.github_contributions.time.sleep", sleeps.append)
 
   error = _push_topic_branch(tmp_path, "fix/demo")
 
@@ -1517,10 +1517,10 @@ def test_push_topic_branch_briefly_retries_transient_transport_errors(
   ))
   sleeps = []
   monkeypatch.setattr(
-    "app.routes.github._git",
+    "app.github_contribution_git._git",
     lambda _repo, *args, **kwargs: next(outcomes),
   )
-  monkeypatch.setattr("app.routes.github.time.sleep", sleeps.append)
+  monkeypatch.setattr("app.github_contributions.time.sleep", sleeps.append)
 
   assert _push_topic_branch(tmp_path, "fix/demo") is None
   assert sleeps == [0.5, 1.0]
@@ -1556,16 +1556,16 @@ def test_push_reviewed_topic_adapts_only_after_workflow_scope_rejection(
       )
     return None
 
-  monkeypatch.setattr("app.routes.github._push_topic_branch", fake_push)
+  monkeypatch.setattr("app.github_contributions._push_topic_branch", fake_push)
   monkeypatch.setattr(
-    "app.routes.github._inspect_owner_fork_default_branch",
+    "app.github_contributions._inspect_owner_fork_default_branch",
     lambda _repo, fork, **kwargs: inspections.append((fork, kwargs)) or {
       "last_submit_fork_sync": "strictly-behind",
       "last_submit_fork_sha": "c" * 40,
     },
   )
   monkeypatch.setattr(
-    "app.routes.github._build_fork_compatible_topic_commit",
+    "app.github_contributions._build_fork_compatible_topic_commit",
     lambda *_args, **_kwargs: built_sha,
   )
 
@@ -1608,22 +1608,22 @@ def test_push_reviewed_topic_uses_granted_workflow_scope_only_as_fallback(
       )
     return None
 
-  monkeypatch.setattr("app.routes.github._push_topic_branch", fake_push)
+  monkeypatch.setattr("app.github_contributions._push_topic_branch", fake_push)
   monkeypatch.setattr(
-    "app.routes.github._inspect_owner_fork_default_branch",
+    "app.github_contributions._inspect_owner_fork_default_branch",
     lambda *_args, **_kwargs: {
       "last_submit_fork_sync": "strictly-behind",
       "last_submit_fork_sha": "c" * 40,
     },
   )
   monkeypatch.setattr(
-    "app.routes.github._build_fork_compatible_topic_commit",
+    "app.github_contributions._build_fork_compatible_topic_commit",
     lambda *_args, **_kwargs: (_ for _ in ()).throw(
       ContributionSubmitError("workflow files cannot be re-parented")
     ),
   )
   monkeypatch.setattr(
-    "app.routes.github._sync_owner_fork_with_workflow_scope",
+    "app.github_contributions._sync_owner_fork_with_workflow_scope",
     lambda _repo, fork, **kwargs: syncs.append((fork, kwargs)) or {
       "last_submit_fork_sync": "fast-forwarded",
     },
@@ -1657,11 +1657,11 @@ def test_push_reviewed_topic_skips_fork_inspection_on_happy_path(
   from app.routes.github import _push_reviewed_topic
 
   monkeypatch.setattr(
-    "app.routes.github._push_topic_branch",
+    "app.github_contributions._push_topic_branch",
     lambda _repo, _branch, _source="HEAD": None,
   )
   monkeypatch.setattr(
-    "app.routes.github._inspect_owner_fork_default_branch",
+    "app.github_contributions._inspect_owner_fork_default_branch",
     lambda *_args, **_kwargs: pytest.fail("fork inspection is not needed"),
   )
 
@@ -1697,7 +1697,7 @@ def test_inspect_owner_fork_reports_strictly_behind_without_mutation(
   gh_calls = []
 
   monkeypatch.setattr(
-    "app.routes.github._upstream_default_branch",
+    "app.github_contribution_git._upstream_default_branch",
     lambda _repo, _slug: "main",
   )
 
@@ -1712,9 +1712,9 @@ def test_inspect_owner_fork_reports_strictly_behind_without_mutation(
         return _cp(returncode=0)
     return _cp("")
 
-  monkeypatch.setattr("app.routes.github._git", fake_git)
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
   monkeypatch.setattr(
-    "app.routes.github._gh",
+    "app.github_contribution_git._gh",
     lambda _repo, *args, **kwargs: gh_calls.append(args) or _cp(""),
   )
 
@@ -1743,7 +1743,7 @@ def test_inspect_owner_fork_accepts_updated_topic_as_upstream_carrier(
   carrier_tip = "e" * 40
 
   monkeypatch.setattr(
-    "app.routes.github._upstream_default_branch",
+    "app.github_contribution_git._upstream_default_branch",
     lambda _repo, _slug: "main",
   )
 
@@ -1762,7 +1762,7 @@ def test_inspect_owner_fork_accepts_updated_topic_as_upstream_carrier(
       return _cp(f"{prefix}/fix/review\x00{carrier_tip}\n")
     return _cp("")
 
-  monkeypatch.setattr("app.routes.github._git", fake_git)
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
 
   patch = _inspect_owner_fork_default_branch(
     repo,
@@ -1791,7 +1791,7 @@ def test_inspect_owner_fork_leaves_diverged_default_branch_untouched(
   gh_calls = []
 
   monkeypatch.setattr(
-    "app.routes.github._upstream_default_branch",
+    "app.github_contribution_git._upstream_default_branch",
     lambda _repo, _slug: "main",
   )
 
@@ -1802,9 +1802,9 @@ def test_inspect_owner_fork_leaves_diverged_default_branch_untouched(
       return _cp(returncode=1)
     return _cp("")
 
-  monkeypatch.setattr("app.routes.github._git", fake_git)
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
   monkeypatch.setattr(
-    "app.routes.github._gh",
+    "app.github_contribution_git._gh",
     lambda _repo, *args, **kwargs: gh_calls.append(args) or _cp(""),
   )
 
@@ -1834,7 +1834,7 @@ def test_inspect_owner_fork_reports_current_or_ahead_branch(
   gh_calls = []
 
   monkeypatch.setattr(
-    "app.routes.github._upstream_default_branch",
+    "app.github_contribution_git._upstream_default_branch",
     lambda _repo, _slug: "main",
   )
 
@@ -1846,9 +1846,9 @@ def test_inspect_owner_fork_reports_current_or_ahead_branch(
       return _cp(returncode=0)
     return _cp("")
 
-  monkeypatch.setattr("app.routes.github._git", fake_git)
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
   monkeypatch.setattr(
-    "app.routes.github._gh",
+    "app.github_contribution_git._gh",
     lambda _repo, *args, **kwargs: gh_calls.append(args) or _cp(""),
   )
 
@@ -1883,9 +1883,9 @@ def test_sync_owner_fork_with_workflow_scope_verifies_fast_forward(
     gh_calls.append(args)
     return _cp("")
 
-  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
   monkeypatch.setattr(
-    "app.routes.github._inspect_owner_fork_default_branch",
+    "app.github_contributions._inspect_owner_fork_default_branch",
     lambda *_args, **_kwargs: {
       "last_submit_fork_branch": "main",
       "last_submit_fork_sha": "d" * 40,
@@ -2004,7 +2004,7 @@ def test_build_fork_compatible_topic_does_not_reset_if_detach_fails(
       raise ContributionSubmitError("detach failed")
     return _cp("")
 
-  monkeypatch.setattr("app.routes.github._git", fake_git)
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
 
   with pytest.raises(ContributionSubmitError, match="detach failed"):
     _build_fork_compatible_topic_commit(
@@ -2441,8 +2441,8 @@ def test_ensure_owner_fork_remote_runs_in_repo_after_pinning_origin(
       fork_ready = True
     return _cp("")
 
-  monkeypatch.setattr("app.routes.github._git", fake_git)
-  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
 
   fork_slug = _ensure_owner_fork_remote(repo, "mobius-os/app-demo", "octocat")
 
@@ -2512,7 +2512,7 @@ def test_submit_contribution_keeps_accepted_pr_open_on_label_transport_failure(
   }
   _write_contribution(app_id, record_id, record, diff_text)
 
-  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+  monkeypatch.setattr("app.github_contributions.shutil.which", lambda name: f"/bin/{name}")
   git_calls = []
   fork_ready = False
 
@@ -2577,8 +2577,8 @@ def test_submit_contribution_keeps_accepted_pr_open_on_label_transport_failure(
       raise label_failure
     return _cp("")
 
-  monkeypatch.setattr("app.routes.github._git", fake_git)
-  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
 
   r = client.post(
     f"/api/github/contributions/{app_id}/{record_id}/submit",
@@ -2677,30 +2677,30 @@ def test_submit_contribution_recovers_ambiguous_create_by_exact_pushed_head(
   }
   _write_contribution(app_id, record_id, record, diff_text)
 
-  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+  monkeypatch.setattr("app.github_contributions.shutil.which", lambda name: f"/bin/{name}")
   monkeypatch.setattr(
-    "app.routes.github._assert_fresh",
+    "app.github_contribution_git._assert_fresh",
     lambda *_args, **_kwargs: (base, head, record["plan"]["diff_sha256"]),
   )
-  monkeypatch.setattr("app.routes.github._assert_coauthor_trailer", lambda *_args: None)
-  monkeypatch.setattr("app.routes.github._assert_clean_worktree", lambda *_args: None)
+  monkeypatch.setattr("app.github_contribution_git._assert_coauthor_trailer", lambda *_args: None)
+  monkeypatch.setattr("app.github_contribution_git._assert_clean_worktree", lambda *_args: None)
   monkeypatch.setattr(
-    "app.routes.github._normalize_head_attribution",
+    "app.github_contribution_git._normalize_head_attribution",
     lambda *_args, **_kwargs: {},
   )
   monkeypatch.setattr(
-    "app.routes.github._assert_merges_with_upstream",
+    "app.github_contribution_git._assert_merges_with_upstream",
     lambda *_args, **_kwargs: {
       "last_submit_upstream_branch": "main",
       "last_submit_upstream_sha": base,
     },
   )
   monkeypatch.setattr(
-    "app.routes.github._ensure_owner_fork_remote",
+    "app.github_contributions._ensure_owner_fork_remote",
     lambda *_args, **_kwargs: "octocat/app-demo-1",
   )
   monkeypatch.setattr(
-    "app.routes.github._push_reviewed_topic",
+    "app.github_contributions._push_reviewed_topic",
     lambda *_args, **kwargs: ("HEAD", kwargs["record_patch"]),
   )
 
@@ -2738,8 +2738,8 @@ def test_submit_contribution_recovers_ambiguous_create_by_exact_pushed_head(
       return _cp("[]")
     return _cp("")
 
-  monkeypatch.setattr("app.routes.github._git", fake_git)
-  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
 
   response = client.post(
     f"/api/github/contributions/{app_id}/{record_id}/submit",
@@ -2818,7 +2818,7 @@ def test_submit_contribution_normalizes_fallback_author_before_push(
     },
   }
   _write_contribution(app_id, record_id, record, diff_text)
-  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+  monkeypatch.setattr("app.github_contributions.shutil.which", lambda name: f"/bin/{name}")
 
   git_calls = []
   normalized = False
@@ -2899,8 +2899,8 @@ def test_submit_contribution_normalizes_fallback_author_before_push(
       return _cp("https://github.com/mobius-os/app-demo/pull/44\n")
     return _cp("")
 
-  monkeypatch.setattr("app.routes.github._git", fake_git)
-  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
 
   r = client.post(
     f"/api/github/contributions/{app_id}/{record_id}/submit",
@@ -2945,7 +2945,7 @@ def test_submit_contribution_replaces_stale_fork_remote_before_push(
     },
   }
   _write_contribution(app_id, record_id, record, diff_text)
-  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+  monkeypatch.setattr("app.github_contributions.shutil.which", lambda name: f"/bin/{name}")
 
   git_calls = []
   fork_fixed = False
@@ -3008,8 +3008,8 @@ def test_submit_contribution_replaces_stale_fork_remote_before_push(
       return _cp("https://github.com/mobius-os/app-demo/pull/43\n")
     return _cp("")
 
-  monkeypatch.setattr("app.routes.github._git", fake_git)
-  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
 
   r = client.post(
     f"/api/github/contributions/{app_id}/{record_id}/submit",
@@ -3358,9 +3358,9 @@ def test_stack_preflight_requires_refresh_after_parent_merges(monkeypatch):
       "stack": {"base_branch": parent_branch},
     },
   ]
-  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
-  monkeypatch.setattr("app.routes.github._upstream_default_branch", lambda *args: "main")
-  monkeypatch.setattr("app.routes.github._assert_upstream_push_permission", lambda *args: None)
+  monkeypatch.setattr("app.github_contributions.shutil.which", lambda name: f"/bin/{name}")
+  monkeypatch.setattr("app.github_contribution_git._upstream_default_branch", lambda *args: "main")
+  monkeypatch.setattr("app.github_contribution_git._assert_upstream_push_permission", lambda *args: None)
 
   with pytest.raises(ContributionSubmitError, match="already merged"):
     _preflight_prepared_stack(rows)
@@ -3380,7 +3380,7 @@ def test_stack_preflight_rejects_changed_existing_parent(monkeypatch, tmp_path):
     )
     return _cp(changed + "\n")
 
-  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
   with pytest.raises(ContributionSubmitError, match="changed after review"):
     _assert_upstream_branch_at(
       tmp_path, "mobius-os/mobius", "stack/chat/01-parent", expected,
@@ -3487,7 +3487,7 @@ def test_direct_stack_layer_pushes_upstream_and_uses_reviewed_base(
       "diff_sha256": hashlib.sha256(diff_text.encode()).hexdigest(),
     },
   }
-  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+  monkeypatch.setattr("app.github_contributions.shutil.which", lambda name: f"/bin/{name}")
   git_calls = []
 
   def fake_git(repo_path, *args, check=True):
@@ -3531,8 +3531,8 @@ def test_direct_stack_layer_pushes_upstream_and_uses_reviewed_base(
       return _cp("https://github.com/mobius-os/app-demo/pull/73\n")
     return _cp("")
 
-  monkeypatch.setattr("app.routes.github._git", fake_git)
-  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
 
   url, number, patch = _submit_prepared_pr(
     record,
@@ -3792,7 +3792,7 @@ def test_stack_landing_requires_every_pr_check_to_be_green(monkeypatch, tmp_path
       }],
     }))
 
-  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
   with pytest.raises(ContributionSubmitError, match="still has CI running"):
     _assert_pr_checks_green(
       tmp_path,
@@ -3829,7 +3829,7 @@ def test_stack_landing_accepts_successful_neutral_and_skipped_checks(
       ],
     }))
 
-  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
   _assert_pr_checks_green(
     tmp_path,
     upstream_repo="mobius-os/app-demo",
@@ -3848,7 +3848,7 @@ def test_stack_landing_never_bypasses_protected_branch(monkeypatch, tmp_path):
     calls.append(args)
     return _cp('{"required_status_checks": {}}')
 
-  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
   with pytest.raises(ContributionSubmitError, match="is protected"):
     _assert_unprotected_landing_target(tmp_path, "mobius-os/mobius", "main")
   assert len(calls) == 1
@@ -3863,7 +3863,7 @@ def test_stack_tip_push_uses_exact_base_lease(monkeypatch, tmp_path):
     calls.append(args)
     return _cp("")
 
-  monkeypatch.setattr("app.routes.github._git", fake_git)
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
   _push_stack_tip_with_lease(
     tmp_path,
     upstream_repo="mobius-os/app-demo",
@@ -3894,8 +3894,8 @@ def test_stack_tip_push_reconciles_a_lost_success_response(monkeypatch, tmp_path
     gh_calls.append(args)
     return _cp(landed_sha)
 
-  monkeypatch.setattr("app.routes.github._git", fake_git)
-  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
   _push_stack_tip_with_lease(
     tmp_path,
     upstream_repo="mobius-os/app-demo",
@@ -3916,15 +3916,15 @@ def test_stack_tip_push_keeps_journal_when_result_cannot_be_read(
 ):
   from app.routes.github import ContributionSubmitError, _push_stack_tip_with_lease
 
-  monkeypatch.setattr("app.routes.github._PUSH_RETRIES", 1)
+  monkeypatch.setattr("app.github_contributions._PUSH_RETRIES", 1)
   monkeypatch.setattr(
-    "app.routes.github._git",
+    "app.github_contribution_git._git",
     lambda repo, *args, check=True: _cp(
       "", returncode=1, stderr="remote end hung up unexpectedly",
     ),
   )
   monkeypatch.setattr(
-    "app.routes.github._upstream_branch_sha",
+    "app.github_contribution_git._upstream_branch_sha",
     lambda *args, **kwargs: None,
   )
 
@@ -3973,7 +3973,7 @@ def test_submit_contribution_rejects_branch_diff_mismatch(
     },
   }
   _write_contribution(app_id, record_id, record, reviewed_diff)
-  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+  monkeypatch.setattr("app.github_contributions.shutil.which", lambda name: f"/bin/{name}")
   git_calls = []
 
   def fake_git(repo_path, *args, check=True):
@@ -4009,8 +4009,8 @@ def test_submit_contribution_rejects_branch_diff_mismatch(
       )
     return _cp("")
 
-  monkeypatch.setattr("app.routes.github._git", fake_git)
-  monkeypatch.setattr("app.routes.github._gh", lambda *args, **kwargs: _cp(""))
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+  monkeypatch.setattr("app.github_contribution_git._gh", lambda *args, **kwargs: _cp(""))
 
   r = client.post(
     f"/api/github/contributions/{app_id}/{record_id}/submit",
@@ -4054,7 +4054,7 @@ def test_submit_contribution_rejects_unmergeable_branch_before_push(
     },
   }
   _write_contribution(app_id, record_id, record, diff_text)
-  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+  monkeypatch.setattr("app.github_contributions.shutil.which", lambda name: f"/bin/{name}")
   git_calls = []
 
   def fake_git(repo_path, *args, check=True):
@@ -4092,8 +4092,8 @@ def test_submit_contribution_rejects_unmergeable_branch_before_push(
       return _commit_metadata(head)
     return _cp("")
 
-  monkeypatch.setattr("app.routes.github._git", fake_git)
-  monkeypatch.setattr("app.routes.github._gh", lambda *args, **kwargs: _cp(""))
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+  monkeypatch.setattr("app.github_contribution_git._gh", lambda *args, **kwargs: _cp(""))
 
   r = client.post(
     f"/api/github/contributions/{app_id}/{record_id}/submit",
@@ -4140,7 +4140,7 @@ def test_submit_contribution_records_public_branch_after_pr_create_failure(
     },
   }
   _write_contribution(app_id, record_id, record, diff_text)
-  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+  monkeypatch.setattr("app.github_contributions.shutil.which", lambda name: f"/bin/{name}")
 
   def fake_git(repo_path, *args, check=True):
     if (preflight := _submit_preflight_response(args)) is not None:
@@ -4188,8 +4188,8 @@ def test_submit_contribution_records_public_branch_after_pr_create_failure(
       raise ContributionSubmitError("create failed")
     return _cp("")
 
-  monkeypatch.setattr("app.routes.github._git", fake_git)
-  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
 
   r = client.post(
     f"/api/github/contributions/{app_id}/{record_id}/submit",
@@ -4302,7 +4302,7 @@ def test_submit_contribution_rolls_back_unready_record(
     },
   }
   _write_contribution(app_id, record_id, record)
-  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+  monkeypatch.setattr("app.github_contributions.shutil.which", lambda name: f"/bin/{name}")
 
   r = client.post(
     f"/api/github/contributions/{app_id}/{record_id}/submit",
@@ -4892,7 +4892,7 @@ def test_existing_branch_pr_classifies_states(tmp_path, monkeypatch):
     assert args[:2] == ("pr", "list") and "all" in args
     return _cp(json.dumps(rows))
 
-  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
   call = lambda: _existing_branch_pr(
     tmp_path, "mobius-os/app-demo", "octocat", "fix/x",
   )
@@ -4934,7 +4934,7 @@ def test_existing_branch_pr_fails_closed_when_lookup_fails(
   # The lookup failing must STOP the send, not let it proceed blind: the
   # whole point is refusing to trust local state about public reality.
   monkeypatch.setattr(
-    "app.routes.github._gh",
+    "app.github_contribution_git._gh",
     lambda repo_path, *args, check=True: _cp("boom", returncode=1),
   )
   with pytest.raises(ContributionSubmitError) as err:
@@ -4942,7 +4942,7 @@ def test_existing_branch_pr_fails_closed_when_lookup_fails(
   assert "Nothing was pushed" in err.value.message
 
   monkeypatch.setattr(
-    "app.routes.github._gh",
+    "app.github_contribution_git._gh",
     lambda repo_path, *args, check=True: _cp("not-json"),
   )
   with pytest.raises(ContributionSubmitError):
@@ -4983,7 +4983,7 @@ def test_send_refuses_branch_with_existing_pr_before_any_push(
       "diff_sha256": hashlib.sha256(diff_text.encode()).hexdigest(),
     },
   }
-  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+  monkeypatch.setattr("app.github_contributions.shutil.which", lambda name: f"/bin/{name}")
   git_calls = []
 
   def fake_git(repo_path, *args, check=True):
@@ -5031,8 +5031,8 @@ def test_send_refuses_branch_with_existing_pr_before_any_push(
       raise AssertionError("a duplicate send must never reach pr create")
     return _cp("")
 
-  monkeypatch.setattr("app.routes.github._git", fake_git)
-  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
 
   with pytest.raises(ContributionSubmitError) as err:
     _submit_prepared_pr(record, diff_path, direct_base_branch="main")
