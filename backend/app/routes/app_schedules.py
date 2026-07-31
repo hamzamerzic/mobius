@@ -105,7 +105,7 @@ def _manifest_schedule(source_dir: Path) -> tuple[str, str] | None:
 def _schedule_from_crontab_text(
   source_dir: Path, text: str,
 ) -> tuple[str, str] | None:
-  from app.install import _crontab_command_path
+  from app.app_cron import crontab_command_path as _crontab_command_path
 
   needle = f"{str(source_dir).rstrip('/')}/"
   for line in text.splitlines():
@@ -178,7 +178,7 @@ def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
   offset, decides the declared wall-clock occurrence at runtime.
   """
   from app import cron_tz
-  from app.install import _register_cron
+  from app.app_cron import register_cron as _register_cron
 
   settings = get_settings()
   apps_root = Path(settings.data_dir) / "apps"
@@ -444,7 +444,7 @@ def update_app_schedule(
       status_code=400, detail="App has no source_dir; cannot locate job.",
     )
   from app import cron_tz
-  from app.install import _register_cron
+  from app.app_cron import register_cron as _register_cron
   try:
     validate_cron_expr(body.cron)
   except ManifestContractError as exc:

@@ -348,7 +348,7 @@ def test_app_token_can_update_own_schedule_only(client, auth, monkeypatch):
   def fake_register(slug, schedule_expr, job_path, app_id=None):
     calls.append((slug, schedule_expr, job_path.name, app_id))
 
-  monkeypatch.setattr("app.install._register_cron", fake_register)
+  monkeypatch.setattr("app.app_cron.register_cron", fake_register)
   source_dir = Path(get_settings().data_dir) / "apps" / "news"
   source_dir.mkdir(parents=True, exist_ok=True)
   (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
@@ -390,7 +390,7 @@ def test_schedule_update_with_timezone_materializes_and_declares(
     calls.append((slug, schedule_expr, job_path.name, app_id,
                   timezone, zone_cron))
 
-  monkeypatch.setattr("app.install._register_cron", fake_register)
+  monkeypatch.setattr("app.app_cron.register_cron", fake_register)
   monkeypatch.setattr(
     "app.cron_tz.materialize_zone_cron",
     lambda zone_cron, tz_name: "* * * * *",
@@ -456,7 +456,7 @@ def test_reconcile_restores_zone_schedule_as_wall_clock_gate(client, auth, db):
                     timezone=None, zone_cron=None):
     calls.append((slug, schedule_expr, timezone, zone_cron))
 
-  with patch("app.install._register_cron", fake_register), \
+  with patch("app.app_cron.register_cron", fake_register), \
        patch("app.cron_tz.materialize_zone_cron",
              lambda zone_cron, tz_name: "* * * * *"):
     count, warnings = apps_module.reconcile_app_cron_supervision(db)
@@ -484,7 +484,7 @@ def test_reconcile_fails_closed_on_malformed_zone_declaration(
   )
 
   from app.routes import app_schedules as apps_module
-  with patch("app.install._register_cron") as register:
+  with patch("app.app_cron.register_cron") as register:
     count, warnings = apps_module.reconcile_app_cron_supervision(db)
 
   assert count == 0
@@ -663,7 +663,7 @@ def test_boot_reconciles_legacy_direct_cron_through_runner(client, db):
   from app.routes import app_schedules as apps_module
   direct = f"15 4 * * * {source_dir}/fetch.sh {app.id}"
   with patch.object(apps_module, "_read_live_crontab", return_value=direct), \
-       patch("app.install._register_cron") as register:
+       patch("app.app_cron.register_cron") as register:
     count, warnings = apps_module.reconcile_app_cron_supervision(db)
 
   assert count == 1

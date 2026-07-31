@@ -607,7 +607,7 @@ class ActiveCodexTurn:
     raw_bc = self._steer_broadcast()
     if raw_bc is None:
       return
-    from app.chat import steer_delivery_failed_event
+    from app.chat_event_sink import steer_delivery_failed_event
     raw_bc.publish(
       steer_delivery_failed_event(attempt.consume_pending_cids)
     )
@@ -616,7 +616,7 @@ class ActiveCodexTurn:
     self, attempt: _CodexSteerAttempt,
   ) -> None:
     """Persist + publish the accepted cut through the turn's owning sink."""
-    from app.chat import commit_steer_cut
+    from app.chat_event_sink import commit_steer_cut
     await commit_steer_cut(
       self.chat_id,
       attempt.user_msgs,

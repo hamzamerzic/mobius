@@ -53,6 +53,11 @@ from app import (
   models,
   source_dirs,
 )
+from app import app_cron
+from app.app_cron import (
+  crontab_command_path as _crontab_command_path,
+  cron_mutation_blocked_in_test_runtime as _cron_mutation_blocked_in_test_runtime,
+)
 from app.app_capabilities import contract_and_digest
 from app.app_source_check import check_app_source
 from app.compiler import (
@@ -236,43 +241,13 @@ _HTTP_TIMEOUT = 15.0
 # different host.
 _MAX_REDIRECTS = 5
 
-_BAKED_CRON_SCAFFOLD = Path("/app/scripts/init-cron-scaffold.sh")
+_BAKED_CRON_SCAFFOLD = app_cron.BAKED_CRON_SCAFFOLD
 # Tests override this module attribute to prevent production cron mutation.
 CRON_SCAFFOLD = _BAKED_CRON_SCAFFOLD
-_ALLOW_TEST_CRON_ENV = "MOBIUS_ALLOW_TEST_CRON"
 
 
 def _cron_scaffold() -> Path:
-  """Return an explicit test override or the active production scaffold.
-
-  Startup reconciliation must migrate persisted crontab entries immediately
-  after a platform update, before the next image rebuild refreshes /app. Prefer
-  the served checkout for that production default; retain the baked copy as
-  the degraded-boot floor.
-  """
-  if CRON_SCAFFOLD != _BAKED_CRON_SCAFFOLD:
-    return CRON_SCAFFOLD
-  live = (
-    Path(__file__).resolve().parent.parent
-    / "scripts"
-    / "init-cron-scaffold.sh"
-  )
-  return live if live.is_file() else _BAKED_CRON_SCAFFOLD
-
-
-def _cron_mutation_blocked_in_test_runtime() -> bool:
-  """Whether host crontab writes must fail closed in this process.
-
-  Pytest is occasionally run from inside the production container, where the
-  real scaffold and crontab binary are both available. Its database and
-  DATA_DIR are isolated, but a low-id test app must never escape that boundary
-  and replace a production schedule. Narrow unit tests can opt in only while
-  their crontab/scaffold subprocess is explicitly faked.
-  """
-  return (
-    os.environ.get("MOBIUS_TEST_RUNTIME") == "1"
-    and os.environ.get(_ALLOW_TEST_CRON_ENV) != "1"
-  )
+  return app_cron.cron_scaffold(CRON_SCAFFOLD)
 
 
 def _validate_manifest(m: dict) -> None:
@@ -1065,88 +1040,23 @@ def clear_pending_conflict_update(source_dir: str | Path) -> None:
   )
 
 
-def _register_cron(slug: str, schedule_expr: str, job_path: Path,
-                   app_id: int | None = None,
-                   timezone: str | None = None,
-                   zone_cron: str | None = None) -> None:
-  """Runs init-cron-scaffold.sh to install the crontab entry.
-
-  ``timezone``/``zone_cron`` (given together) declare the schedule's durable
-  zone-aware identity. The scaffold writes that identity into the complete
-  durable declaration atomically *before* installing the live entry. This
-  ordering means a persistence failure cannot change live behavior while
-  returning failure; a later live-write failure leaves a durable declaration
-  that boot reconciliation can safely retry.
-
-  The scaffold writes both the durable ``init-cron.sh`` declaration and the
-  live crontab entry. On restart, lifespan parses that declaration and rewrites
-  it through the supervised runner; app-owned shell is never executed merely
-  because the container booted. Calling the scaffold for an unchanged
-  ``(slug, schedule, job)`` is idempotent.
-
-  The job script itself is written earlier, in the transactional source
-  write (so a locally edited job survives an update via the per-app git
-  merge); the scaffold preserves an existing job file rather than stubbing
-  it, so it never clobbers what we wrote.
-
-  The job filename (e.g. fetch.sh, from the manifest's schedule.job) is
-  passed to the scaffold so the crontab entry points at the real job —
-  the scaffold defaults to job.sh otherwise, which would leave a
-  manifest that ships fetch.sh firing an empty stub.
-
-  `app_id`, when given, is passed as the scaffold's 4th arg so the
-  crontab command becomes `<job-path> <app_id>`. A reusable job that
-  reads its target app from "$1" (the same contract as the run-job
-  "Generate now" endpoint) then fires correctly from cron. Without it,
-  such a job runs with no id and exits early — which is exactly how a
-  freshly-installed news app's cron lands dead on arrival.
-  """
-  if _cron_mutation_blocked_in_test_runtime():
-    raise HTTPException(
-      500,
-      "Cron mutation is disabled in the test runtime.",
-    )
-  if (timezone is None) != (zone_cron is None):
-    raise HTTPException(
-      500, "Cron registration bug: timezone and zone_cron must be paired.",
-    )
-  if timezone is not None:
-    from app import cron_tz
-
-    if app_id is None:
-      raise HTTPException(
-        500, "A timezone-owned schedule requires an app id.",
-      )
-    if not cron_tz.valid_timezone(timezone):
-      raise HTTPException(500, f"Unknown IANA timezone: {timezone!r}")
-    if cron_tz.parse_daily_cron(zone_cron) is None:
-      raise HTTPException(
-        500, f"Zone-owned schedule must be a plain daily cron: {zone_cron!r}",
-      )
-  scaffold = _cron_scaffold()
-  if not scaffold.exists():
-    # In tests we mock this away; in containers it's always present.
-    raise HTTPException(500, "init-cron-scaffold.sh missing from image.")
-  cmd = [str(scaffold), slug, schedule_expr, job_path.name]
-  if app_id is not None:
-    cmd.append(str(app_id))
-  if timezone is not None:
-    cmd.extend([timezone, zone_cron])
-  # Cron has a deliberately minimal environment. Materialize the configured
-  # backend URL and the active supervisor path into its generated entry so
-  # scheduled jobs use the same live runner and server as Run now.
-  from app.app_jobs import runner_script
-  env = dict(os.environ)
-  env["API_BASE_URL"] = get_settings().api_base_url
-  env["MOBIUS_APP_JOB_RUNNER"] = str(runner_script())
-  result = subprocess.run(
-    cmd, capture_output=True, text=True, timeout=30, env=env,
+def _register_cron(
+  slug: str,
+  schedule_expr: str,
+  job_path: Path,
+  app_id: int | None = None,
+  timezone: str | None = None,
+  zone_cron: str | None = None,
+) -> None:
+  app_cron.register_cron(
+    slug,
+    schedule_expr,
+    job_path,
+    app_id,
+    timezone,
+    zone_cron,
+    scaffold=_cron_scaffold(),
   )
-  if result.returncode != 0:
-    raise HTTPException(
-      500,
-      f"Cron registration failed: {result.stderr.strip()[:400]}",
-    )
 
 
 def _reconcile_cron_after_install_rollback() -> None:
@@ -1172,41 +1082,6 @@ def _reconcile_cron_after_install_rollback() -> None:
     # Rollback is already a best-effort failure path. Log without masking the
     # original install exception that caused it.
     log.warning("install rollback cron reconciliation failed: %s", exc)
-
-
-def _crontab_command_path(line: str) -> str:
-  """The executable path a crontab job line runs, or "" for a line that
-  runs no job (blank, comment, or a `NAME=value` env/setting line).
-
-  The schedule is either a single `@shorthand` token (@daily/@reboot/…) or
-  five whitespace-separated fields; the rest is the command. cron also lets
-  the command be prefixed with inline `NAME=value` assignments, which we
-  skip to reach the real executable (the first non-assignment token).
-  """
-  s = line.strip()
-  if not s or s.startswith("#"):
-    return ""
-  first = s.split(None, 1)[0]
-  if first.startswith("@"):
-    cmd = (s.split(None, 1) + [""])[1]
-  elif "=" in first:
-    return ""  # NAME=value env/setting line — runs no command
-  else:
-    parts = s.split(None, 5)
-    cmd = parts[5] if len(parts) == 6 else ""
-  toks = cmd.split()
-  while toks and "=" in toks[0] and not toks[0].startswith("/"):
-    toks.pop(0)
-  if not toks:
-    return ""
-  for i, token in enumerate(toks):
-    if token.endswith("/app-job-runner.py") and len(toks) > i + 2:
-      # The supervised runner's job path is always its final argument. A
-      # wall-clock schedule inserts its timezone and source expression before
-      # the app id; using the final argument keeps uninstall parsing aligned
-      # with both ordinary and gated invocations.
-      return toks[-1]
-  return toks[0]
 
 
 def _crontab_without_app(current: str, source_dir: Path) -> str | None:
@@ -2829,18 +2704,10 @@ async def install_from_manifest(
   # that left local untouched).
 
   # Phase 3: materialize under one compensation journal.
-  # `created_paths`: files/dirs to delete on failure (and leave on
-  # success). `cleanup_actions`: callables run on the success path
-  # (commit) OR rollback path (revert) — used for backup-rename
-  # rollback on the update path's compiled bundle, so a failed
-  # recompile restores the previous good bundle on disk to match the
-  # DB row that rolled back.
+  # Every filesystem mutation registers its rollback/commit action on this
+  # journal before the durable row commit.
   journal = InstallJournal()
-  created_paths = journal.created_paths
-  rollback_actions = journal.rollback_actions
-  commit_actions = journal.commit_actions
   data_dir = Path(get_settings().data_dir)
-  perms = manifest.get("permissions") or {}
 
   try:
     app = await _prepare_app_row(
@@ -3286,7 +3153,7 @@ async def install_from_manifest(
         if mode == "update" and target.exists():
           continue
         atomic_write(target, content)
-        created_paths.append(target)
+        journal.created_paths.append(target)
 
     # A successfully resolved manifest declaration owns the package icon.
     # Omission clears it; a warned fetch/decode failure preserves the last
