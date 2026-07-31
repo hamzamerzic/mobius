@@ -87,9 +87,11 @@ from app.manifest_contract import (
 # net_utils.py for why the two SSRF validators were unified.
 from app.net_utils import validate_url_safe as _validate_url_safe
 from app.storage_io import atomic_write
-from app.routes.apps import (
-  _derive_source_dir, _reject_if_source_dir_taken, _slugify_for_source_dir,
+from app.app_identity import (
   allocate_unique_slug,
+  derive_source_dir as _derive_source_dir,
+  reject_if_source_dir_taken as _reject_if_source_dir_taken,
+  slugify_for_source_dir as _slugify_for_source_dir,
 )
 
 log = logging.getLogger("mobius.install")
