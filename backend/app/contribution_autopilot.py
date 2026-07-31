@@ -38,6 +38,12 @@ from sqlalchemy.orm import Session
 
 from app import fs_locks, models
 from app.config import get_settings
+from app.contribution_records import (
+  now_iso,
+  read_record,
+  record_paths,
+  write_record,
+)
 from app.timeutil import now_naive_utc
 
 log = logging.getLogger("mobius.contribution_autopilot")
@@ -632,8 +638,6 @@ async def mirror_to_ledger(app_id: int, record_id: str) -> None:
   caller's transaction.
   """
   from app.database import SessionLocal
-  from app.routes import github as gh
-
   def _write() -> None:
     db = SessionLocal()
     try:
@@ -643,14 +647,14 @@ async def mirror_to_ledger(app_id: int, record_id: str) -> None:
       block = mirror_block(row)
     finally:
       db.close()
-    record_path, _ = gh._record_paths(app_id, record_id)
+    record_path, _ = record_paths(app_id, record_id)
     try:
-      record = gh._read_record(record_path)
+      record = read_record(record_path)
     except Exception:
       return
     record["autopilot"] = block
     try:
-      gh._write_record(record_path, record)
+      write_record(record_path, record)
     except Exception:
       log.debug("mirror write failed app=%s rec=%s", app_id, record_id,
                 exc_info=True)
@@ -667,19 +671,17 @@ async def set_ledger_attention(
   app_id: int, record_id: str, attention: dict | None, *, needs_attention: bool,
 ) -> dict | None:
   """Atomically overlay ``human_required`` attention onto the ledger."""
-  from app.routes import github as gh
-
   def _write() -> dict | None:
-    record_path, _ = gh._record_paths(app_id, record_id)
+    record_path, _ = record_paths(app_id, record_id)
     try:
-      record = gh._read_record(record_path)
+      record = read_record(record_path)
     except Exception:
       return None
     record["needs_attention"] = bool(needs_attention)
     record["attention"] = attention
-    record["updated_at"] = gh._now_iso()
+    record["updated_at"] = now_iso()
     try:
-      gh._write_record(record_path, record)
+      write_record(record_path, record)
     except Exception:
       return None
     return record

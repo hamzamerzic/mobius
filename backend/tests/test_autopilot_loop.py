@@ -153,10 +153,12 @@ def _make_fakes(state):
 
 
 def _install_fakes(monkeypatch, state):
-  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+  monkeypatch.setattr("app.github_contributions.shutil.which", lambda name: f"/bin/{name}")
   fake_git, fake_gh = _make_fakes(state)
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
+  # Autopilot's reviewed changed-path read remains at the route trust boundary.
   monkeypatch.setattr("app.routes.github._git", fake_git)
-  monkeypatch.setattr("app.routes.github._gh", fake_gh)
 
 
 async def _fake_spawn(*args, **kwargs):
