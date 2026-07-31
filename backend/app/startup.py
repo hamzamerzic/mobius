@@ -300,7 +300,7 @@ def _reconcile_app_cron(context: StartupContext) -> None:
 
 
 def _route_diagnostics_to_chat_log(_context: StartupContext) -> None:
-  from app.chat import get_chat_log_handler
+  from app.chat_logging import get_chat_log_handler
 
   handler = get_chat_log_handler()
   for name, level in (
