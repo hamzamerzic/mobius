@@ -111,9 +111,10 @@ services:
     tmpfs:
       - /tmp
       - /run
+      - /state:uid=10001,gid=10001,mode=0700
     environment:
       - PORT=8000
-      - HOME=/tmp
+      - HOME=/state
       - MOBIUS_RECOVERY_TARGET_URL=http://recovery-target:18002
       - MOBIUS_RECOVERY_TARGET_TOKEN=${MOBIUS_RECOVERY_TARGET_TOKEN:-not-configured}
       - MOBIUS_RECOVERY_LOCAL_TOKEN=${MOBIUS_RECOVERY_LOCAL_TOKEN:-not-configured}

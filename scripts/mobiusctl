@@ -45,26 +45,131 @@ new_token() {
   fi
 }
 
+die_state() {
+  echo "Invalid recovery state: $*" >&2
+  exit 1
+}
+
+validate_port() {
+  case "$1" in
+    ""|*[!0-9]*) die_state "port must be an integer from 1 to 65535" ;;
+  esac
+  [ "$1" -ge 1 ] && [ "$1" -le 65535 ] ||
+    die_state "port must be an integer from 1 to 65535"
+}
+
+validate_image() {
+  # Deliberately narrower than the full OCI grammar. Every accepted character
+  # is inert in both an env file and a shell assignment, while ordinary
+  # registry/repository/tag/digest references remain supported.
+  [ "${#1}" -le 512 ] || die_state "recovery image reference is too long"
+  case "$1" in
+    [A-Za-z0-9]*) ;;
+    *) die_state "recovery image must start with a letter or number" ;;
+  esac
+  case "$1" in
+    *[!A-Za-z0-9._/@:+-]*)
+      die_state "recovery image contains unsafe characters"
+      ;;
+  esac
+}
+
+validate_token() {
+  [ "${#1}" -ge 32 ] && [ "${#1}" -le 512 ] ||
+    die_state "recovery token length is invalid"
+  case "$1" in
+    *[!A-Za-z0-9_-]*) die_state "recovery token contains unsafe characters" ;;
+  esac
+}
+
 write_state() {
-  if [ -L "$STATE_FILE" ]; then
-    echo "Refusing symlink recovery state: $STATE_FILE" >&2
-    exit 1
+  recovery_target_token=$(new_token)
+  recovery_local_token=$(new_token)
+  recovery_port=${MOBIUS_RECOVERY_PORT:-18003}
+  recovery_image=${MOBIUS_RECOVERY_IMAGE:-ghcr.io/mobius-os/mobius-recovery:stable}
+  validate_token "$recovery_target_token"
+  validate_token "$recovery_local_token"
+  validate_port "$recovery_port"
+  validate_image "$recovery_image"
+
+  # Noclobber closes the symlink/existing-file race around state creation.
+  # A later load independently verifies type, ownership, link count, and mode.
+  if ! (
+    umask 077
+    set -C
+    {
+      printf 'MOBIUS_RECOVERY_TARGET_TOKEN=%s\n' "$recovery_target_token"
+      printf 'MOBIUS_RECOVERY_LOCAL_TOKEN=%s\n' "$recovery_local_token"
+      printf 'MOBIUS_RECOVERY_PORT=%s\n' "$recovery_port"
+      printf 'MOBIUS_RECOVERY_IMAGE=%s\n' "$recovery_image"
+    } > "$STATE_FILE"
+  ); then
+    die_state "could not create $STATE_FILE exclusively"
   fi
-  umask 077
-  {
-    printf 'MOBIUS_RECOVERY_TARGET_TOKEN=%s\n' "$(new_token)"
-    printf 'MOBIUS_RECOVERY_LOCAL_TOKEN=%s\n' "$(new_token)"
-    printf 'MOBIUS_RECOVERY_PORT=%s\n' "${MOBIUS_RECOVERY_PORT:-18003}"
-    printf 'MOBIUS_RECOVERY_IMAGE=%s\n' \
-      "${MOBIUS_RECOVERY_IMAGE:-ghcr.io/mobius-os/mobius-recovery:stable}"
-  } > "$STATE_FILE"
 }
 
 load_state() {
-  [ -f "$STATE_FILE" ] || return 1
-  # Generated values contain only URL-safe token/image/number characters.
-  # shellcheck disable=SC1090
-  . "$STATE_FILE"
+  if [ ! -e "$STATE_FILE" ] && [ ! -L "$STATE_FILE" ]; then
+    return 1
+  fi
+  [ ! -L "$STATE_FILE" ] || die_state "$STATE_FILE must not be a symlink"
+  [ -f "$STATE_FILE" ] || die_state "$STATE_FILE must be a regular file"
+  state_metadata=$(stat -c '%h %a %u' -- "$STATE_FILE" 2>/dev/null) ||
+    die_state "could not inspect $STATE_FILE"
+  set -- $state_metadata
+  [ "$#" -eq 3 ] || die_state "could not inspect $STATE_FILE"
+  [ "$1" -eq 1 ] || die_state "$STATE_FILE must have exactly one hard link"
+  case "$2" in
+    400|600) ;;
+    *) die_state "$STATE_FILE permissions must be 0600 or 0400" ;;
+  esac
+  [ "$3" -eq "$(id -u)" ] ||
+    die_state "$STATE_FILE must be owned by the current user"
+
+  recovery_target_token=
+  recovery_local_token=
+  recovery_port=
+  recovery_image=
+  seen_target=0
+  seen_local=0
+  seen_port=0
+  seen_image=0
+  while IFS= read -r state_line || [ -n "$state_line" ]; do
+    case "$state_line" in
+      MOBIUS_RECOVERY_TARGET_TOKEN=*)
+        [ "$seen_target" -eq 0 ] || die_state "duplicate target token"
+        recovery_target_token=${state_line#MOBIUS_RECOVERY_TARGET_TOKEN=}
+        seen_target=1
+        ;;
+      MOBIUS_RECOVERY_LOCAL_TOKEN=*)
+        [ "$seen_local" -eq 0 ] || die_state "duplicate local token"
+        recovery_local_token=${state_line#MOBIUS_RECOVERY_LOCAL_TOKEN=}
+        seen_local=1
+        ;;
+      MOBIUS_RECOVERY_PORT=*)
+        [ "$seen_port" -eq 0 ] || die_state "duplicate port"
+        recovery_port=${state_line#MOBIUS_RECOVERY_PORT=}
+        seen_port=1
+        ;;
+      MOBIUS_RECOVERY_IMAGE=*)
+        [ "$seen_image" -eq 0 ] || die_state "duplicate image"
+        recovery_image=${state_line#MOBIUS_RECOVERY_IMAGE=}
+        seen_image=1
+        ;;
+      *) die_state "unexpected or malformed line" ;;
+    esac
+  done < "$STATE_FILE"
+  [ "$seen_target$seen_local$seen_port$seen_image" = "1111" ] ||
+    die_state "required values are missing"
+  validate_token "$recovery_target_token"
+  validate_token "$recovery_local_token"
+  validate_port "$recovery_port"
+  validate_image "$recovery_image"
+
+  MOBIUS_RECOVERY_TARGET_TOKEN=$recovery_target_token
+  MOBIUS_RECOVERY_LOCAL_TOKEN=$recovery_local_token
+  MOBIUS_RECOVERY_PORT=$recovery_port
+  MOBIUS_RECOVERY_IMAGE=$recovery_image
   export MOBIUS_RECOVERY_TARGET_TOKEN MOBIUS_RECOVERY_LOCAL_TOKEN
   export MOBIUS_RECOVERY_PORT MOBIUS_RECOVERY_IMAGE
 }
