@@ -483,6 +483,10 @@ export default function ChatView({
   // current() to fire the bar's hidden picker. ChatInputBar's layout
   // effect installs the function.
   const attachTriggerRef = useRef(null)
+  // The model/effort picker can accept another choice before the prior save
+  // settles. Keep its serialized write tail at ChatView scope so both a closed
+  // + popover and an immediate Send still observe the same ordering boundary.
+  const settingsSaveTailRef = useRef(Promise.resolve())
   // Refs for the absolutely-positioned foot. Its ResizeObserver notifies the
   // scroll controller, which owns publishing composer clearance together with
   // every other indirect scroll-geometry write.
@@ -1157,6 +1161,13 @@ export default function ChatView({
       fetchMessages({ force: true })
     },
   })
+  // The composer clears before this boundary, so a slow picker save delays
+  // transport without swallowing text entered after Send.
+  const sendAfterSettingsSaved = useCallback(async (text, attachments, options) => {
+    await settingsSaveTailRef.current
+    return streamSend(text, attachments, options)
+  }, [streamSend])
+
   useEffect(() => {
     if (retiredAssistantItemsRef.current !== streamItems) {
       retiredAssistantItemsRef.current = null
@@ -2025,7 +2036,7 @@ export default function ChatView({
       }
       let queueRequest = null
       try {
-        queueRequest = streamSend(
+        queueRequest = sendAfterSettingsSaved(
           text,
           attachments.length > 0 ? attachments : undefined,
           directSteer
@@ -2323,7 +2334,7 @@ export default function ChatView({
     }
 
     try {
-      const result = await streamSend(
+      const result = await sendAfterSettingsSaved(
         sendText,
         attachments.length > 0 ? attachments : undefined,
         // The minted cid rides the POST so the durable row carries the same
@@ -2449,7 +2460,7 @@ export default function ChatView({
     // stale-closure trap for callers like handleStop).
   }, [
     chatId,
-    streamSend,
+    sendAfterSettingsSaved,
     pendingFiles,
     commitMessages,
     fetchMessages,
@@ -4047,6 +4058,7 @@ export default function ChatView({
                 }
                 onChangeChatInfo={mergeChatInfo}
                 providerSwitchState={providerSwitchState}
+                settingsSaveTailRef={settingsSaveTailRef}
                 onOpenInspector={() => setShowInspector(true)}
                 onOpenSummary={() => setShowSummary(true)}
                 embedded={embedded}

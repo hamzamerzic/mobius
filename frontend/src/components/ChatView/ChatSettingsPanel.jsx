@@ -41,14 +41,11 @@
  * ║      persisted flag isn't refreshed mid-turn, so the messages    ║
  * ║      check engages the lock the moment a reply lands.            ║
  * ║                                                                  ║
- * ║   3. STALE-PATCH GUARD                                           ║
- * ║      `latestReqId` is a MONOTONIC counter owned by the parent    ║
- * ║      (ComposerPopover) — NOT panel-local. A panel-local ref      ║
- * ║      would reset every time the popover closes and reopens,      ║
- * ║      defeating the guard. Rapid picks (model A → model B in      ║
- * ║      quick succession) only let the latest PATCH's response      ║
- * ║      update state; older responses return 'stale' and are        ║
- * ║      dropped.                                                    ║
+ * ║   3. ORDERED PICKER WRITES                                      ║
+ * ║      `settingsSaveTailRef` is owned by ChatView, so model and    ║
+ * ║      effort picks persist in tap order even if this popover is   ║
+ * ║      closed. The same tail gates provider handoffs and message   ║
+ * ║      sends. Rows stay interactive while routine saves settle.    ║
  * ║                                                                  ║
  * ║   4. KEYBOARD-STATE PRESERVATION                                 ║
  * ║      `refocusChatInput` gates on `wasInputFocusedRef?.current`   ║
@@ -250,9 +247,8 @@ export default function ChatSettingsPanel({
   restartResumeError = '',
   onRestartResumeChange,
   onChange,
-  // Stale-PATCH guard: parent passes a ref that survives panel
-  // mount/unmount. See ComposerPopover for the rationale.
-  reqIdRef,
+  // Shared promise tail for picker writes, handoffs, and message sends.
+  settingsSaveTailRef,
   // Tracks whether the chat textarea was focused when the popover
   // opened. Used to decide whether to refocus after a picker
   // action so the soft keyboard stays in its previous state
@@ -265,11 +261,9 @@ export default function ChatSettingsPanel({
 }) {
   const [saving, setSaving] = useState(false)
   const [localError, setLocalError] = useState('')
-  const fallbackReqId = useRef(0)
-  const latestReqId = reqIdRef || fallbackReqId
   const pendingSwitchPreviousRef = useRef(null)
-  // Synchronous double-click guard: disabled={compacting || saving}
-  // only takes effect after React re-renders.
+  // Synchronous guard for the paid atomic handoff. Routine picker writes use
+  // the serialized tail and deliberately remain available while saving.
   const providerSwitchInFlightRef = useRef(false)
   const pendingSwitch = restorableProviderSwitch(
     providerSwitchState?.request,
@@ -321,6 +315,11 @@ export default function ChatSettingsPanel({
   )
 
   useEffect(() => {
+    // Successful writes are published to the parent in serialized server
+    // order, but a newer optimistic choice may still be queued. Hold the
+    // visible draft until the whole tail settles; the final success or failure
+    // then reconciles from the last value the server actually accepted.
+    if (saving) return
     setDraftModel(effective?.model || '')
     setDraftEffort(effective?.effort || '')
     setDraftEffortByProvider(effective?.effort_by_provider || {})
@@ -329,9 +328,11 @@ export default function ChatSettingsPanel({
     effective?.effort,
     effective?.effort_by_provider,
     chatId,
+    saving,
   ])
 
   useEffect(() => {
+    if (saving) return
     const sourceProvider = provider || 'claude'
     setDraftProvider(sourceProvider)
     const restored = restorableProviderSwitch(
@@ -350,38 +351,39 @@ export default function ChatSettingsPanel({
     chatId,
     providerSwitchState?.request,
     providerSwitchState?.status,
+    saving,
   ])
 
-  const patchChat = useCallback(async (body) => {
-    if (!chatId) return 'fail'
-    const reqId = ++latestReqId.current
+  const patchChat = useCallback((body) => {
+    if (!chatId) return Promise.resolve()
     setSaving(true)
     setLocalError('')
-    try {
-      const res = await apiFetch(`/chats/${chatId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(body),
-      })
-      if (reqId !== latestReqId.current) return 'stale'
-      if (!res.ok) {
-        setLocalError('Could not save. Try again.')
-        return 'fail'
+    const operation = settingsSaveTailRef.current.then(async () => {
+      try {
+        const res = await apiFetch(`/chats/${chatId}`, {
+          method: 'PATCH',
+          body: JSON.stringify(body),
+        })
+        if (!res.ok) return 'Could not save. Try again.'
+        const data = await res.json()
+        onChange?.({
+          agent_settings_json: data.agent_settings_json,
+          provider: data.provider,
+          effective: data.effective,
+        })
+        return ''
+      } catch {
+        return 'Network error.'
       }
-      const data = await res.json()
-      onChange?.({
-        agent_settings_json: data.agent_settings_json,
-        provider: data.provider,
-        effective: data.effective,
-      })
-      return 'ok'
-    } catch {
-      if (reqId !== latestReqId.current) return 'stale'
-      setLocalError('Network error.')
-      return 'fail'
-    } finally {
-      if (reqId === latestReqId.current) setSaving(false)
-    }
-  }, [chatId, onChange, latestReqId])
+    })
+    settingsSaveTailRef.current = operation
+    operation.then(error => {
+      if (settingsSaveTailRef.current !== operation) return
+      setLocalError(error)
+      setSaving(false)
+    })
+    return operation
+  }, [chatId, onChange, settingsSaveTailRef])
 
   const switchProviderWithHandoff = useCallback(async ({
     provider: nextProvider,
@@ -402,6 +404,10 @@ export default function ChatSettingsPanel({
     beginProviderSwitch(chatId, request)
     setLocalError('')
     try {
+      // A same-provider choice made just before this confirmation is part of
+      // the source chat state the handoff follows. Wait for that routine write
+      // even if + was closed/reopened while it settled.
+      await settingsSaveTailRef.current
       const res = await apiFetch(`/chats/${chatId}/provider-switch`, {
         method: 'POST',
         body: JSON.stringify(providerSwitchPayload({
@@ -444,7 +450,7 @@ export default function ChatSettingsPanel({
       )
       return false
     }
-  }, [chatId, pendingSwitch, provider])
+  }, [chatId, pendingSwitch, provider, settingsSaveTailRef])
 
   // Conditional refocus — only restores textarea focus if it was
   // ALREADY focused when the popover opened. Without this guard,
@@ -476,46 +482,44 @@ export default function ChatSettingsPanel({
   const switchProviderModel = useCallback(async (
     value, providerValue, allowedEfforts, switchId = createProviderSwitchId(),
   ) => {
-    if (
-      providerSwitchInFlightRef.current
-      || isProviderSwitchBlocking(chatId)
-    ) return false
-    providerSwitchInFlightRef.current = true
-    try {
-      // Cross-provider switch: restore this provider's last-known
-      // effort (or fall back to the value already on screen — which
-      // becomes that provider's first memory once they accept it).
-      // The provider/model effort enums do not overlap perfectly. Normalize
-      // the remembered value against the selected model's declared scale so
-      // the UI and persisted runner value cannot drift apart.
-      const nextEffort = validEffort(
-        allowedEfforts,
-        draftEffortByProvider[providerValue] ?? draftEffort,
-      )
-      const nextEffortByProvider = {
-        ...draftEffortByProvider,
-        [providerValue]: nextEffort,
-      }
-      let ok
-      if (hasAssistantTurns) {
-        ok = await switchProviderWithHandoff({
-          provider: providerValue,
+    if (isProviderSwitchBlocking(chatId)) return false
+    // Cross-provider switch: restore this provider's last-known effort and
+    // normalize it against the selected model's declared scale.
+    const nextEffort = validEffort(
+      allowedEfforts,
+      draftEffortByProvider[providerValue] ?? draftEffort,
+    )
+    const nextEffortByProvider = {
+      ...draftEffortByProvider,
+      [providerValue]: nextEffort,
+    }
+
+    if (!hasAssistantTurns) {
+      setDraftModel(value)
+      setDraftProvider(providerValue)
+      setDraftEffort(nextEffort)
+      setDraftEffortByProvider(nextEffortByProvider)
+      patchChat({
+        provider: providerValue,
+        agent_settings_json: {
           model: value,
           effort: nextEffort,
-          effortByProvider: nextEffortByProvider,
-          switchId,
-        })
-      } else {
-        const outcome = await patchChat({
-          provider: providerValue,
-          agent_settings_json: {
-            model: value,
-            effort: nextEffort,
-            effort_by_provider: nextEffortByProvider,
-          },
-        })
-        ok = outcome === 'ok'
-      }
+          effort_by_provider: nextEffortByProvider,
+        },
+      })
+      return true
+    }
+
+    if (providerSwitchInFlightRef.current) return false
+    providerSwitchInFlightRef.current = true
+    try {
+      const ok = await switchProviderWithHandoff({
+        provider: providerValue,
+        model: value,
+        effort: nextEffort,
+        effortByProvider: nextEffortByProvider,
+        switchId,
+      })
       if (!ok) return false
       setDraftModel(value)
       setDraftProvider(providerValue)
@@ -536,8 +540,8 @@ export default function ChatSettingsPanel({
   const handlePickModel = useCallback(async (value, providerValue, allowedEfforts) => {
     refocusChatInput()
     if (providerValue !== draftProvider) {
-      if (providerSwitchInFlightRef.current) return
       if (hasAssistantTurns) {
+        if (providerSwitchInFlightRef.current) return
         if (!pendingSwitchPreviousRef.current) {
           pendingSwitchPreviousRef.current = {
             provider: draftProvider,
@@ -565,9 +569,6 @@ export default function ChatSettingsPanel({
     // captured prior selection too, so a later Cancel reverts to THIS choice, not
     // a stale earlier one (#7 ensemble finding).
     pendingSwitchPreviousRef.current = null
-    const prevModel = draftModel
-    const prevEffort = draftEffort
-    const prevEffortByProvider = draftEffortByProvider
     const nextEffort = validEffort(allowedEfforts, draftEffort)
     const nextEffortByProvider = {
       ...draftEffortByProvider,
@@ -576,18 +577,13 @@ export default function ChatSettingsPanel({
     setDraftModel(value)
     setDraftEffort(nextEffort)
     setDraftEffortByProvider(nextEffortByProvider)
-    const outcome = await patchChat({
+    await patchChat({
       agent_settings_json: {
         model: value,
         effort: nextEffort,
         effort_by_provider: nextEffortByProvider,
       },
     })
-    if (outcome === 'fail') {
-      setDraftModel(prevModel)
-      setDraftEffort(prevEffort)
-      setDraftEffortByProvider(prevEffortByProvider)
-    }
   }, [
     draftProvider,
     draftModel,
@@ -770,7 +766,7 @@ export default function ChatSettingsPanel({
                 onClick={() => {
                   if (!appCrossProvider) handlePickModel(m.id, pid, rowEfforts)
                 }}
-                disabled={saving || switchBusy || appCrossProvider || !providerConfigured}
+                disabled={switchBusy || appCrossProvider || !providerConfigured}
                 aria-pressed={isSelected}
                 title={appCrossProvider
                   ? 'App chats keep their original provider. Create a new app chat to use this provider.'
@@ -797,10 +793,9 @@ export default function ChatSettingsPanel({
                     efforts={rowEfforts}
                     value={draftEffort}
                     onChange={handleEffortChange}
-                    // Effort writes are optimistic and latest-request-wins, so
+                    // Routine picker writes are optimistic and serialized, so
                     // keep the shared control visually stable and available
-                    // while a save settles. Provider/model changes still lock
-                    // the picker through `saving`; a live provider switch or
+                    // while a save settles. A live provider switch or
                     // disconnected provider remains genuinely unavailable.
                     disabled={switchBusy || !providerConfigured}
                     onStopPointerDown={preserveFocusUnlessTouch}
@@ -818,7 +813,7 @@ export default function ChatSettingsPanel({
                       className="csp__confirm-btn csp__confirm-btn--primary"
                       onPointerDown={preserveFocusUnlessTouch}
                       onClick={handleConfirmProviderSwitch}
-                      disabled={saving || switchBusy}
+                      disabled={switchBusy}
                     >
                       Switch provider
                     </button>
