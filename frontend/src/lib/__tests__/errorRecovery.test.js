@@ -302,6 +302,7 @@ test('diagnostic redaction removes every authorization scheme without swallowing
     'Authorization: ApiKey key-scheme-secret',
     'authorization: Digest response="digest-scheme-secret"',
     '{"authorization":"Token json-scheme-secret","keep":"visible-field"}',
+    '{"authorization":"Digest username=\\"Mufasa\\", response=\\"escaped-quote-secret\\"","keep":"second-visible-field"}',
   ].join('\n'))
 
   for (const secret of [
@@ -309,6 +310,8 @@ test('diagnostic redaction removes every authorization scheme without swallowing
     'key-scheme-secret',
     'digest-scheme-secret',
     'json-scheme-secret',
+    'escaped-quote-secret',
   ]) assert.equal(redacted.includes(secret), false, `must redact ${secret}`)
   assert.match(redacted, /visible-field/)
+  assert.match(redacted, /second-visible-field/)
 })
