@@ -88,8 +88,12 @@ a one-time authenticated, bounded protocol. The target removes the bearer from
 its exec environment, wipes it after deriving a one-way verifier, blocks child
 access to its memory and descriptors, drops packet-capture/ptrace/mount
 capabilities, and confines its own file helpers to explicit roots with Linux
-`openat2`. Repair commands retain root over the stopped `/data` instance but
-cannot inspect target PID1 or modify the recovery worker itself.
+`openat2`. It independently requires a base-10 Unix-epoch expiry no more than
+24 hours ahead, rejects authority at that deadline, kills/reaps active repair
+process trees, discards the verifier, and closes the listener without entering
+a restart loop. Repair commands retain root over the stopped `/data` instance
+but cannot inspect target PID1, survive their request, or modify the recovery
+worker itself.
 
 Self-hosted recovery containers never restart automatically. A worker restart
 would reconstruct its tmpfs-backed one-time-code state from unchanged

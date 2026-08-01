@@ -197,7 +197,10 @@ The Mobius image contains one recovery component:
 entrypoint execs this stdlib daemon as root before initializing or importing
 anything from `/data`. It listens privately on port 18002, authenticates every
 `/v1/*` request (including health) with a high-entropy one-time bearer token,
-and offers bounded argv execution plus bounded read/write/list operations.
+requires a base-10 Unix-epoch deadline no more than 24 hours in the future, and
+offers bounded argv execution plus bounded read/write/list operations. At the
+deadline it revokes the verifier, retires every active repair process, closes
+the listener, and parks PID 1 so an `unless-stopped` policy cannot hot-loop.
 Normal mode never starts the listener.
 
 The entrypoint removes the target bearer from the exec environment and passes
@@ -210,7 +213,10 @@ operations are kernel-confined with `openat2` to `/data`, `/app`, and `/tmp`
 (writes omit `/app`) without symlink, magic-link, `..`, or nested-mount
 escapes. Thus a root repair child can neither inspect target memory or file
 descriptors nor enlist target PID1 to read its own `/proc` memory. Target health
-reports the immutable image-baked Git revision, never a runtime identity env.
+reports the immutable image-baked Git revision and non-secret absolute expiry,
+never a runtime identity env. Each argv execution has its own child-subreaper
+supervisor: session changes and double forks cannot outlive the response, and
+expiry/timeout/output-limit cleanup freezes, kills, and reaps the whole tree.
 
 The reasoning worker is a separate non-root, read-only image. It has no sudo,
 Docker socket, Railway credential, persistent code volume, or update endpoint;
@@ -222,7 +228,9 @@ publishes the worker only on `127.0.0.1:18003`.
 If the worker or browser session is lost, `scripts/mobiusctl recovery reopen`
 keeps the app stopped, removes both isolated containers, rotates the target and
 browser credentials atomically, pulls the latest worker, and prints a new
-one-time code. Normal boot deletes the retired `.recovery-secret`,
+one-time code. Self-hosted target authority lasts one hour by default (the
+launcher accepts an explicit 300–86400 second TTL); `reopen` mints a fresh
+deadline after expiry. Normal boot deletes the retired `.recovery-secret`,
 `.recovery-owner.json`, and `.recover-pending` authority before importing
 persisted code; a legacy user-authored `recovery_chat.jsonl` is retained and
 included in ordinary backup/restore.
@@ -513,6 +521,15 @@ mounting `app_data` into `recovery-target`. The worker can perform arbitrary
 root repair through the authenticated target but cannot access the host control
 plane. Finishing recovery removes both recovery containers, recreates normal
 Mobius, and verifies `/api/health`.
+
+Every self-host lifecycle action takes one bounded installation lock.
+`scripts/mobiusctl update` refuses while isolated recovery state/services are
+present, recreates the normal stack, and passes health before retiring the old
+embedded `mobius-recoveryd`. Recovery start/reopen performs the same retirement
+after the external services launch. Cleanup is never a broad orphan sweep: the
+helper resolves the current app's Compose project and removes only the exact
+`mobius-recoveryd` name with matching project and `recoveryd` service labels.
+An identity mismatch leaves the old container untouched for operator review.
 
 Normal platform boot serves `/data/platform/backend` directly after an import
 probe. It fetches `origin/main`, commits stray local edits, and rebases them onto

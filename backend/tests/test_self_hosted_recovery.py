@@ -101,8 +101,13 @@ def _mobiusctl(tmp_path, action, *, state=None, extra_env=None):
   env["MOBIUS_RECOVERY_STATE_FILE"] = str(state_path)
   env["MOBIUS_RECOVERY_LOCK_DIR"] = str(tmp_path)
   env.update(extra_env or {})
+  command = [str(ROOT / "scripts" / "mobiusctl")]
+  if action == "update":
+    command.append("update")
+  else:
+    command.extend(("recovery", action))
   result = subprocess.run(
-    [str(ROOT / "scripts" / "mobiusctl"), "recovery", action],
+    command,
     cwd=ROOT,
     env=env,
     text=True,
@@ -148,8 +153,24 @@ def _fake_docker(tmp_path):
     "esac\n"
     "case \"$*\" in\n"
     "  *\"${DOCKER_REMAINING_MATCH:-__never__}\"*) printf 'remaining-container\\n' ;;\n"
-    "  *'ps -q app'*) printf 'fake-app\\n' ;;\n"
-    "  inspect*fake-app*) printf '%s\\n' \"${DOCKER_APP_HEALTH:-healthy}\" ;;\n"
+    "  *'ps -q app'*|*'ps -aq app'*)\n"
+    "    printf '%s\\n' \"${DOCKER_APP_ID:-fake-app}\"; exit 0 ;;\n"
+    "  *'com.docker.compose.project'*\"${DOCKER_APP_ID:-fake-app}\"*)\n"
+    "    printf '%s\\n' \"${DOCKER_APP_IDENTITY:-/mobius|mobius|app}\"; exit 0 ;;\n"
+    "  *'com.docker.compose.project'*\"${DOCKER_LEGACY_ID:-__never__}\"*)\n"
+    "    printf '%s\\n' \"${DOCKER_LEGACY_IDENTITY:-/mobius-recoveryd|mobius|recoveryd}\"; exit 0 ;;\n"
+    "  *'.State.Health'*\"${DOCKER_APP_ID:-fake-app}\"*)\n"
+    "    printf '%s\\n' \"${DOCKER_APP_HEALTH:-healthy}\"; exit 0 ;;\n"
+    "  *'container ls -aq --filter name=^/mobius-recoveryd$'*)\n"
+    "    if [ -n \"${DOCKER_LEGACY_ID:-}\" ] &&\n"
+    "       [ ! -e \"$DOCKER_LEGACY_REMOVED\" ]; then\n"
+    "      printf '%s\\n' \"$DOCKER_LEGACY_ID\"\n"
+    "    fi\n"
+    "    exit 0 ;;\n"
+    "  *\"rm -f ${DOCKER_LEGACY_ID:-__never__}\"*)\n"
+    "    : >\"$DOCKER_LEGACY_REMOVED\"; exit 0 ;;\n"
+    "  \"inspect ${DOCKER_LEGACY_ID:-__never__}\")\n"
+    "    [ ! -e \"$DOCKER_LEGACY_REMOVED\" ]; exit $? ;;\n"
     "esac\n"
     "exit 0\n"
   )
@@ -158,6 +179,7 @@ def _fake_docker(tmp_path):
   return {
     "PATH": f"{bin_dir}:{os.environ['PATH']}",
     "DOCKER_LOG": str(log),
+    "DOCKER_LEGACY_REMOVED": str(tmp_path / "legacy.removed"),
   }, log
 
 
@@ -263,6 +285,109 @@ def test_start_mints_a_bounded_target_expiry(tmp_path):
   assert result.returncode == 0, result.stderr
   expiry = int(_read_recovery_state(state)["MOBIUS_RECOVERY_TARGET_EXPIRES_AT"])
   assert before + 300 <= expiry <= int(time.time()) + 300
+
+
+def test_start_retires_only_the_label_verified_legacy_recovery(tmp_path):
+  fake_env, log = _fake_docker(tmp_path)
+  fake_env["DOCKER_LEGACY_ID"] = "legacy-recovery-id"
+
+  result, _state = _mobiusctl(
+    tmp_path, "start", extra_env=fake_env,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert (tmp_path / "legacy.removed").exists()
+  commands = log.read_text().splitlines()
+  launch = next(
+    i for i, line in enumerate(commands)
+    if "up -d --force-recreate recovery-target recovery" in line
+  )
+  app_identity = next(
+    i for i, line in enumerate(commands)
+    if "com.docker.compose.project" in line and "fake-app" in line
+  )
+  legacy_identity = next(
+    i for i, line in enumerate(commands)
+    if "com.docker.compose.project" in line and "legacy-recovery-id" in line
+  )
+  removal = next(
+    i for i, line in enumerate(commands) if line == "rm -f legacy-recovery-id"
+  )
+  assert launch < app_identity < legacy_identity < removal
+
+
+def test_start_refuses_mismatched_legacy_identity_and_restores_app(tmp_path):
+  fake_env, log = _fake_docker(tmp_path)
+  fake_env.update({
+    "DOCKER_LEGACY_ID": "legacy-recovery-id",
+    "DOCKER_LEGACY_IDENTITY": "/mobius-recoveryd|someone-else|recoveryd",
+  })
+
+  result, state = _mobiusctl(
+    tmp_path, "start", extra_env=fake_env,
+  )
+
+  assert result.returncode != 0
+  assert "unexpected identity" in result.stderr
+  assert not (tmp_path / "legacy.removed").exists()
+  assert not state.exists()
+  commands = log.read_text().splitlines()
+  assert "rm -f legacy-recovery-id" not in commands
+  assert any("up -d app" in line for line in commands)
+
+
+def test_update_retires_legacy_only_after_recreated_app_is_healthy(tmp_path):
+  fake_env, log = _fake_docker(tmp_path)
+  fake_env["DOCKER_LEGACY_ID"] = "legacy-recovery-id"
+
+  result, _state = _mobiusctl(
+    tmp_path, "update", extra_env=fake_env,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert (tmp_path / "legacy.removed").exists()
+  commands = log.read_text().splitlines()
+  recreate = next(
+    i for i, line in enumerate(commands)
+    if "up -d --build --force-recreate" in line
+  )
+  health = next(
+    i for i, line in enumerate(commands) if ".State.Health" in line
+  )
+  removal = next(
+    i for i, line in enumerate(commands) if line == "rm -f legacy-recovery-id"
+  )
+  assert recreate < health < removal
+
+
+def test_update_refuses_active_recovery_state_before_docker_changes(tmp_path):
+  state = tmp_path / "recovery.env"
+  _write_recovery_state(state)
+  fake_env, log = _fake_docker(tmp_path)
+
+  result, _ = _mobiusctl(
+    tmp_path, "update", state=state, extra_env=fake_env,
+  )
+
+  assert result.returncode != 0
+  assert "finish it before updating" in result.stderr
+  assert not log.exists()
+
+
+def test_update_refuses_present_isolated_recovery_services(tmp_path):
+  fake_env, log = _fake_docker(tmp_path)
+  fake_env["DOCKER_REMAINING_MATCH"] = "ps -aq recovery recovery-target"
+
+  result, _state = _mobiusctl(
+    tmp_path, "update", extra_env=fake_env,
+  )
+
+  assert result.returncode != 0
+  assert "finish them before updating" in result.stderr
+  assert all(
+    "up -d --build --force-recreate" not in line
+    for line in log.read_text().splitlines()
+  )
 
 
 @pytest.mark.parametrize("ttl", ["299", "86401", "0300", "1.5"])

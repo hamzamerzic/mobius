@@ -161,16 +161,22 @@ and starts a read-only, unprivileged recovery worker on loopback. The worker has
 no Docker socket and cannot modify its own code.
 `reopen` never boots the ordinary app: it revokes both old credentials, pulls
 the latest approved worker, recreates the isolated services, and prints a new
-one-time code.
+one-time code. The root target also enforces its own one-hour absolute deadline
+and closes its private listener when it expires; run `reopen` to mint a fresh
+deadline. Operators who need a different bounded window can prefix `start` or
+`reopen` with `MOBIUS_RECOVERY_TTL_SECONDS=<seconds>` (300–86400).
 
 Update a self-hosted instance with:
 
 ```bash
 git pull
-docker compose up -d --build
+scripts/mobiusctl update
 ```
 
-Data under `/data` survives rebuilds.
+The lifecycle command serializes against recovery, rebuilds and recreates the
+normal stack, verifies Mobius health, then removes an old `mobius-recoveryd`
+container only when its exact name and Compose project/service labels match the
+current installation. Data under `/data` survives rebuilds.
 
 Full root for the in-product agent is explicit and off by default. After the
 owner confirms, set `MOBIUS_AGENT_SUDO=1` in `.env` and recreate the app. Set it
