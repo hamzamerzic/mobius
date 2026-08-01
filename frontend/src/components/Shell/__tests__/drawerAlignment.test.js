@@ -35,9 +35,17 @@ test('collapsed and expanded drawer actions share one vertical rhythm', () => {
   )
 })
 
-test('the notifications panel follows the resizable drawer edge', () => {
+test('the docked notifications panel covers the drawer content column', () => {
+  const panel = ruleBody(shellCss, '.shell--drawer-docked .notifications')
+  const desktopDrawerBody = ruleBody(drawerCss, '.drawer__body', 1)
+  const drawerGutter = px(desktopDrawerBody, 'padding')
+
+  // Width tracks the resizable drawer with no cap, so a wider drawer never
+  // leaves rows visible beside the panel.
+  assert.equal(px(panel, 'left'), drawerGutter)
   assert.match(
-    shellCss,
-    /\.shell--drawer-docked \.notifications\s*\{[\s\S]*?--notifications-panel-max-width:\s*390px;[\s\S]*?left:\s*max\([\s\S]*?var\(--desktop-sidebar-width\)[\s\S]*?- var\(--notifications-panel-max-width\)[\s\S]*?width:\s*min\([\s\S]*?var\(--notifications-panel-max-width\)[\s\S]*?var\(--desktop-sidebar-width\)/,
+    panel,
+    /width:\s*calc\(var\(--desktop-sidebar-width\) - 16px\)/,
   )
+  assert.doesNotMatch(panel, /max-width/)
 })
