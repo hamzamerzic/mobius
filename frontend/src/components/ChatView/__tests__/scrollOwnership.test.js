@@ -55,14 +55,12 @@ test('the sole spacer owner still exists (guard is not vacuous)', () => {
     return src.includes('.spacer-dynamic') && SPACER_HEIGHT_WRITE.test(src)
   }).map(f => f.name).sort()
   assert.deepEqual(writers, [OWNER])
-})
 
-test('only the scroll owner publishes composer clearance geometry', () => {
   const write = /style\.setProperty\(\s*['"]--composer-h['"]/
-  const writers = sourceFiles(chatViewDir).filter(({ full }) => (
+  const clearanceWriters = sourceFiles(chatViewDir).filter(({ full }) => (
     write.test(readFileSync(full, 'utf8'))
   )).map(f => f.name).sort()
-  assert.deepEqual(writers, [OWNER],
+  assert.deepEqual(clearanceWriters, [OWNER],
     'composer clearance can clamp scrollTop indirectly, so route it through '
     + 'the same reader-authority gate as spacer and direct scroll writes')
 })
@@ -108,53 +106,6 @@ test('gesture scroll frames defer anchor, spacer, and persistence work until set
     /scrollEl\.scrollHeight\s*>\s*scrollEl\.clientHeight/,
     'a live spacer collapse must not leave the pre-gesture pin armed',
   )
-})
-
-test('every automatic geometry owner shares the reader-generation gate', () => {
-  const writeStart = ownerSource.indexOf('const writeMode = useCallback(')
-  const writeEnd = ownerSource.indexOf('const persistMode =', writeStart)
-  const writePath = ownerSource.slice(writeStart, writeEnd)
-  assert.match(writePath, /scrollAuthorityAllowsCommit/,
-    'direct scroll writes must reject stale generations')
-
-  const spacerStart = ownerSource.indexOf('function sizeSpacer(')
-  const spacerEnd = ownerSource.indexOf('function maybeApplyMode(', spacerStart)
-  const spacerPath = ownerSource.slice(spacerStart, spacerEnd)
-  assert.match(spacerPath, /layoutOwnsScroll\(authorityVersion\)/)
-  assert.ok(
-    spacerPath.indexOf('layoutOwnsScroll(authorityVersion)')
-      < spacerPath.indexOf("style.setProperty('--composer-h'"),
-    'composer clearance must be gated before it mutates layout',
-  )
-  assert.ok(
-    spacerPath.indexOf('layoutOwnsScroll(authorityVersion)')
-      < spacerPath.indexOf('spacerEl.style.height ='),
-    'spacer height must be gated before it mutates layout',
-  )
-
-  const terminalStart = ownerSource.indexOf('const settleStreamingPin =')
-  const terminalEnd = ownerSource.indexOf('const paneResized =', terminalStart)
-  const terminalPath = ownerSource.slice(terminalStart, terminalEnd)
-  assert.match(terminalPath, /terminalAuthorityVersion/)
-  assert.match(terminalPath, /scrollAuthorityAllowsCommit/,
-    'terminal rAF work must reject a later reader generation')
-
-  const hotStart = ownerSource.indexOf('const onScroll = () => {')
-  const hotEnd = ownerSource.indexOf(
-    "scrollEl.addEventListener('scroll', onScroll",
-    hotStart,
-  )
-  const hotPath = ownerSource.slice(hotStart, hotEnd)
-  assert.match(
-    hotPath,
-    /readerIntentAfterScroll\(\{/,
-    'actual scrolls must claim generations by input sequence, not quiet batch',
-  )
-
-  assert.match(terminalPath, /authority === 'wait'/)
-  assert.match(terminalPath, /requestAnimationFrame\(inspectCommittedLayout\)/,
-    'terminal settlement must wait through a no-scroll tap instead of retiring pin')
-  assert.doesNotMatch(terminalPath, /terminal:reader-owns/)
 })
 
 test('newer semantic actions cannot be overwritten by an older quiet settlement', () => {

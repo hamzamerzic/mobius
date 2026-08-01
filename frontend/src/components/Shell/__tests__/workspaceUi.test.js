@@ -919,9 +919,6 @@ test('drawer row menus use one semantic context-menu path across pointer types',
     /srcEl\.closest\('\.drawer__row'\)\?\.querySelector\('\.drawer__more'\)\?\.click\(\)/,
     'touch hold must not depend on a synthetic trigger click',
   )
-})
-
-test('an outside drawer-menu tap closes only after the backdrop consumes its click', () => {
   assert.match(drawerItemActionMenu, /function consumeOutsidePointer\(event\)[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?stopImmediatePropagation/)
   assert.match(drawerItemActionMenu, /onPointerDown=\{event => \{[\s\S]*?consumeOutsidePointer\(event\)[\s\S]*?\}\}/)
   assert.match(drawerItemActionMenu, /onClick=\{event => \{[\s\S]*?if \(consumeOutsidePointer\(event\)\) close\(\)/)
