@@ -1200,8 +1200,12 @@ test.describe('Drawer close paths converge through handleBack', () => {
       points: [[180, 520], [165, 512], [165, 390]],
       terminal: 'pointercancel',
     })
-    await navigateToSettings(page)
+    await page.getByRole('navigation', { name: 'Primary navigation' })
+      .getByRole('button', { name: 'Settings', exact: true })
+      .click()
 
+    // Drawer closure proves the destination action fired. Waiting for Settings
+    // data here would couple an input-ownership test to unrelated fetch latency.
     await expect(page.getByRole('button', { name: 'Toggle navigation' }))
       .toHaveAttribute('aria-expanded', 'false')
   })
@@ -1219,7 +1223,9 @@ test.describe('Drawer close paths converge through handleBack', () => {
       points: [[180, 420], [150, 421]],
     })
 
-    await navigateToSettings(page)
+    await page.getByRole('navigation', { name: 'Primary navigation' })
+      .getByRole('button', { name: 'Settings', exact: true })
+      .click()
     await expect(page.getByRole('button', { name: 'Toggle navigation' }))
       .toHaveAttribute('aria-expanded', 'false')
   })
