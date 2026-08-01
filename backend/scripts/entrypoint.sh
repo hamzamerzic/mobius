@@ -789,9 +789,22 @@ printf '%s\n' "$_served_sha" > /tmp/serving-sha
 chmod 644 /tmp/serving-source /tmp/serving-sha 2>/dev/null || true
 
 if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
-  # Slice B deploy=merge reconcile. A deploy ships a new image AND advances
-  # canonical origin/main; fetch origin and merge the new version once with the
-  # local edits NOW, before uvicorn imports the code, so the update goes live this
+  # A managed release image must not import the updater from the persistent
+  # checkout it is about to repair. That checkout may predate release-channel
+  # support and still follow origin/main. Import the root-owned updater baked
+  # into this exact image instead; it fetches the configured release ref but
+  # reconciles /data/platform only to /app/build-info.json's immutable SHA.
+  # Normal installations keep the historical persistent-updater path.
+  _platform_reconciler_backend=/data/platform/backend
+  _platform_reconciler_prefix=
+  if [ -n "${MOBIUS_PLATFORM_RELEASE_REF:-}" ]; then
+    _platform_reconciler_backend=/app/platform-baked/backend
+    _platform_reconciler_prefix="env PYTHONDONTWRITEBYTECODE=1"
+  fi
+  # Deploy=merge reconcile. A normal deploy advances origin/main; a managed
+  # deploy fetches its configured channel and selects the image's baked SHA.
+  # Merge that selected version once with local edits before uvicorn imports it,
+  # so the update goes live this
   # boot with no restart. Runs as mobius (writes /data; root would poison /data
   # ownership + hit git "dubious ownership"), cwd the served backend so `app`
   # imports resolve from the clone, under the IDENTICAL GIT_*/PYTHONPATH scrub
@@ -804,9 +817,9 @@ if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
   # comfortably higher so internal timeouts fire FIRST; the post-timeout guard
   # below still cleans the tree if the outer kill ever wins. recoveryd remains
   # the outer floor.
-  echo "Platform layer: reconciling /data/platform with origin (slice B deploy=merge)..." >&2
+  echo "Platform layer: reconciling /data/platform with its configured release target..." >&2
   su -s /bin/sh mobius -c \
-    "cd /data/platform/backend && $_env_scrub timeout 900 python3 -c \
+    "cd '$_platform_reconciler_backend' && $_env_scrub $_platform_reconciler_prefix timeout 900 python3 -c \
      'from app import platform_update; print(platform_update.reconcile_clone_sync())'" \
     2>&1 || true
   # Reconcile itself is best-effort, but the post-reconcile guard is the final
@@ -814,7 +827,7 @@ if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
   # state, do not import that tree. Exiting lets recoveryd/container policy use
   # the baked recovery floor instead of serving possibly half-applied code.
   if ! su -s /bin/sh mobius -c \
-    "cd /data/platform/backend && $_env_scrub python3 -c \
+    "cd '$_platform_reconciler_backend' && $_env_scrub $_platform_reconciler_prefix python3 -c \
      'from app import platform_update; print(platform_update.boot_guard_sync())'" \
     2>&1; then
     echo "Platform layer: boot guard failed; refusing to serve the platform tree." >&2

@@ -92,6 +92,24 @@ test('a disconnected GitHub blocks Send before any request is made', () => {
   assert.match(sendBlocker(record, { connected: false }), /Connect GitHub/)
 })
 
+test('managed release records and stacks stay off the chat send surface', () => {
+  const reason = 'Platform contributions are disabled on this release channel.'
+  const record = {
+    id: 'single', status: 'prepared', review: { state: 'ready' },
+    contribution_disabled_reason: reason,
+  }
+  assert.equal(sendBlocker(record, { connected: true }), reason)
+  assert.deepEqual(visibleReviewItems({ records: [record] }, null), [])
+
+  const stack = [1, 2].map(position => ({
+    id: `layer-${position}`,
+    status: 'prepared',
+    contribution_disabled_reason: reason,
+    stack: { id: 'managed', position, total: 2 },
+  }))
+  assert.deepEqual(visibleReviewItems({ records: stack }, null), [])
+})
+
 test('a stack layer is never sendable from chat — the chain is reviewed together', () => {
   const record = {
     status: 'prepared', stack: { id: 'demo', position: 1, total: 2 },

@@ -281,6 +281,16 @@ def test_submit_pr_rechecks_landed_hooks_after_refresh():
   assert "scripts/git-doctor.sh --fix" in refreshed_segment
 
 
+def test_submit_pr_blocks_non_main_release_before_git_mutation():
+  submit = (ROOT / "scripts" / "submit-pr.sh").read_text(encoding="utf-8")
+  guard = submit.index('MOBIUS_PLATFORM_RELEASE_REF}" != "refs/heads/main"')
+  doctor = submit.index("scripts/git-doctor.sh --fix")
+  fetch = submit.index("git fetch origin main")
+
+  assert guard < doctor < fetch
+  assert "platform contributions are disabled" in submit
+
+
 def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
   entrypoint = (
     ROOT / "backend" / "scripts" / "entrypoint.sh"
@@ -292,6 +302,17 @@ def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
     'if [ "$_use_platform" -eq 1 ] && '
     '[ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then'
   ) in entrypoint
+
+
+def test_managed_release_boot_uses_the_baked_updater():
+  entrypoint = (
+    ROOT / "backend" / "scripts" / "entrypoint.sh"
+  ).read_text(encoding="utf-8")
+
+  assert 'if [ -n "${MOBIUS_PLATFORM_RELEASE_REF:-}" ]; then' in entrypoint
+  assert "_platform_reconciler_backend=/app/platform-baked/backend" in entrypoint
+  assert '_platform_reconciler_prefix="env PYTHONDONTWRITEBYTECODE=1"' in entrypoint
+  assert "cd '$_platform_reconciler_backend'" in entrypoint
 
 
 def test_browser_setup_fails_closed_before_auth_and_never_wipes_chats():
