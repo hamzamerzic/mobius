@@ -752,10 +752,9 @@
   }
 
   /* The docked panel covers the drawer the way the phone panel covers the
-     screen: it fills the drawer's content column edge to edge, inset by the
-     same 8px gutter Drawer.css gives its rows, so resizing the drawer resizes
-     the panel with it and no row ever peeks out beside it. Top and bottom meet
-     the first and last row positions (58px header + 8px, 12px body bottom). */
+     screen: it fills the drawer's content column, inset by the same 8px gutter
+     Drawer.css gives its rows, so a resized drawer resizes the panel with it
+     and no row is left peeking out beside it. */
   .shell--drawer-docked .notifications {
     top: 66px;
     right: auto;
