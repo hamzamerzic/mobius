@@ -887,6 +887,14 @@ def _resolve_asset_file(asset_path: str) -> Path | None:
   return None
 
 
+# Root-served service worker scripts. `sw.js` is the shell's caching worker;
+# `sw-push.js` owns Web Push from a scope inside the shell's PWA scope (see
+# frontend/public/sw-push.js). Both need the same delivery contract: reserved
+# as top-level names, 404 rather than SPA HTML on a miss, and a revalidating
+# full-body response so a stale or truncated worker can never stick.
+_SERVICE_WORKER_SCRIPTS = frozenset({"sw.js", "sw-push.js"})
+
+
 def _is_static_asset_path(path: str) -> bool:
   """True for paths that must 404 on a miss rather than fall through to
   the SPA HTML.
@@ -912,7 +920,7 @@ def _is_static_asset_path(path: str) -> bool:
     # First path segment — catches both `vendor` and `vendor/<file>`
     # without over-matching a route like `vendorfoo`.
     path.split("/", 1)[0] in {"vendor", "assets"}
-    or path == "sw.js"
+    or path in _SERVICE_WORKER_SCRIPTS
     or path.rsplit(".", 1)[-1] in {
       "js", "mjs", "css", "html", "map", "wasm", "json",
     }
@@ -928,8 +936,8 @@ _RESERVED_TOP_LEVEL_APP_ALIASES = {
   "chat",
   "recover",
   "shell",
-  "sw.js",
   "vendor",
+  *_SERVICE_WORKER_SCRIPTS,
 }
 
 
@@ -1276,10 +1284,9 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
       # If-None-Match on every request, so a 304 keeps the
       # download cheap when nothing changed.
       headers = _public_static_headers(path)
-      if path == "sw.js":
+      if path in _SERVICE_WORKER_SCRIPTS:
         headers["Cache-Control"] = "no-cache, must-revalidate"
-      if path == "sw.js":
-        # sw.js is a REVALIDATING response (no-cache + the mtime ETag
+        # A worker script is a REVALIDATING response (no-cache + the mtime ETag
         # FileResponse sets), so it must never answer a 206. A
         # `Range: bytes=0-0` probe would otherwise let Chromium store the
         # 1-byte slice and later serve it as a status-200 full body — a

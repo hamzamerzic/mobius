@@ -29,7 +29,14 @@ export default [
     ],
   },
   {
-    files: ['src/**/*.{js,jsx}', 'scripts/**/*.mjs', 'vite.config.js'],
+    files: [
+      'src/**/*.{js,jsx}',
+      'scripts/**/*.mjs',
+      'vite.config.js',
+      // Served verbatim from public/ rather than bundled, but still hand-
+      // written source that deserves the same rules and worker globals.
+      'public/sw-push.js',
+    ],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'module',

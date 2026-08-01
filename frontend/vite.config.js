@@ -103,7 +103,13 @@ export default defineConfig({
         // rewritten to the active --bg, so precaching it would freeze gesture/
         // system-UI color hints to whatever theme existed at build time.
         globPatterns: ['**/*.{js,css,html,svg,png,ico,webmanifest}'],
-        globIgnores: ['vendor/**', 'app-frame.html', 'manifest.webmanifest'],
+        // `sw-push.js` is itself a service worker (see public/sw-push.js).
+        // Precaching a worker script would let the shell SW serve a cached
+        // copy back to the browser's update check, freezing push behaviour at
+        // whatever shipped first.
+        globIgnores: [
+          'vendor/**', 'app-frame.html', 'manifest.webmanifest', 'sw-push.js',
+        ],
         // ROOT FIX for stale installed PWAs: give EVERY precache
         // entry a real content-hash revision.
         //
