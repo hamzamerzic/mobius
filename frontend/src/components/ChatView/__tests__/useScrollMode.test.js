@@ -1823,7 +1823,7 @@ function partedRow(key, top, partHeights) {
   }
   let cursor = top
   row.children = partHeights.map(height => {
-    const child = { offsetTop: cursor, offsetHeight: height, offsetParent: null }
+    const child = { offsetTop: cursor, offsetHeight: height }
     cursor += height
     return child
   })
@@ -1832,10 +1832,11 @@ function partedRow(key, top, partHeights) {
 
 function partedScrollEl(row, { scrollTop, clientHeight = 900, spacer = 0 }) {
   const scrollHeight = row.offsetTop + row.offsetHeight + spacer
-  return {
+  const scrollEl = {
     scrollTop,
     clientHeight,
     scrollHeight,
+    getBoundingClientRect: () => ({ top: 0 }),
     querySelector(selector) {
       if (selector === '.spacer-dynamic') return { offsetHeight: spacer }
       return selector.includes(row.dataset.key) ? row : null
@@ -1844,6 +1845,15 @@ function partedScrollEl(row, { scrollTop, clientHeight = 900, spacer = 0 }) {
       return selector === '.chat__msg[data-key]' ? [row] : []
     },
   }
+  // Every real element has a rect, and rects are what the shipping code
+  // measures with. Give the fixture the geometry a browser would report so
+  // these tests exercise that arithmetic rather than a test-only fallback.
+  const attachRect = node => {
+    node.getBoundingClientRect = () => ({ top: node.offsetTop - scrollEl.scrollTop })
+    node.children?.forEach(attachRect)
+  }
+  attachRect(row)
+  return scrollEl
 }
 
 test('a reading position inside one enormous turn addresses the part, not the turn', () => {
@@ -1858,8 +1868,6 @@ test('a reading position inside one enormous turn addresses the part, not the tu
   assert.deepEqual(mode.part, [200],
     'the addressed part is the one under the viewport top')
   assert.equal(mode.offset, 0)
-  assert.ok(Math.abs(mode.offset) < 900,
-    'offset stays within one viewport instead of becoming a five-digit row offset')
 })
 
 test('restoring an enormous turn survives a height change elsewhere in that turn', () => {
@@ -1883,7 +1891,7 @@ test('restoring an enormous turn survives a height change elsewhere in that turn
   assert.equal(grownEl.scrollTop, 84_000)
 })
 
-test('a saved location that cannot be resolved is retained, not overwritten', () => {
+test('an unresolvable saved location falls back to real content, not the top of the chat', () => {
   // The row is absent from this visit's committed window. That is a retrieval
   // failure; the automatic tail shown instead must not become the stored
   // location, or one bad return breaks every later return.
@@ -1891,7 +1899,7 @@ test('a saved location that cannot be resolved is retained, not overwritten', ()
   const scrollEl = partedScrollEl(tail, { scrollTop: 0 })
 
   const restored = _validateSavedMode(
-    { kind: 'ANCHOR_AT', key: 'assistant-absent', part: 12, offset: -30 },
+    { kind: 'ANCHOR_AT', key: 'assistant-absent', part: [12], offset: -30 },
     [],
     scrollEl,
   )
@@ -1899,4 +1907,52 @@ test('a saved location that cannot be resolved is retained, not overwritten', ()
   assert.equal(restored.defaultTail, true,
     'the visit still shows real content rather than a blank viewport')
   assert.notEqual(restored.key, 'assistant-absent')
+})
+
+test('a part that is itself taller than the viewport resolves to a deeper path', () => {
+  // The descent is not one level: a single worklog part can itself be
+  // thousands of pixels, which is the whole reason `part` is a PATH.
+  const row = partedRow('assistant-nested', 0, [1200, 3000, 1200])
+  const middle = row.children[1]
+  let cursor = middle.offsetTop
+  middle.children = Array.from({ length: 10 }, () => {
+    const kid = { offsetTop: cursor, offsetHeight: 300 }
+    cursor += 300
+    return kid
+  })
+  const scrollEl = partedScrollEl(row, { scrollTop: 1800 })
+
+  const mode = anchorModeFromScroll(scrollEl)
+
+  assert.deepEqual(mode.part, [1, 2],
+    'descends into the oversized part, not just the oversized row')
+  assert.equal(mode.offset, 0)
+
+  applyMode(scrollEl, mode)
+  assert.equal(scrollEl.scrollTop, 1800,
+    'restores to the nested sub-part the reader was actually on')
+})
+
+test('a part path that no longer resolves fails the restore rather than jumping to the top of the turn', () => {
+  const saved = anchorModeFromScroll(
+    partedScrollEl(partedRow('assistant-huge', 0, Array(300).fill(240)), {
+      scrollTop: 48_000,
+    }),
+  )
+  assert.deepEqual(saved.part, [200])
+
+  // The turn comes back with far fewer parts (a sliced cold render), so part
+  // 200 does not exist. Degrading to the ROW would keep the part-relative
+  // offset and drop the reader at the top of a 72,000px turn.
+  const shrunk = partedRow('assistant-huge', 0, Array(30).fill(240))
+  const scrollEl = partedScrollEl(shrunk, { scrollTop: 0 })
+
+  const restored = _validateSavedMode(saved, [], scrollEl)
+
+  assert.equal(restored.defaultTail, true,
+    'a partially resolving path is an unresolved location, not a clamp')
+
+  applyMode(scrollEl, restored)
+  assert.equal(scrollEl.scrollTop, 6300,
+    'lands on real content at the tail instead of scrollTop 0')
 })

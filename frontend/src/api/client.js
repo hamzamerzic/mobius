@@ -7,7 +7,7 @@ import { del as idbDel } from 'idb-keyval'
 import * as setupSession from '../lib/setupSession.js'
 import { clearLatchedTokens } from '../lib/appToken.js'
 import { clearOwnerDraftStorage } from '../lib/ownerDraftStorage.js'
-import { READING_POSITION_KEY } from '../components/ChatView/useScrollMode.js'
+import { clearReadingPositions } from '../components/ChatView/useScrollMode.js'
 import { clearDurableComposerDrafts } from '../components/ChatView/composerDraft.js'
 import { verifyConnectivity } from '../lib/connectivityStore.js'
 import { SHELL_DATA_CACHE } from '../sw-cache-policy.js'
@@ -107,8 +107,7 @@ export function clearToken() {
   // also means they now outlive a session unless cleared here. Where the owner
   // had scrolled to in each conversation is owner-scoped, so it leaves with
   // the rest of their persisted state.
-  try { localStorage.removeItem(READING_POSITION_KEY) } catch {}
-  try { localStorage.removeItem('chat-reading-position-schema') } catch {}
+  try { clearReadingPositions() } catch {}
 }
 
 // Wipes persisted client state on logout / token expiry: the

@@ -13,11 +13,15 @@
  *                                  — user msg at top (post-send), keyed on
  *                                    the stable client `cid` (data-cid)
  *   { kind: 'FOLLOW_BOTTOM' }     — sticky-bottom for streaming
- *   { kind: 'ANCHOR_AT', key, offset, questionSubmitViewportH?,
+ *   { kind: 'ANCHOR_AT', key, offset, part?, questionSubmitViewportH?,
  *     questionSubmitBaseMode? }
- *                                  — anchored at a specific msg; an in-message
- *                                    question may temporarily preserve its
- *                                    submit-time position at one viewport size
+ *                                  — anchored at a message and, when that row
+ *                                    is taller than the viewport, an ordered
+ *                                    child-index path within it; `offset` is
+ *                                    measured from the addressed element's
+ *                                    top. An in-message question may
+ *                                    temporarily preserve its submit-time
+ *                                    position at one viewport size
  *
  * Send pinning has one rule for direct, queued, and steered messages: the
  * first visible user message always pins; every later message pins when the
@@ -134,36 +138,41 @@ function _appendScrollTrace(bucket, entry) {
 // position — every conversation landed at the bottom and had to be scrolled
 // back by hand. A reading position must outlive the tab that created it, so it
 // is stored with the same durability as the transcript it points into.
+// The rename from the sessionStorage `chat-mode` map IS the migration: those
+// entries carry no part path, so they cannot be migrated into a coordinate
+// they never recorded, and this key has never held any other shape.
 export const READING_POSITION_KEY = 'chat-reading-position'
-const READING_POSITION_SCHEMA_KEY = 'chat-reading-position-schema'
-// Schema 1 supersedes the sessionStorage `chat-mode` map: its entries carry no
-// part path, so they cannot be migrated into a coordinate they never recorded.
-const READING_POSITION_SCHEMA = '1'
 // This instance has 800+ chats. Positions are tiny, but the map is bounded so
-// it cannot grow without limit; least-recently-touched entries drop first.
+// it cannot grow without limit; least-recently-written entries drop first.
 const READING_POSITION_LIMIT = 300
 
 const _scrollModes = (() => {
   try {
-    if (localStorage.getItem(READING_POSITION_SCHEMA_KEY) !== READING_POSITION_SCHEMA) {
-      localStorage.removeItem(READING_POSITION_KEY)
-      localStorage.setItem(READING_POSITION_SCHEMA_KEY, READING_POSITION_SCHEMA)
-      return {}
-    }
     const parsed = JSON.parse(localStorage.getItem(READING_POSITION_KEY) || '{}')
     return (parsed && typeof parsed === 'object') ? parsed : {}
   }
   catch { return {} }
 })()
 
+/** Reading positions are owner-scoped: they leave with the owner's session.
+ *  Clearing storage alone is not enough — logout reloads the shell, and a
+ *  still-mounted ChatView's pagehide write would put the in-memory map
+ *  straight back over the cleared key. */
+export function clearReadingPositions() {
+  for (const key of Object.keys(_scrollModes)) delete _scrollModes[key]
+  try { localStorage.removeItem(READING_POSITION_KEY) } catch {}
+}
+
 function _persistScrollModes() {
   try {
     const entries = Object.entries(_scrollModes)
     if (entries.length > READING_POSITION_LIMIT) {
-      const keep = entries
+      // Descending by write time, so the TAIL past the limit is what gets
+      // evicted. `.slice(0, LIMIT)` here would delete the newest 300 instead.
+      const drop = entries
         .sort((a, b) => (b[1]?.at || 0) - (a[1]?.at || 0))
         .slice(READING_POSITION_LIMIT)
-      for (const [key] of keep) delete _scrollModes[key]
+      for (const [key] of drop) delete _scrollModes[key]
     }
     localStorage.setItem(READING_POSITION_KEY, JSON.stringify(_scrollModes))
   }
@@ -192,19 +201,17 @@ function _topmostVisibleMsg(scrollEl) {
 }
 
 
-/** Position of `el` in the scroll container's coordinate space.
- *
- * Row-level anchors could read `offsetTop` directly because a message row's
- * offsetParent is the list. A part-level anchor addresses a row's CHILD, whose
- * offsetParent may be the row itself, so the walk is what makes row and part
- * anchors comparable. Mocked geometry with no `offsetParent` degrades to plain
- * `offsetTop`, which is exactly the row-level behavior it replaces. */
+/** Position of `el` in the scroll container's coordinate space. */
 function _scrollTopOf(scrollEl, el) {
   // Rects are the only measurement that is correct for BOTH a message row and
   // an arbitrarily nested part of one: a part's offsetParent is whatever
   // happens to be positioned around it, which is not reliably the row or the
   // scroll container, so an offsetTop walk silently produces a wrong (often
   // zero) part position. Both call sites already force layout.
+  //
+  // Every real element has a rect, so this is the only path that runs in a
+  // browser. The `offsetTop` branch exists purely so plain object fixtures
+  // (which have no rect) still measure row-level anchors the old way.
   if (typeof el?.getBoundingClientRect === 'function'
       && typeof scrollEl?.getBoundingClientRect === 'function') {
     return el.getBoundingClientRect().top
@@ -244,7 +251,7 @@ function _partPathAt(scrollEl, row, scrollTop) {
   // a top-level worklog part can itself be thousands of pixels, so one level
   // of resolution is not enough to say where the reader was. Stop as soon as
   // the target fits, which is when its own height bounds the restore error.
-  while (node?.children?.length && (node === row || node.offsetHeight > viewportH)) {
+  while (node?.children?.length && node.offsetHeight > viewportH) {
     let next = null
     for (let index = 0; index < node.children.length; index += 1) {
       const kid = node.children[index]
@@ -265,16 +272,18 @@ function _partPathAt(scrollEl, row, scrollTop) {
 /** The element a mode's `part` addresses within a row already in hand. */
 function _rowPartTarget(row, mode) {
   if (!row) return null
-  const path = Array.isArray(mode?.part)
-    ? mode.part
-    : (Number.isInteger(mode?.part) ? [mode.part] : null)
+  const path = Array.isArray(mode?.part) ? mode.part : null
   if (!path?.length) return row
   let node = row
   for (const index of path) {
     const next = node.children?.[index]
-    // A stale path (the turn re-rendered with a different shape) degrades to
-    // the deepest element that still resolves, never to a failed restore.
-    if (!next) return node
+    // A path that only partially resolves is an UNRESOLVED location, not a
+    // clamp: the caller's `offset` is measured from the addressed part, so
+    // returning a shallower origin (at the top level, the row itself) would
+    // teleport the reader to the top of a turn that can be tens of thousands
+    // of pixels tall. Failing here lets the retention flag keep the stored
+    // position instead of overwriting it with a bogus one.
+    if (!next) return null
     node = next
   }
   return node
@@ -491,8 +500,8 @@ function _anchorRow(scrollEl, key) {
 
 /** Resolve the exact element an ANCHOR_AT addresses: the message row, or the
  *  `part`-th child of that row when the anchor carries sub-message resolution.
- *  A stale part index (the row re-rendered with fewer parts) degrades to the
- *  row rather than failing the whole restore. */
+ *  Null when the row is gone OR its part path no longer resolves; both are
+ *  unresolved locations and neither may be applied. */
 function _anchorEl(scrollEl, mode) {
   return _rowPartTarget(_anchorRow(scrollEl, mode?.key), mode)
 }
@@ -515,14 +524,12 @@ export function _anchorModeIntersectsContent(target, mode, viewportHeight) {
 function _durableQuestionSubmissionMode(mode) {
   if (mode?.kind !== 'ANCHOR_AT') return mode
   if (!Object.hasOwn(mode, 'questionSubmitViewportH')
-      && !Object.hasOwn(mode, 'questionSubmitBaseMode')
-      && !Object.hasOwn(mode, 'reserveTail')) {
+      && !Object.hasOwn(mode, 'questionSubmitBaseMode')) {
     return mode
   }
   const {
     questionSubmitViewportH: _transientViewport,
     questionSubmitBaseMode: _transientBaseMode,
-    reserveTail: _legacyTransientReservation,
     ...durable
   } = mode
   return durable
@@ -564,14 +571,21 @@ export function _anchorReapplyNeeded(scrollEl, mode, lastAnchorTop) {
   const clampedShort = scrollEl.scrollTop < target - 1 && targetReachable
   // As with a send pin, overshooting an unchanged anchor belongs to the
   // reader. Browser clamps only shorten scrollTop; target movement is already
-  // represented by offsetTop changing.
+  // represented by the anchor's container-space top changing.
+  //
+  // That top is rect-derived, so it is a float: compare with the same 0.5px
+  // tolerance `writeMode` uses, or sub-pixel font-swap drift reads as a shift
+  // and fires a repair write.
   // Deliberately only two cases: the anchor MOVED, or the browser clamped us
   // short of a target that is reachable again. An element merely changing its
   // own height is NOT a repair case — the reader's distance from that
   // element's top is what holds them, and re-deriving it on a height change
   // moves them off the content they were reading, which is the "it lands on
   // the right position and then scrolls to the wrong one" failure.
-  return anchorTop !== lastAnchorTop || clampedShort
+  // A null baseline means no recorded position to compare against, which is
+  // itself a repair case (as it was under the previous strict !==).
+  if (!Number.isFinite(lastAnchorTop)) return true
+  return Math.abs(anchorTop - lastAnchorTop) >= 0.5 || clampedShort
 }
 
 
@@ -1110,36 +1124,7 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
 /**
  * Hook that owns the chat scroll subsystem.
  *
- * The `modeRef.current` value is a tagged union — every possible
- * shape:
- *
- *   {kind: 'INITIAL'}
- *     Pre-restore default. applyMode is a no-op in this state.
- *     Set once on mount before the saved mode is read from
- *     sessionStorage. Also re-entered when the layout effect sees
- *     a new chatId (defensive — key={chatId} normally remounts).
- *
- *   {kind: 'PIN_USER_MSG', cid: string, followWhenFilled?: boolean}
- *     Pin the user message with the given stable `cid` (matched via
- *     `data-cid`) to the top of the viewport (PIN_OFFSET=4 px of
- *     breathing room). Set only for the first visible user row or a
- *     later send submitted at the real-content tail; applyMode scrolls to
- *     `userMsgEl.offsetTop - PIN_OFFSET`. Pinning enters hold while the reply
- *     consumes the reservation; an armed live pin hands off to FOLLOW_BOTTOM
- *     only when that reservation reaches zero.
- *
- *   {kind: 'FOLLOW_BOTTOM'}
- *     Sticky-bottom for streaming. applyMode sets scrollTop =
- *     scrollHeight (only if content actually overflows). Engaged
- *     when the reader reaches the physical bottom, or when an armed live
- *     pin consumes its reservation; lost when the reader scrolls up.
- *
- *   {kind: 'ANCHOR_AT', key: string, offset: number}
- *     Anchored at a specific message (`data-key="<key>"`) with
- *     `offset` pixels above the viewport top. Set when the user
- *     scrolls to a non-bottom position and when lifecycle restoration
- *     freezes the current position. A missing saved anchor degrades to
- *     the current visible hold anchor, never FOLLOW_BOTTOM.
+ * See the module docblock for the `modeRef.current` tagged union.
  *
  * The caller is expected to:
  *   - Treat `modeRef` as read-only snapshot state. Route send, queue,
@@ -1175,22 +1160,6 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  *   One entry-readiness state: history blocks reveal, cached permits an
  *   immediate first paint while layout stabilizes, and ready means the
  *   authoritative history read has settled.
- *
- * @returns {{
- *   gestureWindowUntilRef: React.MutableRefObject<number>,
- *   revealed: boolean,
- *   anchorPagination: (key: string, offset: number) => void,
- *   captureSendIntent: (event: object) => object,
- *   commitSendIntent: (event: object) => void,
- *   freezeChatExit: () => void,
- *   freezeForegroundReturn: () => void,
- *   freezeQuestionSubmission: () => void,
- *   freezeQueuedSubmission: () => void,
- *   revealConversationTail: () => void,
- *   settleSendIntent: (event?: object) => void,
- *   settleStreamingPin: () => void,
- *   composerResized: () => void,
- * }}
  */
 export default function useScrollMode({
   chatId,
@@ -1431,7 +1400,12 @@ export default function useScrollMode({
         if (freezeToCurrentPosition) {
           transitionMode(mode, 'lifecycle:chat-exit')
         }
-        _scrollModes[chatId] = { ...mode, at: Date.now() }
+        // `defaultTail` marks a manufactured fallback, never a stored
+        // location: persisting it makes the next mount misread a good entry
+        // as unresolved and freeze that chat's position until the reader
+        // scrolls.
+        const { defaultTail: _fallback, ...durable } = mode
+        _scrollModes[chatId] = { ...durable, at: Date.now() }
       } else {
         delete _scrollModes[chatId]
       }
@@ -2645,8 +2619,8 @@ export default function useScrollMode({
   // reconnect (Path B) or a Path-A commit after the reveal cap must not shift
   // what the reader was looking at. Before reveal, hide-then-reveal already owns
   // the position, so this no-ops; a quick-wake kept socket produces no commit,
-  // so the caller never invokes it. Mirrors the RO's content-tracking re-apply
-  // (FOLLOW_BOTTOM/ANCHOR_AT only — PIN_USER_MSG settles via its own RO branch).
+  // so the caller never invokes it. FOLLOW_BOTTOM/ANCHOR_AT only —
+  // PIN_USER_MSG settles via its own RO branch.
   const reapplyActiveMode = useCallback(() => {
     if (!revealedRef.current) return
     const scrollEl = scrollRef.current
