@@ -607,7 +607,10 @@ def run() -> int:
     return 0
 
   m = re.search(r"^description:\s*(.+)$", out, re.MULTILINE)
-  if m:
+  # StartTurn already names a fresh chat from its first message.  Keep that
+  # synchronous name on the first summary publication; later publications
+  # may sync the title from the durable note.
+  if m and existing.strip():
     _patch_title(chat_id, m.group(1).strip())
   return 0
 
