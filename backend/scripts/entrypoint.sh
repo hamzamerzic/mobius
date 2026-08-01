@@ -40,12 +40,13 @@ case "${MOBIUS_BOOT_MODE:-normal}" in
     ;;
 esac
 
-# Root is an externally-controlled instance capability. There is deliberately
-# no partial apt/dpkg rule: package maintainer scripts already make that rule
-# equivalent to arbitrary root. Enabling this setting is therefore explicit
-# and honest; disabling it leaves the agent with no sudo path at all.
+# Normal Mobius boots give the in-product agent honest, unrestricted root by
+# default. There is deliberately no partial apt/dpkg rule: package maintainer
+# scripts already make that rule equivalent to arbitrary root. Operators can
+# still set MOBIUS_AGENT_SUDO=0 as a coarse kill switch. Recovery mode execs
+# above this point and therefore never installs the agent sudo rule.
 . /app/scripts/agent_sudo.sh
-configure_agent_sudo "${MOBIUS_AGENT_SUDO:-0}" || exit $?
+configure_agent_sudo "${MOBIUS_AGENT_SUDO:-1}" || exit $?
 
 # Stop cron on container shutdown so it doesn't orphan processes.
 cleanup() { kill "$(cat /var/run/crond.pid 2>/dev/null)" 2>/dev/null; }

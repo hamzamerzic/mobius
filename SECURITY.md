@@ -79,12 +79,12 @@ editable platform is broken. This is appropriate because:
 3. Recovery is isolated from the editable production process and provides the
    rollback boundary.
 
-Full agent root is an explicit instance capability, disabled by default.
-`MOBIUS_AGENT_SUDO=1` is accepted only by the root-owned baked entrypoint and
-creates an unrestricted sudo rule after owner confirmation; reverting it
-requires recreating the container. The recovery worker never shares that
-container: it is non-root/read-only and reaches a separate root target through
-a one-time authenticated, bounded protocol. The target removes the bearer from
+Full agent root is the default normal-instance capability. The root-owned baked
+entrypoint creates an unrestricted sudo rule unless an operator sets
+`MOBIUS_AGENT_SUDO=0`; changing that boundary requires recreating the container.
+Recovery mode branches before the rule is installed. The recovery worker never
+shares the normal container: it is non-root/read-only and reaches a separate
+root target through a one-time authenticated, bounded protocol. The target removes the bearer from
 its exec environment, wipes it after deriving a one-way verifier, blocks child
 access to its memory and descriptors, drops packet-capture/ptrace/mount
 capabilities, and confines its own file helpers to explicit roots with Linux

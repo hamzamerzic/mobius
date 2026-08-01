@@ -90,9 +90,9 @@ def test_lifecycle_directs_crashed_services_through_credential_rotation():
   assert script.count("scripts/mobiusctl recovery reopen") >= 3
 
 
-def test_app_sudo_is_explicit_and_defaults_off():
+def test_app_sudo_is_full_root_by_default_with_operator_kill_switch():
   app_env = _compose()["services"]["app"]["environment"]
-  assert "MOBIUS_AGENT_SUDO=${MOBIUS_AGENT_SUDO:-0}" in app_env
+  assert "MOBIUS_AGENT_SUDO=${MOBIUS_AGENT_SUDO:-1}" in app_env
 
 
 def test_stack_release_ref_is_exact_and_unstamped_normal_builds_fail_closed():

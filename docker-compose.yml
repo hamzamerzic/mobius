@@ -49,9 +49,9 @@ services:
       - GITHUB_OAUTH_CLIENT_ID=${GITHUB_OAUTH_CLIENT_ID:-Ov23liMpOLS6qp5YV8Vk}
       - DATABASE_URL=sqlite:////data/db/ultimate.db
       - DATA_DIR=/data
-      # Full root is opt-in because it persists for the lifetime of this
-      # container. Set MOBIUS_AGENT_SUDO=1 only after the owner confirms.
-      - MOBIUS_AGENT_SUDO=${MOBIUS_AGENT_SUDO:-0}
+      # The normal in-product agent has full root by default. Set this to 0 as
+      # an operator kill switch; recovery mode never installs the sudo rule.
+      - MOBIUS_AGENT_SUDO=${MOBIUS_AGENT_SUDO:-1}
       # This cutover is released from a protected stack branch while public
       # main remains on the compatibility image. The image-owned updater
       # fetches this full ref but reconciles only to its exact baked SHA.

@@ -3,7 +3,7 @@
 # privileges. This file is baked root-owned; the live platform never sources it.
 
 configure_agent_sudo() {
-  _sudo_mode="${1:-0}"
+  _sudo_mode="${1:-1}"
   _sudo_dir="${2:-/etc/sudoers.d}"
   _visudo="${3:-/usr/sbin/visudo}"
   rm -f "$_sudo_dir/mobius-apt" "$_sudo_dir/mobius-agent"

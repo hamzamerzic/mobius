@@ -184,11 +184,12 @@ normal stack, verifies Mobius health, then removes an old `mobius-recoveryd`
 container only when its exact name and Compose project/service labels match the
 current installation. Data under `/data` survives rebuilds.
 
-Full root for the in-product agent is explicit and off by default. After the
-owner confirms, set `MOBIUS_AGENT_SUDO=1` in `.env` and recreate the app. Set it
-back to `0` and run `scripts/mobiusctl update` to revoke it by rebuilding and
-recreating from the exact clean release image; a process in the old writable
-container overlay cannot survive that replacement.
+The in-product agent has passwordless full root inside its Mobius container by
+default. Set `MOBIUS_AGENT_SUDO=0` in `.env` and run `scripts/mobiusctl update`
+to use the operator kill switch. Either change recreates the app from the exact
+clean release image, so a process in the old writable container overlay cannot
+survive the replacement. The external recovery worker remains non-root and
+read-only, and recovery boot never installs the agent sudo rule.
 
 To connect a full web service such as Tandoor, point a sibling DNS name at the same server. For example, use `services.mobius.example.com`, then set it as `MOBIUS_SERVICE_GATEWAY_ORIGIN` in `.env`. Caddy serves integrations below `/services/<slug>`, so you do not need wildcard DNS or a new record for each service. See [.env.example](.env.example) for setup and [ARCHITECTURE.md](ARCHITECTURE.md#app-execution-tiers) for the trust boundaries.
 

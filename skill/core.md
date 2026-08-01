@@ -170,7 +170,7 @@ Partner-facing messages describe what the app does and how it feels, not how it'
 - `$API_BASE_URL` — backend URL
 - `$SCRIPTS_DIR` — helper scripts directory
 - `$VIEWPORT_WIDTH` / `$VIEWPORT_HEIGHT` — the partner's actual app viewport (set when the shell sends it; required for screenshots)
-- **System packages and root work**: first run `sudo -n true`. If it succeeds, the partner has explicitly enabled full root for this instance and you may use `sudo` deliberately for the task. If it fails, do not try to bypass it; explain that root must be enabled by the deployment owner and requires a clean container recreation. Runtime package changes are ephemeral until declared in the image.
+- **System packages and root work**: full in-container root is available by default, but first run `sudo -n true` and use `sudo` deliberately for the task. If it fails, do not try to bypass it; the deployment operator has disabled root and must recreate the container to re-enable it. Runtime package changes are ephemeral until declared in the image.
 
 ### Chat rendering
 
