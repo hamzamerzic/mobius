@@ -128,6 +128,7 @@
 }
 
 .standalone-install {
+  position: relative;
   width: min(430px, 100%);
   max-height: calc(100dvh - 32px);
   padding: 22px;
@@ -146,7 +147,6 @@
 }
 
 .standalone-install__identity p,
-.standalone-install__hint,
 .standalone-app--message p {
   margin: 5px 0 0;
   color: var(--muted, #aaa);
@@ -154,38 +154,14 @@
   line-height: 1.5;
 }
 
-.standalone-install__icon-button {
-  position: relative;
+.standalone-install__icon {
   flex: 0 0 64px;
   width: 64px;
   height: 64px;
-  padding: 0;
-  overflow: hidden;
-  border-radius: 15px;
-}
-
-.standalone-install__icon-button img {
-  width: 100%;
-  height: 100%;
   display: block;
+  border-radius: 15px;
   object-fit: cover;
 }
-
-.standalone-install__icon-button span {
-  position: absolute;
-  right: 3px;
-  bottom: 3px;
-  display: grid;
-  place-items: center;
-  width: 21px;
-  height: 21px;
-  border-radius: 50%;
-  background: var(--accent, #a78bfa);
-  color: var(--accent-fg, #111);
-  font-size: 11px;
-}
-
-.standalone-install__hint { margin-top: 14px; }
 
 .standalone-install__instructions {
   display: flex;
@@ -250,8 +226,32 @@
   .standalone-install__arrow { animation: none; }
 }
 
-.standalone-install__message { margin-top: 12px; color: var(--muted, #aaa); font-size: 12px; }
 .standalone-install__actions { margin-top: 18px; }
+
+/* Corner dismissal, replacing a worded "Maybe later" that competed with the
+   one action worth taking. Larger touch target than the glyph it draws. */
+.standalone-install .standalone-install__close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted, #aaa);
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.standalone-install .standalone-install__close:hover {
+  color: var(--text, #fff);
+  background: var(--hover, rgba(255, 255, 255, 0.06));
+}
 .standalone-install .standalone-install__primary {
   border-color: var(--accent, #a78bfa);
   background: var(--accent, #a78bfa);

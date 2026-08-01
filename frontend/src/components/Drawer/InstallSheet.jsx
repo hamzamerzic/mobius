@@ -145,22 +145,13 @@ export default function InstallSheet({ app, onClose }) {
     return new URL(`/apps/${appSlug}/?${query}`, window.location.origin).href
   }
 
-  // Shown for typing by hand. Deliberately WITHOUT the one-time pass: an
-  // address a human copies off a screen should not be a credential, and a
-  // pass-less arrival degrades to the ordinary login rather than failing.
-  const plainUrl = typeof window !== 'undefined'
-    ? new URL(`/apps/${appSlug}/?install=1`, window.location.origin).href
-    : `/apps/${appSlug}/?install=1`
-
   async function copyLink() {
     try {
       await navigator.clipboard.writeText(handoffUrl)
       setCopied(true)
     } catch {
-      // Clipboard access can be denied outright. The address is printed in
-      // the card either way, so this degrades to reading it off the screen.
       setCopied(false)
-      setError('Could not copy — the address is written below.')
+      setError('Could not copy — use the button above instead.')
     }
   }
 
@@ -223,6 +214,17 @@ export default function InstallSheet({ app, onClose }) {
       >
         {handoff ? (
           <>
+            {/* Nothing is left to confirm at this step — the work is done and
+                the card is now just instructions. A corner dismissal reads as
+                "I'm finished reading" without competing with the action. */}
+            <button
+              type="button"
+              className="is__close"
+              aria-label="Close"
+              onClick={() => onClose?.()}
+            >
+              ×
+            </button>
             <h2 className="is__title">Add {label} to your home screen</h2>
             <p className="is__hint is__hint--steps">
               Only Safari can put an app on your home screen, and you’re in
@@ -251,22 +253,6 @@ export default function InstallSheet({ app, onClose }) {
             </div>
 
             {error && <div className="is__error" role="alert">{error}</div>}
-
-            <p className="is__hint">
-              If it opens inside Möbius rather than Safari, tap the compass
-              icon to switch over. Or open Safari yourself and go to{' '}
-              <span className="is__url">{plainUrl}</span>
-            </p>
-
-            <div className="is__actions">
-              <button
-                type="button"
-                className="is__btn is__btn--secondary"
-                onClick={() => onClose?.()}
-              >
-                Done
-              </button>
-            </div>
           </>
         ) : (
         <>
