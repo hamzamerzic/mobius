@@ -914,6 +914,14 @@ test('drawer row menus use one semantic context-menu path across pointer types',
   )
 })
 
+test('an outside drawer-menu tap closes only after the backdrop consumes its click', () => {
+  assert.match(drawerItemActionMenu, /function consumeOutsidePointer\(event\)[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?stopImmediatePropagation/)
+  assert.match(drawerItemActionMenu, /onPointerDown=\{event => \{[\s\S]*?consumeOutsidePointer\(event\)[\s\S]*?\}\}/)
+  assert.match(drawerItemActionMenu, /onClick=\{event => \{[\s\S]*?if \(consumeOutsidePointer\(event\)\) close\(\)/)
+  assert.doesNotMatch(drawer, /navigator\.vibrate/,
+    'drawer rows rely on platform long-press feedback instead of adding a second vibration')
+})
+
 test('a secondary-button release cannot immediately select a flipped drawer menu item', () => {
   assert.match(drawer, /event\.type === 'contextmenu' && secondaryReleaseCleanupRef\.current/)
   assert.match(drawer, /event\.pointerType !== 'mouse' \|\| event\.button !== 2/)

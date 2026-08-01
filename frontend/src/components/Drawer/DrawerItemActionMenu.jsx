@@ -135,11 +135,27 @@ export default function DrawerItemActionMenu({
 
   const recoveryLabel = itemKind === 'chat' ? 'chats' : 'apps'
 
+  function consumeOutsidePointer(event) {
+    if (event.target !== event.currentTarget) return false
+    event.preventDefault()
+    event.stopPropagation()
+    event.nativeEvent?.stopImmediatePropagation?.()
+    return true
+  }
+
   const layer = (
     <div
       className="drawer__item-action-layer"
       onPointerDown={event => {
-        if (event.target === event.currentTarget) close()
+        // Keep the layer mounted for the complete tap. Closing on pointerdown
+        // lets Android retarget the later release/click to the row underneath.
+        consumeOutsidePointer(event)
+      }}
+      onPointerUp={event => {
+        consumeOutsidePointer(event)
+      }}
+      onClick={event => {
+        if (consumeOutsidePointer(event)) close()
       }}
       onContextMenu={event => event.preventDefault()}
       onWheel={event => {

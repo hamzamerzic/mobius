@@ -1639,7 +1639,6 @@ const DrawerRow = memo(function DrawerRow({
       if (gestureClaimRef) gestureClaimRef.current = sourceBtn
       sourceBtn.setAttribute('data-hold-ready', 'true')
       try { sourceBtn.setPointerCapture?.(pointerId) } catch { /* capture optional */ }
-      if (navigator.vibrate) { try { navigator.vibrate(8) } catch { /* unsupported */ } }
     }, DRAWER_HOLD_MS)
     touchMenuCleanupRef.current = cleanup
   }
@@ -1886,7 +1885,6 @@ const DrawerRow = memo(function DrawerRow({
         if (gestureClaimRef) gestureClaimRef.current = sourceBtn
         sourceBtn.setAttribute('data-hold-ready', 'true')
         try { sourceBtn.setPointerCapture?.(pointerId) } catch { /* capture optional */ }
-        if (navigator.vibrate) { try { navigator.vibrate(8) } catch { /* unsupported */ } }
       }, DRAWER_HOLD_MS)
     }
   }
