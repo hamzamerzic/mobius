@@ -207,12 +207,14 @@ test('shared gateway stays branded until heartbeat, preserves cookies, and rejec
     expect(app.slug).toBe('tandoor')
 
     if (TRACKED_TANDOOR_SOURCE) {
-      // The real wrapper's top-level PWA branch must be actionable rather
-      // than endlessly retrying a surface which only the shell can mount.
+      // A Home Screen mini-app is intentionally its own product surface. Do
+      // not restore the fixed "Open in Möbius" overlay: it covered app
+      // content and duplicated the OS app switcher as the route back to the
+      // workspace. Pin the absence after the standalone host has mounted so
+      // this cannot pass merely because React has not rendered yet.
       await page.goto(`${BASE}/apps/${app.slug}/`, { waitUntil: 'domcontentloaded' })
-      const openInMobius = page.getByRole('link', { name: 'Open in Möbius' })
-      await expect(openInMobius).toBeVisible({ timeout: 5_000 })
-      expect(await openInMobius.getAttribute('href')).toBe(`/shell/?app=${app.id}`)
+      await expect(page.locator('main.standalone-app')).toBeVisible({ timeout: 5_000 })
+      await expect(page.getByRole('link', { name: 'Open in Möbius' })).toHaveCount(0)
     }
 
     const shellResponse = await page.goto(

@@ -24,6 +24,29 @@ test('a mini-app prompt in a standalone shell reaches the card as Install', () =
   startInstallPromptCapture(target)
   assert.equal(getInstallPromptSnapshot(), 'installed')
 
+  const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: {
+      userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1',
+      maxTouchPoints: 5,
+    },
+  })
+  try {
+    const iosHtml = renderToStaticMarkup(createElement(StandaloneInstallCard, {
+      app: { slug: 'notes', name: 'Notes', updated_at: '1' },
+      forceOpen: true,
+    }))
+    assert.match(iosHtml, /class="standalone-install__steps" role="status"/)
+    assert.doesNotMatch(iosHtml, /standalone-install__actions/)
+  } finally {
+    if (navigatorDescriptor) {
+      Object.defineProperty(globalThis, 'navigator', navigatorDescriptor)
+    } else {
+      delete globalThis.navigator
+    }
+  }
+
   target.dispatch('beforeinstallprompt', {
     preventDefault() {},
     async prompt() { return { outcome: 'accepted' } },

@@ -166,7 +166,7 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
               // buys nothing. This document's manifest is the app's, so Add to
               // Home Screen here produces the app, and the arrow points down
               // at the real Share button in Safari's toolbar.
-              <p className="standalone-install__steps">
+              <p className="standalone-install__steps" role="status">
                 Tap the <strong>Share</strong> button below, then choose{' '}
                 <strong>Add to Home Screen</strong>.
               </p>
