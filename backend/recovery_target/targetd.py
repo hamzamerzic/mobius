@@ -31,7 +31,10 @@ from typing import Any
 
 PROTOCOL = "mobius-recovery-target/v1"
 DEFAULT_PORT = 18002
-MAX_REQUEST_BYTES = 8 * 1024 * 1024
+# An 8 MiB decoded payload expands to about 10.67 MiB as base64 before the JSON
+# envelope is counted. Keep the wire budget large enough for the advertised
+# file/stdin boundary while still rejecting unbounded request bodies.
+MAX_REQUEST_BYTES = 12 * 1024 * 1024
 MAX_FILE_BYTES = 8 * 1024 * 1024
 MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 MAX_LIST_ENTRIES = 10_000
@@ -39,6 +42,7 @@ MAX_LIST_RESPONSE_BYTES = 8 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 120.0
 MAX_TIMEOUT_SECONDS = 900.0
 MAX_ENV_ITEMS = 128
+MAX_ENV_BYTES = 256 * 1024
 MAX_CONCURRENT_EXEC = 2
 _EXEC_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_EXEC)
 
@@ -157,6 +161,7 @@ def _run_exec(body: dict[str, Any]) -> dict[str, Any]:
     ),
     "DATA_DIR": os.environ.get("DATA_DIR", "/data"),
   }
+  requested_env_bytes = 0
   for key, value in requested_env.items():
     if (
       not isinstance(key, str)
@@ -167,8 +172,16 @@ def _run_exec(body: dict[str, Any]) -> dict[str, Any]:
       or "\x00" in value
     ):
       raise RequestError("invalid_request", "env keys and values must be strings")
-    if len(key) > 256 or len(value.encode("utf-8")) > 64 * 1024:
+    key_bytes = len(key.encode("utf-8"))
+    value_bytes = len(value.encode("utf-8"))
+    if key_bytes > 256 or value_bytes > 64 * 1024:
       raise RequestError("invalid_request", "env key or value is too large")
+    requested_env_bytes += key_bytes + value_bytes
+    if requested_env_bytes > MAX_ENV_BYTES:
+      raise RequestError(
+        "invalid_request",
+        f"env exceeds {MAX_ENV_BYTES} aggregate UTF-8 bytes",
+      )
     env[key] = value
 
   if "stdin" in body and "stdin_base64" in body:

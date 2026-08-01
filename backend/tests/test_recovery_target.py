@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import errno
 import importlib.util
+import io
 import json
 import threading
 import time
@@ -42,7 +43,7 @@ def _server(target):
     thread.join(timeout=2)
 
 
-def _request(url, path, *, token="t" * 43, body=None):
+def _request(url, path, *, token="t" * 43, body=None, timeout=15):
   headers = {"Authorization": f"Bearer {token}"}
   data = None
   method = "GET"
@@ -53,7 +54,7 @@ def _request(url, path, *, token="t" * 43, body=None):
   request = urllib.request.Request(
     url + path, data=data, headers=headers, method=method
   )
-  with urllib.request.urlopen(request, timeout=5) as response:
+  with urllib.request.urlopen(request, timeout=timeout) as response:
     return response.status, json.load(response)
 
 
@@ -161,6 +162,62 @@ def test_file_endpoints_work_over_http(target, tmp_path):
     assert write["bytes_written"] == 7
     _, read = _request(url, "/v1/fs/read", body={"path": str(path)})
     assert base64.b64decode(read["data_base64"]) == b"network"
+
+
+def test_exact_eight_mib_file_write_fits_wire_budget(target, tmp_path):
+  payload = b"w" * target.MAX_FILE_BYTES
+  path = tmp_path / "boundary.bin"
+  with _server(target) as url:
+    status, write = _request(url, "/v1/fs/write", body={
+      "path": str(path),
+      "data_base64": base64.b64encode(payload).decode("ascii"),
+    })
+  assert status == 200
+  assert write["bytes_written"] == 8 * 1024 * 1024
+  assert path.stat().st_size == 8 * 1024 * 1024
+
+
+def test_exact_eight_mib_exec_stdin_fits_wire_budget(target, tmp_path):
+  payload = b"s" * target.MAX_FILE_BYTES
+  with _server(target) as url:
+    status, result = _request(url, "/v1/exec", body={
+      "argv": ["/bin/sh", "-c", "wc -c"],
+      "cwd": str(tmp_path),
+      "stdin_base64": base64.b64encode(payload).decode("ascii"),
+    })
+  assert status == 200
+  assert result["exit_code"] == 0
+  assert int(base64.b64decode(result["stdout_base64"]).strip()) == 8 * 1024 * 1024
+
+
+def test_request_wire_budget_rejects_more_than_twelve_mib(target):
+  assert target.MAX_REQUEST_BYTES == 12 * 1024 * 1024
+  handler = object.__new__(target._Handler)
+  handler.headers = {
+    "Content-Length": str(target.MAX_REQUEST_BYTES + 1),
+  }
+  handler.rfile = io.BytesIO(b"")
+  with pytest.raises(target.RequestError) as too_large:
+    handler._body()
+  assert too_large.value.code == "payload_too_large"
+  assert too_large.value.status == target.HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+
+
+def test_exec_environment_has_an_aggregate_byte_budget(target, tmp_path):
+  assert target.MAX_ENV_BYTES == 256 * 1024
+  with pytest.raises(target.RequestError) as too_large:
+    target._run_exec({
+      "argv": ["/bin/true"],
+      "cwd": str(tmp_path),
+      "env": {
+        "A": "a" * (64 * 1024),
+        "B": "b" * (64 * 1024),
+        "C": "c" * (64 * 1024),
+        "D": "d" * (64 * 1024),
+      },
+    })
+  assert too_large.value.code == "invalid_request"
+  assert "aggregate" in too_large.value.message
 
 
 def test_directory_listing_has_an_aggregate_response_budget(
