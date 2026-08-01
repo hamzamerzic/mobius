@@ -158,3 +158,35 @@ def test_manifest_never_mints_a_pass_for_an_anonymous_fetch(client, auth):
   slug = app_row["slug"]
   body = client.get(f"/apps/{slug}/manifest.json").json()
   assert "pass" not in body["start_url"]
+
+
+def test_wrapped_token_cannot_outlive_the_pass():
+  """The wrapped session must expire with the pass, not 30 days later.
+
+  A JWT is JWS, not JWE: the payload is base64url text, so anyone who can read
+  the pass string -- from the home-screen `start_url`, the clipboard after
+  "Copy link", or a cached document -- can decode the inner `access_token`
+  without any key. Minting it with `create_access_token`'s 30-day default
+  handed over a full-lifetime owner session long after the pass itself went
+  inert. Every other control guards the redeem path, not reading the claim.
+  """
+  import base64
+  import json as _json
+
+  pass_token = auth_lib.create_install_pass(
+    owner_username="owner",
+    token_epoch=0,
+    app_slug="notes",
+    expires_delta=timedelta(minutes=30),
+  )
+
+  def claims(token):
+    segment = token.split(".")[1]
+    segment += "=" * (-len(segment) % 4)
+    return _json.loads(base64.urlsafe_b64decode(segment))
+
+  outer = claims(pass_token)
+  inner = claims(outer["access_token"])
+  assert inner["exp"] <= outer["exp"], (
+    "the wrapped owner token outlives the pass that carries it"
+  )

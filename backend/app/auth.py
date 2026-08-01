@@ -140,8 +140,18 @@ def create_install_pass(
   tap, short enough that the copy sitting in the home-screen icon's URL is
   inert well before anyone could find it there.
   """
+  # Bound the WRAPPED token to the pass's own lifetime. A JWT is JWS, not JWE:
+  # the payload is base64url text, so anyone who can read the pass string --
+  # from the home-screen `start_url` it is baked into, from the clipboard after
+  # "Copy link", or from a cached document -- can decode this claim without a
+  # key. Minting it with the default 30-day expiry meant a leaked pass handed
+  # over a full-lifetime owner session long after the pass itself went inert.
+  # Every other control here (`exp`, single-use consumption, the `app_slug`
+  # binding) guards only the redeem path, not reading the claim.
   access_token = create_access_token(
-    {"sub": owner_username}, token_epoch=token_epoch
+    {"sub": owner_username},
+    expires_delta=expires_delta,
+    token_epoch=token_epoch,
   )
   return create_access_token(
     {
