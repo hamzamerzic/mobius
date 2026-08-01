@@ -1,14 +1,10 @@
 """Database engine and session configuration.
 
-FROZEN at runtime (chmod 444 root-owned per protected-files.txt).
-main.py imports this at module load to set up the engine + run
-migrations; if I'm broken the server can't boot and /recover/chat
-is unreachable. (The recovery surface itself uses raw sqlite3
-and doesn't depend on me, but main.py still does.)
-
-To edit me, change the source on the host repo and rebuild the
-container image. For ad-hoc DB queries the agent should use raw
-`sqlite3` from stdlib — that path doesn't touch this file at all.
+Served from the editable platform checkout. main.py imports this at module load
+to set up the engine and migrations; if a local edit breaks it, normal boot
+falls back to the baked platform and external recovery can repair the preserved
+checkout. For ad-hoc DB queries use raw stdlib `sqlite3` instead of changing
+this module.
 """
 
 import json

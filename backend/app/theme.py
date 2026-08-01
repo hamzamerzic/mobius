@@ -139,7 +139,7 @@ def get_theme_mode(data_dir: str) -> str:
   theme.css is also absent) is the dark palette, so an absent
   theme-mode yields a dark theme AND a dark injected color-scheme —
   they agree. Returning "light" here would mismatch the dark default
-  palette. Used by the recovery page and any other server-rendered
+  palette. Used by any server-rendered
   surface that needs to mirror the SPA's theme without re-parsing the
   CSS.
   """
@@ -166,16 +166,16 @@ def get_theme_mode(data_dir: str) -> str:
 
 
 # =============================================================
-# THEME RECOVERY AFFORDANCES
+# THEME REVERSIBILITY AFFORDANCES
 # =============================================================
 # A theme that makes the shell unresponsive (full-screen overlay,
 # pointer-events: none on the root, opaque ::before with z-index
 # 99999, etc.) traps the user inside a broken UI. The recovery
 # story is: (a) the prior theme.css is snapshotted automatically
 # before every overwrite, so the agent never silently destroys
-# work; (b) the recovery page has a "Reset theme" button that
-# moves theme.css aside so DEFAULT_THEME paints again; (c) the
-# main shell honors `?reset-theme=1` in the URL for cases where
+# work; (b) external recovery can move theme.css aside so
+# DEFAULT_THEME paints again; (c) the main shell honors
+# `?reset-theme=1` in the URL for cases where
 # the user can reach `/` from the address bar but can't click
 # anything inside the page.
 #

@@ -51,7 +51,7 @@ from app.storage_io import atomic_write
 from app import activity, models
 # providers and push are on the agent's write surface; deferred into
 # lifespan with try/except so a SyntaxError in either doesn't prevent
-# uvicorn boot (and thereby kill the recovery surface). See the
+# uvicorn boot. See the
 # wrapped imports in lifespan() below.
 from app.routes import (
   admin_router, apps_router, auth_router,
@@ -567,7 +567,7 @@ app.add_middleware(
 # request receives one diagnostic label before middleware can touch the DB.
 # A managed deployment may expose the application directly on more than one
 # hostname without the bundled Caddyfile. Reserve each configured service host
-# before routing so it can never serve the shell, APIs, recovery, or another
+# before routing so it can never serve the shell, APIs, or another
 # service prefix.
 app.add_middleware(_ServiceSurfaceHostMiddleware)
 app.add_middleware(_SecurityHeadersMiddleware)
@@ -637,7 +637,13 @@ def health(response: Response):
   reloading while the old process is still briefly answering before SIGTERM.
   """
   response.headers["Cache-Control"] = "no-store"
-  return {"status": "ok", "boot_id": _BOOT_ID}
+  return {
+    "status": "ok",
+    "target": "mobius",
+    "mode": "normal",
+    "build_sha": settings.build_sha,
+    "boot_id": _BOOT_ID,
+  }
 
 
 @app.get(
@@ -836,7 +842,7 @@ _live_dir = live_frontend_dir(settings.data_dir)
 # The baked SPA is at the IMAGE path /app/static, NOT relative to __file__.
 # Under the clone serve model __file__ is /data/platform/backend/app/main.py, so
 # `__file__.parent.parent / "static"` would resolve to /data/platform/backend/
-# static (nonexistent) and the baked-frontend recovery fallback would be dead
+# static (nonexistent) and the baked-frontend fallback would be dead
 # whenever /data/platform/frontend/dist is incomplete. Resolve it absolutely
 # (overridable via MOBIUS_BAKED_STATIC_DIR for non-standard image layouts).
 _baked_dir = baked_frontend_dir()
@@ -927,6 +933,8 @@ _RESERVED_TOP_LEVEL_APP_ALIASES = {
   "apps",
   "assets",
   "chat",
+  # Keep the retired recovery path reserved so a mini-app cannot squat on an
+  # owner's old break-glass bookmark and impersonate a privileged surface.
   "recover",
   "shell",
   "sw.js",

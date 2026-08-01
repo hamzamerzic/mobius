@@ -54,7 +54,7 @@ export default function useTheme() {
     // Fire-and-forget: the server rename is the persistence step;
     // the React-Query invalidation fetches the fresh defaults.
     // Errors here are non-fatal — the user can retry by reloading
-    // with the param again or visiting /recover.
+    // with the parameter again.
     api.theme.reset()
       .catch(() => {})
       .finally(() => {

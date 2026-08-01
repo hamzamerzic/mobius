@@ -221,9 +221,8 @@ def restart_server(
 ):
   """Soft restart for the normal Settings surface.
 
-  Recovery keeps its isolated /recover/restart copy so a broken main app can
-  still reload uvicorn. This owner-auth route is the everyday path for applying
-  backend code/config changes without sending the user to recovery first.
+  This owner-auth route is the everyday path for applying backend code/config
+  changes. A broken main app is handled by the external recovery service.
   """
   return JSONResponse(
     {"status": "restarting"},

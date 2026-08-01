@@ -134,21 +134,7 @@ TEST_ENV=(env \
   SECRET_KEY="${SECRET_KEY:-$(python3 -c 'import secrets;print(secrets.token_hex(32))')}")
 
 if [ "${#PYTEST_ARGS[@]}" -eq 0 ]; then
-  # Recovery deliberately refuses to start if the platform package is
-  # importable. Exercise the two systems in separate processes instead of
-  # weakening that production invariant to make one pytest process convenient.
-  "${TEST_ENV[@]}" "$PYTHON" -m pytest -p no:cacheprovider \
-    --ignore=tests/test_recoveryd.py \
-    --ignore=tests/test_recovery_launcher.py \
-    --ignore=tests/test_recovery_throttle.py \
-    --ignore=tests/test_recovery_update.py \
-    || exit $?
-  cd "$ROOT/backend/recovery" || exit 1
-  exec "${TEST_ENV[@]}" "$PYTHON" -m pytest --noconftest -p no:cacheprovider \
-    "$ROOT/backend/tests/test_recoveryd.py" \
-    "$ROOT/backend/tests/test_recovery_launcher.py" \
-    "$ROOT/backend/tests/test_recovery_throttle.py" \
-    "$ROOT/backend/tests/test_recovery_update.py"
+  exec "${TEST_ENV[@]}" "$PYTHON" -m pytest -p no:cacheprovider
 fi
 
 exec "${TEST_ENV[@]}" "$PYTHON" -m pytest -p no:cacheprovider \

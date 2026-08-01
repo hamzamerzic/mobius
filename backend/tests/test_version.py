@@ -25,6 +25,15 @@ def test_version_endpoint_exposes_build_sha(client):
   assert isinstance(body.get("sha"), str) and body["sha"]
 
 
+def test_health_exposes_stable_normal_target_identity(client):
+  body = client.get("/api/health").json()
+  assert body["status"] == "ok"
+  assert body["target"] == "mobius"
+  assert body["mode"] == "normal"
+  assert isinstance(body["build_sha"], str) and body["build_sha"]
+  assert isinstance(body["boot_id"], str) and body["boot_id"]
+
+
 def test_version_exposes_explicit_test_runtime_marker(client, monkeypatch):
   monkeypatch.delenv("MOBIUS_TEST_RUNTIME", raising=False)
   assert client.get("/api/version").json()["test_runtime"] is False
@@ -151,8 +160,8 @@ def test_served_platform_degrades_when_unstamped(client):
 
 
 def test_served_platform_baked_sha_reflects_file(client):
-  # recovery_restore.sh stamps .baked-sha = BUILD_SHA on a platform-baked
-  # restore; the deploy compares this to the commit it just built.
+  # The baked platform seed stamps .baked-sha = BUILD_SHA; the deploy compares
+  # this to the commit it just built.
   baked = _baked_sha_path()
   baked.parent.mkdir(parents=True, exist_ok=True)
   baked.write_text("abc123def456\n", encoding="utf-8")

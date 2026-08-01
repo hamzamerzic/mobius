@@ -353,7 +353,7 @@ resolve_prod_service_gateway_origin
 # ── proxy topology — sampled ONCE, then frozen ──────────────────────────
 # The shared edge proxy (its own compose stack; see the edge repo's README)
 # owns ports 80/443 on this host. When it is running, this repo's bundled
-# caddy service must NOT start, app + recoveryd join the external edge-mobius
+# caddy service must NOT start, app joins the external edge-mobius
 # network via the docker-compose.prod.yml overlay (declared on the service, so
 # every recreate carries the membership — no post-recreate repair hooks), and
 # this deploy installs the rendered edge fragment below.
@@ -395,6 +395,51 @@ fi
 external_prod_caddy_running() {
   [ "$TARGET" = "prod" ] && [ "$EDGE_TOPOLOGY" = "edge" ]
 }
+
+# ── legacy embedded-recovery retirement helper ────────────────────────
+# Old releases gave recoveryd a fixed name and Compose identity. Do not use a
+# broad orphan sweep here: this host carries sibling services, and a rollback
+# may still need their containers. Inspect the exact retired identity, then
+# remove only that one container after the replacement app has passed every
+# health/public verification gate.
+retire_legacy_recoveryd() {
+  [ "$TARGET" = "prod" ] || return 0
+  local legacy_name="mobius-recoveryd"
+  local legacy_ids=""
+  local identity=""
+
+  if ! legacy_ids=$(docker container ls -aq \
+    --filter "name=^/${legacy_name}$"); then
+    fail "could not inspect the retired ${legacy_name} container"
+    return 1
+  fi
+  if [ -z "$legacy_ids" ]; then
+    info "legacy embedded recovery container already absent"
+    return 0
+  fi
+  if [[ "$legacy_ids" == *$'\n'* ]]; then
+    fail "multiple containers matched the exact retired ${legacy_name} name; refusing cleanup"
+    return 1
+  fi
+  if ! identity=$(docker inspect -f \
+    '{{.Name}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' \
+    "$legacy_name"); then
+    fail "could not verify the retired ${legacy_name} Compose identity"
+    return 1
+  fi
+  if [ "$identity" != "/mobius-recoveryd|mobius|recoveryd" ]; then
+    fail "refusing to remove ${legacy_name}: unexpected identity '${identity}'"
+    return 1
+  fi
+
+  intent "docker rm -f ${legacy_name}  # exact name + mobius/recoveryd labels verified"
+  if ! docker rm -f "$legacy_name" >/dev/null; then
+    fail "could not remove retired ${legacy_name}; the healthy app remains deployed"
+    return 1
+  fi
+  ok "retired legacy embedded recovery container (${legacy_name})"
+}
+# ── end legacy embedded-recovery retirement helper ────────────────────
 
 # External networks referenced by the overlay must exist before compose up.
 # Creation is idempotent and safe: the edge stack declares the same name as
@@ -898,7 +943,7 @@ attempt_rollback() {
   # this script manages in that topology; a self-hosted (bundled-caddy)
   # rollback keeps the full-project recreate.
   local rollback_services=()
-  if external_prod_caddy_running; then rollback_services=(app recoveryd); fi
+  if external_prod_caddy_running; then rollback_services=(app); fi
   intent "docker tag ${PREV_IMAGE} ${IMAGE_TAG} && docker compose ${COMPOSE_ARGS[*]} up -d --force-recreate ${rollback_services[*]}"
   if ! docker tag "$PREV_IMAGE" "$IMAGE_TAG"; then
     fail "rollback: could not re-tag ${IMAGE_TAG} → ${PREV_IMAGE:0:19}… — recover ${CONTAINER} manually."
@@ -1273,44 +1318,12 @@ fi
 # ── step 2: recreate container with the new image ──────────────────────
 step "[2/4] docker compose up -d (recreates ${CONTAINER})"
 presence_gate "cutover (recreate ${CONTAINER})"
-RECOVERYD_CUTOVER_FAILED=0
 if external_prod_caddy_running; then
-  info "external edge-caddy owns ports 80/443; updating app + recoveryd services"
+  info "external edge-caddy owns ports 80/443; updating app service"
   ensure_edge_network
   docker rm -f "${CONTAINER}-caddy-1" >/dev/null 2>&1 || true
   intent "docker compose ${COMPOSE_ARGS[*]} up -d app"
   docker compose "${COMPOSE_ARGS[@]}" up -d app
-  # Recover the recovery floor onto the new image too. The recovery agent runs
-  # as full root, so its container carries the read_only + cap_drop guardrail
-  # (base compose) — recreating it here from the freshly-built image is how the
-  # guardrailed recoveryd stays reproducible instead of a hand-run container.
-  # A recoveryd failure must NOT roll back a healthy app deploy, but it must
-  # not pass silently either: the deploy exits nonzero at the end (the flag
-  # below) because a prod without its recovery floor is one platform bug away
-  # from being unrecoverable.
-  intent "docker compose ${COMPOSE_ARGS[*]} up -d recoveryd"
-  if docker compose "${COMPOSE_ARGS[@]}" up -d recoveryd; then
-    # recoveryd's healthcheck allows a 10s start_period; probing once right
-    # after `up -d` would false-fail every deploy. Poll within a bounded
-    # window instead.
-    _recoveryd_ok=0
-    for _i in $(seq 1 30); do
-      if docker exec mobius-recoveryd sh -c \
-        "curl -fsS -o /dev/null http://localhost:8001/recover/health" 2>/dev/null; then
-        _recoveryd_ok=1; break
-      fi
-      sleep 1
-    done
-    if [ "$_recoveryd_ok" = "1" ]; then
-      ok "recovery floor (mobius-recoveryd) healthy on the new image"
-    else
-      fail "recoveryd recreated but /recover/health did not answer within 30s — the recovery floor is DOWN"
-      RECOVERYD_CUTOVER_FAILED=1
-    fi
-  else
-    fail "recoveryd cutover failed — app deploy is unaffected, but the recovery floor is NOT on the new image"
-    RECOVERYD_CUTOVER_FAILED=1
-  fi
 else
   intent "docker compose ${COMPOSE_ARGS[*]} up -d"
   docker compose "${COMPOSE_ARGS[@]}" up -d
@@ -1534,21 +1547,6 @@ if [ -n "$PUBLIC_URL" ]; then
     exit 1
   fi
 
-  # The recovery floor must be publicly reachable through the proxy — it is
-  # the way back in when the platform itself is broken, so a deploy that
-  # silently severed /recover* routing is a failed deploy even with a healthy
-  # app.
-  rcode_pub=$(curl -sk -o /dev/null -w '%{http_code}' "https://${DOMAIN}/recover/health" || echo "000")
-  if [ "$rcode_pub" = "200" ]; then
-    ok "public  /recover/health: ${rcode_pub}"
-  else
-    fail "public  /recover/health: ${rcode_pub} — the recovery floor is not reachable through the proxy."
-    if external_prod_caddy_running; then
-      fail "If this deploy's fragment caused it: <edge>/edgectl rollback mobius restores the previously served routing."
-    fi
-    exit 1
-  fi
-
   # Service gateway origin (when configured): a non-/services path must fail
   # closed with 404 — anything else means the gateway host is either not
   # routed (000/5xx) or serving shell content (200), both wrong.
@@ -1577,10 +1575,13 @@ else
   warn "unreachable). Deploy is healthy; open PWAs reload on next manual open."
 fi
 
-if [ "${RECOVERYD_CUTOVER_FAILED:-0}" = "1" ]; then
-  fail "deploy verified healthy, BUT the recovery floor cutover failed (see step 2 above)."
-  fail "Fix mobius-recoveryd before walking away — a prod without recovery is one bug from unrecoverable."
-  exit 1
+# This is intentionally post-success and outside attempt_rollback(): removal of
+# the retired lifeboat must never influence which app image is served. A label
+# mismatch/removal failure exits nonzero for operator attention but leaves the
+# already-verified healthy app in place.
+if [ "$TARGET" = "prod" ]; then
+  step "[4c/4] retire legacy embedded recovery container"
+  retire_legacy_recoveryd
 fi
 
 # The rollback set was bounded before the build. After a fully successful

@@ -11,11 +11,16 @@ STATE_FILE=${MOBIUS_RECOVERY_STATE_FILE:-"$PROJECT_DIR/.mobius-recovery.env"}
 RECOVERY_TARGET_MIN_TTL_SECONDS=300
 RECOVERY_TARGET_MAX_TTL_SECONDS=86400
 RECOVERY_TARGET_DEFAULT_TTL_SECONDS=3600
+DEFAULT_PLATFORM_RELEASE_REF=refs/heads/stack/external-recovery-v1
 
 usage() {
   cat >&2 <<'EOF'
-Usage: scripts/mobiusctl recovery start|reopen|status|finish
+Usage:
+  scripts/mobiusctl update
+  scripts/mobiusctl recovery start|reopen|status|finish
 
+  update  build/recreate the normal self-hosted stack, verify app health, and
+          retire only an exact label-verified legacy recoveryd container
   start   stop Mobius, pull the latest approved recovery image, and expose the
           recovery UI on loopback (default http://127.0.0.1:18003)
   reopen  keep Mobius stopped, rotate both credentials, and recreate a clean
@@ -27,9 +32,14 @@ EOF
   exit 64
 }
 
-[ "${1:-}" = "recovery" ] || usage
-action=${2:-}
-[ "$#" -eq 2 ] || usage
+case "$#:${1:-}:${2:-}" in
+  1:update:) action=update ;;
+  2:recovery:start) action=start ;;
+  2:recovery:reopen) action=reopen ;;
+  2:recovery:status) action=status ;;
+  2:recovery:finish) action=finish ;;
+  *) usage ;;
+esac
 
 # Serialize every host-side state transition. In particular, `finish` and
 # `reopen` must never interleave into a state where the ordinary app and root
@@ -166,6 +176,99 @@ validate_token() {
   case "$1" in
     *[!A-Za-z0-9_-]*) die_state "recovery token contains unsafe characters" ;;
   esac
+}
+
+validate_release_ref() {
+  release_ref=$1
+  case "$release_ref" in
+    refs/heads/*) ;;
+    *)
+      echo "MOBIUS_PLATFORM_RELEASE_REF must be a full refs/heads/... ref." >&2
+      return 64
+      ;;
+  esac
+  release_branch=${release_ref#refs/heads/}
+  if [ -z "$release_branch" ] ||
+     ! git check-ref-format --branch "$release_branch" >/dev/null 2>&1; then
+    echo "MOBIUS_PLATFORM_RELEASE_REF is not a valid full branch ref." >&2
+    return 64
+  fi
+}
+
+is_full_sha() {
+  printf '%s' "$1" | grep -Eq '^[0-9a-fA-F]{40}$'
+}
+
+prepare_release_build() {
+  # A stack-branch checkout must never produce an image that identifies or
+  # seeds itself from frozen public main. Resolve the exact committed checkout,
+  # fetch the configured full branch ref into its matching remote-tracking ref,
+  # and prove the remote tip contains this exact commit before Docker can run.
+  release_ref=${MOBIUS_PLATFORM_RELEASE_REF:-$DEFAULT_PLATFORM_RELEASE_REF}
+  validate_release_ref "$release_ref" || return $?
+
+  if ! git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "Mobius must be built from a Git checkout." >&2
+    return 1
+  fi
+  checkout_sha=$(git -C "$PROJECT_DIR" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || {
+    echo "Could not resolve the exact Mobius checkout commit." >&2
+    return 1
+  }
+  if ! is_full_sha "$checkout_sha"; then
+    echo "The Mobius checkout did not resolve to a full commit SHA." >&2
+    return 1
+  fi
+
+  dirty=$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=normal) || {
+    echo "Could not verify the Mobius checkout state." >&2
+    return 1
+  }
+  if [ -n "$dirty" ]; then
+    echo "The Mobius release checkout has uncommitted files; commit or remove them before building." >&2
+    return 1
+  fi
+
+  release_tracking_ref="refs/remotes/origin/$release_branch"
+  echo "Fetching the protected Mobius release ref..."
+  git -C "$PROJECT_DIR" fetch --no-tags origin \
+    "+$release_ref:$release_tracking_ref" || {
+    echo "Could not fetch the configured Mobius release ref." >&2
+    return 1
+  }
+  remote_tip=$(git -C "$PROJECT_DIR" rev-parse --verify \
+    "$release_tracking_ref^{commit}" 2>/dev/null) || {
+    echo "Could not resolve the configured Mobius release tip." >&2
+    return 1
+  }
+  if ! is_full_sha "$remote_tip"; then
+    echo "The configured Mobius release tip is not a full commit SHA." >&2
+    return 1
+  fi
+  if ! git -C "$PROJECT_DIR" merge-base --is-ancestor \
+       "$checkout_sha" "$remote_tip"; then
+    echo "The checked-out commit is not contained in $release_ref; refusing to build it." >&2
+    return 1
+  fi
+
+  build_date=$(git -C "$PROJECT_DIR" show -s --format=%cs "$checkout_sha" 2>/dev/null) || {
+    echo "Could not resolve the Mobius checkout commit date." >&2
+    return 1
+  }
+  case "$build_date" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+    *)
+      echo "The Mobius checkout commit date is invalid." >&2
+      return 1
+      ;;
+  esac
+
+  BUILD_SHA=$checkout_sha
+  BUILD_DATE=$build_date
+  MOBIUS_PLATFORM_RELEASE_REF=$release_ref
+  export BUILD_SHA BUILD_DATE MOBIUS_PLATFORM_RELEASE_REF
+  unset dirty release_branch release_tracking_ref remote_tip checkout_sha
+  unset build_date release_ref
 }
 
 generate_state() {
@@ -368,6 +471,99 @@ wait_for_normal_app() {
   return 1
 }
 
+retire_legacy_recoveryd() {
+  # Old self-hosted releases fixed both this name and the Compose service
+  # label. Resolve the current app's project first, then require all three
+  # legacy identity fields. Never use `--remove-orphans` on a shared host.
+  legacy_name=mobius-recoveryd
+  app_ids=$(normal_compose ps -aq app) || return $?
+  set -- $app_ids
+  if [ "$#" -ne 1 ]; then
+    echo "Could not resolve exactly one current Mobius app container; refusing legacy cleanup." >&2
+    return 1
+  fi
+  app_id=$1
+  app_identity=$(docker inspect -f \
+    '{{.Name}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' \
+    "$app_id") || {
+    echo "Could not verify the current Mobius app Compose identity." >&2
+    return 1
+  }
+  app_identity_rest=${app_identity#*|}
+  app_project=${app_identity_rest%%|*}
+  app_service=${app_identity_rest#*|}
+  if [ -z "$app_project" ] || [ "$app_service" != "app" ]; then
+    echo "Current Mobius app has an unexpected Compose identity; refusing legacy cleanup." >&2
+    return 1
+  fi
+
+  legacy_ids=$(docker container ls -aq \
+    --filter "name=^/${legacy_name}$") || {
+    echo "Could not inspect the retired $legacy_name container." >&2
+    return 1
+  }
+  if [ -z "$legacy_ids" ]; then
+    unset legacy_name app_ids app_id app_identity app_identity_rest
+    unset app_project app_service legacy_ids
+    return 0
+  fi
+  set -- $legacy_ids
+  if [ "$#" -ne 1 ]; then
+    echo "Multiple containers matched the exact retired $legacy_name name; refusing cleanup." >&2
+    return 1
+  fi
+  legacy_id=$1
+  legacy_identity=$(docker inspect -f \
+    '{{.Name}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' \
+    "$legacy_id") || {
+    echo "Could not verify the retired $legacy_name Compose identity." >&2
+    return 1
+  }
+  expected_legacy_identity="/$legacy_name|$app_project|recoveryd"
+  if [ "$legacy_identity" != "$expected_legacy_identity" ]; then
+    echo "Refusing to remove $legacy_name: unexpected identity '$legacy_identity'." >&2
+    return 1
+  fi
+
+  echo "Removing exact label-verified legacy recovery container ($legacy_name)..."
+  docker rm -f "$legacy_id" >/dev/null || return $?
+  if docker inspect "$legacy_id" >/dev/null 2>&1; then
+    echo "The retired $legacy_name container still exists after removal." >&2
+    return 1
+  fi
+  legacy_ids=$(docker container ls -aq \
+    --filter "name=^/${legacy_name}$") || return $?
+  if [ -n "$legacy_ids" ]; then
+    echo "A container still owns the retired $legacy_name name after removal." >&2
+    return 1
+  fi
+  unset legacy_name app_ids app_id app_identity app_identity_rest
+  unset app_project app_service legacy_ids legacy_id legacy_identity
+  unset expected_legacy_identity
+}
+
+update_self_host() {
+  if [ -e "$STATE_FILE" ] || [ -L "$STATE_FILE" ]; then
+    echo "Recovery is active or has retained state; finish it before updating Mobius." >&2
+    return 1
+  fi
+  recovery_ids=$(compose ps -aq recovery recovery-target) || return $?
+  if [ -n "$recovery_ids" ]; then
+    echo "Isolated recovery services are still present; finish them before updating Mobius." >&2
+    return 1
+  fi
+  unset recovery_ids
+
+  prepare_release_build || return $?
+
+  echo "Building and recreating the exact Mobius release $BUILD_SHA..."
+  normal_compose up -d --build --force-recreate
+  wait_for_normal_app
+  # Post-health only: an identity mismatch or Docker failure leaves the newly
+  # verified ordinary app running and the old container untouched.
+  retire_legacy_recoveryd
+}
+
 show_recovery_access() {
   echo "Recovery is isolated from the stopped app and available only on loopback:"
   printf '  http://127.0.0.1:%s/\n' "$MOBIUS_RECOVERY_PORT"
@@ -413,6 +609,7 @@ start_recovery() {
   echo "Stopping the ordinary Mobius app..."
   compose stop app
   app_was_stopped=1
+  retire_legacy_recoveryd
   compose up -d --force-recreate recovery-target recovery
 
   trap - EXIT HUP INT TERM
@@ -448,6 +645,7 @@ reopen_recovery() {
   services_stopped=1
   rotate_state
   load_state
+  retire_legacy_recoveryd
   compose up -d --force-recreate recovery-target recovery
 
   trap - EXIT HUP INT TERM
@@ -490,6 +688,7 @@ finish_recovery() {
 }
 
 case "$action" in
+  update) update_self_host ;;
   start) start_recovery ;;
   reopen) reopen_recovery ;;
   status) status_recovery ;;

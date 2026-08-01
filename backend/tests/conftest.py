@@ -220,14 +220,6 @@ def fresh_db():
   for _sub in ("apps", "app-secrets", "shared", "compiled"):
     _shutil.rmtree(_os.path.join(_data_dir, _sub), ignore_errors=True)
 
-  # The recovery seed persists in the module-level DATA_DIR while the test DB
-  # is recreated, so remove it to keep filesystem state aligned with the empty
-  # owner table at the start of every test.
-  for _dot in (".recovery-owner.json",):
-    try:
-      _os.unlink(_os.path.join(_data_dir, _dot))
-    except OSError:
-      pass
   yield
   from app import chat_writer as _cw
   _cw.stop_writer(timeout=5)

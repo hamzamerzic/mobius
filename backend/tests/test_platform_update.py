@@ -1241,7 +1241,8 @@ def test_paths_need_restart_classifier():
   # non-backend-runtime paths never force a restart of the served uvicorn
   assert pu._paths_need_restart([
     "frontend/src/App.jsx", "tests/foo.spec.mjs", "backend/tests/test_x.py",
-    "backend/scripts/memory_search.py", "backend/recovery/x.py",
+    "backend/scripts/memory_search.py", "backend/recovery_target/targetd.py",
+    "backend/runtime/restart_ledger.py",
     "backend/memeval/systems.py", "docs/y.md", "README.md",
   ]) is False
   assert pu._paths_need_restart([]) is False
@@ -1715,19 +1716,21 @@ async def test_frontend_build_failure_rolls_back_source_and_is_not_success(
   assert "frontend_build_failed" in progress["error"]
 
 
-def test_release_channel_reconciles_only_baked_sha_and_preserves_local_edits(
+def test_stack_release_migrates_persisted_main_to_baked_sha_and_keeps_local_edits(
   clone_env, monkeypatch, tmp_path,
 ):
   origin, platform = clone_env
   work = origin.parent / "origin-work"
-  _git(work, "checkout", "-q", "-b", "release/external-recovery")
+  release_branch = "stack/external-recovery-v1"
+  release_ref = f"refs/heads/{release_branch}"
+  _git(work, "checkout", "-q", "-b", release_branch)
   (work / "backend/app/main.py").write_text(
     _MAIN_PY.replace("LINE_C = 3", "LINE_C = 303")
   )
   _git(work, "add", "-A")
   _git(work, "commit", "-q", "-m", "release bridge")
   baked_sha = _git(work, "rev-parse", "HEAD").stdout.strip()
-  _git(work, "push", "-q", "origin", "release/external-recovery")
+  _git(work, "push", "-q", "origin", release_branch)
 
   # The channel advances after this older image was built. Its boot must fetch
   # the new tip for membership proof but must not ingest that newer commit.
@@ -1735,7 +1738,7 @@ def test_release_channel_reconciles_only_baked_sha_and_preserves_local_edits(
   _git(work, "add", "-A")
   _git(work, "commit", "-q", "-m", "newer release")
   newer_sha = _git(work, "rev-parse", "HEAD").stdout.strip()
-  _git(work, "push", "-q", "origin", "release/external-recovery")
+  _git(work, "push", "-q", "origin", release_branch)
 
   _local_commit(
     platform,
@@ -1749,7 +1752,7 @@ def test_release_channel_reconciles_only_baked_sha_and_preserves_local_edits(
   monkeypatch.setattr(pu, "PLATFORM_REPO", platform)
   monkeypatch.setenv(
     release_channel.PLATFORM_RELEASE_REF_ENV,
-    "refs/heads/release/external-recovery",
+    release_ref,
   )
 
   summary = pu.reconcile_clone_sync()
@@ -1761,7 +1764,7 @@ def test_release_channel_reconciles_only_baked_sha_and_preserves_local_edits(
   assert not (platform / "newer-release.txt").exists()
   assert pu.recorded_upstream_sha(platform) == baked_sha
   assert pu._rev(
-    platform, "refs/remotes/origin/release/external-recovery",
+    platform, f"refs/remotes/origin/{release_branch}",
   ) == newer_sha
   assert pu._is_ancestor(platform, baked_sha, "main")
   assert not pu._is_ancestor(platform, newer_sha, "main")
@@ -1770,7 +1773,7 @@ def test_release_channel_reconciles_only_baked_sha_and_preserves_local_edits(
   status = pu.platform_status(platform)
   assert status["contained_upstream_sha"] == baked_sha
   assert status["updates_disabled"] is True
-  assert status["release_ref"] == "refs/heads/release/external-recovery"
+  assert status["release_ref"] == release_ref
   with pytest.raises(
     pu.PlatformUpdateError,
     match="platform_updates_managed_by_release_channel",
@@ -1893,7 +1896,7 @@ def test_managed_release_offline_prebridge_tree_is_not_ready_to_serve(
   monkeypatch.setattr(pu, "PLATFORM_REPO", platform)
   monkeypatch.setenv(
     release_channel.PLATFORM_RELEASE_REF_ENV,
-    "refs/heads/release/external-recovery",
+    "refs/heads/stack/external-recovery-v1",
   )
   monkeypatch.setattr(pu, "_fetch", lambda *_args, **_kwargs: False)
 
@@ -1916,7 +1919,7 @@ def test_invalid_managed_release_config_cannot_approve_prebridge_tree(
   monkeypatch.setattr(pu, "PLATFORM_REPO", platform)
   monkeypatch.setenv(
     release_channel.PLATFORM_RELEASE_REF_ENV,
-    "release/external-recovery",
+    "stack/external-recovery-v1",
   )
 
   summary = pu.reconcile_clone_sync()

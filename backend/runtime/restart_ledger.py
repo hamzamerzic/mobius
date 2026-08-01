@@ -3,7 +3,7 @@
 
 The platform process may *request* a restart, but it cannot authenticate the
 cause of the next boot by writing a transcript row or database flag itself. This
-helper runs from the baked, root-owned recovery bundle and maintains a
+helper runs from the baked, root-owned runtime bundle and maintains a
 root-owned ledger under ``/data/.restart-ledger``:
 
 * ``accept`` validates and consumes one untrusted platform request, records its
@@ -303,8 +303,11 @@ def _main(argv: list[str]) -> int:
     print(f"restart ledger {command} failed: {exc}", file=sys.stderr)
     return 1
   print(f"{command}={'accepted' if result else 'none'}")
-  # `accept=none` still represents a valid restart request (for example a
-  # Recovery restore); it simply grants no automatic chat continuation.
+  # A boot with no accepted prior intent is ordinary success. By contrast,
+  # hardening and request acceptance are security gates: a false result must be
+  # observable by the root entrypoint and must not trigger a restart.
+  if command in {"accept", "harden"} and not result:
+    return 1
   return 0
 
 

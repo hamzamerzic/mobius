@@ -542,7 +542,7 @@
 }
 
 /* Server controls stack with an explicit gap so Restart, transient notices,
-   errors, and Recovery keep stable spacing in every confirmation state. */
+   and errors keep stable spacing in every confirmation state. */
 .settings__section--server {
   display: flex;
   flex-direction: column;
@@ -550,16 +550,8 @@
 }
 
 .settings__section--server .settings__section-title,
-.settings__section--server .settings__row--recovery,
 .settings__section--server .settings__notice {
   margin: 0;
-}
-
-/* Persisted custom themes can outlive component layout changes and are injected
-   after the app bundle. Keep the Server card's own rhythm authoritative so an
-   old theme rule can't double the Restart/Recovery gap. */
-.settings__section--server .settings__row--recovery {
-  margin-top: 0 !important;
 }
 
 .settings__section--server .settings__subtext--tight {

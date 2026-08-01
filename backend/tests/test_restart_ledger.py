@@ -17,7 +17,7 @@ from app import restart_ledger as platform_ledger
 def _load_supervisor():
   path = (
     Path(__file__).resolve().parents[1]
-    / "recovery"
+    / "runtime"
     / "restart_ledger.py"
   )
   spec = importlib.util.spec_from_file_location("frozen_restart_ledger", path)
@@ -171,7 +171,7 @@ def test_boot_does_not_ack_when_accepted_intent_cannot_be_consumed(
   assert not supervisor.ACK_PATH.exists()
 
 
-def test_recovery_restart_without_chat_intent_never_authorizes(
+def test_unpaired_restart_request_never_authorizes(
   tmp_path, monkeypatch,
 ):
   supervisor = _load_supervisor()
@@ -184,6 +184,19 @@ def test_recovery_restart_without_chat_intent_never_authorizes(
   assert supervisor.accept(source_boot, now=now + 1) is False
   assert supervisor.begin_boot("boot-recovery-1234", now=now + 2) is False
   assert _authorized(tmp_path, "boot-recovery-1234") is None
+
+
+def test_supervisor_cli_rejects_unaccepted_request_and_failed_hardening(
+  tmp_path, monkeypatch,
+):
+  supervisor = _load_supervisor()
+  _bind(supervisor, tmp_path, monkeypatch)
+  boot = "boot-source-1234"
+
+  assert supervisor._main(["restart_ledger.py", "begin-boot", boot]) == 0
+  assert supervisor._main(["restart_ledger.py", "accept", boot]) == 1
+  supervisor.BOOT_PATH.unlink()
+  assert supervisor._main(["restart_ledger.py", "harden", boot]) == 1
 
 
 def test_mismatched_or_expired_request_is_consumed_without_ack(

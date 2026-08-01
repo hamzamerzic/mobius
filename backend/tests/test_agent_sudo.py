@@ -38,6 +38,14 @@ def test_sudo_enabled_is_full_root_and_not_misleading_apt_scope(tmp_path):
   assert not (tmp_path / "mobius-apt").exists()
 
 
+def test_sudo_defaults_to_full_root_when_mode_is_unset(tmp_path):
+  result = _configure(tmp_path, "")
+  assert result.returncode == 0
+  assert (tmp_path / "mobius-agent").read_text() == (
+    "mobius ALL=(root) NOPASSWD: ALL\n"
+  )
+
+
 def test_sudo_mode_fails_closed_on_unknown_value(tmp_path):
   result = _configure(tmp_path, "yes")
   assert result.returncode == 64

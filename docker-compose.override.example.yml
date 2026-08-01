@@ -17,17 +17,6 @@ services:
         aliases:
           - app
           - mobius
-  # The recovery floor (recoveryd) must also join the external proxy network so
-  # the outer proxy can route /recover* to it independently of platform health.
-  # The guardrail (read_only + cap_drop + the recoveryd-only recovery_live
-  # volume) is defined in the base docker-compose.yml and carries through here.
-  recoveryd:
-    networks:
-      default: {}
-      edge-mobius:
-        aliases:
-          - recoveryd
-
 networks:
   edge-mobius:
     external: true

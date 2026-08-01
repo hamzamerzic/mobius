@@ -40,12 +40,13 @@ case "${MOBIUS_BOOT_MODE:-normal}" in
     ;;
 esac
 
-# Root is an externally-controlled instance capability. There is deliberately
-# no partial apt/dpkg rule: package maintainer scripts already make that rule
-# equivalent to arbitrary root. Enabling this setting is therefore explicit
-# and honest; disabling it leaves the agent with no sudo path at all.
+# Normal Mobius boots give the in-product agent honest, unrestricted root by
+# default. There is deliberately no partial apt/dpkg rule: package maintainer
+# scripts already make that rule equivalent to arbitrary root. Operators can
+# still set MOBIUS_AGENT_SUDO=0 as a coarse kill switch. Recovery mode execs
+# above this point and therefore never installs the agent sudo rule.
 . /app/scripts/agent_sudo.sh
-configure_agent_sudo "${MOBIUS_AGENT_SUDO:-0}" || exit $?
+configure_agent_sudo "${MOBIUS_AGENT_SUDO:-1}" || exit $?
 
 # Stop cron on container shutdown so it doesn't orphan processes.
 cleanup() { kill "$(cat /var/run/crond.pid 2>/dev/null)" 2>/dev/null; }
@@ -55,6 +56,22 @@ trap cleanup TERM INT
 # Railway (and similar platforms) mount a fresh volume at /data owned by
 # root — the dirs from the Dockerfile are replaced by the empty mount.
 mkdir -p /data/db /data/apps /data/app-secrets /data/compiled /data/shared /data/logs /data/cron-logs /data/cli-auth /data/agent-browser-profiles /data/platform /data/run
+# Retire embedded-recovery authority before any persisted platform code can be
+# imported. These credentials and the pending sentinel have no consumer after
+# the external cutover; preserving them would leave dormant authority on old
+# volumes. The old user-authored recovery_chat.jsonl transcript is deliberately
+# retained and covered by ordinary backup/restore instead.
+for _retired_recovery_state in \
+  /data/.recovery-secret \
+  /data/.recovery-owner.json \
+  /data/.recover-pending
+do
+  if ! rm -f -- "$_retired_recovery_state"; then
+    echo "FATAL: could not remove retired recovery state: $_retired_recovery_state" >&2
+    exit 70
+  fi
+done
+unset _retired_recovery_state
 # Per-boot fail-closed proof. FastAPI lifespan recreates this only after every
 # discovered managed schedule has been converged through the common runner.
 rm -f /data/run/app-cron-supervision-ready
@@ -62,10 +79,10 @@ rm -f /data/run/app-cron-supervision-ready
 # Root-owned planned-restart ledger. Bind an externally accepted intent to this
 # exact boot BEFORE any fallible platform/bootstrap work, so a boot that dies
 # early cannot pass the authorization on to a later unrelated boot. The helper
-# is frozen under /app/recovery and imports no platform code.
+# is baked under /app/runtime and imports no platform code.
 MOBIUS_BOOT_ID="${MOBIUS_BOOT_ID:-$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')}"
 export MOBIUS_BOOT_ID
-if ! DATA_DIR=/data python3 -P /app/recovery/restart_ledger.py \
+if ! DATA_DIR=/data python3 -P /app/runtime/restart_ledger.py \
   begin-boot "$MOBIUS_BOOT_ID"; then
   echo "WARNING: planned-restart ledger could not begin this boot; automatic restart continuation is disabled." >&2
 fi
@@ -89,7 +106,8 @@ fi
 # Fallback invariant: if /data/platform/backend/app exists but cannot import,
 # or the repo is missing/corrupt, preserve it untouched and serve the baked
 # backend floor from /app/platform-baked/backend/app via a degraded /app/app
-# symlink. recoveryd remains the outer recovery floor.
+# symlink. External recovery can still replace or repair /data while normal
+# boot keeps a clean baked fallback.
 # -----------------------------------------------------------------------
 
 # PHASE 3: Boot-attempt counter. Written BEFORE starting uvicorn so a
@@ -115,9 +133,8 @@ if [ "$#" -eq 2 ]; then
   _boot_counter=$2
   _boot_counter_charged=$2
 else
-  # Recovery and the public gateway must still start when this optional
-  # self-heal ledger is unavailable. Disable only counter-based auto-restore
-  # and component rollback for this boot; never trade away the recovery floor.
+  # Disable only counter-based auto-restore when this optional self-heal ledger
+  # is unavailable; the external recovery path does not depend on it.
   echo "WARNING: platform boot-attempt ledger unavailable; automatic crash-loop restore is disabled for this boot." >&2
   _boot_counter_enabled=0
   _boot_counter_helper=""
@@ -207,7 +224,7 @@ fi
 # The compatibility chown above necessarily traverses the root-owned restart
 # ledger. Re-harden it before any mobius process starts. Failure is fail-closed:
 # the app rejects a non-root-owned acknowledgement and offers manual Resume.
-if ! DATA_DIR=/data python3 -P /app/recovery/restart_ledger.py \
+if ! DATA_DIR=/data python3 -P /app/runtime/restart_ledger.py \
   harden "$MOBIUS_BOOT_ID"; then
   echo "WARNING: planned-restart ledger could not be re-hardened; automatic restart continuation is disabled." >&2
 fi
@@ -261,67 +278,22 @@ if [ -z "$SECRET_KEY" ]; then
 fi
 
 _public_port=${PORT:-8000}
-_app_port=${MOBIUS_APP_PORT:-18000}
-_recovery_port=${MOBIUS_RECOVERY_PORT:-18001}
-_railway_gateway=0
-if [ "${MOBIUS_RAILWAY_GATEWAY:-}" = "1" ] ||
-   [ -n "${RAILWAY_ENVIRONMENT:-}" ] ||
-   [ -n "${RAILWAY_ENVIRONMENT_ID:-}" ] ||
-   [ -n "${RAILWAY_PROJECT_ID:-}" ] ||
-   [ -n "${RAILWAY_SERVICE_ID:-}" ]; then
-  _railway_gateway=1
-fi
-
-_app_pid=""
-_gateway_pid=""
-_recovery_pid=""
 _restart_poller_started=0
-
-if [ "$_railway_gateway" -eq 1 ]; then
-  # Baked alongside this entrypoint. recoveryd needs a bounded component-local
-  # relaunch path so its trusted-live crash guard can reach the baked floor
-  # without consuming Railway's whole-container restart budget.
-  . /app/scripts/railway_supervision.sh
-fi
-
-_shutdown_railway_gateway() {
-  _status="${1:-0}"
-  trap - TERM INT
-  cleanup
-  [ -n "$_app_pid" ] && kill "$_app_pid" 2>/dev/null || true
-  [ -n "$_recovery_pid" ] && kill "$_recovery_pid" 2>/dev/null || true
-  [ -n "$_gateway_pid" ] && kill "$_gateway_pid" 2>/dev/null || true
-  [ -n "$_app_pid" ] && wait "$_app_pid" 2>/dev/null || true
-  [ -n "$_recovery_pid" ] && wait "$_recovery_pid" 2>/dev/null || true
-  [ -n "$_gateway_pid" ] && wait "$_gateway_pid" 2>/dev/null || true
-  exit "$_status"
-}
-
-_wait_for_railway_child_exit() {
-  # Railway sees the gateway as pid1's public service, but the gateway can stay
-  # alive after uvicorn or recoveryd crashes and return 502 forever. Watch all
-  # essential children. Any unexpected exit brings the whole container down so
-  # Railway's ON_FAILURE policy restarts a coherent process set.
-  railway_wait_for_essential_child_exit \
-    "$_gateway_pid" "$_app_pid" "$_recovery_pid" \
-    "$_boot_counter_helper" /data/.boot-attempt \
-    "$MOBIUS_BOOT_ID" "$_boot_counter_prior" "$_boot_counter_charged"
-}
 
 _start_platform_restart_poller() {
   [ "$_restart_poller_started" -eq 1 ] && return 0
   (
     while true; do
       if [ -f /data/.platform-restart-requested ]; then
-        # The frozen helper authenticates a matching one-shot chat intent when
-        # present, or consumes the legacy Recovery restore sentinel without
-        # granting chat continuation. Either way, only this external poller
-        # acknowledges the cause before terminating pid 1.
-        if ! DATA_DIR=/data python3 -P /app/recovery/restart_ledger.py \
+        # The baked helper authenticates the matching one-shot chat intent.
+        # Only this root-owned poller acknowledges the cause before terminating
+        # pid 1, so ordinary Settings restarts keep their continuation contract.
+        if ! DATA_DIR=/data python3 -P /app/runtime/restart_ledger.py \
           accept "$MOBIUS_BOOT_ID"; then
           rm -f /data/.platform-restart-requested \
             /data/.restart-continuation-intent.json 2>/dev/null || true
-          echo "O1: restart ledger acceptance failed — restarting without automatic continuation." >&2
+          echo "O1: rejected unauthenticated restart sentinel; container stays running." >&2
+          continue
         fi
         echo "O1: platform-restart sentinel seen — sending SIGTERM to pid 1 (container restart)." >&2
         kill -TERM 1 2>/dev/null || true
@@ -334,93 +306,6 @@ _start_platform_restart_poller() {
   ) &
   _restart_poller_started=1
 }
-
-_reenforce_protected_files() {
-  [ -f /app/protected-files.txt ] || return 0
-  while IFS= read -r line; do
-    case "$line" in \#*|"") continue ;; esac
-    case "$line" in
-      /*) target="$line" ;;
-      *)  continue ;;
-    esac
-    if [ -f "$target" ]; then
-      chown root:root "$target" 2>/dev/null || true
-      case "$target" in
-        *.sh) chmod 555 "$target" 2>/dev/null || true ;;
-        *)    chmod 444 "$target" 2>/dev/null || true ;;
-      esac
-    fi
-  done < /app/protected-files.txt
-}
-
-_process_recover_pending() {
-  [ -f /data/.recover-pending ] || return 0
-  mode=$(cat /data/.recover-pending 2>/dev/null | tr -d '[:space:]')
-  rm -f /data/.recover-pending
-  restore_status=""
-  case "$mode" in
-    platform|platform-baked)
-      echo "Recovery flag detected: $mode — running recovery_restore.sh as root..."
-      if /app/scripts/recovery_restore.sh "$mode"; then
-        restore_status="ok"
-      else
-        restore_status="failed"
-        echo "WARNING: recovery_restore.sh $mode failed" >&2
-      fi
-      ;;
-    "") : ;;
-    *)
-      restore_status="unknown-mode"
-      echo "WARNING: unknown recovery flag mode: $mode" >&2
-      ;;
-  esac
-  if [ -n "$restore_status" ]; then
-    python3 -c "
-import json, sys, time
-entry = {
-  'role': 'system',
-  'content': f\"Recovery action '{sys.argv[1]}' completed: {sys.argv[2]}. Server restarted.\",
-  'ts': int(time.time()),
-}
-print(json.dumps(entry, separators=(',', ':')))
-" "$mode" "$restore_status" >> /data/recovery_chat.jsonl
-    chown mobius:mobius /data/recovery_chat.jsonl 2>/dev/null || true
-  fi
-  _reenforce_protected_files
-}
-
-_process_recover_pending
-
-if [ "$_railway_gateway" -eq 1 ]; then
-  # Railway templates expose one public service with the /data volume attached.
-  # Compose keeps recoveryd in its own container and Caddy routes /recover* to it;
-  # on Railway the closest equivalent is a separate recoveryd process sharing the
-  # same mounted /data, with this tiny gateway playing Caddy's routing role.
-  # recoveryd remains the only recovery implementation.
-  _recovery_allowed_hosts="${RECOVERY_ALLOWED_HOSTS:-}"
-  if [ -z "$_recovery_allowed_hosts" ]; then
-    _recovery_allowed_hosts="${RAILWAY_PUBLIC_DOMAIN:-${DOMAIN:-}}"
-  fi
-  echo "Railway gateway mode: public :$_public_port, app :$_app_port, recovery :$_recovery_port." >&2
-  (
-    export DATA_DIR="${DATA_DIR:-/data}"
-    export RECOVERY_PORT="$_recovery_port"
-    export RECOVERY_PLATFORM_HEALTH_URL="http://127.0.0.1:${_app_port}/api/health"
-    export RECOVERY_ALLOWED_HOSTS="$_recovery_allowed_hosts"
-    railway_supervise_recovery \
-      "http://127.0.0.1:${_recovery_port}/recover/health" \
-      python3 -P /app/recovery/recoveryd.py
-  ) &
-  _recovery_pid=$!
-
-  python3 /app/scripts/railway_gateway.py \
-    --port "$_public_port" \
-    --app "http://127.0.0.1:${_app_port}" \
-    --recovery "http://127.0.0.1:${_recovery_port}" &
-  _gateway_pid=$!
-  trap '_shutdown_railway_gateway 143' TERM INT
-  _start_platform_restart_poller
-fi
 
 # -----------------------------------------------------------------------
 # Platform layer selection (Phase 1).
@@ -443,6 +328,40 @@ _use_platform=0
 _serve_workdir=/app
 _serve_source=baked
 _served_sha="${BUILD_SHA:-unknown}"
+_managed_release=0
+_managed_baked_sha=
+
+# A requested release channel is a boot-time trust boundary, not a best-effort
+# updater hint. Validate both the full branch ref and the immutable image-owned
+# SHA before inspecting the persistent checkout. Runtime BUILD_SHA is
+# deliberately ignored here because a deployment can override it.
+if [ -n "${MOBIUS_PLATFORM_RELEASE_REF:-}" ]; then
+  case "$MOBIUS_PLATFORM_RELEASE_REF" in
+    refs/heads/*) ;;
+    *)
+      echo "FATAL: MOBIUS_PLATFORM_RELEASE_REF must be a full refs/heads/... ref." >&2
+      exit 70
+      ;;
+  esac
+  _managed_release_branch=${MOBIUS_PLATFORM_RELEASE_REF#refs/heads/}
+  if ! git check-ref-format --branch "$_managed_release_branch" >/dev/null 2>&1; then
+    echo "FATAL: MOBIUS_PLATFORM_RELEASE_REF is invalid." >&2
+    exit 70
+  fi
+  unset _managed_release_branch
+  _managed_baked_sha=$(python3 -I -c '
+import json, re
+value = json.load(open("/app/build-info.json", encoding="utf-8")).get("sha", "")
+if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", value):
+  raise SystemExit(1)
+print(value.lower())
+') || {
+    echo "FATAL: managed release image has no valid immutable build SHA." >&2
+    exit 70
+  }
+  _managed_release=1
+  _served_sha=$_managed_baked_sha
+fi
 
 # Env scrub shared by the import probe and the uvicorn exec so probe and serve
 # stay identical. Drops ONLY inherited GIT_*/PYTHONPATH: a GIT_DIR/GIT_WORK_TREE
@@ -585,6 +504,15 @@ _platform_bootstrap() {
       echo "PLATFORM LAYER WARNING: baked platform seed copy failed; trying network clone." >&2
     fi
     rm -rf "$_seeding" 2>/dev/null || true
+  fi
+
+  # A managed stack image must never recover its editable checkout by cloning
+  # the repository's default branch: public main can intentionally remain on an
+  # older compatibility release. Its immutable baked tree is the only safe
+  # first-boot/fallback source for this image.
+  if [ "$_managed_release" -eq 1 ]; then
+    echo "PLATFORM LAYER WARNING: managed baked seed failed; refusing default-branch clone." >&2
+    return 1
   fi
 
   echo "Platform layer: cloning $_origin -> /data/platform (first boot fallback)."
@@ -740,11 +668,15 @@ _platform_use_baked() {
   _use_platform=0
   _serve_source=baked
   _serve_workdir=/app
-  _served_sha="${BUILD_SHA:-unknown}"
+  if [ "$_managed_release" -eq 1 ]; then
+    _served_sha=$_managed_baked_sha
+  else
+    _served_sha="${BUILD_SHA:-unknown}"
+  fi
   export PYTHONDONTWRITEBYTECODE=1
   echo "PLATFORM LAYER WARNING: serving baked floor from $_baked_app." >&2
   echo "  /data/platform is preserved untouched and is NOT served." >&2
-  echo "  Fix /data/platform or run recovery_restore.sh platform-baked." >&2
+  echo "  Fix /data/platform or start the deployment's external Recovery service." >&2
   if [ -e /app/app ] && [ ! -L /app/app ]; then
     find /app/app -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
     rm -rf /app/app
@@ -784,10 +716,6 @@ else
   fi
 fi
 
-printf '%s\n' "$_serve_source" > /tmp/serving-source
-printf '%s\n' "$_served_sha" > /tmp/serving-sha
-chmod 644 /tmp/serving-source /tmp/serving-sha 2>/dev/null || true
-
 if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
   # A managed release image must not import the updater from the persistent
   # checkout it is about to repair. That checkout may predate release-channel
@@ -797,7 +725,7 @@ if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
   # Normal installations keep the historical persistent-updater path.
   _platform_reconciler_backend=/data/platform/backend
   _platform_reconciler_prefix=
-  if [ -n "${MOBIUS_PLATFORM_RELEASE_REF:-}" ]; then
+  if [ "$_managed_release" -eq 1 ]; then
     _platform_reconciler_backend=/app/platform-baked/backend
     _platform_reconciler_prefix="env PYTHONDONTWRITEBYTECODE=1"
   fi
@@ -815,8 +743,8 @@ if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
   # ABOVE the reconcile's bounded operations: fetch 120 + unshallow 120 + merge
   # 120 + probe 60 = 420, plus commit_local's own bounded git calls. Keep this
   # comfortably higher so internal timeouts fire FIRST; the post-timeout guard
-  # below still cleans the tree if the outer kill ever wins. recoveryd remains
-  # the outer floor.
+  # below still cleans the tree if the outer kill ever wins. External recovery
+  # remains available even if normal boot cannot reconcile the tree.
   echo "Platform layer: reconciling /data/platform with its configured release target..." >&2
   su -s /bin/sh mobius -c \
     "cd '$_platform_reconciler_backend' && $_env_scrub $_platform_reconciler_prefix timeout 900 python3 -c \
@@ -824,8 +752,8 @@ if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
     2>&1 || true
   # Reconcile itself is best-effort, but the post-reconcile guard is the final
   # safety boundary: if it cannot prove/reset the tree to a clean committed
-  # state, do not import that tree. Exiting lets recoveryd/container policy use
-  # the baked recovery floor instead of serving possibly half-applied code.
+  # state, do not import that tree. Exiting lets container policy retry instead
+  # of serving possibly half-applied code; external recovery can repair /data.
   if ! su -s /bin/sh mobius -c \
     "cd '$_platform_reconciler_backend' && $_env_scrub $_platform_reconciler_prefix python3 -c \
      'from app import platform_update; print(platform_update.boot_guard_sync())'" \
@@ -833,14 +761,12 @@ if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
     echo "Platform layer: boot guard failed; refusing to serve the platform tree." >&2
     exit 1
   fi
-  # The best-effort reconcile intentionally exits zero on offline/conflict/
-  # invalid-channel outcomes. That is acceptable on the normal main channel,
-  # but a managed migration must never serve a pre-bridge persistent updater:
-  # it would ignore MOBIUS_PLATFORM_RELEASE_REF after uvicorn starts. Import the
-  # STRICT readiness proof from the baked backend. If /data/platform does not
-  # contain this image's exact baked SHA, preserve it for recovery and serve the
-  # immutable baked floor for this boot instead.
-  if [ -n "${MOBIUS_PLATFORM_RELEASE_REF:-}" ]; then
+  # Best-effort reconcile exits zero for offline/conflict/invalid-channel
+  # outcomes. That is fine on ordinary main, but a managed B image must not
+  # serve an A-prime/main-only persistent tree. Import the strict proof from the
+  # immutable baked backend and fall back to the exact baked release unless
+  # persistent HEAD contains this image's baked SHA. Local commits on top pass.
+  if [ "$_managed_release" -eq 1 ]; then
     if ! _managed_release_proof=$(su -s /bin/sh mobius -c \
       "cd '$_platform_reconciler_backend' && $_env_scrub $_platform_reconciler_prefix python3 -c \
        'from app import platform_update; print(platform_update.managed_release_ready_sync())'" \
@@ -853,18 +779,19 @@ if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
       echo "Platform layer: ${_managed_release_proof}" >&2
     fi
   fi
-  # A fast-forward / merge advanced main, so the served sha the /api/version and
-  # /api/debug/serving routes report (written to /tmp/serving-sha above) must
-  # reflect the reconciled HEAD, not the pre-reconcile clone tip.
+  # A successful reconcile may have advanced main. Report persistent HEAD only
+  # when that tree remains the selected source after the managed proof.
   if [ "$_use_platform" -eq 1 ]; then
     _served_sha=$(su -s /bin/sh mobius -c \
       'git -C /data/platform rev-parse HEAD' 2>/dev/null || echo "$_served_sha")
   fi
-  # Selection may have changed to baked after the first markers were written.
-  printf '%s\n' "$_serve_source" > /tmp/serving-source
-  printf '%s\n' "$_served_sha" > /tmp/serving-sha
-  chmod 644 /tmp/serving-source /tmp/serving-sha 2>/dev/null || true
 fi
+
+# Write the markers only after the managed exact-release gate chooses the final
+# source. /api/version and diagnostics must never report the stale pre-gate tree.
+printf '%s\n' "$_serve_source" > /tmp/serving-source
+printf '%s\n' "$_served_sha" > /tmp/serving-sha
+chmod 644 /tmp/serving-source /tmp/serving-sha 2>/dev/null || true
 
 # SECRET_KEY drift detection.
 #
@@ -1033,8 +960,8 @@ if [ -f /app/protected-files.txt ]; then
     esac
     if [ -f "$target" ]; then
       chown root:root "$target"
-      # Shell scripts in the frozen list need to stay EXECUTABLE
-      # (recovery_restore.sh, entrypoint.sh) so root can run them.
+      # Shell scripts in the frozen list need to stay executable so root can
+      # run them.
       # 555 = read + execute for everyone, no write. Non-executable
       # files (Python sources, CSS, HTML) stay 444.
       case "$target" in
@@ -1363,11 +1290,6 @@ fi
 ln -sf /data/.pm-commit /usr/local/bin/pm-commit
 
 
-# Recovery may have scheduled a restore during this boot before the app server
-# started. The early call near the top handles normal previous-boot restores;
-# this second call is a no-op unless a fresh flag appeared while setup ran.
-_process_recover_pending
-
 # Install the codex-plugin-cc into the agent's CLAUDE_CONFIG_DIR if
 # not yet present. Source is baked into the image at /opt/codex-plugin-cc
 # (pinned in the Dockerfile via `git clone --branch v1.0.4`). The install
@@ -1396,25 +1318,9 @@ fi
 # failures that look like generic CLI crashes.
 umask 022
 
-# O1: platform-restart sentinel poller (the recoveryd handshake).
-#
-# The frozen recovery process cannot depend on app imports or app signal paths.
-# So a Tier-1 restore in recoveryd writes /data/.recover-pending=<mode> and
-# then the restart sentinel /data/.platform-restart-requested; this poller is
-# the in-container half that acts on it. On sight it removes the sentinel and
-# `kill -TERM 1` — SIGTERM to pid1. In compose, docker-init forwards SIGTERM to
-# uvicorn; on Railway, the entrypoint shell traps it, stops the gateway/app/
-# recoveryd children, and exits non-zero. Either way the service restarts; the
-# fresh entrypoint processes /data/.recover-pending AS ROOT and reverts
-# /data/platform, so the platform comes back on fixed code. NO Docker socket is
-# involved.
-#
-# This subshell is forked before the server starts. In compose, the shell later
-# execs uvicorn and the poller is reparented to docker-init; on Railway, the
-# shell stays as a tiny supervisor for gateway/app/recoveryd. It is the SOLE
-# writer that consumes /data/.platform-restart-requested; recoveryd is the sole
-# writer that creates it. The 2s cadence bounds restore latency without
-# busy-looping.
+# Root-owned half of the ordinary Settings restart handshake. The app publishes
+# a nonce-bound request; this poller accepts it and terminates pid 1 so Docker or
+# Railway recreates the service. It remains independent of external recovery.
 _start_platform_restart_poller
 
 # PHASE 3: Background health probe — writes /data/.last-successful-boot
@@ -1424,19 +1330,14 @@ _start_platform_restart_poller
 #
 # The probe polls the app's /api/health (127.0.0.1, never routed outside the
 # container) with a 90-second timeout (generous for slow first-boots with DB
-# migrations). In Railway gateway mode it probes the private app port, not
-# /recover/health, so recovery can be live while the boot-attempt counter still
-# correctly treats a broken app as a failed platform boot. On success it writes
-# the sentinel and zeroes the counter. It does NOT restart uvicorn or take any
-# other action — it is purely the signal that "this boot succeeded."
+# migrations). On success it writes the sentinel and zeroes the counter. It
+# does NOT restart uvicorn or take any other action — it is purely the signal
+# that "this boot succeeded."
 #
 # pgrep self-match trap: we do NOT use `until ! pgrep -f uvicorn` or
 # similar — the probe waits on the outcome (/api/health 200), not on a
 # process name. See feedback_pgrep_self_match_in_monitor_loops.md.
 _health_url="http://127.0.0.1:${_public_port}/api/health"
-if [ "$_railway_gateway" -eq 1 ]; then
-  _health_url="http://127.0.0.1:${_app_port}/api/health"
-fi
 (
   # Wait up to 90 seconds for /api/health to return 200.
   for i in $(seq 1 90); do
@@ -1479,11 +1380,7 @@ fi
 # stops serving but never exits, tini never exits, and the container never
 # restarts ("pressed Restart, server never came back"). Bounding the drain makes
 # every SIGTERM-based restart reliably cycle the container.
-if [ "$_railway_gateway" -eq 1 ]; then
-  _uvicorn_flags="--host 127.0.0.1 --port $_app_port --timeout-graceful-shutdown 10"
-else
-  _uvicorn_flags="--host 0.0.0.0 --port $_public_port --timeout-graceful-shutdown 10"
-fi
+_uvicorn_flags="--host 0.0.0.0 --port $_public_port --timeout-graceful-shutdown 10"
 # `$_env_scrub` is applied to the uvicorn exec so the served process runs with
 # the SAME scrubbed GIT_*/PYTHONPATH the import probe validated — a leaked
 # GIT_DIR must not redirect the app's git ops, and no stray PYTHONPATH may
@@ -1495,25 +1392,6 @@ else
   _start_cmd="umask 022 && export PYTHONDONTWRITEBYTECODE=1"
   _start_cmd="$_start_cmd && cd $_serve_workdir"
   _start_cmd="$_start_cmd && exec $_env_scrub uvicorn app.main:app $_uvicorn_flags"
-fi
-
-if [ "$_railway_gateway" -eq 1 ]; then
-  su -s /bin/sh mobius -c "$_start_cmd" &
-  _app_pid=$!
-  if ! railway_child_running "$_gateway_pid"; then
-    echo "FATAL: Railway gateway exited before app startup." >&2
-    if railway_child_running "$_app_pid"; then
-      railway_rollback_platform_boot_attempt \
-        "$_boot_counter_helper" /data/.boot-attempt "$MOBIUS_BOOT_ID" \
-        "$_boot_counter_prior" "$_boot_counter_charged" || {
-        echo "WARNING: could not roll back the early gateway boot attempt." >&2
-      }
-    fi
-    _shutdown_railway_gateway 1
-  fi
-  _wait_for_railway_child_exit
-  _railway_status=$?
-  _shutdown_railway_gateway "$_railway_status"
 fi
 
 exec su -s /bin/sh mobius -c \

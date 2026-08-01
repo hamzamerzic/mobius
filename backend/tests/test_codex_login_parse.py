@@ -1,8 +1,7 @@
 """Tests for the shared codex login-banner parsers.
 
-Pins the two real banner shapes the device-auth flow sees so the normal
-(`routes/auth.py`) and recovery (`recover_oauth.py`) callers can't drift to
-different expectations.
+Pins the two real banner shapes the device-auth flow sees so changes to the
+normal provider-auth caller (`routes/auth.py`) cannot silently break parsing.
 """
 
 from app.codex_login_parse import banner_has_code, parse_login_banner
