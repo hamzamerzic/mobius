@@ -402,9 +402,17 @@ jobs:
           IMAGE_DIGEST: ${{ steps.selected.outputs.digest }}
           INITIAL_TARGET_DIGEST: ${{ steps.inventory.outputs.target_digest }}
           INITIAL_TARGET_REVISION: ${{ steps.inventory.outputs.target_revision }}
+          RELEASE_MODE: ${{ steps.gate.outputs.mode }}
         run: |
           main_sha=$(git ls-remote --exit-code origin refs/heads/main | awk 'NR == 1 { print $1 }')
           test "$main_sha" = "$RECOVERY_CUTOVER_PREREQUISITE_SHA"
+          if [ "$RELEASE_MODE" = normal_release ]; then
+            release_sha=$(git ls-remote --exit-code origin "$MOBIUS_PLATFORM_RELEASE_REF" | awk 'NR == 1 { print $1 }')
+            if [ "$release_sha" != "$GITHUB_SHA" ]; then
+              echo "Refusing to move the channel from a stale normal release" >&2
+              exit 1
+            fi
+          fi
           anonymous_config="$RUNNER_TEMP/anonymous-docker-prewrite"
           install -d -m 0700 "$anonymous_config"
           DOCKER_CONFIG="$anonymous_config" python3 scripts/external_recovery_release.py \

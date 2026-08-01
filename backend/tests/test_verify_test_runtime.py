@@ -620,6 +620,7 @@ def test_pull_requests_run_required_suites_and_protected_channel_publishes_image
     'git ls-remote --exit-code origin refs/heads/main'
   ) >= 4
   assert "Refusing to bind or publish a stale unbound release" in image_workflow
+  assert "Refusing to move the channel from a stale normal release" in image_workflow
   assert 'if [ "$RELEASE_MODE" = resume_cutover ]' in image_workflow
   assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" in image_workflow
   assert "persist-credentials: false" in image_workflow
