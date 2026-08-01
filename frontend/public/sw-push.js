@@ -142,7 +142,7 @@ self.addEventListener('notificationclick', (e) => {
       // postMessaging it. The message path is fast when the current Shell
       // listener is alive, but installed PWAs can have a stale/booting page
       // after a service-worker update; navigation gives the browser a durable
-      // URL to load so actions like "Open Klix" don't focus Mobius and then
+      // URL to load so a "Open <app>" action does not focus Mobius and then
       // appear to do nothing.
       if (/^\/shell\/?\?/.test(target) && 'navigate' in target_client) {
         try {
