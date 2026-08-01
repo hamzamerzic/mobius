@@ -250,13 +250,14 @@ def test_referenced_superseded_image_blocks_the_build():
 def test_reflection_refresh_is_cheap_and_runs_after_success_cache_cleanup():
   text = _read()
   refresh_call = text.rindex("refresh_reflection_resource_snapshot")
-  recovery_failure = text.rindex(
-    'if [ "${RECOVERYD_CUTOVER_FAILED:-0}" = "1" ]'
+  success_notification = text.rindex(
+    'step "[4b/4] notify open shells to reload"'
   )
   cache_cleanup = text.rindex("prune_old_build_cache")
+  deploy_complete = text.rindex("deploy complete")
 
   assert "REFLECTION_RESOURCE_DEEP_SCAN=skip" in text
-  assert recovery_failure < cache_cleanup < refresh_call
+  assert success_notification < cache_cleanup < refresh_call < deploy_complete
 
 
 def test_deploy_script_still_parses():

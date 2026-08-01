@@ -143,7 +143,7 @@ exposes only public packaged assets, while protected API access from null
 origins still requires the scoped principal. Ordinary `/app-assets/` remains
 frame-denied. A configured shared service-gateway hostname is reserved to
 explicitly enabled `/services/<slug>` prefixes and frames only through each
-direct, same-origin-readable adapter; shell/API/recovery and non-enabled
+direct, same-origin-readable adapter; shell/API and non-enabled
 service paths return 404 there. The gateway isolates its owner-trusted service
 group from the Möbius shell, but paths are not origins: services on that
 gateway can reach one another and require dedicated origins when they are not

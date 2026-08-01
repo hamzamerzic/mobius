@@ -194,7 +194,6 @@
         if (!document.getElementById('root').hasChildNodes()) {
           var d = document.createElement('div')
           var retry = document.createElement('a')
-          var recovery = document.createElement('a')
           d.setAttribute('role', 'alert')
           d.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:99999;width:max-content;max-width:calc(100vw - 48px);background:#1e293b;border:1px solid #334155;border-radius:10px;padding:14px 20px;font-family:system-ui,sans-serif;font-size:13px;line-height:1.5;color:#cbd5e1;text-align:center'
           retry.href = window.location.href
@@ -204,13 +203,9 @@
             event.preventDefault()
             window.location.reload()
           })
-          recovery.href = '/recover'
-          recovery.target = '_top'
-          recovery.textContent = 'open recovery'
-          recovery.style.cssText = 'color:inherit;text-decoration:underline;text-underline-offset:2px'
           d.append(
             'Möbius failed to load. ', retry,
-            '. If it still won’t load, ', recovery, '.',
+            '. If it still won’t load, open Recovery from your deployment control panel.',
           )
           document.body.appendChild(d)
         }

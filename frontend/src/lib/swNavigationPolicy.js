@@ -7,12 +7,11 @@ const SHELL_NAVIGATION_DENYLIST = [
   /^\/app-assets\//,
   /^\/app-embeds\//,
   /^\/apps\//,
-  /^\/recover(\/|$)/,
   /^\/shell\/embed(\/|$)/,
   /^\/sites(\/|$)/,
   /^\/services(\/|$)/,
   ...PROXIED_APP_SUBTREES,
-  /^\/(?!(?:shell|apps|recover)(?:\/|$))[A-Za-z0-9_-]+(?:\/(?:index\.html)?)?$/,
+  /^\/(?!(?:shell|apps)(?:\/|$))[A-Za-z0-9_-]+(?:\/(?:index\.html)?)?$/,
 ]
 
 export function isShellNavigationDenied(pathname) {

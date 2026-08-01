@@ -358,8 +358,6 @@ def test_local_browser_e2e_is_explicit_and_disposable():
   assert "down -v --remove-orphans" in runner
   assert 'value.get("test_runtime") is not True' in runner
   assert 'MOBIUS_AUTH_FILE="$auth_file"' in runner
-  assert 'recovery_test_port="$(docker port "$recovery_container" 8001/tcp' in runner
-  assert 'MOBIUS_RECOVER_URL="http://localhost:${recovery_test_port}"' in runner
   assert 'git clone --quiet --no-local "$ROOT" "$snapshot_dir"' in runner
   assert '--project-directory "$snapshot_dir"' in runner
   assert 'cd "$snapshot_dir"' in runner
@@ -367,7 +365,7 @@ def test_local_browser_e2e_is_explicit_and_disposable():
   assert 'MOBIUS_LOCAL_E2E_WORKERS must be a positive integer' in runner
   assert '"$snapshot_dir/node_modules/.bin/playwright" test "$@" --workers="$e2e_workers"' in runner
   assert "Local E2E artifacts retained at:" in runner
-  assert 'compose logs --no-color app caddy recoveryd fake-tandoor' in runner
+  assert 'compose logs --no-color app caddy fake-tandoor' in runner
   assert 'MOBIUS_LOCAL_E2E_KEEP_CACHE' in runner
   assert 'MOBIUS_LOCAL_E2E_KEEP_CACHE:-0' in runner
   assert 'mobius-local-e2e-cache-${checkout_id}:test' in runner

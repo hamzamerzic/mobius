@@ -929,11 +929,13 @@ def _served_platform_sha() -> str | None:
 # Everything else takes effect without one: frontend/** rebuilds into dist,
 # top-level tests/ and docs never run in the server, backend/tests/** never
 # imports, backend/scripts/** are subprocess-invoked fresh each call,
-# backend/recovery/** is the separate recoveryd container, and backend/memeval/**
-# is eval tooling. Broad on backend runtime so a root-level module or symlinked
-# source cannot silently slip past — fail toward restarting.
+# backend/recovery_target/** and backend/runtime/** are baked infrastructure,
+# and backend/memeval/** is eval tooling. Broad on backend runtime so a
+# root-level module or symlinked source cannot silently slip past — fail toward
+# restarting.
 _NON_RUNTIME_BACKEND_SUBDIRS = (
-  "backend/tests/", "backend/scripts/", "backend/recovery/", "backend/memeval/",
+  "backend/tests/", "backend/scripts/", "backend/recovery_target/",
+  "backend/runtime/", "backend/memeval/",
 )
 
 

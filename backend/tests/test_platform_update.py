@@ -1241,7 +1241,8 @@ def test_paths_need_restart_classifier():
   # non-backend-runtime paths never force a restart of the served uvicorn
   assert pu._paths_need_restart([
     "frontend/src/App.jsx", "tests/foo.spec.mjs", "backend/tests/test_x.py",
-    "backend/scripts/memory_search.py", "backend/recovery/x.py",
+    "backend/scripts/memory_search.py", "backend/recovery_target/targetd.py",
+    "backend/runtime/restart_ledger.py",
     "backend/memeval/systems.py", "docs/y.md", "README.md",
   ]) is False
   assert pu._paths_need_restart([]) is False

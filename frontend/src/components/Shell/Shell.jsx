@@ -2656,7 +2656,8 @@ export default function Shell() {
     // Scrub any navStack entries pointing at the deleted chat —
     // otherwise pressing back would navigate into a chat that returns
     // 404, leaving the user staring at an empty view. Soft-deleted
-    // chats are recoverable for 7 days via /recover; once recovered
+    // chats are recoverable for 7 days via Undo/the chat recovery API; once
+    // recovered
     // they re-enter the chat list normally and rebuild navStack via
     // user navigation.
     navStackRef.current = navStackRef.current.filter(e => e.chatId !== id)

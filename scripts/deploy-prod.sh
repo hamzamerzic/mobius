@@ -353,7 +353,7 @@ resolve_prod_service_gateway_origin
 # ── proxy topology — sampled ONCE, then frozen ──────────────────────────
 # The shared edge proxy (its own compose stack; see the edge repo's README)
 # owns ports 80/443 on this host. When it is running, this repo's bundled
-# caddy service must NOT start, app + recoveryd join the external edge-mobius
+# caddy service must NOT start, app joins the external edge-mobius
 # network via the docker-compose.prod.yml overlay (declared on the service, so
 # every recreate carries the membership — no post-recreate repair hooks), and
 # this deploy installs the rendered edge fragment below.
@@ -898,7 +898,7 @@ attempt_rollback() {
   # this script manages in that topology; a self-hosted (bundled-caddy)
   # rollback keeps the full-project recreate.
   local rollback_services=()
-  if external_prod_caddy_running; then rollback_services=(app recoveryd); fi
+  if external_prod_caddy_running; then rollback_services=(app); fi
   intent "docker tag ${PREV_IMAGE} ${IMAGE_TAG} && docker compose ${COMPOSE_ARGS[*]} up -d --force-recreate ${rollback_services[*]}"
   if ! docker tag "$PREV_IMAGE" "$IMAGE_TAG"; then
     fail "rollback: could not re-tag ${IMAGE_TAG} → ${PREV_IMAGE:0:19}… — recover ${CONTAINER} manually."
@@ -1273,44 +1273,12 @@ fi
 # ── step 2: recreate container with the new image ──────────────────────
 step "[2/4] docker compose up -d (recreates ${CONTAINER})"
 presence_gate "cutover (recreate ${CONTAINER})"
-RECOVERYD_CUTOVER_FAILED=0
 if external_prod_caddy_running; then
-  info "external edge-caddy owns ports 80/443; updating app + recoveryd services"
+  info "external edge-caddy owns ports 80/443; updating app service"
   ensure_edge_network
   docker rm -f "${CONTAINER}-caddy-1" >/dev/null 2>&1 || true
   intent "docker compose ${COMPOSE_ARGS[*]} up -d app"
   docker compose "${COMPOSE_ARGS[@]}" up -d app
-  # Recover the recovery floor onto the new image too. The recovery agent runs
-  # as full root, so its container carries the read_only + cap_drop guardrail
-  # (base compose) — recreating it here from the freshly-built image is how the
-  # guardrailed recoveryd stays reproducible instead of a hand-run container.
-  # A recoveryd failure must NOT roll back a healthy app deploy, but it must
-  # not pass silently either: the deploy exits nonzero at the end (the flag
-  # below) because a prod without its recovery floor is one platform bug away
-  # from being unrecoverable.
-  intent "docker compose ${COMPOSE_ARGS[*]} up -d recoveryd"
-  if docker compose "${COMPOSE_ARGS[@]}" up -d recoveryd; then
-    # recoveryd's healthcheck allows a 10s start_period; probing once right
-    # after `up -d` would false-fail every deploy. Poll within a bounded
-    # window instead.
-    _recoveryd_ok=0
-    for _i in $(seq 1 30); do
-      if docker exec mobius-recoveryd sh -c \
-        "curl -fsS -o /dev/null http://localhost:8001/recover/health" 2>/dev/null; then
-        _recoveryd_ok=1; break
-      fi
-      sleep 1
-    done
-    if [ "$_recoveryd_ok" = "1" ]; then
-      ok "recovery floor (mobius-recoveryd) healthy on the new image"
-    else
-      fail "recoveryd recreated but /recover/health did not answer within 30s — the recovery floor is DOWN"
-      RECOVERYD_CUTOVER_FAILED=1
-    fi
-  else
-    fail "recoveryd cutover failed — app deploy is unaffected, but the recovery floor is NOT on the new image"
-    RECOVERYD_CUTOVER_FAILED=1
-  fi
 else
   intent "docker compose ${COMPOSE_ARGS[*]} up -d"
   docker compose "${COMPOSE_ARGS[@]}" up -d
@@ -1534,21 +1502,6 @@ if [ -n "$PUBLIC_URL" ]; then
     exit 1
   fi
 
-  # The recovery floor must be publicly reachable through the proxy — it is
-  # the way back in when the platform itself is broken, so a deploy that
-  # silently severed /recover* routing is a failed deploy even with a healthy
-  # app.
-  rcode_pub=$(curl -sk -o /dev/null -w '%{http_code}' "https://${DOMAIN}/recover/health" || echo "000")
-  if [ "$rcode_pub" = "200" ]; then
-    ok "public  /recover/health: ${rcode_pub}"
-  else
-    fail "public  /recover/health: ${rcode_pub} — the recovery floor is not reachable through the proxy."
-    if external_prod_caddy_running; then
-      fail "If this deploy's fragment caused it: <edge>/edgectl rollback mobius restores the previously served routing."
-    fi
-    exit 1
-  fi
-
   # Service gateway origin (when configured): a non-/services path must fail
   # closed with 404 — anything else means the gateway host is either not
   # routed (000/5xx) or serving shell content (200), both wrong.
@@ -1575,12 +1528,6 @@ if broadcast_shell_rebuilt; then
 else
   warn "could not broadcast shell_rebuilt (no service token, or /api/notify"
   warn "unreachable). Deploy is healthy; open PWAs reload on next manual open."
-fi
-
-if [ "${RECOVERYD_CUTOVER_FAILED:-0}" = "1" ]; then
-  fail "deploy verified healthy, BUT the recovery floor cutover failed (see step 2 above)."
-  fail "Fix mobius-recoveryd before walking away — a prod without recovery is one bug from unrecoverable."
-  exit 1
 fi
 
 # The rollback set was bounded before the build. After a fully successful

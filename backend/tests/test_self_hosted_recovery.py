@@ -52,6 +52,7 @@ def test_only_root_target_mounts_the_stopped_app_data():
   }
   assert target["tmpfs"] == ["/tmp", "/run"]
   assert target["volumes"] == ["app_data:/data"]
+  assert target["networks"] == ["recovery_private"]
   assert any(
     item == "MOBIUS_BOOT_MODE=recovery" for item in target["environment"]
   )
@@ -61,6 +62,7 @@ def test_only_root_target_mounts_the_stopped_app_data():
   ) in target["environment"]
   assert target["healthcheck"] == {"disable": True}
   assert worker.get("volumes") is None
+  assert worker["networks"] == ["recovery_private"]
   assert worker["depends_on"]["recovery-target"]["condition"] == "service_started"
 
 

@@ -522,7 +522,7 @@ def get_skill_path() -> Path | None:
   # skills it points to live agent-editable under /data/shared/skills/
   # (seeded by init_skills.py). Resolve relative to this module so the live
   # /data/platform clone and ordinary local checkouts each use their own
-  # tracked constitution. /app/skill remains the immutable recovery floor.
+  # tracked constitution. /app/skill remains the immutable baked fallback.
   repo = Path(__file__).parent.parent.parent / "skill"
   candidates = [
     repo / "core.md",
@@ -946,9 +946,8 @@ def _live_model_entries(
 
 
 # Claude CLI OAuth constants — the registry path refreshes an expired
-# access token itself rather than 401ing. Duplicated from routes/auth.py
-# (and recover_oauth.py) on purpose, the same way recover_oauth duplicates
-# them: providers.py is a low-level adapter module that must not import a
+# access token itself rather than 401ing. Duplicated from routes/auth.py on
+# purpose: providers.py is a low-level adapter module that must not import a
 # route module, and these are public Anthropic values that change rarely.
 # Keep in sync with routes/auth._CLAUDE_CLIENT_ID / _TOKEN_URL if Anthropic
 # ever rotates them.

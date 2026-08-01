@@ -295,16 +295,15 @@ RUN useradd -m -s /bin/bash mobius \
 COPY backend/app ./app/
 COPY backend/scripts ./scripts/
 COPY backend/recovery_target ./recovery-target/
+COPY backend/runtime ./runtime/
 COPY skill/ ./skill/
 COPY protected-files.txt ./protected-files.txt
 
-# Frozen recovery floor (recoveryd) — the Tier-1 recovery system that runs in
-# its own container. It imports no app.* code and remains root-owned/read-only.
-COPY backend/recovery ./recovery/
-# Stamp target identity from the actual baked checkout, never a runtime-
-# overridable environment value.
+# Neither the early recovery target nor the restart supervisor imports mutable
+# platform code. Stamp target identity from the actual baked checkout (never a
+# runtime-overridable env value), then keep both root-owned and non-writable.
 RUN cp /app/platform-baked/.baked-sha /app/recovery-target/BUILD_REVISION \
-    && chmod -R a-w /app/recovery /app/recovery-target
+    && chmod -R a-w /app/recovery-target /app/runtime
 RUN chmod +x ./scripts/entrypoint.sh
 
 # Build identity — passed at `docker compose build` time (deploy-prod.sh

@@ -33,10 +33,12 @@ filesystem, so each rename is atomic and yields a new inode — a process
 holding an old DB fd cannot corrupt the restored file. Run with the app
 STOPPED and start it after; the restored DB is opened fresh.
 
-Recovery floor
---------------
-recoveryd can drive this: mobius user, python3 + tar + (for encrypted
-secrets) age + the identity file, writes only under /data, no HTTP route.
+External recovery can drive this with the app stopped: Python + tar + (for
+encrypted secrets) age and the identity file, writing only under /data.
+Modern backups omit retired embedded-recovery credentials and sentinels while
+preserving a legacy `recovery_chat.jsonl` transcript as owner data. Restoring
+an older artifact may temporarily recreate the retired files; the next normal
+boot removes them before importing persisted platform code.
 
 The rehearsed restore drill (proven end to end, per-slug throwaway
 container)
@@ -89,8 +91,7 @@ import backup_lib as lib  # noqa: E402
 # instance expects.
 SECRET_FILE_MODE = 0o600
 SECRET_DIR_MODE = 0o700
-SECRET_FILES = ("service-token.txt", ".secret-key", ".recovery-secret",
-                ".recovery-owner.json")
+SECRET_FILES = ("service-token.txt", ".secret-key")
 SECRET_DIRS = ("cli-auth", "app-secrets", "push")
 
 # Trees whose presence means "the target already holds data" (the

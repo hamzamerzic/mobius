@@ -376,7 +376,7 @@ export default function SettingsView({
   const [restartConfirm, setRestartConfirm] = useState(false)
   const [signOutConfirm, setSignOutConfirm] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
-  // Platform self-update (backend/frontend/libraries/recovery as one release).
+  // Platform self-update (backend, frontend, and libraries as one release).
   // 'idle' | 'applying' | 'resolving' | 'restarting'.
   const [platform, setPlatform] = useState(null)
   const [platformPhase, setPlatformPhase] = useState('idle')
@@ -941,8 +941,8 @@ export default function SettingsView({
         onTimeout: ({ freshServerSeen }) => {
           setRestartSlow(false)
           setRestartError(freshServerSeen
-            ? 'The server restarted, but Möbius couldn’t reload the shell. Refresh the page or open Recovery.'
-            : 'Möbius still can’t confirm the restart. Open Recovery if the container needs attention.')
+            ? 'The server restarted, but Möbius couldn’t reload the shell. Refresh the page.'
+            : 'Möbius still can’t confirm the restart. Use your deployment’s Recovery action if the container needs attention.')
           setRestartPhase('idle')
           setRestartConfirm(false)
         },
@@ -1312,8 +1312,8 @@ export default function SettingsView({
         onTimeout: ({ freshServerSeen }) => {
           setPlatformRestartSlow(false)
           setPlatformError(freshServerSeen
-            ? 'The server restarted, but Möbius couldn’t reload the shell. Refresh the page or open Recovery.'
-            : 'Möbius still can’t confirm the restart. Open Recovery if the container needs attention.')
+            ? 'The server restarted, but Möbius couldn’t reload the shell. Refresh the page.'
+            : 'Möbius still can’t confirm the restart. Use your deployment’s Recovery action if the container needs attention.')
           setPlatformPhase('idle')
         },
       })
@@ -1837,12 +1837,6 @@ export default function SettingsView({
               description={restartError}
             />
           )}
-          <div className="settings__row settings__row--recovery">
-            <span className="settings__label">Recovery</span>
-            <a className="settings__btn settings__btn--outline settings__btn--sm" href="/recover" target="_blank" rel="noopener noreferrer">
-              Open
-            </a>
-          </div>
           <div className="settings__row">
             <span className="settings__label">Session</span>
             {signOutConfirm ? (

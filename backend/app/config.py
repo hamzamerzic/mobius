@@ -1,14 +1,12 @@
 """Application settings loaded from environment variables.
 
-FROZEN at runtime (chmod 444 root-owned per protected-files.txt).
-main.py imports this at module load; if I'm broken the server
-can't boot and /recover/chat is unreachable.
+Served from the editable platform checkout. main.py imports this at module load;
+if a local edit breaks it, normal boot falls back to the baked platform and the
+deployment's external recovery service can repair the preserved checkout.
 
-To edit me, change the source on the host repo and rebuild the
-container image. The agent should not try to edit me in-place at
-runtime — the chmod will block it and the error looks like a bug.
-Use /data/shared/agent-settings.json for per-instance settings that
-don't need code changes.
+Use /data/shared/agent-settings.json for per-instance settings that do not need
+code changes. Source edits require a restart and should be committed in the
+platform checkout for rollback.
 """
 
 import json

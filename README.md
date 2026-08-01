@@ -92,7 +92,7 @@ Möbius is an open-source AGI app platform that grows with the needs of its user
 
 Build for a real need, make it yours, improve what gets in the way, then share what generalizes. Community review can turn that work into a building block that makes the whole ecosystem more capable.
 
-Möbius deliberately supports coding agents that can work across a real repository. Today, that means OpenAI Codex and Claude Code. The owner chat agent can edit the frontend and backend, while git history and `/recover` keep those changes reversible.
+Möbius deliberately supports coding agents that can work across a real repository. Today, that means OpenAI Codex and Claude Code. The owner chat agent can edit the frontend and backend, while git history and an isolated deployment-level recovery service keep those changes reversible.
 
 No autonomous rewrite ships without a person in the loop. Agents can prepare changes, run tests, and explain their reasoning. People still decide what becomes part of the shared platform.
 
@@ -137,7 +137,31 @@ sed -i 's/^DOMAIN=.*/DOMAIN=mobius.example.com/' .env
 docker compose up -d
 ```
 
-Caddy configures HTTPS. Open `https://mobius.example.com` and follow the setup wizard. Bookmark `/recover` before asking the agent to change the platform.
+Caddy configures HTTPS. Open `https://mobius.example.com` and follow the setup wizard.
+
+If the instance cannot boot, start the latest isolated recovery worker without
+custom proxy configuration:
+
+```bash
+scripts/mobiusctl recovery start
+# if the worker/browser restarts, rotate both credentials and print a new code:
+scripts/mobiusctl recovery reopen
+scripts/mobiusctl recovery finish
+```
+
+When the server is remote, run this on the owner's computer while recovery is
+active, then open the printed loopback URL locally:
+
+```bash
+ssh -N -L 18003:127.0.0.1:18003 user@server
+```
+
+The command stops the ordinary app, mounts its data into a clean root target,
+and starts a read-only, unprivileged recovery worker on loopback. The worker has
+no Docker socket and cannot modify its own code.
+`reopen` never boots the ordinary app: it revokes both old credentials, pulls
+the latest approved worker, recreates the isolated services, and prints a new
+one-time code.
 
 Update a self-hosted instance with:
 
@@ -147,6 +171,10 @@ docker compose up -d --build
 ```
 
 Data under `/data` survives rebuilds.
+
+Full root for the in-product agent is explicit and off by default. After the
+owner confirms, set `MOBIUS_AGENT_SUDO=1` in `.env` and recreate the app. Set it
+back to `0` and recreate from a clean image to revoke it.
 
 To connect a full web service such as Tandoor, point a sibling DNS name at the same server. For example, use `services.mobius.example.com`, then set it as `MOBIUS_SERVICE_GATEWAY_ORIGIN` in `.env`. Caddy serves integrations below `/services/<slug>`, so you do not need wildcard DNS or a new record for each service. See [.env.example](.env.example) for setup and [ARCHITECTURE.md](ARCHITECTURE.md#app-execution-tiers) for the trust boundaries.
 

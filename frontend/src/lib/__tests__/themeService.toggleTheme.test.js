@@ -301,7 +301,7 @@ test('REGRESSION — toggleTheme preserves selectors containing -- in extra CSS'
   // variable. The next toggle rebuilt theme.css with `--compact: ...` inside
   // :root and removed the actual rule.
   const cssWithSettingsRule = `${DARK_CSS}
-  /* settings restart/recovery spacing: keep Restart and Recovery actions visually separate. */
+  /* settings server spacing: keep Restart and status actions visually separate. */
   .settings__section--server,
   .settings .settings__content > .settings__section.settings__section--compact:last-child .settings__row:last-child {
     gap: 14px;

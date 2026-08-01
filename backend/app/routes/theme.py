@@ -48,9 +48,7 @@ def reset_theme(
   `theme.css.reset-bak-<unix-ts>`.
 
   This is the JSON endpoint used by the shell's `?reset-theme=1`
-  URL-parameter recovery flow. The recovery page (`/recover`)
-  performs the same rename inline so it can stay independent of
-  the regular API import chain.
+  URL-parameter reset flow.
 
   Idempotent: with no override present, returns
   `{"reset": false, "reason": "no override"}`.

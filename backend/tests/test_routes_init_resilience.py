@@ -1,9 +1,8 @@
 """Boot import chain must tolerate broken route modules.
 
-`main.py` is frozen and does `from app.routes import (...)` with ~15
-names. Any one of those modules raising on import would otherwise
-kill uvicorn at boot and take the always-reachable `/recover/chat`
-endpoint down with it. `app/routes/__init__.py` defends against
+`main.py` does `from app.routes import (...)` with ~15 names. Any one of those
+modules raising on import would otherwise kill uvicorn at boot.
+`app/routes/__init__.py` defends against
 this by wrapping each import in `_load(name)` — on failure, a 503
 stub with the right name is exposed so `main.py` still finds
 every expected attribute.
@@ -85,7 +84,7 @@ def test_load_returns_stub_for_nonexistent_module():
       f"{method.upper()} expected 503, got {resp.status_code}"
     )
     assert "definitely_not_a_real_module_xyz" in resp.json()["detail"]
-    assert "/recover/chat" in resp.json()["detail"]
+    assert "external Recovery" in resp.json()["detail"]
 
 
 def test_broken_route_module_yields_stub_real_routers_unaffected(
