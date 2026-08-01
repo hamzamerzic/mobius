@@ -184,7 +184,7 @@ export default function StandaloneApp({ initialApp }) {
   }
 
   return (
-    <main className={`standalone-app${immersive ? ' standalone-app--immersive' : ''}`}>
+    <main className="standalone-app">
       <AppCanvas
         ref={canvasRef}
         appId={app.id}

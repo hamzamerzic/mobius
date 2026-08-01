@@ -193,7 +193,7 @@
   .standalone-install__arrow { animation: none; }
 }
 
-.standalone-install__actions { margin-top: 18px; }
+.standalone-install__actions { margin-top: 18px; justify-content: center; }
 
 /* Corner dismissal, replacing a worded "Maybe later" that competed with the
    one action worth taking. Larger touch target than the glyph it draws. */

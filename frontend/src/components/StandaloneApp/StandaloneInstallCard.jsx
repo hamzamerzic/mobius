@@ -56,6 +56,7 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
   )
   const dialogRef = useRef(null)
   const primaryRef = useRef(null)
+  const closeRef = useRef(null)
   const previousInstallStateRef = useRef(installState)
 
   useEffect(() => {
@@ -86,16 +87,24 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
       close('installed')
       return
     }
+    // `showAction` gates this button out once instructions are on screen, so
+    // the only reachable case here is revealing them for the first time.
     if (installState !== 'ready') {
-      if (showInstructions) {
-        close('instructions-read')
-        return
-      }
-      setShowInstructions(true)
+      revealInstructions()
       return
     }
     const result = await requestInstall()
-    if (result.outcome !== 'accepted') setShowInstructions(true)
+    if (result.outcome !== 'accepted') revealInstructions()
+  }
+
+  // Revealing instructions unmounts the button that was just activated —
+  // `showAction` flips false. Focus would land on <body> while the dialog is
+  // open and its siblings are inert, stranding keyboard and screen-reader
+  // users outside a trap whose Tab handler matches neither edge. Hand focus to
+  // the control that survives.
+  function revealInstructions() {
+    setShowInstructions(true)
+    queueMicrotask(() => closeRef.current?.focus())
   }
 
   // The action button earns its place only when it can DO something: fire a
@@ -118,7 +127,7 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
         onClick={event => event.stopPropagation()}
       >
         <button
-          ref={showAction || installObserved ? null : primaryRef}
+          ref={closeRef}
           className="standalone-install__close"
           type="button"
           aria-label="Close"
