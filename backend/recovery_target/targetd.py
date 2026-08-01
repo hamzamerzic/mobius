@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import errno
 import hmac
 import json
 import os
@@ -529,6 +530,30 @@ class _DualStackServer(ThreadingHTTPServer):
     super().server_bind()
 
 
+class _IPv4Server(ThreadingHTTPServer):
+  daemon_threads = True
+  allow_reuse_address = True
+
+
+def _create_server(port: int) -> ThreadingHTTPServer:
+  """Prefer one dual-stack socket, but keep recovery usable without IPv6."""
+  try:
+    return _DualStackServer(("::", port), _Handler)
+  except OSError as exc:
+    if exc.errno not in {
+      errno.EAFNOSUPPORT,
+      errno.EADDRNOTAVAIL,
+      errno.ENOPROTOOPT,
+      errno.EPROTONOSUPPORT,
+    }:
+      raise
+    print(
+      f"recovery-target: IPv6 unavailable ({exc}); falling back to IPv4",
+      flush=True,
+    )
+    return _IPv4Server(("0.0.0.0", port), _Handler)
+
+
 def main() -> None:
   if os.environ.get("MOBIUS_BOOT_MODE") != "recovery":
     raise SystemExit("recovery target refuses to run outside recovery boot mode")
@@ -543,7 +568,10 @@ def main() -> None:
     raise SystemExit("MOBIUS_RECOVERY_TARGET_PORT must be an integer") from exc
   if not 1 <= port <= 65535:
     raise SystemExit("MOBIUS_RECOVERY_TARGET_PORT must be between 1 and 65535")
-  server = _DualStackServer(("::", port), _Handler)
+  # Every endpoint, including health, requires the bearer token. Managed
+  # launchers therefore clear provider-level unauthenticated health checks and
+  # probe /v1/health themselves before handing the worker to the owner.
+  server = _create_server(port)
   print(
     f"Mobius recovery target {PROTOCOL} listening privately on [::]:{port}",
     flush=True,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import importlib.util
 import json
 import threading
@@ -70,6 +71,20 @@ def test_dual_stack_health_is_authenticated(target):
       "mode": "recovery",
       "build_sha": "unknown",
     }
+
+
+def test_listener_falls_back_to_ipv4_when_ipv6_is_unavailable(target, monkeypatch):
+  class NoIPv6:
+    def __init__(self, *_args, **_kwargs):
+      raise OSError(errno.EAFNOSUPPORT, "IPv6 disabled")
+
+  monkeypatch.setattr(target, "_DualStackServer", NoIPv6)
+  server = target._create_server(0)
+  try:
+    assert server.address_family == target.socket.AF_INET
+    assert server.server_address[0] == "0.0.0.0"
+  finally:
+    server.server_close()
 
 
 def test_exec_uses_argv_without_shell_and_does_not_inherit_target_token(
