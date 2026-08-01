@@ -17,6 +17,10 @@ def _compose():
 def test_external_recovery_worker_is_unprivileged_and_has_no_host_control():
   worker = _compose()["services"]["recovery"]
   assert worker["profiles"] == ["recovery"]
+  # The hardened worker must be its own PID 1 so it can reject wrappers that
+  # retain bootstrap authority; Compose's `init` shim would make it PID 2.
+  assert worker.get("init") is None
+  assert worker["restart"] == "unless-stopped"
   assert worker["read_only"] is True
   assert worker["cap_drop"] == ["ALL"]
   assert "no-new-privileges:true" in worker["security_opt"]

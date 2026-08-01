@@ -109,7 +109,6 @@ services:
     profiles: ["recovery"]
     image: ${MOBIUS_RECOVERY_IMAGE:-ghcr.io/mobius-os/mobius-recovery:stable}
     container_name: ${MOBIUS_RECOVERY_CONTAINER:-mobius-recovery}
-    init: true
     restart: unless-stopped
     read_only: true
     cap_drop:
