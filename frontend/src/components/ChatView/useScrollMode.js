@@ -39,11 +39,12 @@
  * the scroll event itself. There is no second sentinel/observer authority
  * that can lag behind the reader and contradict the current viewport.
  *
- * User-gesture detection: pointerdown/wheel/touchstart/touchmove/keydown hold
+ * User-gesture detection: pointerdown/wheel/keydown hold
  * reader ownership until the first scroll event actually arrives. Real scrolls
- * keep that ownership through a 250ms quiet-settle window: the hot event path
- * records intent and current tail proximity only, then derives/persists the
- * final anchor and resizes reservation once after momentum stops. Wheel input
+ * keep that ownership until the browser's native `scrollend` event (with a
+ * 250ms quiet-settle fallback for older engines): the hot event path records
+ * intent and current tail proximity only, then derives/persists the final anchor
+ * and resizes reservation once after momentum stops. Wheel input
  * is released early only when its direction is exactly clamped at the matching
  * edge; elapsed frames cannot prove that an in-range gesture was a no-op under
  * renderer load. Outside that handoff/settle window, scrolls come from our
@@ -65,9 +66,9 @@ import { isPerfProbeEnabled, perfMark, perfTime } from '../../lib/perfProbe.js'
 // saved anchor stable as lazy previews arrive after reveal.
 const REVEAL_CAP_MS = 1500
 
-// Reader quiet-settle window. Input and momentum retain Infinity ownership;
-// every real scroll restarts this timer. Only its trailing edge derives the
-// final hold/follow mode and gives layout writes back to the controller.
+// Reader quiet-settle fallback for engines without native scrollend. Input and
+// momentum retain Infinity ownership; only the native/fallback trailing edge
+// derives the final hold/follow mode and gives layout writes back.
 const GESTURE_SETTLE_MS = 250
 
 // A tap or non-scrolling key must not suspend layout ownership forever. This
@@ -836,12 +837,12 @@ export function readerInputActivatesDisclosure(
  * `readGeometry` is a THUNK, not a value, because only wheel and scroll-key
  * branches below ever read it.
  *
- * This function is called from the shared user-input handler, which is bound to
- * touchstart and touchmove as well as wheel/keydown. Passing an eagerly-built
- * object meant `scrollTop`/`scrollHeight`/`clientHeight` were read on every
- * touch event and then discarded - and reading `scrollHeight` forces a
+ * This function is called from the shared user-input handler. Passing an
+ * eagerly-built object meant `scrollTop`/`scrollHeight`/`clientHeight` were read
+ * on touch input and then discarded - and reading `scrollHeight` forces a
  * synchronous layout of the whole (unvirtualized) transcript. Wheel and the
- * comparatively rare scroll keys genuinely need the values; touch does not.
+ * comparatively rare scroll keys genuinely need the values; pointer input does
+ * not.
  *
  * Deferring is deliberately done HERE rather than by guarding the call site.
  * Which input types need geometry is this function's own
@@ -1604,7 +1605,7 @@ export default function useScrollMode({
       // scroll geometry too and must wait with the spacer during a gesture.
       if (!layoutOwnsScroll(authorityVersion)) {
         deferLayoutUntilReaderYields(authorityVersion)
-        return spacerEl.offsetHeight || 0
+        return
       }
       const composerHeight = footRef.current?.offsetHeight
       if (chatRef.current && Number.isFinite(composerHeight)) {
@@ -1928,17 +1929,29 @@ export default function useScrollMode({
     //
     const ro = new ResizeObserver(() => {
       const authorityVersion = currentAuthority()
+      // Streaming content can resize on every reveal frame while the reader is
+      // actively scrolling. Defer the whole geometry transaction here: even a
+      // read of scrollHeight/offsetHeight can synchronously lay out the full
+      // transcript and steal a frame from native momentum. The trailing replay
+      // performs one authoritative spacer + mode pass after reader ownership
+      // ends.
+      if (!layoutOwnsScroll(authorityVersion)) {
+        deferLayoutUntilReaderYields(authorityVersion)
+        requestRevealOnQuiet()
+        return
+      }
       if (scrollEl.clientHeight > fullViewHRef.current) {
         fullViewHRef.current = scrollEl.clientHeight
       }
       sizeSpacer(authorityVersion)
       const k = modeRef.current.kind
-      const mayWriteScroll = layoutOwnsScroll(authorityVersion)
-      if (mayWriteScroll && (
+      if (
         k === 'FOLLOW_BOTTOM'
-        || (k === 'ANCHOR_AT'
-          && (!revealedRef.current || mountStabilizingRef.current))
-      )) {
+        // Hidden transcripts may re-anchor freely. Once revealed, only the
+        // conditional shift/clamp repair below may move an anchor; otherwise
+        // every late renderer or font swap becomes a visible jump.
+        || (k === 'ANCHOR_AT' && !revealedRef.current)
+      ) {
         writeMode(
           scrollEl,
           modeRef.current,
@@ -1947,8 +1960,7 @@ export default function useScrollMode({
             : 'layout:restore-anchor',
           authorityVersion,
         )
-        nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
-      } else if (k === 'PIN_USER_MSG' && mayWriteScroll) {
+      } else if (k === 'PIN_USER_MSG') {
         // Re-pin in two cases, both of which leave the message off its
         // intended top position with no user action:
         //
@@ -1984,7 +1996,7 @@ export default function useScrollMode({
         // target means we re-pin exactly once, when the settled layout
         // can actually hold the message at the top.
         settlePinnedMode(authorityVersion)
-      } else if (k === 'ANCHOR_AT' && mayWriteScroll) {
+      } else if (k === 'ANCHOR_AT') {
         // POST-REVEAL ANCHOR_AT repair (the pre-reveal case is handled by the
         // first branch above). Background panes resize routinely once panes
         // exist (design §2 prerequisite), and a settled anchor deserves the
@@ -2009,7 +2021,8 @@ export default function useScrollMode({
     // reset the quiet window through the observer.
 
     // User-gesture detection. The scroll event itself stays intentionally
-    // cheap: it records ownership/intent and restarts one quiet-settle timer.
+    // cheap: it records ownership/intent and lets native scrollend perform the
+    // one settlement pass (with a quiet timer only on older engines).
     // Anchor discovery, spacer measurement, mode transition, and persistence
     // run once at the trailing edge instead of on every compositor frame.
     let readerScrollDirty = false
@@ -2017,6 +2030,7 @@ export default function useScrollMode({
     let readerScrollSequence = null
     let readerSettleTimer = 0
     let disclosureInputOwnsGesture = false
+    const hasNativeScrollEnd = 'onscrollend' in scrollEl
 
     const discardPendingReaderSettle = () => {
       clearTimeout(readerSettleTimer)
@@ -2079,14 +2093,6 @@ export default function useScrollMode({
       recordTrace('events', 'reader:scroll-settled', { scrollEl })
       resumeLayoutAfterGestureRef.current?.()
       requestRevealOnQuiet()
-    }
-
-    const scheduleReaderSettle = () => {
-      clearTimeout(readerSettleTimer)
-      readerSettleTimer = setTimeout(
-        settleReaderScroll,
-        GESTURE_SETTLE_MS,
-      )
     }
 
     const releasePendingGesture = (sequence) => {
@@ -2203,7 +2209,6 @@ export default function useScrollMode({
         scheduleNoScrollRelease()
       }
     }
-    const onGestureEndWithoutScroll = scheduleNoScrollRelease
     const questionEditField = (target) => target?.matches?.(
       'textarea[data-chat-scroll-edit-field]',
     ) ? target : null
@@ -2247,37 +2252,38 @@ export default function useScrollMode({
       }
       scheduleQuestionEditNoScrollRelease()
     }
-    // Field-probe instrumentation, bound at the listener boundary so
-    // `onUserInput`'s own control flow - which has several early returns -
-    // stays exactly as written. Each wrapper is created once and reused for
-    // both add and remove; a fresh wrapper per call would not match on removal
-    // and would leak a listener per remount. When the device has not opted in,
-    // `probed` returns `onUserInput` itself, so an ordinary session registers
-    // the identical function reference it always did.
-    //
-    // touchmove and wheel are counted under separate labels because they are
-    // the mobile and desktop halves of one question: a touch digitizer samples
-    // at 120-240Hz where a wheel emits roughly one event per notch, so equal
-    // per-event cost is very unequal per-second cost.
-    const probed = (label) => (isPerfProbeEnabled()
-      ? (event) => perfTime(label, () => onUserInput(event))
-      : onUserInput)
-    const onTouchMoveInput = probed('scroll.touchmove')
-    const onWheelInput = probed('scroll.wheel')
+    // Reuse the exact input handler when the opt-in field probe is disabled;
+    // the hot path then carries no timing closure or extra wrapper.
+    const onWheelInput = isPerfProbeEnabled()
+      ? (event) => perfTime('scroll.wheel', () => onUserInput(event))
+      : onUserInput
 
     // Scroll-START latency, measured rather than inferred. Lag at the moment a
     // finger lands is a different failure from steady-state jank and has a
-    // different cause: the work between touchstart and the first frame that
-    // actually moves. Stamped on touchstart, consumed by that gesture's first
+    // different cause: the work between touch pointerdown and the first frame
+    // that actually moves. Stamped on pointerdown, consumed by that gesture's first
     // scroll event, so the recorded value is exactly the gap a reader feels.
     let pendingGestureStart = 0
-    const onTouchStartInput = (event) => {
-      if (isPerfProbeEnabled()) {
+    const onPointerDownInput = (event) => {
+      if (event.pointerType === 'touch' && isPerfProbeEnabled()) {
         pendingGestureStart = performance.now()
         perfTime('scroll.touchstart', () => onUserInput(event))
         return
       }
       onUserInput(event)
+    }
+    // Pointerdown already owns an ordinary gesture. This branch does no work at
+    // digitizer frequency; it only re-arms the safety gate if a deliberately
+    // long (>2s) stationary touch outlived the no-scroll dead-man before moving.
+    const onPointerMoveInput = (event) => {
+      if (event.pointerType !== 'touch'
+          || gestureWindowUntilRef.current === Number.POSITIVE_INFINITY
+          || readerScrollDirty) return
+      onUserInput(event)
+    }
+    const onPointerUpInput = () => {
+      if (!readerScrollDirty) pendingGestureStart = 0
+      scheduleNoScrollRelease()
     }
     const noteScrollStart = () => {
       if (!pendingGestureStart) return
@@ -2285,28 +2291,25 @@ export default function useScrollMode({
       pendingGestureStart = 0
     }
 
-    scrollEl.addEventListener('pointerdown', onUserInput, { passive: true })
-    scrollEl.addEventListener('touchstart', onTouchStartInput, { passive: true })
-    // A long touch can pause before moving. Refresh intent on touchmove so the
-    // pre-scroll race stays closed for the whole gesture rather than only quick
-    // flicks.
-    scrollEl.addEventListener('touchmove', onTouchMoveInput, { passive: true })
+    scrollEl.addEventListener('pointerdown', onPointerDownInput, { passive: true })
+    scrollEl.addEventListener('pointermove', onPointerMoveInput, { passive: true })
     scrollEl.addEventListener('wheel', onWheelInput, { passive: true })
     scrollEl.addEventListener('keydown', onUserInput, { passive: true })
     scrollEl.addEventListener('focusin', onQuestionEditFocusIn, { passive: true })
     scrollEl.addEventListener('focusout', onQuestionEditFocusOut, { passive: true })
     scrollEl.addEventListener('beforeinput', onQuestionEditMutation, { passive: true })
     scrollEl.addEventListener('input', onQuestionEditMutation, { passive: true })
-    scrollEl.addEventListener('pointerup', onGestureEndWithoutScroll, { passive: true })
-    scrollEl.addEventListener('pointercancel', onGestureEndWithoutScroll, { passive: true })
-    scrollEl.addEventListener('touchend', onGestureEndWithoutScroll, { passive: true })
-    scrollEl.addEventListener('touchcancel', onGestureEndWithoutScroll, { passive: true })
+    scrollEl.addEventListener('pointerup', onPointerUpInput, { passive: true })
+    // Do not release on pointercancel: touch-action hands a native vertical pan
+    // to the browser by cancelling its Pointer Events stream just before the
+    // first scroll event. Releasing here would misclassify that first frame as
+    // programmatic and let layout work take the viewport back mid-gesture.
 
     // Scroll handler — user-driven scrolls only mark intent here. The expensive
     // semantic location/mode work runs once in settleReaderScroll.
     const onScroll = () => {
       // First scroll event of a touch gesture closes the start-latency window
-      // opened on touchstart. Placed before the early returns below so the
+      // opened on pointerdown. Placed before the early returns below so the
       // measurement reflects when content actually moved, not whether this
       // controller classified the movement as reader-driven.
       noteScrollStart()
@@ -2355,9 +2358,15 @@ export default function useScrollMode({
       readerScrollSequence = intent.claimedSequence
       readerIntentVersionRef.current = intent.version
       readerLocationExplicitRef.current = true
-      scheduleReaderSettle()
+      if (!hasNativeScrollEnd) {
+        clearTimeout(readerSettleTimer)
+        readerSettleTimer = setTimeout(settleReaderScroll, GESTURE_SETTLE_MS)
+      }
     }
     scrollEl.addEventListener('scroll', onScroll, { passive: true })
+    if (hasNativeScrollEnd) {
+      scrollEl.addEventListener('scrollend', settleReaderScroll, { passive: true })
+    }
 
     // Mobile keyboard via visualViewport.
     let vvHandler = null
@@ -2408,19 +2417,16 @@ export default function useScrollMode({
         composerResizeRunRef.current = null
       }
       scrollEl.removeEventListener('scroll', onScroll)
-      scrollEl.removeEventListener('pointerdown', onUserInput)
-      scrollEl.removeEventListener('touchstart', onTouchStartInput)
-      scrollEl.removeEventListener('touchmove', onTouchMoveInput)
+      if (hasNativeScrollEnd) scrollEl.removeEventListener('scrollend', settleReaderScroll)
+      scrollEl.removeEventListener('pointerdown', onPointerDownInput)
+      scrollEl.removeEventListener('pointermove', onPointerMoveInput)
       scrollEl.removeEventListener('wheel', onWheelInput)
       scrollEl.removeEventListener('keydown', onUserInput)
       scrollEl.removeEventListener('focusin', onQuestionEditFocusIn)
       scrollEl.removeEventListener('focusout', onQuestionEditFocusOut)
       scrollEl.removeEventListener('beforeinput', onQuestionEditMutation)
       scrollEl.removeEventListener('input', onQuestionEditMutation)
-      scrollEl.removeEventListener('pointerup', onGestureEndWithoutScroll)
-      scrollEl.removeEventListener('pointercancel', onGestureEndWithoutScroll)
-      scrollEl.removeEventListener('touchend', onGestureEndWithoutScroll)
-      scrollEl.removeEventListener('touchcancel', onGestureEndWithoutScroll)
+      scrollEl.removeEventListener('pointerup', onPointerUpInput)
       if (forceRevealRef.current === forceReveal) forceRevealRef.current = null
       if (vvHandler && typeof window !== 'undefined' && window.visualViewport) {
         window.visualViewport.removeEventListener('resize', vvHandler)
