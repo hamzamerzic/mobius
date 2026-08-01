@@ -1,6 +1,7 @@
 """Password hashing and JWT utilities."""
 
 import hashlib
+import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Optional
 
@@ -147,6 +148,12 @@ def create_install_pass(
       "scope": "install_pass",
       "access_token": access_token,
       "app_slug": app_slug,
+      # Without this the pass is a pure function of its claims, and `exp` has
+      # one-second resolution — so two passes minted for the same app inside the
+      # same second are BYTE-IDENTICAL. Redemption is single-use by token
+      # digest, so spending one would silently burn the other, and the owner
+      # would meet the login screen the pass exists to avoid.
+      "jti": secrets.token_urlsafe(12),
     },
     expires_delta=expires_delta,
   )

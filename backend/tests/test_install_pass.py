@@ -85,6 +85,27 @@ def test_a_pass_is_bound_to_the_app_it_was_minted_for(client, auth):
   assert ok.status_code == 200
 
 
+def test_two_passes_for_one_app_are_distinct_and_independent(client, auth):
+  """CI caught this: the claims were deterministic and `exp` has one-second
+  resolution, so two passes minted for the same app inside the same second were
+  BYTE-IDENTICAL. Redemption is single-use by token digest, so spending either
+  burned both — and the owner met the login screen the pass exists to avoid."""
+  app_row = _create_app(client, auth)
+  slug = app_row["slug"]
+
+  first = _mint(client, auth, slug).json()["install_pass"]
+  second = _mint(client, auth, slug).json()["install_pass"]
+  assert first != second
+
+  spent = client.post("/api/auth/install-pass/redeem",
+                      json={"install_pass": first, "slug": slug})
+  assert spent.status_code == 200
+  # Spending one must leave the other whole.
+  still_good = client.post("/api/auth/install-pass/redeem",
+                           json={"install_pass": second, "slug": slug})
+  assert still_good.status_code == 200
+
+
 def test_expired_and_forged_passes_are_refused(client, auth):
   app_row = _create_app(client, auth)
   slug = app_row["slug"]
