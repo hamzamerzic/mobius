@@ -1,4 +1,5 @@
 import {
+  startTransition,
   useState,
   useRef,
   useEffect,
@@ -6,6 +7,7 @@ import {
   useCallback,
   useMemo,
 } from 'react'
+import { flushSync } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
@@ -73,11 +75,13 @@ import {
   builtAppPulseDecision,
   canFastForwardQueue,
   cidOf,
+  coldTranscriptRenderFrames,
   continuationRowsFromPromotedMessage,
   isContinuationMessage,
   isOwnerUserMessage,
   mergeRecentMessagesIntoLoadedWindow,
   openAppCtaViewModel,
+  shouldAttachRunningStream,
   shouldRetryStopAfterConfirm,
   stopConfirmedIdle,
   stopRequestSucceeded,
@@ -131,6 +135,14 @@ const MESSAGE_META_VISIBLE_MS = 5000
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function yieldToMainThread() {
+  // scheduler.yield() continuations retain enough priority for React to batch
+  // every prefix update into one final commit in Chromium. A fresh timer task
+  // gives React a real commit/paint/input boundary without imposing a whole
+  // animation-frame delay on every hidden slice.
+  return new Promise(resolve => setTimeout(resolve, 0))
 }
 
 function appendMessageBatch(prev, rows) {
@@ -826,6 +838,7 @@ export default function ChatView({
       }
       return {
         running: !!data.running,
+        pendingQuestionId: data.pending_question_id || null,
         pendingLimitResume: !!tailResumableBlock(msgs)?.pause?.resets_at,
       }
     } catch {
@@ -1217,7 +1230,10 @@ export default function ChatView({
           setEmbeddedRunActive(true)
         }
         if (
-          (running === true || (snapshot === null && delta.started))
+          shouldAttachRunningStream({
+            running: running === true || (snapshot === null && delta.started),
+            pendingQuestionId: snapshot?.pendingQuestionId,
+          })
           && !delta.finished
           && !isStreamingRef.current
         ) {
@@ -1243,7 +1259,10 @@ export default function ChatView({
   const ensureRuntimeStreamConnected = useCallback(() => {
     if (hiddenRef.current) return
     if (connectionError === 'disconnected') return
-    if (!serverRunningRef.current) return
+    if (!shouldAttachRunningStream({
+      running: serverRunningRef.current,
+      pendingQuestionId: liveQuestionId,
+    })) return
     if (isStreamingRef.current) return
     if (runtimeReconnectInFlightRef.current) return
 
@@ -1257,7 +1276,7 @@ export default function ChatView({
       .finally(() => {
         runtimeReconnectInFlightRef.current = false
       })
-  }, [connectToStream, connectionError, isStreamingRef])
+  }, [connectToStream, connectionError, isStreamingRef, liveQuestionId])
 
   const wasHiddenRef = useRef(hidden)
   useLayoutEffect(() => {
@@ -1583,7 +1602,12 @@ export default function ChatView({
       pendingQueue.hydrate(runtime.pending_messages || [])
       if (running) {
         setSending(true)
-        connectToStream(false)
+        if (shouldAttachRunningStream({
+          running,
+          pendingQuestionId: runtime.pending_question_id,
+        })) {
+          connectToStream(false)
+        }
       } else {
         setSending(false)
         sendingRef.current = false
@@ -1678,7 +1702,44 @@ export default function ChatView({
         messages: refreshed.messages,
         offset: refreshed.offset,
       })
-      applyMessagesToView(refreshed.messages, refreshed.offset)
+      const renderFrames = coldTranscriptRenderFrames(refreshed.messages)
+      if (renderFrames.length === 1) {
+        // An ordinary cold transcript stays one interruptible commit. Readiness
+        // remains in the SAME transition, so the shell cannot reveal a partial
+        // transcript; cached activations above remain immediate.
+        startTransition(() => {
+          applyMessagesToView(refreshed.messages, refreshed.offset)
+          settleRuntime(runtime, refreshed.messages)
+        })
+        return
+      }
+
+      // A single agentic turn can contain hundreds of interleaved worklog,
+      // activity, and report blocks. React cannot interrupt one DOM commit, so
+      // prepare that hidden destination in prefix-complete frame-sized slices.
+      // Each await yields a real paint opportunity to the outgoing chat and
+      // drawer. Only the final authoritative frame settles loading/readiness,
+      // preserving the existing hide-then-reveal scroll contract.
+      setInitialEntryPhase('preparing')
+      for (const frame of renderFrames) {
+        await yieldToMainThread()
+        if (cancelled) return
+        if (fetchGenRef.current !== gen) {
+          // A newer generation owns the runtime now (a fresh send, or Stop
+          // clearing the queue), so this fetch must NOT apply its own runtime
+          // state — settleRuntime would re-hydrate the queue Stop just
+          // cleared. But 'preparing' is a hidden gate that only this path
+          // sets, and neither superseding path releases it: returning here
+          // without releasing it strands the chat blank until remount.
+          setInitialEntryPhase('ready')
+          setLoading(false)
+          return
+        }
+        // React may batch state updates across async task yields and discard
+        // every intermediate prefix. Commit each hidden slice explicitly; the
+        // flush is scoped to this cold, off-screen preparation path only.
+        flushSync(() => applyMessagesToView(frame, refreshed.offset))
+      }
       settleRuntime(runtime, refreshed.messages)
     }
 
