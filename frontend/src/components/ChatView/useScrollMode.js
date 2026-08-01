@@ -125,22 +125,50 @@ function _appendScrollTrace(bucket, entry) {
   window.__mobiusChatScrollTrace = trace
 }
 
-// Per-chat ScrollMode persistence in sessionStorage. Schema 3 retires modes
-// written by the old missing-location fallback, which manufactured an
-// ANCHOR_AT from the browser's initial scrollTop=0 and then persisted that
-// accidental top-of-chat position as if the reader had chosen it.
-const SCROLL_MODE_SCHEMA = '3'
+// Durable per-chat reading positions.
+//
+// These lived in sessionStorage, which dies with the browsing session. The
+// messages they address survive in IndexedDB for a day, so on every PWA
+// relaunch a chat re-opened instantly with its history intact and NO reading
+// position — every conversation landed at the bottom and had to be scrolled
+// back by hand. A reading position must outlive the tab that created it, so it
+// is stored with the same durability as the transcript it points into.
+export const READING_POSITION_KEY = 'chat-reading-position'
+const READING_POSITION_SCHEMA_KEY = 'chat-reading-position-schema'
+// Schema 1 supersedes the sessionStorage `chat-mode` map: its entries carry no
+// part path, so they cannot be migrated into a coordinate they never recorded.
+const READING_POSITION_SCHEMA = '1'
+// This instance has 800+ chats. Positions are tiny, but the map is bounded so
+// it cannot grow without limit; least-recently-touched entries drop first.
+const READING_POSITION_LIMIT = 300
+
 const _scrollModes = (() => {
   try {
-    if (sessionStorage.getItem('chat-mode-schema') !== SCROLL_MODE_SCHEMA) {
-      sessionStorage.removeItem('chat-mode')
-      sessionStorage.setItem('chat-mode-schema', SCROLL_MODE_SCHEMA)
+    if (localStorage.getItem(READING_POSITION_SCHEMA_KEY) !== READING_POSITION_SCHEMA) {
+      localStorage.removeItem(READING_POSITION_KEY)
+      localStorage.setItem(READING_POSITION_SCHEMA_KEY, READING_POSITION_SCHEMA)
       return {}
     }
-    return JSON.parse(sessionStorage.getItem('chat-mode') || '{}')
+    const parsed = JSON.parse(localStorage.getItem(READING_POSITION_KEY) || '{}')
+    return (parsed && typeof parsed === 'object') ? parsed : {}
   }
   catch { return {} }
 })()
+
+function _persistScrollModes() {
+  try {
+    const entries = Object.entries(_scrollModes)
+    if (entries.length > READING_POSITION_LIMIT) {
+      const keep = entries
+        .sort((a, b) => (b[1]?.at || 0) - (a[1]?.at || 0))
+        .slice(READING_POSITION_LIMIT)
+      for (const [key] of keep) delete _scrollModes[key]
+    }
+    localStorage.setItem(READING_POSITION_KEY, JSON.stringify(_scrollModes))
+  }
+  // Private mode or a full quota must never break scrolling.
+  catch { /* position is best-effort, never load-bearing */ }
+}
 
 
 /** Returns the topmost intersecting message, or the last real row while the
@@ -1410,14 +1438,14 @@ export default function useScrollMode({
         // absent location — never a retrieval failure — may be cleared here.
         if (savedLocationUnresolvedRef.current) return
         delete _scrollModes[chatId]
-        sessionStorage.setItem('chat-mode', JSON.stringify(_scrollModes))
+        _persistScrollModes()
         return
       }
       const candidate = freezeToCurrentPosition
         ? (modeForChatExit(scrollRef.current) || modeRef.current)
         : modeRef.current
       // One persistence gate for every lifecycle path. Invalid ANCHOR_AT
-      // geometry is normalized before it reaches sessionStorage. Live
+      // geometry is normalized before it reaches storage. Live
       // FOLLOW_BOTTOM/PIN_USER_MSG remains observable while mounted; the
       // restore gate settles those modes on the next mount.
       const mode = _modeForPersistence(
@@ -1427,11 +1455,11 @@ export default function useScrollMode({
         if (freezeToCurrentPosition) {
           transitionMode(mode, 'lifecycle:chat-exit')
         }
-        _scrollModes[chatId] = mode
+        _scrollModes[chatId] = { ...mode, at: Date.now() }
       } else {
         delete _scrollModes[chatId]
       }
-      sessionStorage.setItem('chat-mode', JSON.stringify(_scrollModes))
+      _persistScrollModes()
     } catch {}
   }, [chatId, messagesRef, scrollRef, transitionMode])
 
