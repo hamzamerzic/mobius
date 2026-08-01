@@ -20,7 +20,10 @@ def test_external_recovery_worker_is_unprivileged_and_has_no_host_control():
   # The hardened worker must be its own PID 1 so it can reject wrappers that
   # retain bootstrap authority; Compose's `init` shim would make it PID 2.
   assert worker.get("init") is None
-  assert worker["restart"] == "unless-stopped"
+  # The tmpfs-backed one-time-code ledger is not durable. An automatic restart
+  # would reconstruct it from the unchanged Compose environment and replay a
+  # consumed code, so only mobiusctl `reopen` may recreate this container.
+  assert worker["restart"] == "no"
   assert worker["read_only"] is True
   assert worker["cap_drop"] == ["ALL"]
   assert "no-new-privileges:true" in worker["security_opt"]
@@ -40,6 +43,9 @@ def test_only_root_target_mounts_the_stopped_app_data():
   worker = services["recovery"]
   assert target["profiles"] == ["recovery"]
   assert target.get("init") is None
+  # A restarted target would accept the same still-live bearer. It must remain
+  # exited until `reopen` removes both services and rotates both credentials.
+  assert target["restart"] == "no"
   assert target["read_only"] is True
   assert set(target["cap_drop"]) == {
     "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_PTRACE",
@@ -72,6 +78,14 @@ def test_lifecycle_pulls_latest_before_stopping_app_and_restores_on_finish():
   app_up = script.index("normal_compose up -d --force-recreate app", finish)
   health = script.index("wait_for_normal_app", app_up)
   assert down < app_up < health
+
+
+def test_lifecycle_directs_crashed_services_through_credential_rotation():
+  script = (ROOT / "scripts" / "mobiusctl").read_text()
+  assert "required after either isolated service exits" in script
+  assert "If either recovery service exits, do not restart it" in script
+  assert "If either service exited, do not restart it" in script
+  assert script.count("scripts/mobiusctl recovery reopen") >= 3
 
 
 def test_app_sudo_is_explicit_and_defaults_off():

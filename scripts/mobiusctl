@@ -19,7 +19,8 @@ Usage: scripts/mobiusctl recovery start|reopen|status|finish
   start   stop Mobius, pull the latest approved recovery image, and expose the
           recovery UI on loopback (default http://127.0.0.1:18003)
   reopen  keep Mobius stopped, rotate both credentials, and recreate a clean
-          recovery target + latest worker with a new one-time sign-in code
+          recovery target + latest worker with a new one-time sign-in code;
+          required after either isolated service exits
   status  show the isolated recovery services
   finish  remove recovery services, restart Mobius, and verify app health
 EOF
@@ -374,6 +375,8 @@ show_recovery_access() {
   printf '  %s\n' "$MOBIUS_RECOVERY_LOCAL_TOKEN"
   printf 'Root repair authority expires at Unix epoch %s.\n' \
     "$MOBIUS_RECOVERY_TARGET_EXPIRES_AT"
+  echo "If either recovery service exits, do not restart it; rotate both credentials with:"
+  echo "  scripts/mobiusctl recovery reopen"
   echo "When repair is complete: scripts/mobiusctl recovery finish"
 }
 
@@ -461,7 +464,8 @@ status_recovery() {
   printf 'Loopback URL: http://127.0.0.1:%s/\n' "$MOBIUS_RECOVERY_PORT"
   printf 'Root target expiry (Unix epoch): %s\n' \
     "$MOBIUS_RECOVERY_TARGET_EXPIRES_AT"
-  echo "For a new one-time code: scripts/mobiusctl recovery reopen"
+  echo "If either service exited, do not restart it; rotate both credentials with:"
+  echo "  scripts/mobiusctl recovery reopen"
 }
 
 finish_recovery() {

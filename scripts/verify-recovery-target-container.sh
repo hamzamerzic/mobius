@@ -35,6 +35,7 @@ printf '%s\n' \
 # this proves the invariant independently of Compose or platform defaults.
 docker run -d \
   --name "$CONTAINER" \
+  --restart=no \
   --read-only \
   --tmpfs /tmp \
   --tmpfs /run \
@@ -307,9 +308,30 @@ print(json.dumps({
 }, sort_keys=True))
 PY
 
+# A crash must leave the root target exited. Reconstructing it automatically
+# from the container config would replay the same still-live bearer; the host
+# lifecycle must instead remove both services and rotate both credentials via
+# `mobiusctl recovery reopen`.
+restart_policy=$(docker inspect \
+  -f '{{.HostConfig.RestartPolicy.Name}}' "$CONTAINER")
+[ "$restart_policy" = "no" ] || {
+  echo "recovery target has replay-prone restart policy: $restart_policy" >&2
+  exit 1
+}
+docker kill "$CONTAINER" >/dev/null
+docker wait "$CONTAINER" >/dev/null
+sleep 2
+crashed_state=$(docker inspect \
+  -f '{{.State.Status}} {{.RestartCount}}' "$CONTAINER")
+[ "$crashed_state" = "exited 0" ] || {
+  echo "crashed recovery target restarted with retained authority: $crashed_state" >&2
+  exit 1
+}
+
 # A retained bearer must become inert at the target's own absolute deadline,
 # independently of worker/session state. The target closes its listener and
-# parks PID1 instead of exiting into an `unless-stopped` restart loop.
+# parks PID1; expiry therefore remains final even if an operator inspects the
+# still-running container before using `mobiusctl recovery reopen`.
 TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')
 EXPIRES_AT=$(($(date -u +%s) + 8))
 ENV_FILE=$(mktemp /tmp/mobius-recovery-target-expiry.XXXXXX)
@@ -322,6 +344,7 @@ printf '%s\n' \
   "MOBIUS_RECOVERY_TARGET_TOKEN=$TOKEN" >"$ENV_FILE"
 docker run -d \
   --name "$EXPIRED_CONTAINER" \
+  --restart=no \
   --read-only \
   --tmpfs /tmp \
   --tmpfs /run \

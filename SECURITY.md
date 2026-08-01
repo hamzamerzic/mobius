@@ -91,6 +91,13 @@ capabilities, and confines its own file helpers to explicit roots with Linux
 `openat2`. Repair commands retain root over the stopped `/data` instance but
 cannot inspect target PID1 or modify the recovery worker itself.
 
+Self-hosted recovery containers never restart automatically. A worker restart
+would reconstruct its tmpfs-backed one-time-code state from unchanged
+environment credentials, while a target restart would retain the same bearer.
+If either exits, use `scripts/mobiusctl recovery reopen`; it removes both
+containers, rotates both credentials, pulls the latest worker, and recreates a
+clean pair while keeping the ordinary app stopped.
+
 ## Opaque embedded-chat contract
 
 `window.mobius.chat` creates three documents. The outer sandbox restriction

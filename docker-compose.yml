@@ -73,12 +73,16 @@ services:
   # On-demand self-hosted recovery. `scripts/mobiusctl recovery start` stops
   # the ordinary app before starting these two profile-scoped services.
   # recovery-target is the only root process; the external worker receives no
-  # Docker socket and cannot write its own read-only filesystem.
+  # Docker socket and cannot write its own read-only filesystem. Both services
+  # are deliberately one-shot: restarting either container would replay the
+  # credentials injected at creation. After either process exits, use
+  # `scripts/mobiusctl recovery reopen` to remove both containers and rotate
+  # both credentials before recreating them.
   recovery-target:
     profiles: ["recovery"]
     image: ${MOBIUS_IMAGE:-mobius}
     container_name: ${MOBIUS_RECOVERY_TARGET_CONTAINER:-mobius-recovery-target}
-    restart: unless-stopped
+    restart: "no"
     read_only: true
     cap_drop:
       - NET_ADMIN
@@ -109,7 +113,7 @@ services:
     profiles: ["recovery"]
     image: ${MOBIUS_RECOVERY_IMAGE:-ghcr.io/mobius-os/mobius-recovery:stable}
     container_name: ${MOBIUS_RECOVERY_CONTAINER:-mobius-recovery}
-    restart: unless-stopped
+    restart: "no"
     read_only: true
     cap_drop:
       - ALL
