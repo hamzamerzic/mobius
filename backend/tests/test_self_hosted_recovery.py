@@ -21,6 +21,7 @@ def test_external_recovery_worker_is_unprivileged_and_has_no_host_control():
   assert worker["ports"] == [
     "127.0.0.1:${MOBIUS_RECOVERY_PORT:-18003}:8000"
   ]
+  assert "MOBIUS_RECOVERY_SECURE_COOKIE=0" in worker["environment"]
 
 
 def test_only_root_target_mounts_the_stopped_app_data():

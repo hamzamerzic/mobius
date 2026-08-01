@@ -117,6 +117,9 @@ services:
       - MOBIUS_RECOVERY_TARGET_URL=http://recovery-target:18002
       - MOBIUS_RECOVERY_TARGET_TOKEN=${MOBIUS_RECOVERY_TARGET_TOKEN:-not-configured}
       - MOBIUS_RECOVERY_LOCAL_TOKEN=${MOBIUS_RECOVERY_LOCAL_TOKEN:-not-configured}
+      # The self-host helper publishes plain HTTP on loopback. Managed HTTPS
+      # deployments retain the worker's secure-cookie default instead.
+      - MOBIUS_RECOVERY_SECURE_COOKIE=0
     ports:
       - "127.0.0.1:${MOBIUS_RECOVERY_PORT:-18003}:8000"
     depends_on:
