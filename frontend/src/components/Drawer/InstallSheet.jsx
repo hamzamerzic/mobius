@@ -4,6 +4,7 @@ import { apiFetch } from '../../api/client.js'
 import { appIconUrl } from '../appIcon.js'
 import { appQueries } from '../../hooks/queries.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
+import { loginBoundaryPath } from '../../lib/safeReturnPath.js'
 import {
   detectInstallPlatform,
   isStandaloneDisplay,
@@ -125,13 +126,17 @@ export default function InstallSheet({ app, onClose }) {
   // The app's own page — the only document whose manifest names and icons
   // THIS app. `?install=1` opens its Add-to-Home card on arrival.
   const installPath = `/apps/${appSlug}/?install=1`
-  const installUrl = typeof window !== 'undefined'
-    ? new URL(installPath, window.location.origin).href
-    : installPath
+  // Safari may not share the installed Möbius PWA's session. Enter through
+  // the login boundary so both signed-in and signed-out browser contexts land
+  // back on the app's install surface instead of falling through to the shell.
+  const handoffPath = loginBoundaryPath(installPath)
+  const handoffUrl = typeof window !== 'undefined'
+    ? new URL(handoffPath, window.location.origin).href
+    : handoffPath
 
   async function copyLink() {
     try {
-      await navigator.clipboard.writeText(installUrl)
+      await navigator.clipboard.writeText(handoffUrl)
       setCopied(true)
     } catch {
       // Clipboard access can be denied outright. The address is printed in
@@ -210,7 +215,7 @@ export default function InstallSheet({ app, onClose }) {
               <a
                 ref={primaryFocusRef}
                 className="is__btn is__btn--primary is__btn--link"
-                href={installUrl}
+                href={handoffUrl}
                 target="_blank"
                 rel="noopener noreferrer"
               >
@@ -230,7 +235,7 @@ export default function InstallSheet({ app, onClose }) {
             <p className="is__hint">
               If it opens inside Möbius rather than Safari, tap the compass
               icon to switch over. Or open Safari yourself and go to{' '}
-              <span className="is__url">{installUrl}</span>
+              <span className="is__url">{handoffUrl}</span>
             </p>
 
             <div className="is__actions">
