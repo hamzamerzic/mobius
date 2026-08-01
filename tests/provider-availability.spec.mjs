@@ -137,6 +137,7 @@ test('model and effort choices stay interactive while saves remain ordered', asy
   await expect(rows).toHaveCount(3)
   const first = rows.filter({ hasText: 'Test model 1' })
   const second = rows.filter({ hasText: 'Test model 2' })
+  let alternateEffort
   try {
     await first.click()
     await expect.poll(() => startedSettings.map(settings => settings.model))
@@ -146,7 +147,7 @@ test('model and effort choices stay interactive while saves remain ordered', asy
     await expect(second).toHaveAttribute('aria-pressed', 'true')
 
     const effortGroup = page.getByRole('radiogroup', { name: 'Reasoning effort' })
-    const alternateEffort = effortGroup.locator('[role="radio"][aria-checked="false"]').first()
+    alternateEffort = effortGroup.locator('[role="radio"][aria-checked="false"]').first()
     await expect(alternateEffort).toBeEnabled()
     await alternateEffort.click()
     await expect(alternateEffort).toHaveAttribute('aria-checked', 'true')
