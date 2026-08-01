@@ -11,12 +11,12 @@
 #   scripts/deploy-prod.sh --yes            # don't prompt before `docker compose build`
 #   scripts/deploy-prod.sh --target=test    # redirect to mobius-test (port 8001) instead of prod
 #   scripts/deploy-prod.sh --check          # verify-only: bundle hash, internal health, public health
-#   scripts/deploy-prod.sh --allow-unpushed # emergency hotfix: deploy a commit not yet on origin/main
+#   scripts/deploy-prod.sh --allow-unpushed # emergency hotfix: deploy a commit not yet on the configured release ref
 #                                           # (downgrades the default refusal + dirty-tree abort to a warning;
-#                                           #  push it to main ASAP or the next deploy-from-main reverts it)
-#   scripts/deploy-prod.sh --allow-stale    # deliberate rollback: deploy a prod checkout BEHIND origin/main
-#                                           # (bypasses the behind-origin/main hard block — only for an
-#                                           #  intentional rollback to an older main; you are reverting newer work)
+#                                           #  push it there ASAP or the next normal deploy reverts it)
+#   scripts/deploy-prod.sh --allow-stale    # deliberate rollback: deploy behind the configured release ref
+#                                           # (bypasses the behind-release hard block only for an
+#                                           #  intentional rollback; you are reverting newer work)
 #   scripts/deploy-prod.sh --allow-low-disk # proceed below the build free-space floor
 #   scripts/deploy-prod.sh --force-now      # skip the owner-presence gate (deploy even mid-conversation)
 #
@@ -47,19 +47,19 @@ ASSUME_YES=0
 FORCE_NOW="${FORCE_NOW:-0}"
 PRESENCE_WAIT_SECONDS="${PRESENCE_WAIT_SECONDS:-90}"
 CHECK_ONLY=0
-# Default-refuse to deploy a commit that isn't on origin/main: a deploy from an
-# unpushed commit ships code the next deploy-from-main silently REVERTS (the
+# Default-refuse to deploy a commit that is not on the configured release: a
+# local-only commit is silently REVERTED by the next normal deploy (the
 # "deployed-but-unpushed → reverted" class — see push-deploy-to-main lesson).
 # The escape hatch (--allow-unpushed / ALLOW_UNPUSHED=1) downgrades the abort to
 # a loud warning for a deliberate emergency hotfix: empower with an explicit
 # override, safe-by-default — not a hard wall.
 ALLOW_UNPUSHED="${ALLOW_UNPUSHED:-0}"
 # The mirror-image refusal: deploy-prod builds from the WORKING TREE, so a
-# checkout that is BEHIND origin/main bakes a STALE image and silently REVERTS
-# everyone's pushed work (the served frontend regresses to an old bundle). This
+# checkout that is BEHIND the configured release bakes a STALE image and
+# silently REVERTS pushed work (the served frontend regresses to an old bundle). This
 # is the recurring "sibling deployed from a stale checkout" prod incident. We
 # HARD-BLOCK a strictly-behind checkout (exit 2). --allow-stale / ALLOW_STALE=1
-# is the escape hatch for a DELIBERATE rollback to an older main — same
+# is the escape hatch for a DELIBERATE rollback to an older release — same
 # empower-with-an-explicit-override shape as --allow-unpushed.
 ALLOW_STALE="${ALLOW_STALE:-0}"
 ALLOW_LOW_DISK="${ALLOW_LOW_DISK:-0}"
@@ -345,10 +345,56 @@ resolve_prod_service_gateway_origin() {
   MOBIUS_SERVICE_GATEWAY_ORIGIN="$value"
   export MOBIUS_SERVICE_GATEWAY_ORIGIN
 }
+
+resolve_platform_release_ref() {
+  local value="${MOBIUS_PLATFORM_RELEASE_REF:-}" source="environment"
+  local file candidate canonical_env=""
+
+  # DOMAIN is often exported explicitly for a worktree deployment, which means
+  # ensure_prod_env does not source the checkout's .env. Resolve this setting
+  # independently so the managed channel still comes from deployment config
+  # rather than from a repository-wide temporary default.
+  if [ -z "$value" ]; then
+    canonical_env=$(canonical_env_path || true)
+    for file in "$REPO_ROOT/.env" "$canonical_env"; do
+      [ -n "$file" ] || continue
+      candidate=$(env_value_from_file "$file" MOBIUS_PLATFORM_RELEASE_REF || true)
+      if [ -n "$candidate" ]; then
+        value="$candidate"
+        source="$file"
+        break
+      fi
+    done
+  fi
+  MOBIUS_PLATFORM_RELEASE_REF="${value:-refs/heads/main}"
+  [ "$source" = "environment" ] || info "loaded platform release ref from $source"
+  export MOBIUS_PLATFORM_RELEASE_REF
+}
 # ── end prod environment resolution ──────────────────────────────
 
 ensure_prod_env
 resolve_prod_service_gateway_origin
+resolve_platform_release_ref
+
+# The same full branch ref drives both the image's boot reconciler and this
+# deploy's pushed-source/freshness proofs. Normal installations follow main;
+# a managed stack channel is an explicit environment or .env choice.
+MOBIUS_PLATFORM_RELEASE_REF="${MOBIUS_PLATFORM_RELEASE_REF:-refs/heads/main}"
+case "$MOBIUS_PLATFORM_RELEASE_REF" in
+  refs/heads/*) ;;
+  *)
+    fail "MOBIUS_PLATFORM_RELEASE_REF must be a full refs/heads/... ref."
+    exit 2
+    ;;
+esac
+PLATFORM_RELEASE_BRANCH=${MOBIUS_PLATFORM_RELEASE_REF#refs/heads/}
+if ! git check-ref-format --branch "$PLATFORM_RELEASE_BRANCH" >/dev/null 2>&1; then
+  fail "MOBIUS_PLATFORM_RELEASE_REF is invalid."
+  exit 2
+fi
+PLATFORM_RELEASE_TRACKING_REF="refs/remotes/origin/$PLATFORM_RELEASE_BRANCH"
+PLATFORM_RELEASE_LABEL="origin/$PLATFORM_RELEASE_BRANCH"
+export MOBIUS_PLATFORM_RELEASE_REF
 
 # ── proxy topology — sampled ONCE, then frozen ──────────────────────────
 # The shared edge proxy (its own compose stack; see the edge repo's README)
@@ -1020,113 +1066,114 @@ wait_for_cutover() {
 
 # ── prod source-safety guard ────────────────────────────────────────────
 # The project pin above stops worktree junk, but a worktree (or a stale
-# checkout) builds ITS branch — deploying non-main code to prod. Warn +
-# confirm so prod always ships a deliberate, current main.
+# checkout) builds ITS branch. Warn + confirm so prod always ships the
+# deliberate release selected by MOBIUS_PLATFORM_RELEASE_REF.
 if [ "$TARGET" = "prod" ]; then
   if [ -f "$REPO_ROOT/.git" ]; then
     warn "running from a git worktree (${REPO_ROOT})."
-    warn "prod normally deploys main from the canonical checkout; a worktree builds its own branch."
+    warn "prod normally deploys ${PLATFORM_RELEASE_LABEL}; a worktree builds its own branch."
     confirm_yes "deploy prod from this worktree anyway?" || { fail "aborted — use the main checkout"; exit 1; }
   fi
   if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-    # Pull origin/main forward so the ancestor + tip comparisons below see the
-    # real remote state, not a stale local ref. `fetch origin` (not `origin
-    # main`) so origin/main updates even on a worktree whose upstream tracks a
-    # different branch; best-effort — an offline fetch leaves the prior ref.
-    # Record whether the fetch actually succeeded: the behind-origin/main guard
-    # below trusts origin/main as fresh only when it did; on a failed fetch the
-    # local ref may be stale, so the guard warns rather than silently trusting it.
+    # Pull the selected remote release forward so the ancestor + tip
+    # comparisons below see the real remote state, not a stale local ref.
+    # Best-effort: an offline fetch leaves the prior tracking ref. Record
+    # whether it succeeded so the behind-release guard never treats a cached
+    # ref as fresh.
     fetch_ok=0
-    if git -C "$REPO_ROOT" fetch origin -q 2>/dev/null; then fetch_ok=1; fi
+    if git -C "$REPO_ROOT" fetch --no-tags origin -q \
+      "+$MOBIUS_PLATFORM_RELEASE_REF:$PLATFORM_RELEASE_TRACKING_REF" 2>/dev/null; then
+      fetch_ok=1
+    elif [ "$MOBIUS_PLATFORM_RELEASE_REF" != "refs/heads/main" ]; then
+      fail "could not fetch the managed release ${MOBIUS_PLATFORM_RELEASE_REF}; refusing to trust a cached ref."
+      exit 1
+    fi
 
     # ── unpushed-commit guard (the headline structural fix) ───────────────
-    # You can only deploy code that is ALREADY on origin/main. A deploy from a
-    # commit that isn't on origin/main ships code the NEXT deploy-from-main
+    # You can only deploy code that is ALREADY on the selected release. A deploy
+    # from a commit that is not there ships code the NEXT normal deploy
     # silently REVERTS — the "deployed-but-unpushed → reverted" class. Assert
-    # HEAD is contained in (an ancestor of) origin/main and refuse otherwise.
+    # HEAD is contained in (an ancestor of) that ref and refuse otherwise.
     # `--allow-unpushed` / ALLOW_UNPUSHED=1 is the documented escape hatch for a
     # deliberate emergency hotfix: it downgrades the abort to a loud warning
     # (safe-by-default, with an explicit override — not a hard wall).
     head_sha=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "")
-    main_sha=$(git -C "$REPO_ROOT" rev-parse origin/main 2>/dev/null || echo "")
-    if [ -z "$main_sha" ]; then
-      warn "couldn't resolve origin/main (no network/remote?) — skipping the"
-      warn "unpushed-commit guard; confirm you're on current, pushed main."
-    elif ! git -C "$REPO_ROOT" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
+    release_sha=$(git -C "$REPO_ROOT" rev-parse "${PLATFORM_RELEASE_TRACKING_REF}^{commit}" 2>/dev/null || echo "")
+    if [ -z "$release_sha" ]; then
+      if [ "$MOBIUS_PLATFORM_RELEASE_REF" != "refs/heads/main" ]; then
+        fail "fetched managed release ${MOBIUS_PLATFORM_RELEASE_REF} did not resolve to a commit."
+        exit 1
+      fi
+      warn "couldn't resolve ${PLATFORM_RELEASE_LABEL} (no network/remote?) — skipping the"
+      warn "unpushed-commit guard; confirm you're on the current pushed release."
+    elif ! git -C "$REPO_ROOT" merge-base --is-ancestor HEAD "$PLATFORM_RELEASE_TRACKING_REF" 2>/dev/null; then
       if [ "$ALLOW_UNPUSHED" = "1" ]; then
-        warn "HEAD $(git -C "$REPO_ROOT" rev-parse --short HEAD) is NOT on origin/main — deploying anyway (--allow-unpushed)."
-        warn "PUSH IT to main ASAP: the next deploy-from-main will REVERT this prod build until you do."
+        warn "HEAD $(git -C "$REPO_ROOT" rev-parse --short HEAD) is NOT on ${PLATFORM_RELEASE_LABEL} — deploying anyway (--allow-unpushed)."
+        warn "PUSH IT to ${PLATFORM_RELEASE_BRANCH} ASAP: the next normal deploy will REVERT this prod build until you do."
       else
-        fail "HEAD $(git -C "$REPO_ROOT" rev-parse --short HEAD) is not on origin/main (not an ancestor of $(git -C "$REPO_ROOT" rev-parse --short origin/main))."
-        fail "Deploying an unpushed commit means the NEXT deploy-from-main silently REVERTS it"
+        fail "HEAD $(git -C "$REPO_ROOT" rev-parse --short HEAD) is not on ${PLATFORM_RELEASE_LABEL} (not an ancestor of $(git -C "$REPO_ROOT" rev-parse --short "$PLATFORM_RELEASE_TRACKING_REF"))."
+        fail "Deploying an unpushed commit means the NEXT normal deploy silently REVERTS it"
         fail "(the deployed-but-unpushed → reverted class). Push it first:"
-        fail "    git push origin HEAD:main"
+        fail "    git push origin HEAD:${PLATFORM_RELEASE_BRANCH}"
         fail "then re-run. For a deliberate emergency hotfix, pass --allow-unpushed (or ALLOW_UNPUSHED=1)"
-        fail "and push to main immediately after."
+        fail "and push to ${PLATFORM_RELEASE_BRANCH} immediately after."
         exit 1
       fi
     fi
 
-    # ── behind-origin/main guard (the mirror-image structural fix) ────────
+    # ── behind-origin/main guard (selected release; marker kept for tests) ─
     # The unpushed guard above refuses a checkout that is AHEAD of / DIVERGED
-    # from origin/main. This refuses the OPPOSITE failure: a checkout that is
-    # strictly BEHIND origin/main. deploy-prod builds from the WORKING TREE, so
-    # a behind checkout bakes a STALE image — it lacks commits that ARE on main,
+    # from the selected release. This refuses the OPPOSITE failure: a checkout
+    # that is strictly BEHIND it. deploy-prod builds from the WORKING TREE, so
+    # a behind checkout bakes a STALE image — it lacks pushed release commits,
     # so the deploy silently REVERTS everyone's pushed work (served frontend
     # regresses to an old bundle). This is the recurring "sibling deployed from
     # a stale checkout" prod incident, and the single most common cause of it.
     #
     # Condition is STRICTLY BEHIND, not merely "not an ancestor": HEAD IS an
-    # ancestor of origin/main AND origin/main is NOT an ancestor of HEAD. We
+    # ancestor of the release AND the release is NOT an ancestor of HEAD. We
     # require BOTH so the guard never fires on a DIVERGED checkout — diverged is
     # owned by the unpushed guard above (exit 1, with its own --allow-unpushed
-    # messaging). A bare `! is-ancestor origin/main HEAD` would also catch
+    # messaging). A bare `! is-ancestor release HEAD` would also catch
     # diverged, which collides with the unpushed guard when the operator passed
     # --allow-unpushed (it warns-and-continues on diverged, then we'd wrongly
     # relabel it "behind"). The two-sided test keeps the guards disjoint:
-    #   HEAD==main          → both ancestor checks true  → PASS (no-op)
-    #   HEAD ahead/unpushed → origin/main IS ancestor    → PASS (unpushed concern)
+    #   HEAD==release       → both ancestor checks true  → PASS (no-op)
+    #   HEAD ahead/unpushed → release IS ancestor        → PASS (unpushed concern)
     #   strictly behind     → only HEAD-is-ancestor true → BLOCK
     #   diverged            → HEAD-is-ancestor false     → PASS here (unpushed owns)
     # We hard-block (exit 2, distinct from the unpushed guard's exit 1 so callers
     # can tell the two apart). --allow-stale / ALLOW_STALE=1 is the escape hatch
-    # for a DELIBERATE rollback to an older main. prod-only: scoped to
+    # for a DELIBERATE rollback to an older release. prod-only: scoped to
     # TARGET==prod by the enclosing `if`; the test target deploys throwaway
-    # checkouts. main_sha empty (origin/main unresolvable) means the block above
-    # already warned + skipped, so this only runs when origin/main is known.
-    # NOTE: this verifies against the LOCAL origin/main ref, which is only
-    # trustworthy when the pre-guard fetch (line ~539) actually SUCCEEDED. We
-    # therefore HARD-BLOCK only when fetch_ok=1 — a failed fetch (offline /
-    # remote down) leaves a possibly-stale cached ref, and the offline-is-a-
-    # warning contract says we must NOT hard-block an offline deploy. When the
-    # fetch failed we only WARN that staleness is unverified (the elif below),
-    # accepting that a checkout matching a stale ref then deploys — the
-    # alternative, blocking every offline deploy, is what we were told not to do.
-    # main_sha empty (origin/main unresolvable at all) means the unpushed-guard
-    # block above already warned + skipped.
-    if [ -n "$main_sha" ] && [ "$fetch_ok" = "1" ] &&
-       git -C "$REPO_ROOT" merge-base --is-ancestor HEAD origin/main 2>/dev/null &&
-       ! git -C "$REPO_ROOT" merge-base --is-ancestor origin/main HEAD 2>/dev/null; then
-      behind_count=$(git -C "$REPO_ROOT" rev-list --count HEAD..origin/main 2>/dev/null || echo "?")
+    # checkouts. release_sha empty means the block above already warned +
+    # skipped, so this only runs when the selected release is known.
+    # This trusts the local tracking ref only after the exact fetch succeeds.
+    # The legacy main channel retains its offline-warning behavior; managed
+    # non-main releases already hard-failed above instead of trusting cache.
+    if [ -n "$release_sha" ] && [ "$fetch_ok" = "1" ] &&
+       git -C "$REPO_ROOT" merge-base --is-ancestor HEAD "$PLATFORM_RELEASE_TRACKING_REF" 2>/dev/null &&
+       ! git -C "$REPO_ROOT" merge-base --is-ancestor "$PLATFORM_RELEASE_TRACKING_REF" HEAD 2>/dev/null; then
+      behind_count=$(git -C "$REPO_ROOT" rev-list --count "HEAD..$PLATFORM_RELEASE_TRACKING_REF" 2>/dev/null || echo "?")
       if [ "$ALLOW_STALE" = "1" ]; then
-        warn "checkout is BEHIND origin/main by ${behind_count} commit(s) — deploying anyway (--allow-stale)."
+        warn "checkout is BEHIND ${PLATFORM_RELEASE_LABEL} by ${behind_count} commit(s) — deploying anyway (--allow-stale)."
         warn "this is a ROLLBACK: you are reverting newer pushed work. Confirm that's intended."
       else
-        fail "checkout is BEHIND origin/main: HEAD $(git -C "$REPO_ROOT" rev-parse --short HEAD) is missing ${behind_count} commit(s) that are on origin/main $(git -C "$REPO_ROOT" rev-parse --short origin/main)."
+        fail "checkout is BEHIND ${PLATFORM_RELEASE_LABEL}: HEAD $(git -C "$REPO_ROOT" rev-parse --short HEAD) is missing ${behind_count} commit(s) that are on ${PLATFORM_RELEASE_LABEL} $(git -C "$REPO_ROOT" rev-parse --short "$PLATFORM_RELEASE_TRACKING_REF")."
         fail "deploy-prod builds from the working tree, so deploying this STALE checkout"
         fail "would bake an old image and silently REVERT everyone's pushed work."
         fail "Bring the checkout current first, then re-run:"
-        fail "    git fetch && git rebase origin/main      # (or: git pull --ff-only)"
-        fail "For a DELIBERATE rollback to an older main, pass --allow-stale (or ALLOW_STALE=1)."
+        fail "    git fetch && git rebase ${PLATFORM_RELEASE_LABEL}"
+        fail "For a DELIBERATE rollback to an older release, pass --allow-stale (or ALLOW_STALE=1)."
         exit 2
       fi
-    elif [ -n "$main_sha" ] && [ "$fetch_ok" != "1" ]; then
-      # Origin/main resolved from a CACHED ref but the pre-guard fetch failed, so
+    elif [ -n "$release_sha" ] && [ "$fetch_ok" != "1" ]; then
+      # The release resolved from a CACHED ref but the pre-guard fetch failed, so
       # the ref may be stale: a checkout that matches it could still be behind the
       # TRUE remote. Don't hard-block an offline deploy (offline-is-a-warning
       # contract) — make the unverified staleness explicit instead.
-      warn "could not fetch origin (offline?) — the behind-origin/main staleness check"
-      warn "is UNVERIFIED (ran against a possibly-stale cached origin/main ref)."
+      warn "could not fetch origin (offline?) — the behind-release staleness check"
+      warn "is UNVERIFIED (ran against a possibly-stale cached ${PLATFORM_RELEASE_LABEL} ref)."
       warn "Confirm you're current with the true remote before trusting this deploy."
     fi
 
@@ -1143,19 +1190,19 @@ if [ "$TARGET" = "prod" ]; then
     if [ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]; then
       if [ "$ALLOW_UNPUSHED" = "1" ]; then
         warn "working tree is DIRTY — deploying uncommitted changes anyway (--allow-unpushed)."
-        warn "These changes are on no commit; commit + push to main ASAP."
+        warn "These changes are on no commit; commit + push to ${PLATFORM_RELEASE_BRANCH} ASAP."
       else
         fail "working tree is dirty — deploy-prod builds from the checkout, so this would"
         fail "ship uncommitted code that is on no commit (the next deploy reverts it)."
-        fail "Commit + push to main first, or pass --allow-unpushed for an emergency hotfix."
+        fail "Commit + push to ${PLATFORM_RELEASE_BRANCH} first, or pass --allow-unpushed for an emergency hotfix."
         exit 1
       fi
     fi
 
-    # Existing on-main-but-different / unresolvable-origin advisory (kept).
-    if [ -n "$head_sha" ] && [ -n "$main_sha" ] && [ "$head_sha" != "$main_sha" ]; then
-      warn "HEAD $(git -C "$REPO_ROOT" rev-parse --short HEAD) != origin/main $(git -C "$REPO_ROOT" rev-parse --short origin/main 2>/dev/null) — you may deploy non-main code."
-      confirm_yes "deploy this non-main checkout to prod?" || { fail "aborted"; exit 1; }
+    # Existing pushed-but-not-at-tip advisory (kept).
+    if [ -n "$head_sha" ] && [ -n "$release_sha" ] && [ "$head_sha" != "$release_sha" ]; then
+      warn "HEAD $(git -C "$REPO_ROOT" rev-parse --short HEAD) != ${PLATFORM_RELEASE_LABEL} $(git -C "$REPO_ROOT" rev-parse --short "$PLATFORM_RELEASE_TRACKING_REF" 2>/dev/null) — you may deploy an older release commit."
+      confirm_yes "deploy this non-tip checkout to prod?" || { fail "aborted"; exit 1; }
     fi
   fi
 fi
@@ -1422,25 +1469,35 @@ fi
 # ── served PLATFORM ancestry assertion (prod only) ─────────────────────
 # The backend-sha block above reads the IMAGE build sha. Under the clone model,
 # the deployed backend is the served /data/platform HEAD after boot reconcile.
-# Assert freshness by ancestry: origin/main must be contained in that served HEAD
-# (exact equality is fine; local agent commits replayed on top are also fine).
-# Reconcile conflict/rollback/offline states are explicit exceptions because
-# they intentionally keep the previous working tree live.
+# Assert freshness by ancestry: the configured release must be contained in
+# that served HEAD (exact equality is fine; local agent commits replayed on top
+# are also fine).
+# Reconcile conflict/rollback states remain explicit exceptions because they
+# intentionally keep the previous working tree live. Only legacy main retains
+# the prior offline-warning exception; a managed non-main release fails closed.
 if [ "$TARGET" = "prod" ]; then
   serving_source=$(served_version_field serving_source)
   platform_sha=$(served_version_field platform_sha)
   case "$platform_sha" in null|unknown) platform_sha="" ;; esac
 
-  platform_freshness=$(docker exec -u mobius "$CONTAINER" bash -c '
+  platform_freshness=$(docker exec -u mobius \
+    -e MOBIUS_DEPLOY_RELEASE_REF="$MOBIUS_PLATFORM_RELEASE_REF" \
+    "$CONTAINER" bash -c '
+    ref=${MOBIUS_DEPLOY_RELEASE_REF:-}
+    [ "${MOBIUS_PLATFORM_RELEASE_REF:-}" = "$ref" ] || { echo ref_mismatch; exit 0; }
+    case "$ref" in refs/heads/*) ;; *) echo invalid_ref; exit 0 ;; esac
+    branch=${ref#refs/heads/}
+    git check-ref-format --branch "$branch" >/dev/null 2>&1 || { echo invalid_ref; exit 0; }
+    tracking="refs/remotes/origin/$branch"
     cd /data/platform 2>/dev/null || { echo missing; exit 0; }
     [ -f /data/.platform-conflict ] && { echo conflict; exit 0; }
     [ -f /data/.platform-rolled-back ] && { echo rolled_back; exit 0; }
     [ -f /data/.platform-offline ] && { echo offline_flag; exit 0; }
     head=$(git rev-parse --verify HEAD 2>/dev/null) || { echo invalid; exit 0; }
-    if ! git fetch --quiet origin main:refs/remotes/origin/main >/dev/null 2>&1; then
+    if ! git fetch --quiet --no-tags origin "+$ref:$tracking" >/dev/null 2>&1; then
       echo offline; exit 0
     fi
-    target=$(git rev-parse --verify origin/main 2>/dev/null) || { echo offline; exit 0; }
+    target=$(git rev-parse --verify "${tracking}^{commit}" 2>/dev/null) || { echo offline; exit 0; }
     if [ "$head" = "$target" ]; then
       echo "exact:$head"; exit 0
     fi
@@ -1460,8 +1517,21 @@ if [ "$TARGET" = "prod" ]; then
       warn "Boot reconcile rejected the update and kept the previous working platform live."
       ;;
     offline|offline_flag)
-      warn "served platform freshness skipped: origin/main could not be refreshed in the container."
+      if [ "$MOBIUS_PLATFORM_RELEASE_REF" != "refs/heads/main" ]; then
+        fail "served platform freshness could not refresh managed release ${PLATFORM_RELEASE_LABEL}."
+        fail "Refusing to trust a cached non-main release ref."
+        exit 1
+      fi
+      warn "served platform freshness skipped: ${PLATFORM_RELEASE_LABEL} could not be refreshed in the container."
       warn "Boot reconcile will retry when origin is reachable."
+      ;;
+    invalid_ref)
+      fail "served platform freshness rejected the configured release ref."
+      exit 1
+      ;;
+    ref_mismatch)
+      fail "live MOBIUS_PLATFORM_RELEASE_REF does not match the deploy verifier."
+      exit 1
       ;;
     exact:*)
       head_sha=${platform_freshness#exact:}
@@ -1470,7 +1540,7 @@ if [ "$TARGET" = "prod" ]; then
         fail "The backend is not serving the one served tree; investigate entrypoint fallback."
         exit 1
       fi
-      ok "served platform: HEAD == origin/main (${head_sha:0:18}…)"
+      ok "served platform: HEAD == ${PLATFORM_RELEASE_LABEL} (${head_sha:0:18}…)"
       ;;
     ancestor:*)
       pair=${platform_freshness#ancestor:}
@@ -1486,13 +1556,13 @@ if [ "$TARGET" = "prod" ]; then
         fail "The served-platform stamp is stale after reconcile."
         exit 1
       fi
-      ok "served platform: origin/main ${origin_sha:0:18}… is ancestor of served HEAD ${head_sha:0:18}…"
+      ok "served platform: ${PLATFORM_RELEASE_LABEL} ${origin_sha:0:18}… is ancestor of served HEAD ${head_sha:0:18}…"
       ;;
     stale:*)
       pair=${platform_freshness#stale:}
       origin_sha=${pair%%:*}
       head_sha=${pair#*:}
-      fail "served platform is stale: origin/main ${origin_sha:0:18}… is not an ancestor of /data/platform HEAD ${head_sha:0:18}…"
+      fail "served platform is stale: ${PLATFORM_RELEASE_LABEL} ${origin_sha:0:18}… is not an ancestor of /data/platform HEAD ${head_sha:0:18}…"
       fail "No reconcile conflict/offline flag explains the drift; deploy did not advance the served tree."
       exit 1
       ;;
