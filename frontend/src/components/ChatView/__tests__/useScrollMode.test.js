@@ -11,6 +11,7 @@ import {
   _scrollModeForDiagnostics,
   _validateSavedMode,
   applyMode,
+  anchorModeFromScroll,
   bottomAnchorModeFromScroll,
   contentHoldModeFromScroll,
   gestureLayoutRetryDelay,
@@ -1806,4 +1807,96 @@ test('F4: foreground return freezes as an anchor even at the tail', () => {
   assert.equal(restored.kind, 'ANCHOR_AT',
     'return freezes as an anchor, not the grown tail')
   assert.equal(restored.key, 'a-9')
+})
+
+// --- Sub-message reading resolution (R4) -----------------------------------
+// One settled agentic turn in the owner's chats renders 73,721px — 77 viewport
+// heights in a single message row. A whole-message anchor therefore cannot say
+// WHERE in that turn the reader was, and any re-render height change threw them
+// thousands of pixels away. These lock the part-level address that fixes it.
+
+function partedRow(key, top, partHeights) {
+  const row = {
+    offsetTop: top,
+    offsetHeight: partHeights.reduce((sum, h) => sum + h, 0),
+    dataset: { key },
+  }
+  let cursor = top
+  row.children = partHeights.map(height => {
+    const child = { offsetTop: cursor, offsetHeight: height, offsetParent: null }
+    cursor += height
+    return child
+  })
+  return row
+}
+
+function partedScrollEl(row, { scrollTop, clientHeight = 900, spacer = 0 }) {
+  const scrollHeight = row.offsetTop + row.offsetHeight + spacer
+  return {
+    scrollTop,
+    clientHeight,
+    scrollHeight,
+    querySelector(selector) {
+      if (selector === '.spacer-dynamic') return { offsetHeight: spacer }
+      return selector.includes(row.dataset.key) ? row : null
+    },
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [row] : []
+    },
+  }
+}
+
+test('a reading position inside one enormous turn addresses the part, not the turn', () => {
+  // 300 worklog parts of 240px = a 72,000px single message.
+  const row = partedRow('assistant-huge', 0, Array(300).fill(240))
+  const scrollEl = partedScrollEl(row, { scrollTop: 48_000 })
+
+  const mode = anchorModeFromScroll(scrollEl)
+
+  assert.equal(mode.kind, 'ANCHOR_AT')
+  assert.equal(mode.key, 'assistant-huge')
+  assert.deepEqual(mode.part, [200],
+    'the addressed part is the one under the viewport top')
+  assert.equal(mode.offset, 0)
+  assert.ok(Math.abs(mode.offset) < 900,
+    'offset stays within one viewport instead of becoming a five-digit row offset')
+})
+
+test('restoring an enormous turn survives a height change elsewhere in that turn', () => {
+  const saved = anchorModeFromScroll(
+    partedScrollEl(partedRow('assistant-huge', 0, Array(300).fill(240)), {
+      scrollTop: 48_000,
+    }),
+  )
+
+  // The same turn re-renders with earlier parts taller (expanded tool output,
+  // late syntax highlighting, swapped webfonts): every part below shifts down.
+  const grown = partedRow('assistant-huge', 0, [
+    ...Array(100).fill(600), ...Array(200).fill(240),
+  ])
+  const grownEl = partedScrollEl(grown, { scrollTop: 0 })
+  applyMode(grownEl, saved)
+
+  const target = grown.children[saved.part[0]]
+  assert.equal(grownEl.scrollTop, target.offsetTop,
+    'the reader lands on the same part they were reading, wherever it moved to')
+  assert.equal(grownEl.scrollTop, 84_000)
+})
+
+test('a saved location that cannot be resolved is retained, not overwritten', () => {
+  // The row is absent from this visit's committed window. That is a retrieval
+  // failure; the automatic tail shown instead must not become the stored
+  // location, or one bad return breaks every later return.
+  const tail = partedRow('assistant-tail', 0, [400])
+  const scrollEl = partedScrollEl(tail, { scrollTop: 0 })
+
+  const restored = _validateSavedMode(
+    { kind: 'ANCHOR_AT', key: 'assistant-absent', part: 12, offset: -30 },
+    [],
+    scrollEl,
+  )
+
+  assert.equal(restored.defaultTail, true,
+    'the visit still shows real content rather than a blank viewport')
+  assert.notEqual(restored.key, 'assistant-absent')
 })

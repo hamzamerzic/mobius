@@ -163,6 +163,117 @@ function _topmostVisibleMsg(scrollEl) {
 }
 
 
+/** Position of `el` in the scroll container's coordinate space.
+ *
+ * Row-level anchors could read `offsetTop` directly because a message row's
+ * offsetParent is the list. A part-level anchor addresses a row's CHILD, whose
+ * offsetParent may be the row itself, so the walk is what makes row and part
+ * anchors comparable. Mocked geometry with no `offsetParent` degrades to plain
+ * `offsetTop`, which is exactly the row-level behavior it replaces. */
+function _scrollTopOf(scrollEl, el) {
+  // Rects are the only measurement that is correct for BOTH a message row and
+  // an arbitrarily nested part of one: a part's offsetParent is whatever
+  // happens to be positioned around it, which is not reliably the row or the
+  // scroll container, so an offsetTop walk silently produces a wrong (often
+  // zero) part position. Both call sites already force layout.
+  if (typeof el?.getBoundingClientRect === 'function'
+      && typeof scrollEl?.getBoundingClientRect === 'function') {
+    return el.getBoundingClientRect().top
+      - scrollEl.getBoundingClientRect().top
+      + scrollEl.scrollTop
+  }
+  return el?.offsetTop || 0
+}
+
+
+/** Index of the row's topmost child intersecting the viewport, or null.
+ *
+ * WHY a message needs sub-message resolution at all: one settled Möbius
+ * assistant turn is routinely tens of thousands of pixels tall — a measured
+ * turn in the owner's "Fixing urgent Möbius tech debt" chat renders 73,721px,
+ * 77 viewport heights, 82% of that entire conversation — because agentic turns
+ * interleave a few hundred text/tool worklog parts into ONE message row.
+ *
+ * A whole-message anchor therefore has no resolution inside the message the
+ * reader is actually reading: `offset` becomes a five-digit negative number
+ * that only restores correctly if the row re-renders to a byte-identical
+ * height. It does not. Collapsed-then-expanded tool blocks, asynchronous
+ * syntax highlighting, KaTeX, swapped webfonts and the sliced cold render each
+ * move it, and every pixel of that drift lands the reader somewhere else
+ * entirely — the reported "random super high up position" that then takes tens
+ * of screens of scrolling to escape.
+ *
+ * The parts are already discrete, ordered DOM children, so addressing the Nth
+ * one needs no extra markup and bounds the restore error by that part's own
+ * height (tens of pixels for a worklog line) instead of the whole turn's. */
+function _partPathAt(scrollEl, row, scrollTop) {
+  const viewportH = scrollEl.clientHeight || 0
+  const bottom = scrollTop + viewportH
+  const path = []
+  let node = row
+  // Descend while the addressed element is still taller than the viewport:
+  // a top-level worklog part can itself be thousands of pixels, so one level
+  // of resolution is not enough to say where the reader was. Stop as soon as
+  // the target fits, which is when its own height bounds the restore error.
+  while (node?.children?.length && (node === row || node.offsetHeight > viewportH)) {
+    let next = null
+    for (let index = 0; index < node.children.length; index += 1) {
+      const kid = node.children[index]
+      const kidTop = _scrollTopOf(scrollEl, kid)
+      if (kidTop + (kid.offsetHeight || 0) > scrollTop && kidTop < bottom) {
+        path.push(index)
+        next = kid
+        break
+      }
+    }
+    if (!next) break
+    node = next
+  }
+  return path.length ? path : null
+}
+
+
+/** The element a mode's `part` addresses within a row already in hand. */
+function _rowPartTarget(row, mode) {
+  if (!row) return null
+  const path = Array.isArray(mode?.part)
+    ? mode.part
+    : (Number.isInteger(mode?.part) ? [mode.part] : null)
+  if (!path?.length) return row
+  let node = row
+  for (const index of path) {
+    const next = node.children?.[index]
+    // A stale path (the turn re-rendered with a different shape) degrades to
+    // the deepest element that still resolves, never to a failed restore.
+    if (!next) return node
+    node = next
+  }
+  return node
+}
+
+
+/** Build an ANCHOR_AT for `row` describing the viewport at `scrollTop`. */
+function _anchorModeForRow(scrollEl, row, scrollTop, extra = null) {
+  if (!row?.dataset?.key) return null
+  const part = _partPathAt(scrollEl, row, scrollTop)
+  const target = _rowPartTarget(row, { part })
+  const offset = _scrollTopOf(scrollEl, target) - scrollTop
+  // The deepest addressable element can still be a single very tall leaf (one
+  // 8,000px code block). Record the height that offset was measured against so
+  // restore can hold the same RELATIVE place when late highlighting, math or a
+  // swapped font changes that one element's height.
+  const targetH = target?.offsetHeight || 0
+  return {
+    kind: 'ANCHOR_AT',
+    key: row.dataset.key,
+    offset,
+    ...(part == null ? {} : { part }),
+    ...(part != null && offset < 0 && targetH > 0 ? { targetH } : {}),
+    ...(extra || {}),
+  }
+}
+
+
 /** Snapshot the reader's current scroll position as an ANCHOR_AT mode
  *  (the same {key, offset} the gesture-gated scroll handler stamps when
  *  the user scrolls up). Returns null when there's no scroll element or
@@ -174,13 +285,11 @@ function _topmostVisibleMsg(scrollEl) {
  *  shows the latest user row; mode alone neither grants nor retires it. */
 export function anchorModeFromScroll(scrollEl) {
   if (!scrollEl) return null
-  const anchorEl = _topmostVisibleMsg(scrollEl)
-  if (!anchorEl?.dataset?.key) return null
-  return {
-    kind: 'ANCHOR_AT',
-    key: anchorEl.dataset.key,
-    offset: anchorEl.offsetTop - scrollEl.scrollTop,
-  }
+  return _anchorModeForRow(
+    scrollEl,
+    _topmostVisibleMsg(scrollEl),
+    scrollEl.scrollTop,
+  )
 }
 
 
@@ -190,15 +299,13 @@ export function anchorModeFromScroll(scrollEl) {
 function _contentAnchorModeFromScroll(scrollEl) {
   if (!scrollEl) return null
   const row = _topmostVisibleMsg(scrollEl)
-  if (!row?.dataset?.key) return null
-  const mode = {
-    kind: 'ANCHOR_AT',
-    key: row.dataset.key,
-    offset: row.offsetTop - scrollEl.scrollTop,
-  }
-  return _anchorModeIntersectsContent(row, mode, scrollEl?.clientHeight)
-    ? mode
-    : null
+  const mode = _anchorModeForRow(scrollEl, row, scrollEl.scrollTop)
+  if (!mode) return null
+  // The row is already in hand — validate against it directly rather than
+  // re-resolving through the scroll container.
+  return _anchorModeIntersectsContent(
+    _rowPartTarget(row, mode), mode, scrollEl?.clientHeight,
+  ) ? mode : null
 }
 
 
@@ -216,12 +323,9 @@ export function bottomAnchorModeFromScroll(scrollEl) {
   const spacerH = scrollEl.querySelector('.spacer-dynamic')?.offsetHeight || 0
   const realContentH = scrollEl.scrollHeight - spacerH
   const targetScrollTop = Math.max(0, realContentH - scrollEl.clientHeight)
-  return {
-    kind: 'ANCHOR_AT',
-    key,
-    offset: last.offsetTop - targetScrollTop,
+  return _anchorModeForRow(scrollEl, last, targetScrollTop, {
     defaultTail: true,
-  }
+  })
 }
 
 
@@ -247,11 +351,7 @@ export function physicalBottomAnchorModeFromScroll(scrollEl) {
     0,
     scrollEl.scrollHeight - scrollEl.clientHeight,
   )
-  return {
-    kind: 'ANCHOR_AT',
-    key,
-    offset: last.offsetTop - targetScrollTop,
-  }
+  return _anchorModeForRow(scrollEl, last, targetScrollTop)
 }
 
 
@@ -330,10 +430,12 @@ export function applyMode(scrollEl, mode) {
       }
       return
     case 'ANCHOR_AT': {
-      const sel = `[data-key="${(typeof CSS !== 'undefined' && CSS.escape)
-        ? CSS.escape(mode.key) : mode.key}"]`
-      const el = scrollEl.querySelector(sel)
-      if (el) scrollEl.scrollTop = Math.max(0, el.offsetTop - mode.offset)
+      const el = _anchorEl(scrollEl, mode)
+      if (el) {
+        scrollEl.scrollTop = Math.max(
+          0, _scrollTopOf(scrollEl, el) - _scaledOffset(mode, el),
+        )
+      }
       return
     }
   }
@@ -358,24 +460,50 @@ export function _pinReapplyNeeded(scrollEl, mode, lastPinTop) {
 
 /** Resolve the row an ANCHOR_AT mode targets: the element whose `data-key`
  *  equals the mode's key. */
-function _anchorEl(scrollEl, key) {
+function _anchorRow(scrollEl, key) {
   if (!scrollEl || key == null) return null
   const esc = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(key) : key
   return scrollEl.querySelector(`[data-key="${esc}"]`)
+}
+
+
+/** The offset to apply for `mode` against `target`'s CURRENT height.
+ *
+ * A negative offset means the viewport top sits inside the addressed element.
+ * When that element's height has changed since the position was saved, holding
+ * the absolute pixel offset would drift; holding the same proportion of the
+ * element keeps the reader on the same content. */
+function _scaledOffset(mode, target) {
+  const offset = Number(mode?.offset)
+  const savedH = Number(mode?.targetH)
+  const currentH = target?.offsetHeight
+  if (!(offset < 0) || !(savedH > 0) || !(currentH > 0) || savedH === currentH) {
+    return offset
+  }
+  return offset * (currentH / savedH)
+}
+
+
+/** Resolve the exact element an ANCHOR_AT addresses: the message row, or the
+ *  `part`-th child of that row when the anchor carries sub-message resolution.
+ *  A stale part index (the row re-rendered with fewer parts) degrades to the
+ *  row rather than failing the whole restore. */
+function _anchorEl(scrollEl, mode) {
+  return _rowPartTarget(_anchorRow(scrollEl, mode?.key), mode)
 }
 
 /** The defining ANCHOR_AT invariant: its row intersects the viewport encoded
  * by `offset`. Negative offsets are valid while the row remains partially
  * visible; an offset beyond either edge describes layout reservation, not a
  * readable conversation location. */
-export function _anchorModeIntersectsContent(row, mode, viewportHeight) {
+export function _anchorModeIntersectsContent(target, mode, viewportHeight) {
   const offset = Number(mode?.offset)
-  return !!row
+  return !!target
     && Number.isFinite(offset)
     && Number.isFinite(viewportHeight)
     && viewportHeight > 0
     && offset < viewportHeight
-    && offset > -row.offsetHeight
+    && offset > -target.offsetHeight
 }
 
 
@@ -422,16 +550,17 @@ export function releaseQuestionSubmissionForViewport(mode, viewportHeight) {
  *  clamp-repair PIN already had (design §2 prerequisite). */
 export function _anchorReapplyNeeded(scrollEl, mode, lastAnchorTop) {
   if (!scrollEl || mode?.kind !== 'ANCHOR_AT') return false
-  const el = _anchorEl(scrollEl, mode.key)
+  const el = _anchorEl(scrollEl, mode)
   if (!el) return false
-  const target = Math.max(0, el.offsetTop - mode.offset)
+  const anchorTop = _scrollTopOf(scrollEl, el)
+  const target = Math.max(0, anchorTop - _scaledOffset(mode, el))
   const maxScrollTop = scrollEl.scrollHeight - scrollEl.clientHeight
   const targetReachable = maxScrollTop >= target - 1
   const clampedShort = scrollEl.scrollTop < target - 1 && targetReachable
   // As with a send pin, overshooting an unchanged anchor belongs to the
   // reader. Browser clamps only shorten scrollTop; target movement is already
   // represented by offsetTop changing.
-  return el.offsetTop !== lastAnchorTop || clampedShort
+  return anchorTop !== lastAnchorTop || clampedShort
 }
 
 
@@ -458,15 +587,13 @@ export function _validateSavedMode(saved, messages, scrollEl) {
       : holdBottom()
   }
   if (saved.kind === 'ANCHOR_AT') {
-    const sel = `[data-key="${(typeof CSS !== 'undefined' && CSS.escape)
-      ? CSS.escape(saved.key) : saved.key}"]`
-    const row = scrollEl?.querySelector(sel)
     // A resolvable row is not enough: an old build could persist that row with
     // a huge negative offset while the viewport sat wholly in spacer below it.
     // Enforce the same content-intersection invariant used by spacer sizing,
     // self-healing every off-content restore to the real tail.
     const durable = _durableQuestionSubmissionMode(saved)
-    return _anchorModeIntersectsContent(row, durable, scrollEl?.clientHeight)
+    const target = _anchorEl(scrollEl, durable)
+    return _anchorModeIntersectsContent(target, durable, scrollEl?.clientHeight)
       ? durable
       : holdBottom()
   }
@@ -529,9 +656,11 @@ export function _computeSpacerH(
   const viewH = fullViewH || scrollEl.clientHeight
   if (mode?.kind === 'ANCHOR_AT'
       && Number.isFinite(mode.questionSubmitViewportH)) {
-    const anchorEl = _anchorEl(scrollEl, mode.key)
+    const anchorEl = _anchorEl(scrollEl, mode)
     if (!anchorEl) return 0
-    const anchorTarget = Math.max(0, anchorEl.offsetTop - mode.offset)
+    const anchorTarget = Math.max(
+      0, _scrollTopOf(scrollEl, anchorEl) - mode.offset,
+    )
     return Math.max(0, viewH + anchorTarget - listEl.offsetHeight)
   }
   if (!lastUserMsgEl) return 0
@@ -1081,6 +1210,13 @@ export default function useScrollMode({
   // used the automatic latest-message fallback. Passive lifecycle/viewport
   // changes must not promote that fallback into a saved reading position.
   const readerLocationExplicitRef = useRef(false)
+  // A saved location existed but this visit could not resolve it (its row or
+  // part was not in the committed window yet). That is a RETRIEVAL failure,
+  // not the reader choosing the tail — so the automatic tail fallback must not
+  // be written over the stored location. Without this, one unresolvable visit
+  // permanently destroyed the reader's position and every later return was
+  // "broken" for good rather than for one visit.
+  const savedLocationUnresolvedRef = useRef(false)
   const gestureWindowUntilRef = useRef(0)
   const pendingGestureTimerRef = useRef(0)
   const pendingGestureReleaseRafRef = useRef(0)
@@ -1263,6 +1399,9 @@ export default function useScrollMode({
   const persistMode = useCallback(({ freezeToCurrentPosition = false } = {}) => {
     try {
       if (!readerLocationExplicitRef.current) {
+        // Keep a stored location this visit merely failed to resolve. Only an
+        // absent location — never a retrieval failure — may be cleared here.
+        if (savedLocationUnresolvedRef.current) return
         delete _scrollModes[chatId]
         sessionStorage.setItem('chat-mode', JSON.stringify(_scrollModes))
         return
@@ -1423,6 +1562,14 @@ export default function useScrollMode({
     // currently painted location before persisting it so the later unmount
     // cleanup cannot delete the snapshot and reopen a growing turn at its new
     // tail when the reader returns.
+    //
+    // The one exception is a visit that never resolved the stored location and
+    // in which the reader never moved: promoting there would overwrite a good
+    // saved position with the fallback tail this visit happened to show, which
+    // is how a single unresolvable return turned into "coming back again
+    // fails" forever after.
+    if (savedLocationUnresolvedRef.current
+        && !readerLocationExplicitRef.current) return
     readerLocationExplicitRef.current = true
     persistMode({ freezeToCurrentPosition: true })
   }, [persistMode])
@@ -1531,9 +1678,11 @@ export default function useScrollMode({
     ) {
       const saved = _scrollModes[chatId]
       const restored = _validateSavedMode(saved, messagesRef.current, scrollEl)
-      readerLocationExplicitRef.current = !!saved
+      const resolved = !!saved
         && restored?.kind !== 'INITIAL'
         && !restored?.defaultTail
+      readerLocationExplicitRef.current = resolved
+      savedLocationUnresolvedRef.current = !!saved && !resolved
       transitionMode(
         restored,
         'lifecycle:restore',
@@ -1705,8 +1854,8 @@ export default function useScrollMode({
           lastPinTopRef.current = el ? el.offsetTop : null
           lastAnchorTopRef.current = null
         } else if (modeRef.current.kind === 'ANCHOR_AT') {
-          const el = _anchorEl(scrollEl, modeRef.current.key)
-          lastAnchorTopRef.current = el ? el.offsetTop : null
+          const el = _anchorEl(scrollEl, modeRef.current)
+          lastAnchorTopRef.current = el ? _scrollTopOf(scrollEl, el) : null
           lastPinTopRef.current = null
         } else {
           lastPinTopRef.current = null
@@ -1744,8 +1893,8 @@ export default function useScrollMode({
         'layout:repair-anchor',
         authorityVersion,
       )) return
-      const el = _anchorEl(scrollEl, modeRef.current.key)
-      lastAnchorTopRef.current = el ? el.offsetTop : null
+      const el = _anchorEl(scrollEl, modeRef.current)
+      lastAnchorTopRef.current = el ? _scrollTopOf(scrollEl, el) : null
       lastAppliedModeRef.current = modeRef.current
       nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
     }
@@ -1816,8 +1965,8 @@ export default function useScrollMode({
           lastPinTopRef.current = el ? el.offsetTop : null
           lastAnchorTopRef.current = null
         } else if (modeRef.current.kind === 'ANCHOR_AT') {
-          const el = _anchorEl(scrollEl, modeRef.current.key)
-          lastAnchorTopRef.current = el ? el.offsetTop : null
+          const el = _anchorEl(scrollEl, modeRef.current)
+          lastAnchorTopRef.current = el ? _scrollTopOf(scrollEl, el) : null
           lastPinTopRef.current = null
         } else {
           lastPinTopRef.current = null
