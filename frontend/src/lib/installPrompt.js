@@ -40,7 +40,6 @@ export function startInstallPromptCapture(
   launchedInstalled = isStandaloneDisplay(target)
 
   target.addEventListener('beforeinstallprompt', (event) => {
-    if (launchedInstalled) return
     event.preventDefault?.()
     deferredPrompt = event
     emitChange()
@@ -54,8 +53,13 @@ export function startInstallPromptCapture(
 }
 
 export function getInstallPromptSnapshot() {
-  if (launchedInstalled || observedInstall) return 'installed'
+  // An actual prompt is app-specific evidence and outranks the window's
+  // boot-time display-mode guess. This matters when an installed Möbius window
+  // navigates to a mini-app document: the window still looks standalone, but
+  // Chromium may offer a prompt for the mini-app whose manifest is now active.
+  if (observedInstall) return 'installed'
   if (deferredPrompt) return 'ready'
+  if (launchedInstalled) return 'installed'
   return 'manual'
 }
 

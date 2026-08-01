@@ -126,15 +126,17 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
         aria-labelledby="standalone-install-title"
         onClick={event => event.stopPropagation()}
       >
-        <button
-          ref={closeRef}
-          className="standalone-install__close"
-          type="button"
-          aria-label="Close"
-          onClick={() => close('dismiss')}
-        >
-          ×
-        </button>
+        {!installObserved && (
+          <button
+            ref={closeRef}
+            className="standalone-install__close"
+            type="button"
+            aria-label="Close"
+            onClick={() => close('dismiss')}
+          >
+            ×
+          </button>
+        )}
         {installObserved ? (
           <>
             <div className="standalone-install__success" aria-hidden="true">✓</div>
@@ -158,7 +160,7 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
               />
               <h1 id="standalone-install-title">Install {app.name}</h1>
             </div>
-            {showInstructions && (platform.ios ? (
+            {showInstructions && (platform.iosSafari && !platform.ipad ? (
               // On iPhone the sentence IS the card, so it gets no box of its
               // own — a bordered panel inside a bordered card is nesting that
               // buys nothing. This document's manifest is the app's, so Add to

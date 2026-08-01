@@ -131,6 +131,9 @@
 }
 
 .standalone-install__identity h1 {
+  max-width: 100%;
+  padding-inline: 38px;
+  overflow-wrap: anywhere;
   text-align: center;
   font-size: 19px;
   font-weight: 600;
@@ -205,6 +208,7 @@
   place-items: center;
   width: 34px;
   height: 34px;
+  min-height: 34px;
   padding: 0;
   border: none;
   border-radius: 9px;

@@ -37,6 +37,7 @@
  */
 
 import { getAuthHeaders, BASE } from '../api/client.js'
+import { isStandaloneDisplay } from '../utils/installPlatform.js'
 
 const STORAGE_KEY = 'mobius-perf-probe'
 const SESSION_KEY = 'mobius-perf-session'
@@ -127,9 +128,7 @@ export function perfTime(name, fn) {
 function describeDevice() {
   const nav = navigator || {}
   const conn = nav.connection || nav.mozConnection || nav.webkitConnection || null
-  const standalone =
-    window.matchMedia?.('(display-mode: standalone)')?.matches ||
-    nav.standalone === true
+  const standalone = isStandaloneDisplay(window)
   // Form factor is decided by the coarse-pointer media query rather than a UA
   // string: what matters for these measurements is whether the device uses a
   // touch digitizer and a mobile GPU, which is what the query actually asks.

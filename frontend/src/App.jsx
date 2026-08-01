@@ -2,6 +2,7 @@ import { lazy, Suspense, useState, useEffect } from 'react'
 import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client'
 import { QueryClientProvider, useIsRestoring } from '@tanstack/react-query'
 import ErrorBoundary from './components/ErrorBoundary/ErrorBoundary.jsx'
+import RecoveryLink from './components/ErrorBoundary/RecoveryLink.jsx'
 import { api, beginEphemeralAuth, getToken, setToken, BASE } from './api/client.js'
 import * as setupSession from './lib/setupSession.js'
 import { setupQueries } from './hooks/queries.js'
@@ -9,6 +10,7 @@ import { queryClient, persistOptions } from './queryClient.js'
 import { shellReload } from './lib/shellReloadState.js'
 import { beginEmbedBootstrap } from './lib/chatEmbedBootstrap.js'
 import { startInstallPromptCapture } from './lib/installPrompt.js'
+import { readInstallPass, withoutInstallPass } from './lib/installPassUrl.js'
 import { safeReturnPath } from './lib/safeReturnPath.js'
 import { readStandaloneBoot } from './lib/standaloneBoot.js'
 
@@ -49,11 +51,20 @@ if (EMBED_ROUTE) {
   startInstallPromptCapture()
 }
 
+function clearInstallPassFromUrl() {
+  const next = withoutInstallPass(window.location.href)
+  if (next) window.history.replaceState(null, '', next)
+}
+
 export default function App() {
   if (EMBED_ROUTE) {
     return (
       <QueryClientProvider client={queryClient}>
-        <ErrorBoundary label="chat-embed">
+        <ErrorBoundary
+          label="chat-embed"
+          recoveryKey="chat-embed:root"
+          canAskAgent={false}
+        >
           {/* Keep the opaque embed blank until its capability is verified. */}
           <Suspense fallback={null}>
             <ChatEmbed />
@@ -87,14 +98,14 @@ function AppRoot() {
   let ssoSignal = ''
   // A one-time install pass on a standalone app's FIRST launch. iOS gives the
   // newly installed web app its own empty storage, so this is the only moment
-  // it can inherit the session that installed it. Only honoured when a token
-  // is absent — an already-signed-in launch ignores a stale pass in the URL.
+  // it can inherit the session that installed it. Read it even when this
+  // container already has a token so the stale credential is still stripped.
   let installPass = ''
   try {
     const params = new URLSearchParams(window.location.search)
     if (params.get('mobius_sso') === '1') ssoSignal = 'handoff'
     if (params.get('mobius_sso_error') === '1') ssoSignal = 'error'
-    if (STANDALONE_APP && !hasToken) installPass = params.get('pass') || ''
+    installPass = readInstallPass(window.location.search, STANDALONE_APP)
   } catch { /* ignore */ }
   const initialStatus = resumeStep
     ? 'setup'
@@ -110,19 +121,13 @@ function AppRoot() {
     enabled: !hasToken && !ssoSignal && status !== 'install-pass',
   })
   useEffect(() => {
+    if (installPass && hasToken) clearInstallPassFromUrl()
+  }, [installPass, hasToken])
+  useEffect(() => {
     if (status !== 'install-pass') return undefined
     let cancelled = false
     // Strip the pass from the URL whichever way this goes: it is spent on
     // redemption, and the address stays in the home-screen icon forever.
-    function clearPassFromUrl() {
-      try {
-        const current = new URL(window.location.href)
-        current.searchParams.delete('pass')
-        window.history.replaceState(
-          null, '', current.pathname + current.search + current.hash,
-        )
-      } catch { /* ignore */ }
-    }
     async function redeem() {
       try {
         const response = await api.auth.installPass.redeem(
@@ -132,13 +137,13 @@ function AppRoot() {
         const data = await response.json()
         if (!data?.access_token) throw new Error('INSTALL_PASS_REJECTED')
         setToken(data.access_token)
-        clearPassFromUrl()
+        clearInstallPassFromUrl()
         if (!cancelled) setStatus('shell')
       } catch {
         // An expired or spent pass is not an error worth showing: fall
         // through to the ordinary sign-in, which is where this launch would
         // have landed anyway.
-        clearPassFromUrl()
+        clearInstallPassFromUrl()
         if (!cancelled) setStatus('loading')
       }
     }
@@ -319,6 +324,7 @@ function SetupStatusError({ retrying, onRetry }) {
             {retrying ? 'Trying again…' : 'Try again'}
           </button>
         </div>
+        <RecoveryLink />
       </div>
     </div>
   )
@@ -341,6 +347,7 @@ function ManagedSignInError({ onRetry }) {
             Try again
           </button>
         </div>
+        <RecoveryLink />
       </div>
     </div>
   )

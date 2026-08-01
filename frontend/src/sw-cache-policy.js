@@ -248,6 +248,32 @@ export function isAppCodeRoute(pathname) {
   return /^\/api\/apps\/\d+\/(frame|module)$/.test(pathname)
 }
 
+// PURE: transient install/auth parameters never define app-code identity.
+// Keeping this normalization in one place prevents live fetches and precache
+// warming from drifting into different keys as new handoff fields are added.
+export function appCodeCacheKey(rawUrl, origin) {
+  try {
+    const key = new URL(rawUrl, origin)
+    for (const param of ['token', '_', 'install', 'pass']) {
+      key.searchParams.delete(param)
+    }
+    return key.href
+  } catch {
+    return null
+  }
+}
+
+// A pass-bearing standalone document includes the opaque secret again in its
+// manifest link. Cache-Control does not govern Cache API writes, so the
+// service worker must refuse to store that body explicitly.
+export function appCodeRequestMayBeStored(rawUrl, origin) {
+  try {
+    return !new URL(rawUrl, origin).searchParams.has('pass')
+  } catch {
+    return false
+  }
+}
+
 // PURE: what to do with a RESOLVED network response on an app-code route.
 // Two cache surfaces share the handler but differ on who may be stored:
 //   - frame/module reads (gated=false): store EVERY 200. Loading speed must

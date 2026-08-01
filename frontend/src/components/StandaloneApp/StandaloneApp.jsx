@@ -204,7 +204,7 @@ export default function StandaloneApp({ initialApp }) {
         onAppError={(_id, error, chatId) => setCrash({ error, chatId })}
       />
 
-      {updateAvailable && (
+      {updateAvailable && !crash && (
         <button
           className="standalone-app__update"
           type="button"
