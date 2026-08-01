@@ -204,15 +204,6 @@ export default function StandaloneApp({ initialApp }) {
         onAppError={(_id, error, chatId) => setCrash({ error, chatId })}
       />
 
-      <a
-        className="standalone-app__mobius-link"
-        href={shellUrl({ app: app.id })}
-        aria-label={`Open ${app.name} in Möbius`}
-      >
-        <span aria-hidden="true">∞</span>
-        <span>Open in Möbius</span>
-      </a>
-
       {updateAvailable && (
         <button
           className="standalone-app__update"
