@@ -281,6 +281,16 @@ def test_submit_pr_rechecks_landed_hooks_after_refresh():
   assert "scripts/git-doctor.sh --fix" in refreshed_segment
 
 
+def test_submit_pr_blocks_non_main_release_before_git_mutation():
+  submit = (ROOT / "scripts" / "submit-pr.sh").read_text(encoding="utf-8")
+  guard = submit.index('MOBIUS_PLATFORM_RELEASE_REF}" != "refs/heads/main"')
+  doctor = submit.index("scripts/git-doctor.sh --fix")
+  fetch = submit.index("git fetch origin main")
+
+  assert guard < doctor < fetch
+  assert "platform contributions are disabled" in submit
+
+
 def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
   entrypoint = (
     ROOT / "backend" / "scripts" / "entrypoint.sh"
@@ -292,6 +302,32 @@ def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
     'if [ "$_use_platform" -eq 1 ] && '
     '[ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then'
   ) in entrypoint
+
+
+def test_managed_release_boot_uses_the_baked_updater():
+  entrypoint = (
+    ROOT / "backend" / "scripts" / "entrypoint.sh"
+  ).read_text(encoding="utf-8")
+
+  assert 'if [ -n "${MOBIUS_PLATFORM_RELEASE_REF:-}" ]; then' in entrypoint
+  assert "_platform_reconciler_backend=/app/platform-baked/backend" in entrypoint
+  assert '_platform_reconciler_prefix="env PYTHONDONTWRITEBYTECODE=1"' in entrypoint
+  assert "cd '$_platform_reconciler_backend'" in entrypoint
+
+
+def test_managed_release_boot_falls_back_when_exact_target_is_not_integrated():
+  entrypoint = (
+    ROOT / "backend" / "scripts" / "entrypoint.sh"
+  ).read_text(encoding="utf-8")
+  reconcile = entrypoint.index("platform_update.reconcile_clone_sync()")
+  guard = entrypoint.index("platform_update.boot_guard_sync()", reconcile)
+  proof = entrypoint.index("platform_update.managed_release_ready_sync()", guard)
+  fallback = entrypoint.index("_platform_use_baked", proof)
+  served_head_gate = entrypoint.index('if [ "$_use_platform" -eq 1 ]; then', proof)
+
+  assert reconcile < guard < proof < fallback < served_head_gate
+  assert "/data/platform is preserved for recovery" in entrypoint
+  assert 'printf \'%s\\n\' "$_serve_source" > /tmp/serving-source' in entrypoint
 
 
 def test_browser_setup_fails_closed_before_auth_and_never_wipes_chats():
@@ -523,7 +559,9 @@ def test_pull_requests_run_required_suites_and_main_publishes_image():
   test_workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
     encoding="utf-8"
   )
-  image_workflow = (ROOT / ".github" / "workflows" / "main-image.yml").read_text(
+  image_workflow = (
+    ROOT / ".github" / "workflows" / "compatibility-bootstrap.yml"
+  ).read_text(
     encoding="utf-8"
   )
   test_triggers = test_workflow.split("\npermissions:\n", 1)[0]
@@ -548,12 +586,32 @@ def test_pull_requests_run_required_suites_and_main_publishes_image():
   assert "push:\n" in image_triggers
   assert "    branches: [main]\n" in image_triggers
   assert "schedule:\n" not in image_triggers
-  assert "workflow_dispatch:\n" in image_triggers
+  assert "workflow_dispatch:\n" not in image_triggers
   assert "pull_request:\n" not in image_triggers
   assert "packages: write" in image_workflow
   assert "push: true" in image_workflow
-  assert "tags: ghcr.io/mobius-os/mobius:main" in image_workflow
-  assert "docker buildx imagetools inspect ghcr.io/mobius-os/mobius:main" in image_workflow
+  assert "MOBIUS_IMAGE_REPOSITORY: ghcr.io/mobius-os/mobius" in image_workflow
+  assert "for tag in main external-recovery" in image_workflow
+  assert '--tag "$MOBIUS_IMAGE_REPOSITORY:$tag"' in image_workflow
+  assert '"$MOBIUS_IMAGE_REPOSITORY@$IMAGE_DIGEST"' in image_workflow
+  assert "--prefer-index=false" in image_workflow
+  assert 'test "$revision" = "$GITHUB_SHA"' in image_workflow
+  assert 'test "$GITHUB_REF" = refs/heads/main' in image_workflow
+  assert "git ls-remote --exit-code origin refs/heads/main" in image_workflow
+  assert "cancel-in-progress: false" in image_workflow
+  assert "group: mobius-core-image-publication" in image_workflow
+  assert "vars.MOBIUS_COMPATIBILITY_BOOTSTRAP_ENABLED == 'true'" in image_workflow
+  assert "github.sha == vars.MOBIUS_COMPATIBILITY_BOOTSTRAP_SHA" in image_workflow
+  assert "environment: compatibility-bootstrap" in image_workflow
+  assert "COMPATIBILITY_PREVIOUS_SHA:" in image_workflow
+  assert "COMPATIBILITY_PREVIOUS_DIGEST:" in image_workflow
+  assert 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in image_workflow
+  assert "steps.existing.outputs.mode == 'build'" in image_workflow
+  assert image_workflow.count("scripts/compatibility_bootstrap.py") == 3
+  assert "inventory \\" in image_workflow
+  assert "prewrite \\" in image_workflow
+  assert "final \\" in image_workflow
+  assert not (ROOT / ".github" / "workflows" / "main-image.yml").exists()
   assert "ghcr.io/mobius-os/mobius:daily" not in image_workflow
   assert "cache-to: type=gha,mode=max,ignore-error=true" in image_workflow
   assert "load: true" not in image_workflow
