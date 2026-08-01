@@ -206,14 +206,19 @@ test('shared gateway stays branded until heartbeat, preserves cookies, and rejec
     app = applied.app
     expect(app.slug).toBe('tandoor')
 
+    await page.goto(`${BASE}/apps/${app.slug}/?install=1`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('main.standalone-app')).toBeVisible({ timeout: 5_000 })
+    const installClose = page.locator('.standalone-install__close')
+    await expect(installClose).toBeVisible({ timeout: 5_000 })
+    await expect(installClose).toHaveCSS('height', '34px')
+    await expect(installClose).toHaveCSS('min-height', '34px')
+
     if (TRACKED_TANDOOR_SOURCE) {
       // A Home Screen mini-app is intentionally its own product surface. Do
       // not restore the fixed "Open in Möbius" overlay: it covered app
       // content and duplicated the OS app switcher as the route back to the
-      // workspace. Pin the absence after the standalone host has mounted so
-      // this cannot pass merely because React has not rendered yet.
-      await page.goto(`${BASE}/apps/${app.slug}/`, { waitUntil: 'domcontentloaded' })
-      await expect(page.locator('main.standalone-app')).toBeVisible({ timeout: 5_000 })
+      // workspace. The host is already mounted above, so this cannot pass
+      // merely because React has not rendered yet.
       await expect(page.getByRole('link', { name: 'Open in Möbius' })).toHaveCount(0)
     }
 

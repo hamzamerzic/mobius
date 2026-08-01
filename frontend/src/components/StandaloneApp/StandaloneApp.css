@@ -191,7 +191,6 @@
   justify-content: center;
   width: 34px;
   height: 34px;
-  min-height: 34px;
   margin: 20px auto 2px;
   border-radius: 999px;
   border: 1px solid color-mix(in srgb, var(--accent, #a78bfa) 34%, var(--border, #333));
@@ -222,6 +221,7 @@
   place-items: center;
   width: 34px;
   height: 34px;
+  min-height: 34px;
   padding: 0;
   border: none;
   border-radius: 9px;
