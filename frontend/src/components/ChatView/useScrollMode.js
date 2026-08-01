@@ -2113,8 +2113,13 @@ export default function useScrollMode({
       const mayWriteScroll = layoutOwnsScroll(authorityVersion)
       if (mayWriteScroll && (
         k === 'FOLLOW_BOTTOM'
-        || (k === 'ANCHOR_AT'
-          && (!revealedRef.current || mountStabilizingRef.current))
+        // ANCHOR_AT is re-applied unconditionally ONLY while the transcript
+        // is still hidden, where corrections cost nothing. Once the reader can
+        // see it, the conditional shift/clamp repair below is the only writer:
+        // an unconditional re-apply on every layout observation is exactly the
+        // visible "it jumps two or three times on entry" the reader reports,
+        // because every late highlight, math block and font swap fires one.
+        || (k === 'ANCHOR_AT' && !revealedRef.current)
       )) {
         writeMode(
           scrollEl,
