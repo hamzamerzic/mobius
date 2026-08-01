@@ -282,28 +282,18 @@ RUN useradd -m -s /bin/bash mobius \
     && ln -s /opt/agent-browser /home/mobius/.agent-browser \
     && chown -R mobius:mobius /opt/agent-browser
 
-# apt scoped-sudo (owner spec): mobius (the in-product agent) may install/remove
-# OS packages but NOT have full root, so it can't break the recovery floor or
-# core system files. Scoped to apt/dpkg only; validated by visudo. NOT a hard
-# sandbox (apt maintainer scripts run as root) — the real safety is that the
-# recovery runtime depends on ZERO apt-installed packages, so a bad package can
-# never compromise it.
-RUN printf 'mobius ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/dpkg\n' \
-      > /etc/sudoers.d/mobius-apt \
-    && chmod 440 /etc/sudoers.d/mobius-apt \
-    && visudo -cf /etc/sudoers.d/mobius-apt
-
 # Runtime source belongs at the tail of the image so normal code changes reuse
 # the browser, CLI, Python, vendor, and platform-seed layers above.
 COPY backend/app ./app/
 COPY backend/scripts ./scripts/
+COPY backend/recovery_target ./recovery-target/
 COPY skill/ ./skill/
 COPY protected-files.txt ./protected-files.txt
 
 # Frozen recovery floor (recoveryd) — the Tier-1 recovery system that runs in
 # its own container. It imports no app.* code and remains root-owned/read-only.
 COPY backend/recovery ./recovery/
-RUN chmod -R a-w /app/recovery
+RUN chmod -R a-w /app/recovery /app/recovery-target
 RUN chmod +x ./scripts/entrypoint.sh
 
 # Build identity — passed at `docker compose build` time (deploy-prod.sh

@@ -1,0 +1,173 @@
+#!/bin/sh
+set -eu
+
+# Host-side lifecycle for the external self-hosted recovery worker. The worker
+# has no Docker socket: this small operator command owns every container state
+# transition, while the root target owns only the stopped instance's /data.
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PROJECT_DIR=$(dirname "$SCRIPT_DIR")
+STATE_FILE=${MOBIUS_RECOVERY_STATE_FILE:-"$PROJECT_DIR/.mobius-recovery.env"}
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: scripts/mobiusctl recovery start|status|finish
+
+  start   stop Mobius, pull the latest approved recovery image, and expose the
+          recovery UI on loopback (default http://127.0.0.1:18003)
+  status  show the isolated recovery services
+  finish  remove recovery services, restart Mobius, and verify app health
+EOF
+  exit 64
+}
+
+[ "${1:-}" = "recovery" ] || usage
+action=${2:-}
+[ "$#" -eq 2 ] || usage
+
+compose() {
+  (
+    cd "$PROJECT_DIR"
+    if [ -f .env ]; then
+      docker compose --profile recovery \
+        --env-file .env --env-file "$STATE_FILE" "$@"
+    else
+      docker compose --profile recovery --env-file "$STATE_FILE" "$@"
+    fi
+  )
+}
+
+new_token() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n'
+  else
+    python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
+  fi
+}
+
+write_state() {
+  if [ -L "$STATE_FILE" ]; then
+    echo "Refusing symlink recovery state: $STATE_FILE" >&2
+    exit 1
+  fi
+  umask 077
+  {
+    printf 'MOBIUS_RECOVERY_TARGET_TOKEN=%s\n' "$(new_token)"
+    printf 'MOBIUS_RECOVERY_LOCAL_TOKEN=%s\n' "$(new_token)"
+    printf 'MOBIUS_RECOVERY_PORT=%s\n' "${MOBIUS_RECOVERY_PORT:-18003}"
+    printf 'MOBIUS_RECOVERY_IMAGE=%s\n' \
+      "${MOBIUS_RECOVERY_IMAGE:-ghcr.io/mobius-os/mobius-recovery:stable}"
+  } > "$STATE_FILE"
+}
+
+load_state() {
+  [ -f "$STATE_FILE" ] || return 1
+  # Generated values contain only URL-safe token/image/number characters.
+  # shellcheck disable=SC1090
+  . "$STATE_FILE"
+  export MOBIUS_RECOVERY_TARGET_TOKEN MOBIUS_RECOVERY_LOCAL_TOKEN
+  export MOBIUS_RECOVERY_PORT MOBIUS_RECOVERY_IMAGE
+}
+
+recovery_down() {
+  compose stop recovery recovery-target >/dev/null 2>&1 || true
+  compose rm -f recovery recovery-target >/dev/null 2>&1 || true
+}
+
+start_recovery() {
+  if [ -f "$STATE_FILE" ]; then
+    echo "Recovery state already exists. Run 'scripts/mobiusctl recovery status' or finish it first." >&2
+    exit 1
+  fi
+  write_state
+  load_state
+
+  app_was_stopped=0
+  cleanup_failed_start() {
+    status=$?
+    if [ "$status" -ne 0 ]; then
+      echo "Recovery start failed; restoring the ordinary Mobius app." >&2
+      recovery_down
+      compose up -d app >/dev/null 2>&1 || true
+      rm -f "$STATE_FILE"
+    fi
+    exit "$status"
+  }
+  trap cleanup_failed_start EXIT HUP INT TERM
+
+  echo "Pulling the latest approved recovery worker..."
+  compose pull recovery
+  echo "Stopping the ordinary Mobius app..."
+  compose stop app
+  app_was_stopped=1
+  compose up -d --force-recreate recovery-target recovery
+
+  trap - EXIT HUP INT TERM
+  echo "Recovery is isolated from the stopped app and available only on loopback:"
+  printf '  http://127.0.0.1:%s/?token=%s\n' \
+    "$MOBIUS_RECOVERY_PORT" "$MOBIUS_RECOVERY_LOCAL_TOKEN"
+  echo "When repair is complete: scripts/mobiusctl recovery finish"
+  : "$app_was_stopped"
+}
+
+status_recovery() {
+  if ! load_state; then
+    echo "Recovery is not active."
+    exit 0
+  fi
+  compose ps recovery-target recovery
+  printf 'Loopback URL: http://127.0.0.1:%s/\n' "$MOBIUS_RECOVERY_PORT"
+}
+
+finish_recovery() {
+  if ! load_state; then
+    echo "No recovery state found; ensuring the ordinary app is running."
+    # Compose still needs an env file for profile interpolation.
+    write_state
+    load_state
+  fi
+  echo "Stopping and removing the isolated recovery services..."
+  recovery_down
+  rm -f "$STATE_FILE"
+
+  # Use the ordinary .env/default interpolation after the recovery secret is
+  # gone; the app never receives either recovery token.
+  (
+    cd "$PROJECT_DIR"
+    docker compose up -d app
+  )
+  container_id=$(
+    cd "$PROJECT_DIR"
+    docker compose ps -q app
+  )
+  [ -n "$container_id" ] || {
+    echo "Mobius app container was not created." >&2
+    exit 1
+  }
+  echo "Waiting for Mobius health..."
+  attempt=0
+  while [ "$attempt" -lt 120 ]; do
+    health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_id" 2>/dev/null || true)
+    case "$health" in
+      healthy|running)
+        echo "Mobius is back and healthy."
+        exit 0
+        ;;
+      unhealthy|exited|dead)
+        echo "Mobius did not recover cleanly (state: $health)." >&2
+        exit 1
+        ;;
+    esac
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  echo "Timed out waiting for Mobius health." >&2
+  exit 1
+}
+
+case "$action" in
+  start) start_recovery ;;
+  status) status_recovery ;;
+  finish) finish_recovery ;;
+  *) usage ;;
+esac

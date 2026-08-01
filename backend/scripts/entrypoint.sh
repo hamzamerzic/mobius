@@ -3,6 +3,27 @@
 # the 'mobius' user for the actual server.  The non-root user allows
 # --dangerously-skip-permissions in the Claude CLI.
 
+# Recovery target mode is an immutable, early boot path. It must run before
+# touching /data or importing any agent-editable platform code. The separate
+# recovery worker reaches this private listener with a one-time bearer token.
+case "${MOBIUS_BOOT_MODE:-normal}" in
+  normal) ;;
+  recovery)
+    exec python3 -I /app/recovery-target/targetd.py
+    ;;
+  *)
+    echo "FATAL: MOBIUS_BOOT_MODE must be normal or recovery." >&2
+    exit 64
+    ;;
+esac
+
+# Root is an externally-controlled instance capability. There is deliberately
+# no partial apt/dpkg rule: package maintainer scripts already make that rule
+# equivalent to arbitrary root. Enabling this setting is therefore explicit
+# and honest; disabling it leaves the agent with no sudo path at all.
+. /app/scripts/agent_sudo.sh
+configure_agent_sudo "${MOBIUS_AGENT_SUDO:-0}" || exit $?
+
 # Stop cron on container shutdown so it doesn't orphan processes.
 cleanup() { kill "$(cat /var/run/crond.pid 2>/dev/null)" 2>/dev/null; }
 trap cleanup TERM INT
