@@ -125,7 +125,7 @@ export default function InstallSheet({ app, onClose }) {
   }
 
   // The app's own page — the only document whose manifest names and icons
-  // THIS app. `?install=1` opens its Add-to-Home card on arrival, and an
+  // THIS app. `?install=1` opens its Add-to-Home card on arrival, and the
   // opaque one-time pass rides through the manifest into the installed app's
   // first launch so it can sign itself in.
   //
@@ -160,8 +160,6 @@ export default function InstallSheet({ app, onClose }) {
       await navigator.clipboard.writeText(plainHandoffUrl)
       setCopied(true)
     } catch {
-      // Clipboard access can be denied outright. The address is printed in
-      // the card either way, so this degrades to reading it off the screen.
       setCopied(false)
       setError('Could not copy — the address is written below.')
     }
@@ -231,6 +229,17 @@ export default function InstallSheet({ app, onClose }) {
       >
         {handoff ? (
           <>
+            {/* Nothing is left to confirm at this step — the work is done and
+                the card is now just instructions. A corner dismissal reads as
+                "I'm finished reading" without competing with the action. */}
+            <button
+              type="button"
+              className="is__close"
+              aria-label="Close"
+              onClick={() => onClose?.()}
+            >
+              ×
+            </button>
             <h2 className="is__title">Add {label} to your home screen</h2>
             <p className="is__hint is__hint--steps">
               Only Safari can put an app on your home screen, and you’re in
@@ -265,16 +274,6 @@ export default function InstallSheet({ app, onClose }) {
               icon to switch over. Or open Safari yourself and go to{' '}
               <span className="is__url">{plainHandoffUrl}</span>
             </p>
-
-            <div className="is__actions">
-              <button
-                type="button"
-                className="is__btn is__btn--secondary"
-                onClick={() => onClose?.()}
-              >
-                Done
-              </button>
-            </div>
           </>
         ) : (
         <>
