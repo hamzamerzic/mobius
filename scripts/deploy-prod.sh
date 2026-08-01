@@ -345,15 +345,41 @@ resolve_prod_service_gateway_origin() {
   MOBIUS_SERVICE_GATEWAY_ORIGIN="$value"
   export MOBIUS_SERVICE_GATEWAY_ORIGIN
 }
+
+resolve_platform_release_ref() {
+  local value="${MOBIUS_PLATFORM_RELEASE_REF:-}" source="environment"
+  local file candidate canonical_env=""
+
+  # DOMAIN is often exported explicitly for a worktree deployment, which means
+  # ensure_prod_env does not source the checkout's .env. Resolve this setting
+  # independently so the managed channel still comes from deployment config
+  # rather than from a repository-wide temporary default.
+  if [ -z "$value" ]; then
+    canonical_env=$(canonical_env_path || true)
+    for file in "$REPO_ROOT/.env" "$canonical_env"; do
+      [ -n "$file" ] || continue
+      candidate=$(env_value_from_file "$file" MOBIUS_PLATFORM_RELEASE_REF || true)
+      if [ -n "$candidate" ]; then
+        value="$candidate"
+        source="$file"
+        break
+      fi
+    done
+  fi
+  MOBIUS_PLATFORM_RELEASE_REF="${value:-refs/heads/main}"
+  [ "$source" = "environment" ] || info "loaded platform release ref from $source"
+  export MOBIUS_PLATFORM_RELEASE_REF
+}
 # ── end prod environment resolution ──────────────────────────────
 
 ensure_prod_env
 resolve_prod_service_gateway_origin
+resolve_platform_release_ref
 
 # The same full branch ref drives both the image's boot reconciler and this
-# deploy's pushed-source/freshness proofs. Keep the stack channel as the
-# external-recovery default, while allowing an operator-exported or .env value.
-MOBIUS_PLATFORM_RELEASE_REF="${MOBIUS_PLATFORM_RELEASE_REF:-refs/heads/stack/external-recovery-v1}"
+# deploy's pushed-source/freshness proofs. Normal installations follow main;
+# a managed stack channel is an explicit environment or .env choice.
+MOBIUS_PLATFORM_RELEASE_REF="${MOBIUS_PLATFORM_RELEASE_REF:-refs/heads/main}"
 case "$MOBIUS_PLATFORM_RELEASE_REF" in
   refs/heads/*) ;;
   *)

@@ -141,9 +141,11 @@ def test_deploy_script_still_parses():
 def test_managed_release_ref_is_shared_by_host_and_container_proofs():
   text = _read()
   assert (
-    'MOBIUS_PLATFORM_RELEASE_REF="${MOBIUS_PLATFORM_RELEASE_REF:-refs/heads/stack/external-recovery-v1}"'
+    'MOBIUS_PLATFORM_RELEASE_REF="${MOBIUS_PLATFORM_RELEASE_REF:-refs/heads/main}"'
     in text
   )
+  assert "resolve_platform_release_ref" in text
+  assert "env_value_from_file \"$file\" MOBIUS_PLATFORM_RELEASE_REF" in text
   assert 'git check-ref-format --branch "$PLATFORM_RELEASE_BRANCH"' in text
   assert '"+$MOBIUS_PLATFORM_RELEASE_REF:$PLATFORM_RELEASE_TRACKING_REF"' in text
   assert '--no-tags origin -q' in text
