@@ -65,7 +65,7 @@ jobs:
           test "$GITHUB_SHA" != "$RECOVERY_CUTOVER_PREREQUISITE_SHA"
           git cat-file -e "$RECOVERY_CUTOVER_PREREQUISITE_SHA^{commit}"
           git merge-base --is-ancestor "$RECOVERY_CUTOVER_PREREQUISITE_SHA" "$GITHUB_SHA"
-          removal_root_sha=$(git rev-list --ancestry-path --reverse \
+          removal_root_sha=$(git rev-list --first-parent --reverse \
             "$RECOVERY_CUTOVER_PREREQUISITE_SHA..$GITHUB_SHA" | sed -n '1p')
           case "$removal_root_sha" in
             *[!0-9a-f]*|'') exit 2 ;;

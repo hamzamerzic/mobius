@@ -626,7 +626,7 @@ def test_pull_requests_run_required_suites_and_protected_channel_publishes_image
   assert image_workflow.count(
     'git cat-file -e "$main_sha:backend/recovery/recoveryd.py"'
   ) == 5
-  assert "git rev-list --ancestry-path --reverse" in image_workflow
+  assert "git rev-list --first-parent --reverse" in image_workflow
   assert 'git rev-parse "${removal_root_sha}^1"' in image_workflow
   assert image_workflow.count(
     "Refusing a removal lineage already contained by main"
