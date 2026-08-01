@@ -665,8 +665,9 @@ test('mobile tabs require a hold before dragging while the strip preserves pinch
   assert.match(drawer, /if \(event\.pointerType === 'touch'\) return/)
   assert.equal((drawer.match(/window\.addEventListener\('touchmove', onMove, \{ capture: true, passive: true \}\)/g) || []).length, 2,
     'ordinary drawer-row scrolling must begin with passive touch listeners')
-  assert.equal((drawer.match(/function claimTouchMoves\(\)[\s\S]*?passive: false/g) || []).length, 2,
+  assert.equal((drawer.match(/holdTimerRef\.current = setTimeout\(\(\) => \{[\s\S]*?window\.addEventListener\('touchmove', onMove, \{ capture: true, passive: false \}\)/g) || []).length, 2,
     'only a resolved hold may promote row gestures to cancelable ownership')
+  assert.doesNotMatch(drawer, /blockingTouchMove|function claimTouchMoves/)
   assert.match(drawer, /window\.addEventListener\('touchend', onUp, true\)/)
   assert.match(drawer, /onTouchStart=\{onRowTouchStart\}/)
   assert.match(drawer, /const TOUCH_CONTEXT_MENU_PROVENANCE_MS = 1500/)
@@ -688,7 +689,7 @@ test('drawer swipe-to-close leaves vertical scrolling on the native pointer path
   assert.match(drawer, /onPointerCancel=\{onDrawerPointerCancel\}/)
   assert.doesNotMatch(drawer, /addEventListener\('touchmove', move/,
     'the panel must never install a scroll-blocking touch listener')
-  assert.match(drawer, /if \(dx < 0 && isHorizontalSwipe\) panningRef\.current = true/)
+  assert.match(drawer, /if \(dx < 0 && isHorizontalSwipe\) gesture\.panning = true/)
   assert.match(drawer, /setPointerCapture\?\.\(e\.pointerId\)/)
 })
 
