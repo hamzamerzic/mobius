@@ -5,6 +5,9 @@ import errno
 import importlib.util
 import io
 import json
+import os
+import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -26,7 +29,7 @@ def target(monkeypatch):
   assert spec and spec.loader
   module = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(module)
-  monkeypatch.setenv("MOBIUS_RECOVERY_TARGET_TOKEN", "t" * 43)
+  module._STARTUP_TOKEN = b"t" * 43
   return module
 
 
@@ -231,10 +234,161 @@ def test_directory_listing_has_an_aggregate_response_budget(
 
 
 @pytest.mark.parametrize("value", ["", "short", "x" * 513])
-def test_target_token_fails_closed(target, monkeypatch, value):
-  monkeypatch.setenv("MOBIUS_RECOVERY_TARGET_TOKEN", value)
+def test_target_token_fails_closed(target, value):
   with pytest.raises(RuntimeError, match="32-512"):
-    target._token()
+    target._validate_token(value.encode("utf-8"))
+
+
+def test_direct_secret_environment_is_rejected(target, monkeypatch):
+  monkeypatch.setenv("MOBIUS_RECOVERY_TARGET_TOKEN", "s" * 43)
+  with pytest.raises(RuntimeError, match="must not reach"):
+    target._read_startup_token()
+
+
+def test_fd_secret_is_absent_from_target_and_root_exec_proc_environments(
+  tmp_path,
+):
+  """Exercise the real fd handoff, prctl, /proc, and exec boundary."""
+  token = b"subprocess-only-secret-" + b"z" * 43
+  revision = tmp_path / "BUILD_REVISION"
+  revision.write_text("a" * 40 + "\n")
+  read_fd, write_fd = os.pipe()
+  try:
+    os.write(write_fd, token)
+  finally:
+    os.close(write_fd)
+  env = os.environ.copy()
+  env.pop("MOBIUS_RECOVERY_TARGET_TOKEN", None)
+  env["MOBIUS_RECOVERY_TARGET_TOKEN_FD"] = str(read_fd)
+  program = r'''
+import base64
+import importlib.util
+import json
+import os
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("subprocess_targetd", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.BUILD_REVISION_PATH = Path(sys.argv[2])
+module._drop_packet_capture_capabilities = lambda: None
+module._initialize_startup_security(require_pid_one=False)
+try:
+  self_environment = Path("/proc/self/environ").read_bytes()
+  self_environment_blocked = False
+except PermissionError:
+  self_environment = b""
+  self_environment_blocked = True
+parent_pid = os.getpid()
+result = module._run_exec({
+  "argv": [
+    "/bin/sh", "-c",
+    f"cat /proc/self/environ; cat /proc/{parent_pid}/environ",
+  ],
+  "cwd": "/tmp",
+})
+print(json.dumps({
+  "self_environment": base64.b64encode(self_environment).decode("ascii"),
+  "self_environment_blocked": self_environment_blocked,
+  "fd_closed": not Path(f"/proc/self/fd/{sys.argv[3]}").exists(),
+  "exec": result,
+}))
+'''
+  try:
+    completed = subprocess.run(
+      [
+        sys.executable, "-c", program, str(_TARGET_PATH), str(revision),
+        str(read_fd),
+      ],
+      env=env,
+      pass_fds=(read_fd,),
+      text=True,
+      capture_output=True,
+      timeout=15,
+    )
+  finally:
+    os.close(read_fd)
+  assert completed.returncode == 0, completed.stderr
+  assert token.decode("ascii") not in completed.stdout
+  assert token.decode("ascii") not in completed.stderr
+  payload = json.loads(completed.stdout)
+  own_environment = base64.b64decode(payload["self_environment"])
+  command_stdout = base64.b64decode(payload["exec"]["stdout_base64"])
+  assert token not in own_environment
+  assert b"MOBIUS_RECOVERY_TARGET_TOKEN=" not in own_environment
+  assert token not in command_stdout
+  assert b"MOBIUS_RECOVERY_TARGET_TOKEN=" not in command_stdout
+  assert payload["self_environment_blocked"] is True
+  assert payload["fd_closed"] is True
+  assert payload["exec"]["exit_code"] != 0
+
+
+def test_packet_capabilities_are_removed_from_all_sets_and_bounding(
+  target, monkeypatch,
+):
+  blocked = {target.CAP_NET_ADMIN, target.CAP_NET_RAW}
+  data = (target._CapabilityData * 2)()
+  for capability in blocked:
+    mask = 1 << (capability % 32)
+    data[capability // 32].effective |= mask
+    data[capability // 32].permitted |= mask
+    data[capability // 32].inheritable |= mask
+  bounding = set(blocked)
+  ambient = set(blocked)
+
+  class FakeLibc:
+    def capget(self, _header, _data):
+      return 0
+
+    def capset(self, _header, _data):
+      return 0
+
+    def prctl(self, operation, argument, *_unused):
+      if operation == target._PR_CAPBSET_READ:
+        return int(argument in bounding)
+      if operation == target._PR_CAPBSET_DROP:
+        bounding.discard(argument)
+        return 0
+      if (
+        operation == target._PR_CAP_AMBIENT
+        and argument == target._PR_CAP_AMBIENT_CLEAR_ALL
+      ):
+        ambient.clear()
+        return 0
+      if operation == target._PR_CAP_AMBIENT:
+        capability = _unused[0]
+        return int(capability in ambient)
+      raise AssertionError((operation, argument, _unused))
+
+  fake_libc = FakeLibc()
+  monkeypatch.setattr(target.ctypes, "CDLL", lambda *_args, **_kwargs: fake_libc)
+  monkeypatch.setattr(
+    target,
+    "_capability_state",
+    lambda _libc: (target._CapabilityHeader(), data),
+  )
+
+  target._drop_packet_capture_capabilities()
+
+  assert bounding == set()
+  assert ambient == set()
+  for capability in blocked:
+    mask = 1 << (capability % 32)
+    word = data[capability // 32]
+    assert not word.effective & mask
+    assert not word.permitted & mask
+    assert not word.inheritable & mask
+
+
+def test_health_identity_is_baked_not_runtime_environment(
+  target, monkeypatch,
+):
+  monkeypatch.setenv("BUILD_SHA", "runtime-spoof")
+  target._BUILD_REVISION = "b" * 40
+  with _server(target) as url:
+    _, body = _request(url, "/v1/health")
+  assert body["build_sha"] == "b" * 40
 
 
 def test_paths_must_be_absolute(target):

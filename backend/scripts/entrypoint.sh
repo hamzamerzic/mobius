@@ -9,6 +9,28 @@
 case "${MOBIUS_BOOT_MODE:-normal}" in
   normal) ;;
   recovery)
+    # Never exec the target with its bearer in the process environment. Linux
+    # exposes the original exec environment through /proc even after unsetenv,
+    # so move the secret through an unlinked, inherited descriptor and build a
+    # fresh Python environment without it. The target closes fd 3 before it
+    # starts listening and refuses to run unless it is container pid 1.
+    _recovery_target_token=${MOBIUS_RECOVERY_TARGET_TOKEN:-}
+    unset MOBIUS_RECOVERY_TARGET_TOKEN
+    umask 077
+    _recovery_token_file=$(mktemp /tmp/mobius-recovery-target-token.XXXXXX) || {
+      echo "FATAL: could not allocate recovery target secret descriptor." >&2
+      exit 70
+    }
+    if ! printf '%s' "$_recovery_target_token" > "$_recovery_token_file"; then
+      rm -f "$_recovery_token_file"
+      echo "FATAL: could not stage recovery target secret." >&2
+      exit 70
+    fi
+    exec 3< "$_recovery_token_file"
+    rm -f "$_recovery_token_file"
+    unset _recovery_target_token _recovery_token_file
+    MOBIUS_RECOVERY_TARGET_TOKEN_FD=3
+    export MOBIUS_RECOVERY_TARGET_TOKEN_FD
     exec python3 -I /app/recovery-target/targetd.py
     ;;
   *)

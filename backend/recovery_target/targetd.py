@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import ctypes
 import errno
 import hmac
 import json
@@ -31,6 +32,15 @@ from typing import Any
 
 PROTOCOL = "mobius-recovery-target/v1"
 DEFAULT_PORT = 18002
+BUILD_REVISION_PATH = Path("/app/recovery-target/BUILD_REVISION")
+CAP_NET_ADMIN = 12
+CAP_NET_RAW = 13
+_CAPABILITY_VERSION_3 = 0x20080522
+_PR_CAPBSET_READ = 23
+_PR_CAPBSET_DROP = 24
+_PR_CAP_AMBIENT = 47
+_PR_CAP_AMBIENT_IS_SET = 1
+_PR_CAP_AMBIENT_CLEAR_ALL = 4
 # An 8 MiB decoded payload expands to about 10.67 MiB as base64 before the JSON
 # envelope is counted. Keep the wire budget large enough for the advertised
 # file/stdin boundary while still rejecting unbounded request bodies.
@@ -45,6 +55,23 @@ MAX_ENV_ITEMS = 128
 MAX_ENV_BYTES = 256 * 1024
 MAX_CONCURRENT_EXEC = 2
 _EXEC_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_EXEC)
+_STARTUP_TOKEN: bytes | None = None
+_BUILD_REVISION = "unknown"
+
+
+class _CapabilityHeader(ctypes.Structure):
+  _fields_ = [
+    ("version", ctypes.c_uint32),
+    ("pid", ctypes.c_int),
+  ]
+
+
+class _CapabilityData(ctypes.Structure):
+  _fields_ = [
+    ("effective", ctypes.c_uint32),
+    ("permitted", ctypes.c_uint32),
+    ("inheritable", ctypes.c_uint32),
+  ]
 
 
 class RequestError(Exception):
@@ -60,13 +87,185 @@ class RequestError(Exception):
     self.status = status
 
 
-def _token() -> str:
-  value = os.environ.get("MOBIUS_RECOVERY_TARGET_TOKEN", "")
-  if len(value) < 32 or len(value.encode("utf-8")) > 512:
+def _validate_token(value: bytes) -> bytes:
+  if len(value) < 32 or len(value) > 512:
     raise RuntimeError(
       "MOBIUS_RECOVERY_TARGET_TOKEN must contain 32-512 UTF-8 bytes"
     )
+  try:
+    value.decode("utf-8")
+  except UnicodeDecodeError as exc:
+    raise RuntimeError(
+      "MOBIUS_RECOVERY_TARGET_TOKEN must contain 32-512 UTF-8 bytes"
+    ) from exc
+  if b"\x00" in value or b"\r" in value or b"\n" in value:
+    raise RuntimeError(
+      "MOBIUS_RECOVERY_TARGET_TOKEN must not contain NUL or newlines"
+    )
   return value
+
+
+def _capability_state(
+  libc: ctypes.CDLL,
+) -> tuple[_CapabilityHeader, Any]:
+  header = _CapabilityHeader(version=_CAPABILITY_VERSION_3, pid=0)
+  data = (_CapabilityData * 2)()
+  if libc.capget(ctypes.byref(header), ctypes.byref(data)) != 0:
+    error = ctypes.get_errno()
+    raise RuntimeError(f"could not inspect process capabilities: errno {error}")
+  return header, data
+
+
+def _drop_packet_capture_capabilities() -> None:
+  """Permanently deny packet capture/manipulation to target exec children."""
+  libc = ctypes.CDLL(None, use_errno=True)
+  capget = getattr(libc, "capget", None)
+  capset = getattr(libc, "capset", None)
+  prctl = getattr(libc, "prctl", None)
+  if capget is None or capset is None or prctl is None:
+    raise RuntimeError("recovery target requires Linux capability controls")
+
+  # A root repair command otherwise inherits Docker's CAP_NET_RAW and can use
+  # AF_PACKET to capture a later worker Authorization header on the private
+  # plain-HTTP interface. Remove both packet capabilities from every mutable
+  # set and the bounding set before the server starts listening.
+  header, data = _capability_state(libc)
+  for capability in (CAP_NET_ADMIN, CAP_NET_RAW):
+    word = capability // 32
+    mask = 1 << (capability % 32)
+    data[word].effective &= ~mask
+    data[word].permitted &= ~mask
+    data[word].inheritable &= ~mask
+
+    bounded = prctl(_PR_CAPBSET_READ, capability, 0, 0, 0)
+    if bounded < 0:
+      error = ctypes.get_errno()
+      raise RuntimeError(
+        f"could not inspect capability bounding set: errno {error}"
+      )
+    if bounded and prctl(_PR_CAPBSET_DROP, capability, 0, 0, 0) != 0:
+      error = ctypes.get_errno()
+      raise RuntimeError(
+        f"could not drop capability {capability} from bounding set: errno {error}"
+      )
+
+  if capset(ctypes.byref(header), ctypes.byref(data)) != 0:
+    error = ctypes.get_errno()
+    raise RuntimeError(f"could not restrict process capabilities: errno {error}")
+  if prctl(_PR_CAP_AMBIENT, _PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) != 0:
+    error = ctypes.get_errno()
+    raise RuntimeError(f"could not clear ambient capabilities: errno {error}")
+
+  # Fail closed if the kernel ignored any operation. The bounding-set check is
+  # essential because uid 0 regains capabilities from that set across exec.
+  _, restricted = _capability_state(libc)
+  for capability in (CAP_NET_ADMIN, CAP_NET_RAW):
+    word = capability // 32
+    mask = 1 << (capability % 32)
+    if (
+      restricted[word].effective & mask
+      or restricted[word].permitted & mask
+      or restricted[word].inheritable & mask
+    ):
+      raise RuntimeError(f"capability {capability} remains in process sets")
+    if prctl(_PR_CAPBSET_READ, capability, 0, 0, 0) != 0:
+      raise RuntimeError(f"capability {capability} remains in bounding set")
+    if prctl(
+      _PR_CAP_AMBIENT, _PR_CAP_AMBIENT_IS_SET, capability, 0, 0
+    ) != 0:
+      raise RuntimeError(f"capability {capability} remains in ambient set")
+
+
+def _set_process_nondumpable() -> None:
+  """Blocks sibling/child ptrace and /proc memory access to the bearer."""
+  libc = ctypes.CDLL(None, use_errno=True)
+  prctl = getattr(libc, "prctl", None)
+  if prctl is None:
+    raise RuntimeError("recovery target requires Linux prctl")
+  # PR_SET_DUMPABLE = 4. Failure must stop recovery rather than expose the
+  # in-memory capability to an arbitrary root command launched by this target.
+  if prctl(4, 0, 0, 0, 0) != 0:
+    error = ctypes.get_errno()
+    raise RuntimeError(f"could not disable process dumpability: errno {error}")
+
+
+def _assert_clean_initial_environment() -> None:
+  """Proves the exec environment itself never received the bearer."""
+  if "MOBIUS_RECOVERY_TARGET_TOKEN" in os.environ:
+    raise RuntimeError(
+      "MOBIUS_RECOVERY_TARGET_TOKEN must not reach the target environment"
+    )
+  try:
+    initial_environment = Path("/proc/self/environ").read_bytes()
+  except OSError as exc:
+    raise RuntimeError("could not inspect recovery target environment") from exc
+  if b"MOBIUS_RECOVERY_TARGET_TOKEN=" in initial_environment:
+    raise RuntimeError("recovery target bearer is exposed through /proc")
+
+
+def _read_startup_token() -> bytes:
+  """Consumes the one-shot inherited descriptor; never reads a secret env."""
+  if "MOBIUS_RECOVERY_TARGET_TOKEN" in os.environ:
+    raise RuntimeError(
+      "MOBIUS_RECOVERY_TARGET_TOKEN must not reach the target environment"
+    )
+  raw_fd = os.environ.pop("MOBIUS_RECOVERY_TARGET_TOKEN_FD", "")
+  if not raw_fd.isdecimal():
+    raise RuntimeError("MOBIUS_RECOVERY_TARGET_TOKEN_FD is required")
+  fd = int(raw_fd)
+  if fd < 3:
+    raise RuntimeError("MOBIUS_RECOVERY_TARGET_TOKEN_FD is invalid")
+  value = bytearray()
+  try:
+    while len(value) <= 512:
+      chunk = os.read(fd, 513 - len(value))
+      if not chunk:
+        break
+      value.extend(chunk)
+  except OSError as exc:
+    raise RuntimeError("could not consume recovery target bearer") from exc
+  finally:
+    try:
+      os.close(fd)
+    except OSError:
+      pass
+  try:
+    return _validate_token(bytes(value))
+  finally:
+    for index in range(len(value)):
+      value[index] = 0
+
+
+def _load_baked_build_revision() -> str:
+  try:
+    value = BUILD_REVISION_PATH.read_text(encoding="ascii").strip().lower()
+  except OSError as exc:
+    raise RuntimeError("baked recovery target identity is missing") from exc
+  if len(value) != 40 or any(char not in "0123456789abcdef" for char in value):
+    raise RuntimeError("baked recovery target identity is invalid")
+  return value
+
+
+def _initialize_startup_security(*, require_pid_one: bool = True) -> None:
+  """Loads immutable identity + bearer before any request can be accepted."""
+  global _BUILD_REVISION, _STARTUP_TOKEN
+  if require_pid_one and os.getpid() != 1:
+    raise RuntimeError(
+      "recovery target must be container pid 1 so no parent retains its bearer"
+    )
+  if _STARTUP_TOKEN is not None:
+    raise RuntimeError("recovery target startup security was already initialized")
+  _assert_clean_initial_environment()
+  _drop_packet_capture_capabilities()
+  _set_process_nondumpable()
+  _STARTUP_TOKEN = _read_startup_token()
+  _BUILD_REVISION = _load_baked_build_revision()
+
+
+def _startup_token() -> bytes:
+  if _STARTUP_TOKEN is None:
+    raise RuntimeError("recovery target bearer is not initialized")
+  return _STARTUP_TOKEN
 
 
 def _absolute_path(value: Any, field: str = "path") -> Path:
@@ -467,9 +666,9 @@ class _Handler(BaseHTTPRequestHandler):
     )
 
   def _authorized(self) -> bool:
-    expected = f"Bearer {_token()}"
-    supplied = self.headers.get("Authorization", "")
-    if not hmac.compare_digest(supplied.encode(), expected.encode()):
+    expected = b"Bearer " + _startup_token()
+    supplied = self.headers.get("Authorization", "").encode("utf-8")
+    if not hmac.compare_digest(supplied, expected):
       self._send(
         HTTPStatus.UNAUTHORIZED,
         {"error": {"code": "unauthorized", "message": "invalid bearer token"}},
@@ -513,7 +712,7 @@ class _Handler(BaseHTTPRequestHandler):
       "protocol": PROTOCOL,
       "target": "mobius",
       "mode": "recovery",
-      "build_sha": os.environ.get("BUILD_SHA", "unknown"),
+      "build_sha": _BUILD_REVISION,
     })
 
   def do_POST(self) -> None:  # noqa: N802
@@ -581,8 +780,10 @@ def main() -> None:
     raise SystemExit("recovery target refuses to run outside recovery boot mode")
   if os.geteuid() != 0:
     raise SystemExit("recovery target must run as root")
-  token = _token()
-  del token
+  try:
+    _initialize_startup_security()
+  except RuntimeError as exc:
+    raise SystemExit(f"recovery target security initialization failed: {exc}") from exc
   raw_port = os.environ.get("MOBIUS_RECOVERY_TARGET_PORT", str(DEFAULT_PORT))
   try:
     port = int(raw_port)

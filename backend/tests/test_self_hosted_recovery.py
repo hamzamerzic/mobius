@@ -33,12 +33,17 @@ def test_only_root_target_mounts_the_stopped_app_data():
   target = services["recovery-target"]
   worker = services["recovery"]
   assert target["profiles"] == ["recovery"]
+  assert target.get("init") is None
+  assert target["read_only"] is True
+  assert set(target["cap_drop"]) == {"NET_ADMIN", "NET_RAW"}
+  assert target["tmpfs"] == ["/tmp", "/run"]
   assert target["volumes"] == ["app_data:/data"]
   assert any(
     item == "MOBIUS_BOOT_MODE=recovery" for item in target["environment"]
   )
+  assert target["healthcheck"] == {"disable": True}
   assert worker.get("volumes") is None
-  assert worker["depends_on"]["recovery-target"]["condition"] == "service_healthy"
+  assert worker["depends_on"]["recovery-target"]["condition"] == "service_started"
 
 
 def test_lifecycle_pulls_latest_before_stopping_app_and_restores_on_finish():

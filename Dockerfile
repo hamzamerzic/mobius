@@ -293,7 +293,10 @@ COPY protected-files.txt ./protected-files.txt
 # Frozen recovery floor (recoveryd) — the Tier-1 recovery system that runs in
 # its own container. It imports no app.* code and remains root-owned/read-only.
 COPY backend/recovery ./recovery/
-RUN chmod -R a-w /app/recovery /app/recovery-target
+# Stamp target identity from the actual baked checkout, never a runtime-
+# overridable environment value.
+RUN cp /app/platform-baked/.baked-sha /app/recovery-target/BUILD_REVISION \
+    && chmod -R a-w /app/recovery /app/recovery-target
 RUN chmod +x ./scripts/entrypoint.sh
 
 # Build identity — passed at `docker compose build` time (deploy-prod.sh
