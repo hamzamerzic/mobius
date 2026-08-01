@@ -654,11 +654,15 @@ test('mobile tabs require a hold before dragging while the strip preserves pinch
     'touch drawer rows must not enter the workspace drag-out controller',
   )
   assert.match(drawer, /heldDrawerRowIntent\(dx, dy, true\)/)
-  assert.match(drawer, /openItemMenuAt\(\{ x: upEvent\.clientX, y: upEvent\.clientY \}\)/)
+  assert.match(drawer, /openItemMenuAt\(\{ x: point\.clientX, y: point\.clientY \}\)/)
   assert.doesNotMatch(dragBinding, /openTabMenuAtRef/)
   assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)
-  assert.match(drawer, /function beginTouchMenuHold\(event\)/)
-  assert.match(drawer, /window\.addEventListener\('touchmove', preventClaimedTouchMove, \{ capture: true, passive: false \}\)/)
+  assert.match(drawer, /function beginTouchMenuHold\(event, \{ touchEvents = false \} = \{\}\)/)
+  assert.match(drawer, /function onRowTouchStart\(event\)[\s\S]*?beginPinnedReorder\(event, \{ touchEvents: true \}\)/)
+  assert.match(drawer, /if \(event\.pointerType === 'touch'\) return/)
+  assert.match(drawer, /window\.addEventListener\('touchmove', onMove, \{ capture: true, passive: false \}\)/)
+  assert.match(drawer, /window\.addEventListener\('touchend', onUp, true\)/)
+  assert.match(drawer, /onTouchStart=\{onRowTouchStart\}/)
   assert.match(drawer, /const TOUCH_CONTEXT_MENU_PROVENANCE_MS = 1500/)
   assert.match(drawer, /function suppressTouchContextMenu\(event\)[\s\S]*?event\.nativeEvent\?\.pointerType[\s\S]*?contextPointerType === 'touch'[\s\S]*?freshTouchPointer[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?stopImmediatePropagation/)
   assert.equal((drawer.match(/onContextMenuCapture=\{suppressTouchContextMenu\}/g) || []).length, 2,
@@ -666,7 +670,7 @@ test('mobile tabs require a hold before dragging while the strip preserves pinch
   assert.match(drawerCss, /\.drawer__row \.drawer__item\s*\{[\s\S]*?-webkit-touch-callout:\s*none/)
   assert.match(drawer, /sourceBtn\.setAttribute\('data-hold-ready', 'true'\)/)
   assert.match(drawer, /const openMenu = held && !dragging && !cancelledAfterHold/)
-  assert.match(drawer, /if \(openMenu\) openItemMenuAt\(\{ x: upEvent\.clientX, y: upEvent\.clientY \}\)/)
+  assert.match(drawer, /if \(openMenu\) openItemMenuAt\(\{ x: point\.clientX, y: point\.clientY \}\)/)
   assert.match(drawer, /if \(intent === 'cancel'\)[\s\S]*?cancelledAfterHold = true/)
   assert.match(drawerCss, /\.drawer__item\[data-hold-ready="true"\]/)
 })
@@ -906,7 +910,7 @@ test('drawer row menus use one semantic context-menu path across pointer types',
   assert.match(drawer, /function openItemMenuAt\(point\)[\s\S]*?actions\.toggleMenu\(kind, id, true, surface,/)
   assert.equal((drawer.match(/onContextMenu=\{openItemMenu\}/g) || []).length, 2,
     'app cards, app rows, and chat rows must share one opening function')
-  assert.match(drawer, /if \(openMenu\) openItemMenuAt\(\{ x: upEvent\.clientX, y: upEvent\.clientY \}\)/)
+  assert.match(drawer, /if \(openMenu\) openItemMenuAt\(\{ x: point\.clientX, y: point\.clientY \}\)/)
   assert.doesNotMatch(
     dragBinding,
     /srcEl\.closest\('\.drawer__row'\)\?\.querySelector\('\.drawer__more'\)\?\.click\(\)/,
