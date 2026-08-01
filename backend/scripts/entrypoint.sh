@@ -833,13 +833,37 @@ if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
     echo "Platform layer: boot guard failed; refusing to serve the platform tree." >&2
     exit 1
   fi
+  # The best-effort reconcile intentionally exits zero on offline/conflict/
+  # invalid-channel outcomes. That is acceptable on the normal main channel,
+  # but a managed migration must never serve a pre-bridge persistent updater:
+  # it would ignore MOBIUS_PLATFORM_RELEASE_REF after uvicorn starts. Import the
+  # STRICT readiness proof from the baked backend. If /data/platform does not
+  # contain this image's exact baked SHA, preserve it for recovery and serve the
+  # immutable baked floor for this boot instead.
+  if [ -n "${MOBIUS_PLATFORM_RELEASE_REF:-}" ]; then
+    if ! _managed_release_proof=$(su -s /bin/sh mobius -c \
+      "cd '$_platform_reconciler_backend' && $_env_scrub $_platform_reconciler_prefix python3 -c \
+       'from app import platform_update; print(platform_update.managed_release_ready_sync())'" \
+      2>&1); then
+      echo "PLATFORM RELEASE WARNING: persistent checkout is not at this image's release." >&2
+      echo "  ${_managed_release_proof}" >&2
+      echo "  Serving the baked floor; /data/platform is preserved for recovery." >&2
+      _platform_use_baked
+    else
+      echo "Platform layer: ${_managed_release_proof}" >&2
+    fi
+  fi
   # A fast-forward / merge advanced main, so the served sha the /api/version and
   # /api/debug/serving routes report (written to /tmp/serving-sha above) must
   # reflect the reconciled HEAD, not the pre-reconcile clone tip.
-  _served_sha=$(su -s /bin/sh mobius -c \
-    'git -C /data/platform rev-parse HEAD' 2>/dev/null || echo "$_served_sha")
+  if [ "$_use_platform" -eq 1 ]; then
+    _served_sha=$(su -s /bin/sh mobius -c \
+      'git -C /data/platform rev-parse HEAD' 2>/dev/null || echo "$_served_sha")
+  fi
+  # Selection may have changed to baked after the first markers were written.
+  printf '%s\n' "$_serve_source" > /tmp/serving-source
   printf '%s\n' "$_served_sha" > /tmp/serving-sha
-  chmod 644 /tmp/serving-sha 2>/dev/null || true
+  chmod 644 /tmp/serving-source /tmp/serving-sha 2>/dev/null || true
 fi
 
 # SECRET_KEY drift detection.

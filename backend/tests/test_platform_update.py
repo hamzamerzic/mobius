@@ -1765,6 +1765,7 @@ def test_release_channel_reconciles_only_baked_sha_and_preserves_local_edits(
   ) == newer_sha
   assert pu._is_ancestor(platform, baked_sha, "main")
   assert not pu._is_ancestor(platform, newer_sha, "main")
+  assert "managed_release[ready]" in pu.managed_release_ready_sync()
 
   status = pu.platform_status(platform)
   assert status["contained_upstream_sha"] == baked_sha
@@ -1818,6 +1819,11 @@ def test_release_channel_rejects_baked_sha_outside_fetched_ref_without_mutation(
   assert not (platform / "release-only.txt").exists()
   assert not (platform / "main-only.txt").exists()
   assert pu.recorded_upstream_sha(platform) == before
+  with pytest.raises(
+    pu.PlatformUpdateError,
+    match="managed_release_target_not_integrated",
+  ):
+    pu.managed_release_ready_sync()
 
 
 def test_release_channel_deepens_before_rejecting_ambiguous_shallow_ancestry(
@@ -1873,6 +1879,55 @@ def test_release_channel_deepens_before_rejecting_ambiguous_shallow_ancestry(
   assert membership_checks >= 2
   assert pu.recorded_upstream_sha(platform) == baked_sha
   assert not (platform / "next.txt").exists()
+
+
+def test_managed_release_offline_prebridge_tree_is_not_ready_to_serve(
+  clone_env, monkeypatch, tmp_path,
+):
+  _origin, platform = clone_env
+  before = _served_sha(platform)
+  missing_sha = "a" * 40
+  build_info = tmp_path / "build-info.json"
+  build_info.write_text(f'{{"sha":"{missing_sha}"}}\n')
+  monkeypatch.setattr(release_channel, "BUILD_INFO_PATH", build_info)
+  monkeypatch.setattr(pu, "PLATFORM_REPO", platform)
+  monkeypatch.setenv(
+    release_channel.PLATFORM_RELEASE_REF_ENV,
+    "refs/heads/release/external-recovery",
+  )
+  monkeypatch.setattr(pu, "_fetch", lambda *_args, **_kwargs: False)
+
+  summary = pu.reconcile_clone_sync()
+
+  assert "reconcile[offline]" in summary
+  assert _served_sha(platform) == before
+  with pytest.raises(
+    pu.PlatformUpdateError,
+    match="managed_release_target_missing",
+  ):
+    pu.managed_release_ready_sync()
+
+
+def test_invalid_managed_release_config_cannot_approve_prebridge_tree(
+  clone_env, monkeypatch,
+):
+  _origin, platform = clone_env
+  before = _served_sha(platform)
+  monkeypatch.setattr(pu, "PLATFORM_REPO", platform)
+  monkeypatch.setenv(
+    release_channel.PLATFORM_RELEASE_REF_ENV,
+    "release/external-recovery",
+  )
+
+  summary = pu.reconcile_clone_sync()
+
+  assert "platform_release_ref_invalid" in summary
+  assert _served_sha(platform) == before
+  with pytest.raises(
+    pu.PlatformUpdateError,
+    match="platform_release_ref_invalid",
+  ):
+    pu.managed_release_ready_sync()
 
 
 def test_entrypoint_ignores_durable_update_progress_from_outer_data_repo():

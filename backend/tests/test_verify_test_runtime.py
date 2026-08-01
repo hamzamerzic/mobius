@@ -315,6 +315,21 @@ def test_managed_release_boot_uses_the_baked_updater():
   assert "cd '$_platform_reconciler_backend'" in entrypoint
 
 
+def test_managed_release_boot_falls_back_when_exact_target_is_not_integrated():
+  entrypoint = (
+    ROOT / "backend" / "scripts" / "entrypoint.sh"
+  ).read_text(encoding="utf-8")
+  reconcile = entrypoint.index("platform_update.reconcile_clone_sync()")
+  guard = entrypoint.index("platform_update.boot_guard_sync()", reconcile)
+  proof = entrypoint.index("platform_update.managed_release_ready_sync()", guard)
+  fallback = entrypoint.index("_platform_use_baked", proof)
+  served_head_gate = entrypoint.index('if [ "$_use_platform" -eq 1 ]; then', proof)
+
+  assert reconcile < guard < proof < fallback < served_head_gate
+  assert "/data/platform is preserved for recovery" in entrypoint
+  assert 'printf \'%s\\n\' "$_serve_source" > /tmp/serving-source' in entrypoint
+
+
 def test_browser_setup_fails_closed_before_auth_and_never_wipes_chats():
   setup = (ROOT / "tests" / "auth.setup.mjs").read_text(encoding="utf-8")
   marker_probe = 'request.get(`${BASE}/api/version`'
