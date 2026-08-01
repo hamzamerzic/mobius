@@ -286,18 +286,11 @@ function _anchorModeForRow(scrollEl, row, scrollTop, extra = null) {
   if (!row?.dataset?.key) return null
   const part = _partPathAt(scrollEl, row, scrollTop)
   const target = _rowPartTarget(row, { part })
-  const offset = _scrollTopOf(scrollEl, target) - scrollTop
-  // The deepest addressable element can still be a single very tall leaf (one
-  // 8,000px code block). Record the height that offset was measured against so
-  // restore can hold the same RELATIVE place when late highlighting, math or a
-  // swapped font changes that one element's height.
-  const targetH = target?.offsetHeight || 0
   return {
     kind: 'ANCHOR_AT',
     key: row.dataset.key,
-    offset,
+    offset: _scrollTopOf(scrollEl, target) - scrollTop,
     ...(part == null ? {} : { part }),
-    ...(part != null && offset < 0 && targetH > 0 ? { targetH } : {}),
     ...(extra || {}),
   }
 }
@@ -462,7 +455,7 @@ export function applyMode(scrollEl, mode) {
       const el = _anchorEl(scrollEl, mode)
       if (el) {
         scrollEl.scrollTop = Math.max(
-          0, _scrollTopOf(scrollEl, el) - _scaledOffset(mode, el),
+          0, _scrollTopOf(scrollEl, el) - mode.offset,
         )
       }
       return
@@ -493,23 +486,6 @@ function _anchorRow(scrollEl, key) {
   if (!scrollEl || key == null) return null
   const esc = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(key) : key
   return scrollEl.querySelector(`[data-key="${esc}"]`)
-}
-
-
-/** The offset to apply for `mode` against `target`'s CURRENT height.
- *
- * A negative offset means the viewport top sits inside the addressed element.
- * When that element's height has changed since the position was saved, holding
- * the absolute pixel offset would drift; holding the same proportion of the
- * element keeps the reader on the same content. */
-function _scaledOffset(mode, target) {
-  const offset = Number(mode?.offset)
-  const savedH = Number(mode?.targetH)
-  const currentH = target?.offsetHeight
-  if (!(offset < 0) || !(savedH > 0) || !(currentH > 0) || savedH === currentH) {
-    return offset
-  }
-  return offset * (currentH / savedH)
 }
 
 
@@ -582,21 +558,20 @@ export function _anchorReapplyNeeded(scrollEl, mode, lastAnchorTop) {
   const el = _anchorEl(scrollEl, mode)
   if (!el) return false
   const anchorTop = _scrollTopOf(scrollEl, el)
-  const target = Math.max(0, anchorTop - _scaledOffset(mode, el))
+  const target = Math.max(0, anchorTop - mode.offset)
   const maxScrollTop = scrollEl.scrollHeight - scrollEl.clientHeight
   const targetReachable = maxScrollTop >= target - 1
   const clampedShort = scrollEl.scrollTop < target - 1 && targetReachable
   // As with a send pin, overshooting an unchanged anchor belongs to the
   // reader. Browser clamps only shorten scrollTop; target movement is already
   // represented by offsetTop changing.
-  // A part anchor holds a position INSIDE the addressed element, scaled by
-  // that element's height. Late highlighting or math can change that height
-  // without moving its top, which silently rescales the held position — so an
-  // own-height change is a repair case exactly like a moved top.
-  const heightChanged = Number(mode.targetH) > 0
-    && el.offsetHeight > 0
-    && el.offsetHeight !== Number(mode.targetH)
-  return anchorTop !== lastAnchorTop || clampedShort || heightChanged
+  // Deliberately only two cases: the anchor MOVED, or the browser clamped us
+  // short of a target that is reachable again. An element merely changing its
+  // own height is NOT a repair case — the reader's distance from that
+  // element's top is what holds them, and re-deriving it on a height change
+  // moves them off the content they were reading, which is the "it lands on
+  // the right position and then scrolls to the wrong one" failure.
+  return anchorTop !== lastAnchorTop || clampedShort
 }
 
 
