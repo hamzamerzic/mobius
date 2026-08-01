@@ -14,7 +14,9 @@ export default function usePushSubscription() {
     // A denied permission can never be re-raised from here, so the whole
     // pipeline (worker install, key fetch, subscribe) would be wasted. Only
     // 'denied' short-circuits: 'default' is what raises the prompt.
-    if (Notification?.permission === 'denied') return
+    // `globalThis.` matters: a bare `Notification` is a ReferenceError, not
+    // undefined, anywhere the API is absent.
+    if (globalThis.Notification?.permission === 'denied') return
     // Push unsupported or the prompt refused — nothing to surface.
     subscribeToPush().catch(() => {})
   }, [])
