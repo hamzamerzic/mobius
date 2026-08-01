@@ -1,14 +1,17 @@
 """Database engine and session configuration.
 
-FROZEN at runtime (chmod 444 root-owned per protected-files.txt).
-main.py imports this at module load to set up the engine + run
-migrations; if I'm broken the server can't boot and /recover/chat
-is unreachable. (The recovery surface itself uses raw sqlite3
-and doesn't depend on me, but main.py still does.)
+Boot-critical, but editable in place. main.py imports this at module
+load to set up the engine + run migrations; if I'm broken the server
+can't boot and only /recover stays reachable. (The recovery surface
+itself uses raw sqlite3 and doesn't depend on me, but main.py does.)
+So `python3 -m py_compile` this file before asking for a restart — a
+failing compile proves the next boot dies.
 
-To edit me, change the source on the host repo and rebuild the
-container image. For ad-hoc DB queries the agent should use raw
-`sqlite3` from stdlib — that path doesn't touch this file at all.
+I am NOT frozen. protected-files.txt froze the baked /app fallback,
+not the served clone; the whole-repo model moved the running backend
+to /data/platform/backend/app, which is mobius-owned and writable.
+Edit here and restart. For ad-hoc DB queries prefer raw `sqlite3`
+from stdlib — that path doesn't touch this file at all.
 """
 
 import json
@@ -33,6 +36,20 @@ _request_label: ContextVar[str] = ContextVar(
   "mobius_database_request_label", default="background",
 )
 _checkout_warn_seconds = float(os.environ.get("DB_CHECKOUT_WARN_SECONDS", "2"))
+# SQLite's default journal_size_limit is -1 (never truncate), so a WAL only
+# ever ratchets upward: a checkpoint copies pages back into the database but
+# leaves the file at its high-water mark. On 2026-08-01 that produced a 1.9 GB
+# WAL holding 855 live pages (~3.5 MB) against a 748 MB database — 10% of the
+# data volume, none of it reachable content. With this limit a checkpoint that
+# resets the WAL also truncates the file back down.
+#
+# The cap is not a hard ceiling: truncation happens only when a checkpoint can
+# reset the WAL, which requires no reader still holding an older snapshot. With
+# enough concurrent agent sessions there is always one, so the file can still
+# exceed this between resets. Bounding session concurrency is the other half of
+# that fix and is not yet implemented; until it is, this limit is what keeps a
+# quiet moment sufficient to reclaim the space.
+_WAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024
 _pool_metrics_lock = threading.Lock()
 _pool_metrics = {
   "checked_out": 0,
@@ -136,6 +153,7 @@ def _make_engine():
       cur.execute("PRAGMA busy_timeout=5000")
       cur.execute("PRAGMA journal_mode=WAL")
       cur.execute("PRAGMA synchronous=FULL")
+      cur.execute(f"PRAGMA journal_size_limit={_WAL_SIZE_LIMIT_BYTES}")
       cur.close()
   return eng
 

@@ -2,10 +2,14 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from app import database
 
 
-def test_sqlite_connection_pragma_order(monkeypatch, tmp_path):
+def _capture_connect_pragmas(monkeypatch, tmp_path):
+  """Run _make_engine with a fake engine and return the pragmas a new
+  connection executes."""
   listeners = {}
 
   def _listens_for(_engine, event_name):
@@ -45,9 +49,40 @@ def test_sqlite_connection_pragma_order(monkeypatch, tmp_path):
   database._make_engine()
   connection = _Connection()
   listeners["connect"](connection, object())
+  return connection.connection_cursor.statements
 
-  assert connection.connection_cursor.statements == [
+
+def test_sqlite_connection_pragma_order(monkeypatch, tmp_path):
+  assert _capture_connect_pragmas(monkeypatch, tmp_path) == [
     "PRAGMA busy_timeout=5000",
     "PRAGMA journal_mode=WAL",
     "PRAGMA synchronous=FULL",
+    f"PRAGMA journal_size_limit={database._WAL_SIZE_LIMIT_BYTES}",
   ]
+
+
+def test_wal_size_limit_is_set_so_the_journal_cannot_ratchet_unbounded(
+  monkeypatch, tmp_path
+):
+  """SQLite defaults journal_size_limit to -1, which never truncates the WAL:
+  a checkpoint returns pages to the database but leaves the file at its
+  high-water mark. Left unset it reached 1.9 GB holding 3.5 MB of live pages.
+  Every connection must declare a limit for a checkpoint to reclaim the file."""
+  statements = _capture_connect_pragmas(monkeypatch, tmp_path)
+
+  limits = [s for s in statements if "journal_size_limit" in s]
+  assert limits == [f"PRAGMA journal_size_limit={database._WAL_SIZE_LIMIT_BYTES}"]
+  assert database._WAL_SIZE_LIMIT_BYTES > 0
+
+
+@pytest.mark.parametrize("pragma", ["journal_mode=WAL", "busy_timeout=5000"])
+def test_wal_size_limit_follows_the_pragmas_it_depends_on(
+  monkeypatch, tmp_path, pragma
+):
+  """journal_size_limit only means anything in WAL mode, and the busy handler
+  must already be installed before any pragma that can contend for a lock."""
+  statements = _capture_connect_pragmas(monkeypatch, tmp_path)
+
+  assert statements.index(f"PRAGMA {pragma}") < statements.index(
+    f"PRAGMA journal_size_limit={database._WAL_SIZE_LIMIT_BYTES}"
+  )
