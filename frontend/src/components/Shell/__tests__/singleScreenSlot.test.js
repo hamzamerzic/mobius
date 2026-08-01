@@ -327,6 +327,26 @@ test('a refused empty-builder entry preserves the coupled close undo', () => {
   assert.equal(state.ws.viewMode, 'panes', 'the closed Builder world is restored with its tab')
 })
 
+test('a real later mode choice still rebases a coupled undo to tree-only', () => {
+  let state = init({
+    ...paneModel.seedFromFlatTabs([makeTab('chat', '5')]),
+    viewMode: 'single',
+  })
+  state = reduce(state, {
+    type: 'OPEN_TAB_AT',
+    tab: makeTab('app', '42'),
+    target: { paneId: state.ws.focusedPaneId, edge: 'right' },
+    flipViewMode: 'panes',
+  })
+  assert.equal(state.undo.restoreViewMode, true)
+
+  state = reduce(state, { type: 'SET_VIEW_MODE', mode: 'single' })
+  assert.equal(state.undo.restoreViewMode, false, 'the accepted mode choice rebases the undo')
+  state = reduce(state, { type: 'UNDO_LAST' })
+  assert.equal(state.ws.viewMode, 'single', 'tree undo preserves the later Standard choice')
+  assert.equal(Object.keys(state.ws.panes).length, 1, 'the split itself is still undone')
+})
+
 test('singleScreenRoute: chat, installed app, Apps launcher, and empty/home', () => {
   const base = paneModel.seedFromFlatTabs([])
   assert.deepEqual(paneModel.singleScreenRoute({ ...base, singleScreen: { kind: 'chat', id: '9' } }), {

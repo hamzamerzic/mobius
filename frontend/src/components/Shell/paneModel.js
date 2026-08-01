@@ -398,8 +398,8 @@ export function normalize(ws) {
   const nextId = Math.max(maxId + 1, storedNext)
   // Builder is a presentation of actual pane content, never an empty world. A
   // stale/corrupt persisted blob can still say `panes` after every tab is gone;
-  // repair that at the model boundary so boot cannot strand the owner in an
-  // otherwise un-exitable blank Builder. Non-empty trees preserve their mode.
+  // repair that at the model boundary so boot cannot strand the owner in a blank
+  // Builder. Non-empty trees preserve their mode.
   const requestedViewMode = coerceViewMode(ws.viewMode)
   const viewMode = requestedViewMode === 'panes'
     && panesAreEmpty(panes)
