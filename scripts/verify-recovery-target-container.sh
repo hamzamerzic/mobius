@@ -110,17 +110,49 @@ else:
   packet = {"opened": True, "errno": None}
   packet_socket.close()
 
-try:
-  with open("/proc/1/environ", "rb") as environ:
-    parent_environment = environ.read()
-except OSError as exc:
-  proc = {"readable": False, "errno": exc.errno, "data": ""}
-else:
-  proc = {
+def probe_file(path):
+  try:
+    with open(path, "rb", buffering=0) as source:
+      data = source.read(4096)
+  except OSError as exc:
+    return {"readable": False, "errno": exc.errno, "data": ""}
+  return {
     "readable": True,
     "errno": None,
-    "data": parent_environment.decode("latin1"),
+    "data": data.decode("latin1"),
   }
+
+
+def probe_fds(path):
+  try:
+    entries = os.listdir(path)
+  except OSError as exc:
+    return {"listed": False, "errno": exc.errno, "entries": {}}
+  probes = {}
+  for entry in entries:
+    fd_path = f"{path}/{entry}"
+    try:
+      target = os.readlink(fd_path)
+    except OSError as exc:
+      link = {"readable": False, "errno": exc.errno, "target": ""}
+    else:
+      link = {"readable": True, "errno": None, "target": target}
+    try:
+      opened = os.open(fd_path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError as exc:
+      descriptor = {"openable": False, "errno": exc.errno}
+    else:
+      os.close(opened)
+      descriptor = {"openable": True, "errno": None}
+    probes[entry] = {"link": link, "descriptor": descriptor}
+  return {"listed": True, "errno": None, "entries": probes}
+
+
+proc = {
+  "environ": probe_file("/proc/1/environ"),
+  "mem": probe_file("/proc/1/mem"),
+  "fds": probe_fds("/proc/1/fd"),
+}
 
 print(json.dumps({
   "uid": os.geteuid(),
@@ -140,8 +172,24 @@ assert child["uid"] == 0
 assert "targetd.py" in child["pid_one"]
 assert child["packet"]["opened"] is False
 assert child["packet"]["errno"] in {errno.EPERM, errno.EACCES}
-assert token not in child["proc"]["data"]
-assert "MOBIUS_RECOVERY_TARGET_TOKEN=" not in child["proc"]["data"]
+for name in ("environ", "mem"):
+  probe = child["proc"][name]
+  assert probe["readable"] is False, (name, probe)
+  assert probe["errno"] in {errno.EPERM, errno.EACCES}, (name, probe)
+fds = child["proc"]["fds"]
+if not fds["listed"]:
+  assert fds["errno"] in {errno.EPERM, errno.EACCES}, fds
+else:
+  assert fds["entries"], fds
+  for fd, probe in fds["entries"].items():
+    assert probe["link"]["readable"] is False, (fd, probe)
+    assert probe["link"]["errno"] in {errno.EPERM, errno.EACCES}, (fd, probe)
+    assert probe["descriptor"]["openable"] is False, (fd, probe)
+    assert probe["descriptor"]["errno"] in {
+      errno.EPERM, errno.EACCES,
+    }, (fd, probe)
+assert token not in child["proc"]["environ"]["data"]
+assert "MOBIUS_RECOVERY_TARGET_TOKEN=" not in child["proc"]["environ"]["data"]
 
 blocked_mask = (1 << 12) | (1 << 13)
 assert set(child["caps"]) == {"CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"}
