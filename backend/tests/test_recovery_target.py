@@ -12,6 +12,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -30,6 +31,7 @@ def target(monkeypatch):
   module = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(module)
   module._STARTUP_TOKEN_DIGEST = module._token_digest(b"t" * 43)
+  module._TARGET_EXPIRES_AT = int(time.time()) + 3600
   return module
 
 
@@ -74,7 +76,52 @@ def test_dual_stack_health_is_authenticated(target):
       "target": "mobius",
       "mode": "recovery",
       "build_sha": "unknown",
+      "expires_at": target._TARGET_EXPIRES_AT,
     }
+
+
+def test_expired_target_rejects_a_valid_bearer_and_closes_listener(
+  target, monkeypatch,
+):
+  target._TARGET_EXPIRES_AT = 1_800_000_000
+  monkeypatch.setattr(target.time, "time", lambda: 1_800_000_000)
+  with _server(target) as url:
+    with pytest.raises(urllib.error.HTTPError) as expired:
+      _request(url, "/v1/health")
+    assert expired.value.code == 401
+    payload = json.load(expired.value)
+  assert payload["error"] == {
+    "code": "auth_expired",
+    "message": "recovery target capability has expired",
+  }
+  assert target._TARGET_EXPIRED.is_set()
+  assert target._STARTUP_TOKEN_DIGEST is None
+
+
+@pytest.mark.parametrize("raw", [
+  "",
+  "1800000000.5",
+  "-1800000000",
+  "1799999999",
+  "1800086401",
+  "99999999999",
+])
+def test_target_expiry_must_be_a_future_epoch_within_24_hours(
+  target, monkeypatch, raw,
+):
+  monkeypatch.setattr(target.time, "time", lambda: 1_800_000_000)
+  monkeypatch.setenv("MOBIUS_RECOVERY_TARGET_EXPIRES_AT", raw)
+  with pytest.raises(RuntimeError):
+    target._read_target_expiry()
+
+
+def test_target_expiry_accepts_the_24_hour_boundary(target, monkeypatch):
+  monkeypatch.setattr(target.time, "time", lambda: 1_800_000_000)
+  monkeypatch.setenv(
+    "MOBIUS_RECOVERY_TARGET_EXPIRES_AT",
+    str(1_800_000_000 + target.MAX_TARGET_LIFETIME_SECONDS),
+  )
+  assert target._read_target_expiry() == 1_800_086_400
 
 
 def test_listener_falls_back_to_ipv4_when_ipv6_is_unavailable(target, monkeypatch):
@@ -120,6 +167,105 @@ def test_exec_timeout_kills_the_process_group(target, tmp_path):
   assert result["timed_out"] is True
   assert result["exit_code"] != 0
   assert time.monotonic() - started < 3
+
+
+def test_exec_supervisor_kills_and_reaps_setsid_double_fork(
+  target, tmp_path,
+):
+  marker = tmp_path / "escaped.pid"
+  program = f'''
+import os
+import time
+
+pid = os.fork()
+if pid:
+  os._exit(0)
+os.setsid()
+pid = os.fork()
+if pid:
+  os._exit(0)
+with open({str(marker)!r}, "w", encoding="ascii") as target:
+  target.write(str(os.getpid()))
+time.sleep(30)
+'''
+  started = time.monotonic()
+  result = target._run_exec({
+    "argv": [sys.executable, "-c", program],
+    "cwd": str(tmp_path),
+    "timeout_seconds": 5,
+  })
+
+  assert result["exit_code"] == 0
+  assert result["timed_out"] is False
+  assert time.monotonic() - started < 3
+  escaped_pid = int(marker.read_text())
+  assert not Path(f"/proc/{escaped_pid}").exists()
+
+
+def test_exec_supervisor_kills_detached_child_that_closes_output_pipes(
+  target, tmp_path,
+):
+  marker = tmp_path / "detached.pid"
+  program = f'''
+import os
+import time
+
+pid = os.fork()
+if pid:
+  os._exit(0)
+os.setsid()
+for fd in (0, 1, 2):
+  try:
+    os.close(fd)
+  except OSError:
+    pass
+with open({str(marker)!r}, "w", encoding="ascii") as target:
+  target.write(str(os.getpid()))
+time.sleep(30)
+'''
+  result = target._run_exec({
+    "argv": [sys.executable, "-c", program],
+    "cwd": str(tmp_path),
+    "timeout_seconds": 5,
+  })
+
+  assert result["exit_code"] == 0
+  escaped_pid = int(marker.read_text())
+  assert not Path(f"/proc/{escaped_pid}").exists()
+
+
+def test_concurrent_exec_cleanup_does_not_kill_an_active_supervisor(
+  target, tmp_path,
+):
+  ready = tmp_path / "long-command.ready"
+  long_program = f'''
+import pathlib
+import time
+
+pathlib.Path({str(ready)!r}).touch()
+time.sleep(0.5)
+print("survived")
+'''
+  with ThreadPoolExecutor(max_workers=2) as executor:
+    long_result = executor.submit(target._run_exec, {
+      "argv": [sys.executable, "-c", long_program],
+      "cwd": str(tmp_path),
+      "timeout_seconds": 5,
+    })
+    deadline = time.monotonic() + 3
+    while not ready.exists() and time.monotonic() < deadline:
+      time.sleep(0.01)
+    assert ready.exists(), "long-running supervisor never became active"
+    short_result = executor.submit(target._run_exec, {
+      "argv": ["/bin/true"],
+      "cwd": str(tmp_path),
+      "timeout_seconds": 5,
+    })
+
+  assert short_result.result()["exit_code"] == 0
+  completed = long_result.result()
+  assert completed["exit_code"] == 0
+  assert base64.b64decode(completed["stdout_base64"]) == b"survived\n"
 
 
 def test_exec_output_is_bounded_and_process_is_killed(target, tmp_path, monkeypatch):
@@ -347,6 +493,7 @@ def test_fd_secret_is_absent_from_target_and_root_exec_proc_environments(
   env = os.environ.copy()
   env.pop("MOBIUS_RECOVERY_TARGET_TOKEN", None)
   env["MOBIUS_RECOVERY_TARGET_TOKEN_FD"] = str(read_fd)
+  env["MOBIUS_RECOVERY_TARGET_EXPIRES_AT"] = str(int(time.time()) + 3600)
   program = r'''
 import base64
 import ctypes
@@ -409,6 +556,7 @@ print(json.dumps({
   assert b"MOBIUS_RECOVERY_TARGET_TOKEN=" not in own_environment
   assert token not in command_stdout
   assert b"MOBIUS_RECOVERY_TARGET_TOKEN=" not in command_stdout
+  assert b"MOBIUS_RECOVERY_TARGET_EXPIRES_AT=" not in command_stdout
   # Root can read its own /proc/self/environ on some kernels even after
   # PR_SET_DUMPABLE=0. The security boundary is that the target is provably
   # non-dumpable and its root exec child cannot inspect the parent; the real

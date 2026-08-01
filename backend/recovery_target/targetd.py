@@ -23,6 +23,7 @@ import signal
 import socket
 import stat
 import subprocess
+import sys
 import threading
 import time
 from http import HTTPStatus
@@ -47,6 +48,8 @@ _PR_CAPBSET_DROP = 24
 _PR_CAP_AMBIENT = 47
 _PR_CAP_AMBIENT_IS_SET = 1
 _PR_CAP_AMBIENT_CLEAR_ALL = 4
+_PR_SET_CHILD_SUBREAPER = 36
+_PR_GET_CHILD_SUBREAPER = 37
 _SYS_OPENAT2 = 437
 _RESOLVE_NO_XDEV = 0x01
 _RESOLVE_NO_MAGICLINKS = 0x02
@@ -65,8 +68,15 @@ MAX_TIMEOUT_SECONDS = 900.0
 MAX_ENV_ITEMS = 128
 MAX_ENV_BYTES = 256 * 1024
 MAX_CONCURRENT_EXEC = 2
+MAX_TARGET_LIFETIME_SECONDS = 24 * 60 * 60
 _EXEC_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_EXEC)
+_ACTIVE_SUPERVISORS: set[int] = set()
+_ACTIVE_SUPERVISORS_LOCK = threading.Lock()
 _STARTUP_TOKEN_DIGEST: bytes | None = None
+_TARGET_EXPIRES_AT: int | None = None
+_TARGET_EXPIRED = threading.Event()
+_TARGET_REVOCATION_LOCK = threading.Lock()
+_TARGET_SHUTDOWN_STARTED = False
 _BUILD_REVISION = "unknown"
 _DATA_ROOT = Path(os.environ.get("DATA_DIR", "/data"))
 # Convenience file operations are deliberately narrower than root exec. They
@@ -216,6 +226,30 @@ def _set_process_nondumpable() -> None:
     raise RuntimeError(f"could not disable process dumpability: errno {error}")
 
 
+def _set_child_subreaper() -> None:
+  """Keep every orphaned repair process below this immutable PID1.
+
+  PID 1 is already the final reparenting point in a container PID namespace,
+  but setting and verifying the Linux subreaper bit makes that dependency
+  explicit and gives the per-exec supervisor the same fail-closed primitive.
+  """
+  libc = ctypes.CDLL(None, use_errno=True)
+  prctl = getattr(libc, "prctl", None)
+  if prctl is None:
+    raise RuntimeError("recovery target requires Linux prctl")
+  if prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+    error = ctypes.get_errno()
+    raise RuntimeError(f"could not become a child subreaper: errno {error}")
+  enabled = ctypes.c_int(0)
+  if prctl(
+    _PR_GET_CHILD_SUBREAPER, ctypes.byref(enabled), 0, 0, 0,
+  ) != 0:
+    error = ctypes.get_errno()
+    raise RuntimeError(f"could not verify child subreaper state: errno {error}")
+  if enabled.value != 1:
+    raise RuntimeError("kernel ignored child subreaper configuration")
+
+
 def _assert_clean_initial_environment() -> None:
   """Proves the exec environment itself never received the bearer."""
   if "MOBIUS_RECOVERY_TARGET_TOKEN" in os.environ:
@@ -271,6 +305,43 @@ def _read_startup_token_digest() -> bytes:
       value[index] = 0
 
 
+def _read_target_expiry() -> int:
+  """Consume a bounded absolute deadline for the root capability."""
+  raw = os.environ.pop("MOBIUS_RECOVERY_TARGET_EXPIRES_AT", "")
+  if not raw.isascii() or not raw.isdecimal() or len(raw) > 10:
+    raise RuntimeError(
+      "MOBIUS_RECOVERY_TARGET_EXPIRES_AT must be an epoch integer"
+    )
+  expires_at = int(raw)
+  now = int(time.time())
+  if expires_at <= now:
+    raise RuntimeError("recovery target expiry must be in the future")
+  if expires_at > now + MAX_TARGET_LIFETIME_SECONDS:
+    raise RuntimeError(
+      "recovery target expiry exceeds the maximum 24-hour lifetime"
+    )
+  return expires_at
+
+
+def _target_is_expired() -> bool:
+  expires_at = _TARGET_EXPIRES_AT
+  if _TARGET_EXPIRED.is_set() or expires_at is None:
+    return True
+  if time.time() >= expires_at:
+    _TARGET_EXPIRED.set()
+    return True
+  return False
+
+
+def _require_active_target() -> None:
+  if _target_is_expired():
+    raise RequestError(
+      "auth_expired",
+      "recovery target capability has expired",
+      HTTPStatus.UNAUTHORIZED,
+    )
+
+
 def _load_baked_build_revision() -> str:
   try:
     value = BUILD_REVISION_PATH.read_text(encoding="ascii").strip().lower()
@@ -283,7 +354,7 @@ def _load_baked_build_revision() -> str:
 
 def _initialize_startup_security(*, require_pid_one: bool = True) -> None:
   """Loads immutable identity + bearer before any request can be accepted."""
-  global _BUILD_REVISION, _STARTUP_TOKEN_DIGEST
+  global _BUILD_REVISION, _STARTUP_TOKEN_DIGEST, _TARGET_EXPIRES_AT
   if require_pid_one and os.getpid() != 1:
     raise RuntimeError(
       "recovery target must be container pid 1 so no parent retains its bearer"
@@ -294,6 +365,8 @@ def _initialize_startup_security(*, require_pid_one: bool = True) -> None:
   _assert_fs_policy_supported()
   _drop_recovery_escape_capabilities()
   _set_process_nondumpable()
+  _set_child_subreaper()
+  _TARGET_EXPIRES_AT = _read_target_expiry()
   _STARTUP_TOKEN_DIGEST = _read_startup_token_digest()
   _BUILD_REVISION = _load_baked_build_revision()
 
@@ -463,16 +536,268 @@ def _decode_base64(value: Any, field: str) -> bytes:
   return decoded
 
 
-def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
-  if process.poll() is not None:
+def _process_record(pid: int) -> tuple[int, int] | None:
+  """Return ``(ppid, starttime)`` from proc without trusting process names."""
+  try:
+    raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    tail = raw[raw.rindex(")") + 2:].split()
+    return int(tail[1]), int(tail[19])
+  except (OSError, ValueError, IndexError):
+    return None
+
+
+def _process_snapshot() -> dict[int, tuple[int, int]]:
+  snapshot: dict[int, tuple[int, int]] = {}
+  try:
+    entries = os.scandir("/proc")
+  except OSError:
+    return snapshot
+  with entries:
+    for entry in entries:
+      if not entry.name.isdecimal():
+        continue
+      pid = int(entry.name)
+      record = _process_record(pid)
+      if record is not None:
+        snapshot[pid] = record
+  return snapshot
+
+
+def _descendant_snapshot(
+  root_pid: int,
+) -> dict[int, tuple[int, int, int]]:
+  """Return descendants as ``pid -> (ppid, starttime, depth)``."""
+  processes = _process_snapshot()
+  descendants: dict[int, tuple[int, int, int]] = {}
+  frontier = {root_pid}
+  depth = 1
+  while frontier:
+    found = {
+      pid for pid, (ppid, _starttime) in processes.items()
+      if ppid in frontier and pid != root_pid and pid not in descendants
+    }
+    for pid in found:
+      ppid, starttime = processes[pid]
+      descendants[pid] = (ppid, starttime, depth)
+    frontier = found
+    depth += 1
+  return descendants
+
+
+def _signal_recorded_process(pid: int, starttime: int, signum: int) -> None:
+  current = _process_record(pid)
+  if current is None or current[1] != starttime:
     return
   try:
-    os.killpg(process.pid, signal.SIGKILL)
+    os.kill(pid, signum)
   except ProcessLookupError:
     pass
 
 
+def _stop_and_kill_descendants(root_pid: int) -> None:
+  """Freeze then kill a whole process tree, including new sessions.
+
+  The exec supervisor is a child subreaper, so double-forked and ``setsid``
+  processes remain descendants of this one stable root. Freezing ancestors
+  before the final scan closes the fork-while-cleaning race.
+  """
+  descendants = _descendant_snapshot(root_pid)
+  for pid, (_ppid, starttime, depth) in sorted(
+    descendants.items(), key=lambda item: item[1][2],
+  ):
+    _signal_recorded_process(pid, starttime, signal.SIGSTOP)
+  # A child could fork between the first snapshot and SIGSTOP delivery.
+  descendants.update(_descendant_snapshot(root_pid))
+  for pid, (_ppid, starttime, depth) in sorted(
+    descendants.items(), key=lambda item: item[1][2], reverse=True,
+  ):
+    _signal_recorded_process(pid, starttime, signal.SIGKILL)
+
+
+def _reap_all_children(deadline: float) -> None:
+  while time.monotonic() < deadline:
+    reaped = False
+    while True:
+      try:
+        pid, _status = os.waitpid(-1, os.WNOHANG)
+      except ChildProcessError:
+        return
+      if pid == 0:
+        break
+      reaped = True
+    if not reaped:
+      time.sleep(0.01)
+
+
+def _retire_untracked_target_children() -> None:
+  """Kill/reap only children not owned by another concurrent exec."""
+  with _ACTIVE_SUPERVISORS_LOCK:
+    active = set(_ACTIVE_SUPERVISORS)
+    snapshot = _process_snapshot()
+    roots = {
+      pid: starttime
+      for pid, (ppid, starttime) in snapshot.items()
+      if ppid == os.getpid() and pid not in active
+    }
+    for pid in roots:
+      _stop_and_kill_descendants(pid)
+    for pid, starttime in roots.items():
+      _signal_recorded_process(pid, starttime, signal.SIGKILL)
+    deadline = time.monotonic() + 1.0
+    for pid in roots:
+      while time.monotonic() < deadline:
+        try:
+          waited, _status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+          break
+        if waited == pid:
+          break
+        time.sleep(0.01)
+
+
+def _request_supervisor_termination(process: subprocess.Popen[bytes]) -> None:
+  if process.poll() is not None:
+    return
+  try:
+    os.kill(process.pid, signal.SIGTERM)
+  except ProcessLookupError:
+    pass
+
+
+def _force_kill_supervisor(process: subprocess.Popen[bytes]) -> None:
+  if process.poll() is not None:
+    return
+  _stop_and_kill_descendants(process.pid)
+  try:
+    os.kill(process.pid, signal.SIGKILL)
+  except ProcessLookupError:
+    pass
+
+
+def _retire_active_supervisors(*, force: bool) -> None:
+  """Stop every in-flight root command when the capability expires."""
+  with _ACTIVE_SUPERVISORS_LOCK:
+    active = list(_ACTIVE_SUPERVISORS)
+  for pid in active:
+    record = _process_record(pid)
+    if record is None:
+      continue
+    _ppid, starttime = record
+    if force:
+      _stop_and_kill_descendants(pid)
+      _signal_recorded_process(pid, starttime, signal.SIGKILL)
+    else:
+      _signal_recorded_process(pid, starttime, signal.SIGTERM)
+
+
+def _revoke_target(server: Any) -> None:
+  """Revoke once, close the listener, and leave PID1 parked without restart."""
+  global _STARTUP_TOKEN_DIGEST, _TARGET_SHUTDOWN_STARTED
+  with _TARGET_REVOCATION_LOCK:
+    _TARGET_EXPIRED.set()
+    # Only a one-way digest survives startup, but discard even that verifier
+    # at expiry. Every request checks the sticky expiry event before auth.
+    _STARTUP_TOKEN_DIGEST = None
+    if _TARGET_SHUTDOWN_STARTED:
+      return
+    _TARGET_SHUTDOWN_STARTED = True
+
+  _retire_active_supervisors(force=False)
+  try:
+    # Called by a timer or request thread, never the serve_forever thread.
+    server.shutdown()
+  finally:
+    # Graceful supervisor termination owns normal tree cleanup. This forced
+    # pass closes the small race where a hostile child delays that cleanup.
+    _retire_active_supervisors(force=True)
+
+
+def _read_supervisor_config(fd: int) -> dict[str, Any]:
+  payload = bytearray()
+  try:
+    while len(payload) <= MAX_REQUEST_BYTES:
+      chunk = os.read(fd, min(64 * 1024, MAX_REQUEST_BYTES + 1 - len(payload)))
+      if not chunk:
+        break
+      payload.extend(chunk)
+  finally:
+    os.close(fd)
+  if len(payload) > MAX_REQUEST_BYTES:
+    raise RuntimeError("exec supervisor configuration is too large")
+  try:
+    value = json.loads(payload.decode("utf-8"))
+  except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    raise RuntimeError("exec supervisor configuration is invalid") from exc
+  if not isinstance(value, dict):
+    raise RuntimeError("exec supervisor configuration is invalid")
+  return value
+
+
+def _supervisor_exit_code(returncode: int) -> int:
+  if returncode < 0:
+    return min(255, 128 - returncode)
+  return min(255, returncode)
+
+
+def _exec_supervisor_main(raw_fd: str) -> int:
+  """Own one repair process tree until every descendant has been reaped."""
+  if not raw_fd.isdecimal() or int(raw_fd) < 3:
+    print("recovery exec supervisor received an invalid descriptor", file=sys.stderr)
+    return 125
+  try:
+    _set_child_subreaper()
+    config = _read_supervisor_config(int(raw_fd))
+    argv = config["argv"]
+    cwd = config["cwd"]
+    env = config["env"]
+    if not isinstance(argv, list) or not argv or not isinstance(cwd, str):
+      raise RuntimeError("exec supervisor configuration is invalid")
+    if not isinstance(env, dict):
+      raise RuntimeError("exec supervisor configuration is invalid")
+  except (KeyError, OSError, RuntimeError) as exc:
+    print(f"recovery exec supervisor failed to initialize: {exc}", file=sys.stderr)
+    return 125
+
+  termination_signal: list[int | None] = [None]
+
+  def terminate(signum: int, _frame: object) -> None:
+    termination_signal[0] = signum
+
+  for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(signum, terminate)
+
+  child: subprocess.Popen[bytes] | None = None
+  returncode = 125
+  try:
+    child = subprocess.Popen(argv, cwd=cwd, env=env)
+    while True:
+      if termination_signal[0] is not None:
+        returncode = 128 + int(termination_signal[0])
+        break
+      polled = child.poll()
+      if polled is not None:
+        returncode = _supervisor_exit_code(polled)
+        break
+      time.sleep(0.01)
+  except OSError as exc:
+    print(f"recovery exec supervisor could not start command: {exc}", file=sys.stderr)
+  finally:
+    # This is intentionally unconditional after the direct command exits.
+    # Background/setsid/double-fork children are never durable recovery state.
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+      descendants = _descendant_snapshot(os.getpid())
+      if not descendants:
+        break
+      _stop_and_kill_descendants(os.getpid())
+      _reap_all_children(min(deadline, time.monotonic() + 0.25))
+    _stop_and_kill_descendants(os.getpid())
+    _reap_all_children(deadline)
+  return returncode
+
+
 def _run_exec(body: dict[str, Any]) -> dict[str, Any]:
+  _require_active_target()
   argv = body.get("argv")
   if (
     not isinstance(argv, list)
@@ -560,17 +885,48 @@ def _run_exec(body: dict[str, Any]) -> dict[str, Any]:
     )
   started = time.monotonic()
   process: subprocess.Popen[bytes] | None = None
+  config_read_fd: int | None = None
+  config_write_fd: int | None = None
   try:
     try:
-      process = subprocess.Popen(
-        argv,
-        cwd=str(cwd),
-        env=env,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
-      )
+      config_read_fd, config_write_fd = os.pipe()
+      supervisor_env = {
+        "HOME": "/root",
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "PATH": os.environ.get(
+          "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        ),
+        "DATA_DIR": os.environ.get("DATA_DIR", "/data"),
+      }
+      with _ACTIVE_SUPERVISORS_LOCK:
+        process = subprocess.Popen(
+          [
+            sys.executable, "-I", str(Path(__file__).resolve()),
+            "--exec-supervisor", str(config_read_fd),
+          ],
+          cwd="/",
+          env=supervisor_env,
+          stdin=subprocess.PIPE,
+          stdout=subprocess.PIPE,
+          stderr=subprocess.PIPE,
+          start_new_session=True,
+          pass_fds=(config_read_fd,),
+        )
+        _ACTIVE_SUPERVISORS.add(process.pid)
+      os.close(config_read_fd)
+      config_read_fd = None
+      config_payload = json.dumps({
+        "argv": argv,
+        "cwd": str(cwd),
+        "env": env,
+      }, separators=(",", ":")).encode("utf-8")
+      config_offset = 0
+      while config_offset < len(config_payload):
+        config_offset += os.write(
+          config_write_fd, config_payload[config_offset:],
+        )
+      os.close(config_write_fd)
+      config_write_fd = None
     except OSError as exc:
       raise RequestError(
         "exec_failed", str(exc), HTTPStatus.UNPROCESSABLE_ENTITY
@@ -592,11 +948,18 @@ def _run_exec(body: dict[str, Any]) -> dict[str, Any]:
     output = {"stdout": bytearray(), "stderr": bytearray()}
     truncated = False
     timed_out = False
+    termination_requested_at: float | None = None
+    process_exited_at: float | None = None
     while selector.get_map():
+      if _target_is_expired() and termination_requested_at is None:
+        termination_requested_at = time.monotonic()
+        _request_supervisor_termination(process)
       remaining = timeout - (time.monotonic() - started)
       if remaining <= 0:
         timed_out = True
-        _kill_process_group(process)
+        if termination_requested_at is None:
+          termination_requested_at = time.monotonic()
+          _request_supervisor_termination(process)
         remaining = 0.1
       events = selector.select(min(max(remaining, 0.01), 0.25))
       for key, _mask in events:
@@ -626,15 +989,45 @@ def _run_exec(body: dict[str, Any]) -> dict[str, Any]:
           target.extend(chunk[:room])
         if len(chunk) > room:
           truncated = True
-          _kill_process_group(process)
+          if termination_requested_at is None:
+            termination_requested_at = time.monotonic()
+            _request_supervisor_termination(process)
 
       if process.poll() is not None:
+        if process_exited_at is None:
+          process_exited_at = time.monotonic()
         # Pipes may still contain a final kernel-buffered chunk. Keep draining
-        # them, but an unwritten stdin pipe can now be retired.
+        # briefly, but never let an escaped descriptor holder defeat the API's
+        # timeout after its per-exec supervisor has exited.
         if process.stdin in [item.fileobj for item in selector.get_map().values()]:
           selector.unregister(process.stdin)
           process.stdin.close()
-    exit_code = process.wait(timeout=2)
+        if time.monotonic() - process_exited_at >= 0.5:
+          for item in list(selector.get_map().values()):
+            stream = item.fileobj
+            selector.unregister(stream)
+            stream.close()
+          break
+      elif (
+        termination_requested_at is not None
+        and time.monotonic() - termination_requested_at >= 3.0
+      ):
+        _force_kill_supervisor(process)
+    try:
+      exit_code = process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+      # A supervisor that has closed its pipes but has not exited is not a
+      # completed repair command. Kill it before reporting a target failure so
+      # callers can never mistake an uncontained process for a clean result.
+      _force_kill_supervisor(process)
+      try:
+        exit_code = process.wait(timeout=1)
+      except subprocess.TimeoutExpired as final_exc:
+        raise RequestError(
+          "exec_cleanup_failed",
+          "repair process supervisor could not be retired",
+          HTTPStatus.INTERNAL_SERVER_ERROR,
+        ) from final_exc
     elapsed_ms = round((time.monotonic() - started) * 1000)
     return {
       "exit_code": exit_code,
@@ -645,16 +1038,31 @@ def _run_exec(body: dict[str, Any]) -> dict[str, Any]:
       "duration_ms": elapsed_ms,
     }
   finally:
+    for fd in (config_read_fd, config_write_fd):
+      if fd is not None:
+        try:
+          os.close(fd)
+        except OSError:
+          pass
     if process is not None and process.poll() is None:
-      _kill_process_group(process)
+      _request_supervisor_termination(process)
       try:
         process.wait(timeout=2)
       except subprocess.TimeoutExpired:
-        pass
+        _force_kill_supervisor(process)
+        try:
+          process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+          pass
+    if process is not None:
+      with _ACTIVE_SUPERVISORS_LOCK:
+        _ACTIVE_SUPERVISORS.discard(process.pid)
+    _retire_untracked_target_children()
     _EXEC_SLOTS.release()
 
 
 def _read_file(body: dict[str, Any]) -> dict[str, Any]:
+  _require_active_target()
   path = _absolute_path(body.get("path"))
   offset = _bounded_int(
     body.get("offset"), field="offset", default=0, minimum=0, maximum=2**63 - 1
@@ -704,6 +1112,7 @@ def _read_file(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _write_file(body: dict[str, Any]) -> dict[str, Any]:
+  _require_active_target()
   path = _absolute_path(body.get("path"))
   data = _decode_base64(body.get("data_base64"), "data_base64")
   mode = _bounded_int(
@@ -773,6 +1182,7 @@ def _write_file(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _list_directory(body: dict[str, Any]) -> dict[str, Any]:
+  _require_active_target()
   path = _absolute_path(body.get("path"))
   directory_fd: int | None = None
   try:
@@ -856,6 +1266,18 @@ class _Handler(BaseHTTPRequestHandler):
     )
 
   def _authorized(self) -> bool:
+    if _target_is_expired():
+      _revoke_target(self.server)
+      self._send(
+        HTTPStatus.UNAUTHORIZED,
+        {
+          "error": {
+            "code": "auth_expired",
+            "message": "recovery target capability has expired",
+          }
+        },
+      )
+      return False
     values = self.headers.get_all("Authorization", failobj=[]) or []
     supplied_buffer: bytearray | None = None
     authorized = False
@@ -867,14 +1289,30 @@ class _Handler(BaseHTTPRequestHandler):
         pass
       else:
         supplied_digest = _token_digest(supplied_buffer)
-        authorized = hmac.compare_digest(
-          supplied_digest, _startup_token_digest()
-        )
+        try:
+          expected_digest = _startup_token_digest()
+        except RuntimeError:
+          expected_digest = b""
+        authorized = hmac.compare_digest(supplied_digest, expected_digest)
       finally:
         if supplied_buffer is not None:
           for index in range(len(supplied_buffer)):
             supplied_buffer[index] = 0
     values.clear()
+    # Close the compare-vs-deadline race: expiry is sticky, so even a wall-clock
+    # adjustment cannot make a revoked capability valid again.
+    if _target_is_expired():
+      _revoke_target(self.server)
+      self._send(
+        HTTPStatus.UNAUTHORIZED,
+        {
+          "error": {
+            "code": "auth_expired",
+            "message": "recovery target capability has expired",
+          }
+        },
+      )
+      return False
     if not authorized:
       self._send(
         HTTPStatus.UNAUTHORIZED,
@@ -920,6 +1358,7 @@ class _Handler(BaseHTTPRequestHandler):
       "target": "mobius",
       "mode": "recovery",
       "build_sha": _BUILD_REVISION,
+      "expires_at": _TARGET_EXPIRES_AT,
     })
 
   def do_POST(self) -> None:  # noqa: N802
@@ -982,6 +1421,30 @@ def _create_server(port: int) -> ThreadingHTTPServer:
     return _IPv4Server(("0.0.0.0", port), _Handler)
 
 
+def _schedule_target_expiry(server: ThreadingHTTPServer) -> threading.Timer:
+  expires_at = _TARGET_EXPIRES_AT
+  if expires_at is None:
+    raise RuntimeError("recovery target expiry is not initialized")
+  delay = max(0.0, expires_at - time.time())
+  timer = threading.Timer(delay, _revoke_target, args=(server,))
+  timer.daemon = True
+  timer.start()
+  return timer
+
+
+def _park_expired_target() -> None:
+  """Keep an expired PID1 quiescent so restart policies cannot hot-loop."""
+  stopped = threading.Event()
+
+  def stop(_signum: int, _frame: object) -> None:
+    stopped.set()
+
+  for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(signum, stop)
+  while not stopped.wait(3600):
+    pass
+
+
 def main() -> None:
   if os.environ.get("MOBIUS_BOOT_MODE") != "recovery":
     raise SystemExit("recovery target refuses to run outside recovery boot mode")
@@ -1006,8 +1469,21 @@ def main() -> None:
     f"Mobius recovery target {PROTOCOL} listening privately on [::]:{port}",
     flush=True,
   )
-  server.serve_forever(poll_interval=0.25)
+  expiry_timer = _schedule_target_expiry(server)
+  try:
+    server.serve_forever(poll_interval=0.25)
+  finally:
+    expiry_timer.cancel()
+    server.server_close()
+  if _TARGET_EXPIRED.is_set():
+    print(
+      "recovery-target: capability expired; listener closed and PID1 parked",
+      flush=True,
+    )
+    _park_expired_target()
 
 
 if __name__ == "__main__":
+  if len(sys.argv) == 3 and sys.argv[1] == "--exec-supervisor":
+    raise SystemExit(_exec_supervisor_main(sys.argv[2]))
   main()

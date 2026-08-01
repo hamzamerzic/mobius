@@ -5,7 +5,8 @@
 
 # Recovery target mode is an immutable, early boot path. It must run before
 # touching /data or importing any agent-editable platform code. The separate
-# recovery worker reaches this private listener with a one-time bearer token.
+# recovery worker reaches this private listener with a one-time bearer token
+# whose canonical base-10 epoch deadline is enforced by targetd itself.
 case "${MOBIUS_BOOT_MODE:-normal}" in
   normal) ;;
   recovery)

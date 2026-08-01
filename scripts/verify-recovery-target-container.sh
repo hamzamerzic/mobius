@@ -5,8 +5,10 @@ set -euo pipefail
 
 IMAGE=${MOBIUS_IMAGE:-mobius}
 CONTAINER="mobius-recovery-target-security-$$"
+EXPIRED_CONTAINER="${CONTAINER}-expired"
 ENV_FILE=$(mktemp /tmp/mobius-recovery-target-security.XXXXXX)
 TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')
+EXPIRES_AT=$(($(date -u +%s) + 600))
 
 cleanup() {
   status=$?
@@ -14,6 +16,7 @@ cleanup() {
     docker logs "$CONTAINER" 2>/dev/null || true
   fi
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  docker rm -f "$EXPIRED_CONTAINER" >/dev/null 2>&1 || true
   rm -f "$ENV_FILE"
   exit "$status"
 }
@@ -25,6 +28,7 @@ printf '%s\n' \
   'MOBIUS_RECOVERY_TARGET_PORT=18002' \
   'DATA_DIR=/data' \
   'BUILD_SHA=runtime-spoof-must-not-win' \
+  "MOBIUS_RECOVERY_TARGET_EXPIRES_AT=$EXPIRES_AT" \
   "MOBIUS_RECOVERY_TARGET_TOKEN=$TOKEN" >"$ENV_FILE"
 
 # Add dangerous capabilities deliberately. targetd must remove them itself so
@@ -50,6 +54,7 @@ BINDING=$(docker port "$CONTAINER" 18002/tcp)
 PORT=${BINDING##*:}
 MOBIUS_TEST_URL="http://127.0.0.1:$PORT" \
 MOBIUS_TEST_TOKEN="$TOKEN" \
+MOBIUS_TEST_EXPIRES_AT="$EXPIRES_AT" \
 python3 - <<'PY'
 import base64
 import errno
@@ -61,6 +66,7 @@ import urllib.request
 
 url = os.environ["MOBIUS_TEST_URL"]
 token = os.environ["MOBIUS_TEST_TOKEN"]
+expires_at = int(os.environ["MOBIUS_TEST_EXPIRES_AT"])
 headers = {
   "Authorization": f"Bearer {token}",
   "Content-Type": "application/json",
@@ -104,6 +110,7 @@ while True:
 revision = health["build_sha"]
 assert len(revision) == 40 and all(c in "0123456789abcdef" for c in revision)
 assert revision != "runtime-spoof-must-not-win"
+assert health["expires_at"] == expires_at, health
 
 # Target PID1 handles convenience filesystem calls itself, so nondumpability
 # alone cannot protect its memory from a confused-deputy /proc read. Prove the
@@ -141,6 +148,46 @@ rejected("/v1/fs/write", {
   "data_base64": base64.b64encode(b"blocked").decode("ascii"),
 })
 assert len(rejected_fs_checks) == 11, rejected_fs_checks
+
+# A process group is not a containment boundary: a repair command can call
+# setsid and double-fork while retaining the HTTP response pipes. The baked
+# per-exec subreaper must kill/reap that descendant before returning.
+escaped_program = r'''
+import os
+import time
+
+pid = os.fork()
+if pid:
+  os._exit(0)
+os.setsid()
+pid = os.fork()
+if pid:
+  os._exit(0)
+with open("/tmp/recovery-escaped.pid", "w", encoding="ascii") as target:
+  target.write(str(os.getpid()))
+time.sleep(30)
+'''
+escaped_started = time.monotonic()
+escaped_result = request("/v1/exec", {
+  "argv": ["/usr/local/bin/python3", "-c", escaped_program],
+  "cwd": "/tmp",
+  "timeout_seconds": 5,
+})
+assert escaped_result["exit_code"] == 0, escaped_result
+assert not escaped_result["timed_out"], escaped_result
+assert time.monotonic() - escaped_started < 3, escaped_result
+escaped_marker = request(
+  "/v1/fs/read", {"path": "/tmp/recovery-escaped.pid"},
+)
+escaped_pid = int(base64.b64decode(escaped_marker["data_base64"]))
+escaped_probe = request("/v1/exec", {
+  "argv": [
+    "/usr/local/bin/python3", "-c",
+    f"import os,sys; sys.exit(1 if os.path.exists('/proc/{escaped_pid}') else 0)",
+  ],
+  "cwd": "/tmp",
+})
+assert escaped_probe["exit_code"] == 0, (escaped_pid, escaped_probe)
 
 child_program = r'''
 import json
@@ -253,8 +300,86 @@ for name, raw_value in child["caps"].items():
 print(json.dumps({
   "blocked_fs_checks": len(rejected_fs_checks),
   "build_sha": revision,
+  "escaped_pid_reaped": escaped_pid,
   "packet_errno": child["packet"]["errno"],
   "capabilities": child["caps"],
   "pid_one": child["pid_one"],
 }, sort_keys=True))
 PY
+
+# A retained bearer must become inert at the target's own absolute deadline,
+# independently of worker/session state. The target closes its listener and
+# parks PID1 instead of exiting into an `unless-stopped` restart loop.
+TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')
+EXPIRES_AT=$(($(date -u +%s) + 8))
+ENV_FILE=$(mktemp /tmp/mobius-recovery-target-expiry.XXXXXX)
+chmod 600 "$ENV_FILE"
+printf '%s\n' \
+  'MOBIUS_BOOT_MODE=recovery' \
+  'MOBIUS_RECOVERY_TARGET_PORT=18002' \
+  'DATA_DIR=/data' \
+  "MOBIUS_RECOVERY_TARGET_EXPIRES_AT=$EXPIRES_AT" \
+  "MOBIUS_RECOVERY_TARGET_TOKEN=$TOKEN" >"$ENV_FILE"
+docker run -d \
+  --name "$EXPIRED_CONTAINER" \
+  --read-only \
+  --tmpfs /tmp \
+  --tmpfs /run \
+  --tmpfs /data \
+  --no-healthcheck \
+  --env-file "$ENV_FILE" \
+  -p 127.0.0.1::18002 \
+  "$IMAGE" >/dev/null
+rm -f "$ENV_FILE"
+
+BINDING=$(docker port "$EXPIRED_CONTAINER" 18002/tcp)
+PORT=${BINDING##*:}
+MOBIUS_TEST_URL="http://127.0.0.1:$PORT" \
+MOBIUS_TEST_TOKEN="$TOKEN" \
+MOBIUS_TEST_EXPIRES_AT="$EXPIRES_AT" \
+python3 - <<'PY'
+import json
+import os
+import time
+import urllib.error
+import urllib.request
+
+url = os.environ["MOBIUS_TEST_URL"]
+token = os.environ["MOBIUS_TEST_TOKEN"]
+expires_at = int(os.environ["MOBIUS_TEST_EXPIRES_AT"])
+request = urllib.request.Request(
+  url + "/v1/health",
+  headers={"Authorization": f"Bearer {token}"},
+)
+while True:
+  try:
+    with urllib.request.urlopen(request, timeout=1) as response:
+      health = json.load(response)
+    break
+  except (OSError, urllib.error.URLError):
+    if time.time() >= expires_at - 1:
+      raise
+    time.sleep(0.1)
+assert health["expires_at"] == expires_at, health
+
+time.sleep(max(0, expires_at - time.time()) + 0.25)
+try:
+  urllib.request.urlopen(request, timeout=1)
+except urllib.error.HTTPError as exc:
+  body = json.load(exc)
+  assert exc.code == 401, (exc.code, body)
+  assert body["error"]["code"] == "auth_expired", body
+  result = "auth_expired"
+except (ConnectionError, urllib.error.URLError, TimeoutError, OSError):
+  result = "listener_closed"
+else:
+  raise AssertionError("expired recovery bearer was still accepted")
+print(json.dumps({"expired_bearer": result}, sort_keys=True))
+PY
+
+expired_state=$(docker inspect \
+  -f '{{.State.Running}} {{.RestartCount}}' "$EXPIRED_CONTAINER")
+[ "$expired_state" = "true 0" ] || {
+  echo "expired recovery target did not remain quiescent: $expired_state" >&2
+  exit 1
+}

@@ -92,6 +92,7 @@ services:
       - MOBIUS_BOOT_MODE=recovery
       - MOBIUS_RECOVERY_TARGET_PORT=18002
       - MOBIUS_RECOVERY_TARGET_TOKEN=${MOBIUS_RECOVERY_TARGET_TOKEN:-not-configured}
+      - MOBIUS_RECOVERY_TARGET_EXPIRES_AT=${MOBIUS_RECOVERY_TARGET_EXPIRES_AT:-0}
       - DATA_DIR=/data
     volumes:
       - app_data:/data
