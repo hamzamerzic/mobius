@@ -118,6 +118,17 @@ from app.memory_observability import record_memory_checkpoint_once
 
 log = logging.getLogger("moebius.chat")
 
+# Möbius supplies the complete behavioral constitution through the thread's
+# base_instructions. These overrides prevent user/project Codex configuration
+# from silently adding a second instruction stack. Permission, tool, app, and
+# environment blocks remain Codex-owned because they describe the runtime
+# surface rather than agent behavior.
+_CODEX_PROMPT_CONTROL_OVERRIDES = [
+  'instructions=""',
+  'developer_instructions=""',
+  "project_doc_max_bytes=0",
+]
+
 
 def _env_flag_on(name: str, *, default: bool) -> bool:
   """Read a boolean env var: ``off``/``0``/``false``/``no``/empty disable it;
@@ -135,6 +146,10 @@ def _codex_config_overrides(
   allow_goals: bool = True,
 ) -> list[str]:
   """Assemble the Codex ``CodexConfig.config_overrides`` for a turn.
+
+  Prompt-control overrides are unconditional: per-chat ``base_instructions``
+  owns behavior, while config files and project instruction documents must not
+  grow a provider-specific second constitution.
 
   ``request_user_input`` (AskUserQuestion parity) is on for ordinary chats and
   deliberately absent for delegated children. Multi-agent (collab /
@@ -155,7 +170,7 @@ def _codex_config_overrides(
   robust to a rollout change, not just to the binary we probed. Re-run the
   delegate probe after any @openai/codex bump.
   """
-  overrides = []
+  overrides = list(_CODEX_PROMPT_CONTROL_OVERRIDES)
   if allow_questions:
     overrides.append("features.default_mode_request_user_input=true")
   if allow_goals:
@@ -873,7 +888,7 @@ def _sdk_imports() -> dict[str, Any]:
     InvalidRequestError,
     TransportClosedError,
   )
-  from openai_codex.types import ReasoningEffort, ReasoningSummary
+  from openai_codex.types import Personality, ReasoningEffort, ReasoningSummary
   from openai_codex.generated.v2_all import (
     AgentMessageDeltaNotification,
     AgentMessageThreadItem,
@@ -982,6 +997,7 @@ def _sdk_imports() -> dict[str, Any]:
     "FileChangePatchUpdatedNotification": FileChangePatchUpdatedNotification,
     "FileChangeThreadItem": FileChangeThreadItem,
     "ImageViewThreadItem": ImageViewThreadItem,
+    "Personality": Personality,
     "ReasoningEffort": ReasoningEffort,
     "ReasoningSummary": ReasoningSummary,
     "Sandbox": Sandbox,
@@ -1445,10 +1461,9 @@ async def run_codex_sdk_turn(
   env = dict(base_env)
   env.setdefault("CODEX_HOME", "/data/cli-auth/codex")
 
-  # config_overrides carries the request_user_input (AskUserQuestion parity) and
-  # multi-agent enablement flags — assembled, with the #31864 tool_namespace pin
-  # and the MOEBIUS_CODEX_MULTI_AGENT kill switch, in _codex_config_overrides().
-  # Delegated children disable both at this provider-owned seam.
+  # config_overrides always isolates the prompt stack, then carries the
+  # request_user_input (AskUserQuestion parity), goal, and multi-agent flags.
+  # Delegated children disable those optional tools at this provider-owned seam.
   codex_bin = shutil.which("codex")
   delegated = run_policy is not None
   config_overrides = _codex_config_overrides(
@@ -1674,8 +1689,10 @@ async def run_codex_sdk_turn(
           approval_mode=sdk["ApprovalMode"].auto_review,
           sandbox=_sandbox,
           base_instructions=base_instructions,
+          developer_instructions="",
           cwd=cwd,
           model=model,
+          personality=sdk["Personality"].none,
         )
       else:
         # Resume parses the thread's persisted history, which can include
@@ -1690,8 +1707,10 @@ async def run_codex_sdk_turn(
           approval_mode=sdk["ApprovalMode"].auto_review,
           sandbox=_sandbox,
           base_instructions=base_instructions,
+          developer_instructions="",
           cwd=cwd,
           model=model,
+          personality=sdk["Personality"].none,
         )
       record_memory_checkpoint_once(
         "codex_first_thread_ready",
