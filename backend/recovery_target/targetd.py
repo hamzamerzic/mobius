@@ -13,15 +13,16 @@ import base64
 import binascii
 import ctypes
 import errno
+import hashlib
 import hmac
 import json
 import os
+import secrets
 import selectors
 import signal
 import socket
 import stat
 import subprocess
-import tempfile
 import threading
 import time
 from http import HTTPStatus
@@ -35,12 +36,22 @@ DEFAULT_PORT = 18002
 BUILD_REVISION_PATH = Path("/app/recovery-target/BUILD_REVISION")
 CAP_NET_ADMIN = 12
 CAP_NET_RAW = 13
+CAP_SYS_PTRACE = 19
+CAP_SYS_ADMIN = 21
+_BLOCKED_CAPABILITIES = (
+  CAP_NET_ADMIN, CAP_NET_RAW, CAP_SYS_PTRACE, CAP_SYS_ADMIN,
+)
 _CAPABILITY_VERSION_3 = 0x20080522
 _PR_CAPBSET_READ = 23
 _PR_CAPBSET_DROP = 24
 _PR_CAP_AMBIENT = 47
 _PR_CAP_AMBIENT_IS_SET = 1
 _PR_CAP_AMBIENT_CLEAR_ALL = 4
+_SYS_OPENAT2 = 437
+_RESOLVE_NO_XDEV = 0x01
+_RESOLVE_NO_MAGICLINKS = 0x02
+_RESOLVE_BENEATH = 0x08
+_TOKEN_DIGEST_DOMAIN = b"mobius-recovery-target/v1 bearer\x00"
 # An 8 MiB decoded payload expands to about 10.67 MiB as base64 before the JSON
 # envelope is counted. Keep the wire budget large enough for the advertised
 # file/stdin boundary while still rejecting unbounded request bodies.
@@ -55,8 +66,16 @@ MAX_ENV_ITEMS = 128
 MAX_ENV_BYTES = 256 * 1024
 MAX_CONCURRENT_EXEC = 2
 _EXEC_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_EXEC)
-_STARTUP_TOKEN: bytes | None = None
+_STARTUP_TOKEN_DIGEST: bytes | None = None
 _BUILD_REVISION = "unknown"
+_DATA_ROOT = Path(os.environ.get("DATA_DIR", "/data"))
+# Convenience file operations are deliberately narrower than root exec. They
+# run inside target PID1 and therefore must never act as a confused deputy for
+# /proc memory. Recovery data, baked app sources, and scratch paths are
+# sufficient for inspection; only stopped-instance data and scratch are
+# writable. openat2 enforces these roots against symlink and mount races.
+_FS_READ_ROOTS = (_DATA_ROOT, Path("/app"), Path("/tmp"))
+_FS_WRITE_ROOTS = (_DATA_ROOT, Path("/tmp"))
 
 
 class _CapabilityHeader(ctypes.Structure):
@@ -74,6 +93,14 @@ class _CapabilityData(ctypes.Structure):
   ]
 
 
+class _OpenHow(ctypes.Structure):
+  _fields_ = [
+    ("flags", ctypes.c_uint64),
+    ("mode", ctypes.c_uint64),
+    ("resolve", ctypes.c_uint64),
+  ]
+
+
 class RequestError(Exception):
   def __init__(
     self,
@@ -87,22 +114,22 @@ class RequestError(Exception):
     self.status = status
 
 
-def _validate_token(value: bytes) -> bytes:
+def _validate_token(value: bytes | bytearray | memoryview) -> None:
   if len(value) < 32 or len(value) > 512:
     raise RuntimeError(
-      "MOBIUS_RECOVERY_TARGET_TOKEN must contain 32-512 UTF-8 bytes"
+      "MOBIUS_RECOVERY_TARGET_TOKEN must contain 32-512 printable ASCII bytes"
     )
-  try:
-    value.decode("utf-8")
-  except UnicodeDecodeError as exc:
+  if any(byte < 0x21 or byte > 0x7E for byte in value):
     raise RuntimeError(
-      "MOBIUS_RECOVERY_TARGET_TOKEN must contain 32-512 UTF-8 bytes"
-    ) from exc
-  if b"\x00" in value or b"\r" in value or b"\n" in value:
-    raise RuntimeError(
-      "MOBIUS_RECOVERY_TARGET_TOKEN must not contain NUL or newlines"
+      "MOBIUS_RECOVERY_TARGET_TOKEN must contain 32-512 printable ASCII bytes"
     )
-  return value
+
+
+def _token_digest(value: bytes | bytearray | memoryview) -> bytes:
+  verifier = hashlib.sha256()
+  verifier.update(_TOKEN_DIGEST_DOMAIN)
+  verifier.update(value)
+  return verifier.digest()
 
 
 def _capability_state(
@@ -116,8 +143,8 @@ def _capability_state(
   return header, data
 
 
-def _drop_packet_capture_capabilities() -> None:
-  """Permanently deny packet capture/manipulation to target exec children."""
+def _drop_recovery_escape_capabilities() -> None:
+  """Deny packet capture, ptrace, and mounts to target exec children."""
   libc = ctypes.CDLL(None, use_errno=True)
   capget = getattr(libc, "capget", None)
   capset = getattr(libc, "capset", None)
@@ -125,12 +152,12 @@ def _drop_packet_capture_capabilities() -> None:
   if capget is None or capset is None or prctl is None:
     raise RuntimeError("recovery target requires Linux capability controls")
 
-  # A root repair command otherwise inherits Docker's CAP_NET_RAW and can use
-  # AF_PACKET to capture a later worker Authorization header on the private
-  # plain-HTTP interface. Remove both packet capabilities from every mutable
-  # set and the bounding set before the server starts listening.
+  # A root repair command must not capture a later Authorization header,
+  # ptrace target PID1, or create a nested mount that bypasses filesystem-root
+  # policy. None of these powers are needed to repair the stopped /data tree.
+  # Remove them from every mutable set and the bounding set before listening.
   header, data = _capability_state(libc)
-  for capability in (CAP_NET_ADMIN, CAP_NET_RAW):
+  for capability in _BLOCKED_CAPABILITIES:
     word = capability // 32
     mask = 1 << (capability % 32)
     data[word].effective &= ~mask
@@ -159,7 +186,7 @@ def _drop_packet_capture_capabilities() -> None:
   # Fail closed if the kernel ignored any operation. The bounding-set check is
   # essential because uid 0 regains capabilities from that set across exec.
   _, restricted = _capability_state(libc)
-  for capability in (CAP_NET_ADMIN, CAP_NET_RAW):
+  for capability in _BLOCKED_CAPABILITIES:
     word = capability // 32
     mask = 1 << (capability % 32)
     if (
@@ -203,8 +230,8 @@ def _assert_clean_initial_environment() -> None:
     raise RuntimeError("recovery target bearer is exposed through /proc")
 
 
-def _read_startup_token() -> bytes:
-  """Consumes the one-shot inherited descriptor; never reads a secret env."""
+def _read_startup_token_digest() -> bytes:
+  """Consumes and wipes the bearer, retaining only a one-way verifier."""
   if "MOBIUS_RECOVERY_TARGET_TOKEN" in os.environ:
     raise RuntimeError(
       "MOBIUS_RECOVERY_TARGET_TOKEN must not reach the target environment"
@@ -215,13 +242,16 @@ def _read_startup_token() -> bytes:
   fd = int(raw_fd)
   if fd < 3:
     raise RuntimeError("MOBIUS_RECOVERY_TARGET_TOKEN_FD is invalid")
-  value = bytearray()
+  value = bytearray(513)
+  view = memoryview(value)
+  token: memoryview | None = None
+  length = 0
   try:
-    while len(value) <= 512:
-      chunk = os.read(fd, 513 - len(value))
-      if not chunk:
+    while length < len(value):
+      read = os.readv(fd, [view[length:]])
+      if not read:
         break
-      value.extend(chunk)
+      length += read
   except OSError as exc:
     raise RuntimeError("could not consume recovery target bearer") from exc
   finally:
@@ -230,8 +260,13 @@ def _read_startup_token() -> bytes:
     except OSError:
       pass
   try:
-    return _validate_token(bytes(value))
+    token = view[:length]
+    _validate_token(token)
+    return _token_digest(token)
   finally:
+    if token is not None:
+      token.release()
+    view.release()
     for index in range(len(value)):
       value[index] = 0
 
@@ -248,24 +283,25 @@ def _load_baked_build_revision() -> str:
 
 def _initialize_startup_security(*, require_pid_one: bool = True) -> None:
   """Loads immutable identity + bearer before any request can be accepted."""
-  global _BUILD_REVISION, _STARTUP_TOKEN
+  global _BUILD_REVISION, _STARTUP_TOKEN_DIGEST
   if require_pid_one and os.getpid() != 1:
     raise RuntimeError(
       "recovery target must be container pid 1 so no parent retains its bearer"
     )
-  if _STARTUP_TOKEN is not None:
+  if _STARTUP_TOKEN_DIGEST is not None:
     raise RuntimeError("recovery target startup security was already initialized")
   _assert_clean_initial_environment()
-  _drop_packet_capture_capabilities()
+  _assert_fs_policy_supported()
+  _drop_recovery_escape_capabilities()
   _set_process_nondumpable()
-  _STARTUP_TOKEN = _read_startup_token()
+  _STARTUP_TOKEN_DIGEST = _read_startup_token_digest()
   _BUILD_REVISION = _load_baked_build_revision()
 
 
-def _startup_token() -> bytes:
-  if _STARTUP_TOKEN is None:
+def _startup_token_digest() -> bytes:
+  if _STARTUP_TOKEN_DIGEST is None:
     raise RuntimeError("recovery target bearer is not initialized")
-  return _STARTUP_TOKEN
+  return _STARTUP_TOKEN_DIGEST
 
 
 def _absolute_path(value: Any, field: str = "path") -> Path:
@@ -275,6 +311,121 @@ def _absolute_path(value: Any, field: str = "path") -> Path:
   if not path.is_absolute():
     raise RequestError("invalid_path", f"{field} must be absolute")
   return path
+
+
+def _openat2(dir_fd: int, relative: Path, flags: int, mode: int = 0) -> int:
+  """Open one path beneath dir_fd without symlink or mount escapes."""
+  if relative.is_absolute():
+    raise ValueError("openat2 path must be relative")
+  raw_path = os.fsencode(str(relative) or ".")
+  if b"\x00" in raw_path:
+    raise OSError(errno.EINVAL, "path contains NUL")
+  how = _OpenHow(
+    flags=flags,
+    mode=mode,
+    resolve=_RESOLVE_BENEATH | _RESOLVE_NO_MAGICLINKS | _RESOLVE_NO_XDEV,
+  )
+  libc = ctypes.CDLL(None, use_errno=True)
+  result = libc.syscall(
+    ctypes.c_long(_SYS_OPENAT2),
+    ctypes.c_int(dir_fd),
+    ctypes.c_char_p(raw_path),
+    ctypes.byref(how),
+    ctypes.c_size_t(ctypes.sizeof(how)),
+  )
+  if result < 0:
+    error = ctypes.get_errno()
+    raise OSError(error, os.strerror(error), os.fsdecode(raw_path))
+  return int(result)
+
+
+def _select_fs_root(path: Path, roots: tuple[Path, ...]) -> tuple[Path, Path]:
+  for root in sorted(set(roots), key=lambda item: len(item.parts), reverse=True):
+    if not root.is_absolute():
+      continue
+    try:
+      relative = path.relative_to(root)
+    except ValueError:
+      continue
+    return root, relative if relative.parts else Path(".")
+  raise RequestError(
+    "path_forbidden",
+    "path is outside the recovery filesystem roots",
+    HTTPStatus.FORBIDDEN,
+  )
+
+
+def _translate_policy_open_error(exc: OSError) -> None:
+  if exc.errno in {errno.EXDEV, errno.ELOOP}:
+    raise RequestError(
+      "path_forbidden",
+      "path escapes its recovery filesystem root",
+      HTTPStatus.FORBIDDEN,
+    ) from exc
+  if exc.errno in {errno.ENOSYS, errno.EOPNOTSUPP}:
+    raise RequestError(
+      "path_policy_unavailable",
+      "kernel-enforced recovery path policy is unavailable",
+      HTTPStatus.INTERNAL_SERVER_ERROR,
+    ) from exc
+  raise exc
+
+
+def _open_relative(root: Path, relative: Path, flags: int, mode: int = 0) -> int:
+  root_flags = (
+    getattr(os, "O_PATH", os.O_RDONLY)
+    | os.O_DIRECTORY
+    | os.O_CLOEXEC
+    | getattr(os, "O_NOFOLLOW", 0)
+  )
+  root_fd = os.open(root, root_flags)
+  try:
+    try:
+      return _openat2(root_fd, relative, flags | os.O_CLOEXEC, mode)
+    except OSError as exc:
+      _translate_policy_open_error(exc)
+      raise AssertionError("unreachable")
+  finally:
+    os.close(root_fd)
+
+
+def _open_fs_path(
+  path: Path,
+  roots: tuple[Path, ...],
+  flags: int,
+  mode: int = 0,
+) -> int:
+  root, relative = _select_fs_root(path, roots)
+  return _open_relative(root, relative, flags, mode)
+
+
+def _open_fs_parent(
+  path: Path, roots: tuple[Path, ...],
+) -> tuple[int, str]:
+  root, relative = _select_fs_root(path, roots)
+  name = relative.name
+  if relative == Path(".") or name in {"", ".", ".."} or "/" in name:
+    raise RequestError(
+      "invalid_path", "path must name an entry below a recovery filesystem root"
+    )
+  parent_fd = _open_relative(
+    root, relative.parent, os.O_RDONLY | os.O_DIRECTORY,
+  )
+  return parent_fd, name
+
+
+def _assert_fs_policy_supported() -> None:
+  """Fail target startup unless the kernel can enforce race-free roots."""
+  if any(not root.is_absolute() for root in (*_FS_READ_ROOTS, *_FS_WRITE_ROOTS)):
+    raise RuntimeError("recovery filesystem roots must be absolute")
+  try:
+    fd = _open_relative(Path("/tmp"), Path("."), os.O_RDONLY | os.O_DIRECTORY)
+  except (OSError, RequestError) as exc:
+    raise RuntimeError(
+      "kernel-enforced recovery filesystem policy is unavailable"
+    ) from exc
+  else:
+    os.close(fd)
 
 
 def _bounded_int(
@@ -515,13 +666,22 @@ def _read_file(body: dict[str, Any]) -> dict[str, Any]:
     minimum=1,
     maximum=MAX_FILE_BYTES,
   )
+  fd: int | None = None
   try:
-    st = path.stat()
+    fd = _open_fs_path(path, _FS_READ_ROOTS, os.O_RDONLY)
+    st = os.fstat(fd)
     if not stat.S_ISREG(st.st_mode):
       raise RequestError("not_a_file", "path is not a regular file")
-    with path.open("rb") as handle:
-      handle.seek(offset)
-      data = handle.read(limit)
+    os.lseek(fd, offset, os.SEEK_SET)
+    chunks: list[bytes] = []
+    remaining = limit
+    while remaining:
+      chunk = os.read(fd, remaining)
+      if not chunk:
+        break
+      chunks.append(chunk)
+      remaining -= len(chunk)
+    data = b"".join(chunks)
     return {
       "path": str(path),
       "offset": offset,
@@ -538,6 +698,9 @@ def _read_file(body: dict[str, Any]) -> dict[str, Any]:
     raise RequestError(
       "fs_read_failed", str(exc), HTTPStatus.UNPROCESSABLE_ENTITY
     ) from exc
+  finally:
+    if fd is not None:
+      os.close(fd)
 
 
 def _write_file(body: dict[str, Any]) -> dict[str, Any]:
@@ -549,14 +712,26 @@ def _write_file(body: dict[str, Any]) -> dict[str, Any]:
   atomic = body.get("atomic", True)
   if not isinstance(atomic, bool):
     raise RequestError("invalid_request", "atomic must be a boolean")
-  if not path.parent.is_dir():
-    raise RequestError("missing_parent", "the destination parent does not exist")
-
-  temp_path: Path | None = None
+  parent_fd: int | None = None
+  temp_name: str | None = None
   try:
+    parent_fd, name = _open_fs_parent(path, _FS_WRITE_ROOTS)
     if atomic:
-      fd, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-      temp_path = Path(raw_temp)
+      for _attempt in range(10):
+        candidate = f".{name}.{secrets.token_hex(8)}.tmp"
+        try:
+          fd = os.open(
+            candidate,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+            mode,
+            dir_fd=parent_fd,
+          )
+        except FileExistsError:
+          continue
+        temp_name = candidate
+        break
+      else:
+        raise OSError(errno.EEXIST, "could not allocate atomic write path")
       try:
         os.fchmod(fd, mode)
         offset = 0
@@ -565,12 +740,15 @@ def _write_file(body: dict[str, Any]) -> dict[str, Any]:
         os.fsync(fd)
       finally:
         os.close(fd)
-      os.replace(temp_path, path)
-      temp_path = None
+      os.replace(
+        temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
+      )
+      temp_name = None
+      os.fsync(parent_fd)
     else:
       flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
       flags |= getattr(os, "O_NOFOLLOW", 0)
-      fd = os.open(path, flags, mode)
+      fd = os.open(name, flags | os.O_CLOEXEC, mode, dir_fd=parent_fd)
       try:
         os.fchmod(fd, mode)
         offset = 0
@@ -585,16 +763,25 @@ def _write_file(body: dict[str, Any]) -> dict[str, Any]:
       "fs_write_failed", str(exc), HTTPStatus.UNPROCESSABLE_ENTITY
     ) from exc
   finally:
-    if temp_path is not None:
-      temp_path.unlink(missing_ok=True)
+    if temp_name is not None and parent_fd is not None:
+      try:
+        os.unlink(temp_name, dir_fd=parent_fd)
+      except FileNotFoundError:
+        pass
+    if parent_fd is not None:
+      os.close(parent_fd)
 
 
 def _list_directory(body: dict[str, Any]) -> dict[str, Any]:
   path = _absolute_path(body.get("path"))
+  directory_fd: int | None = None
   try:
+    directory_fd = _open_fs_path(
+      path, _FS_READ_ROOTS, os.O_RDONLY | os.O_DIRECTORY,
+    )
     entries: list[dict[str, Any]] = []
     encoded_bytes = len(str(path).encode("utf-8")) + 64
-    with os.scandir(path) as iterator:
+    with os.scandir(directory_fd) as iterator:
       for entry in iterator:
         if len(entries) >= MAX_LIST_ENTRIES:
           raise RequestError(
@@ -619,7 +806,7 @@ def _list_directory(body: dict[str, Any]) -> dict[str, Any]:
           "mtime_ns": info.st_mtime_ns,
         }
         if kind == "symlink":
-          item["target"] = os.readlink(entry.path)
+          item["target"] = os.readlink(entry.name, dir_fd=directory_fd)
         encoded_bytes += len(
           json.dumps(item, separators=(",", ":")).encode("utf-8")
         ) + 1
@@ -638,6 +825,9 @@ def _list_directory(body: dict[str, Any]) -> dict[str, Any]:
     raise RequestError(
       "fs_list_failed", str(exc), HTTPStatus.UNPROCESSABLE_ENTITY
     ) from exc
+  finally:
+    if directory_fd is not None:
+      os.close(directory_fd)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -666,9 +856,26 @@ class _Handler(BaseHTTPRequestHandler):
     )
 
   def _authorized(self) -> bool:
-    expected = b"Bearer " + _startup_token()
-    supplied = self.headers.get("Authorization", "").encode("utf-8")
-    if not hmac.compare_digest(supplied, expected):
+    values = self.headers.get_all("Authorization", failobj=[]) or []
+    supplied_buffer: bytearray | None = None
+    authorized = False
+    if len(values) == 1 and values[0].startswith("Bearer "):
+      try:
+        supplied_buffer = bytearray(values[0][7:], "ascii")
+        _validate_token(supplied_buffer)
+      except (UnicodeEncodeError, RuntimeError):
+        pass
+      else:
+        supplied_digest = _token_digest(supplied_buffer)
+        authorized = hmac.compare_digest(
+          supplied_digest, _startup_token_digest()
+        )
+      finally:
+        if supplied_buffer is not None:
+          for index in range(len(supplied_buffer)):
+            supplied_buffer[index] = 0
+    values.clear()
+    if not authorized:
       self._send(
         HTTPStatus.UNAUTHORIZED,
         {"error": {"code": "unauthorized", "message": "invalid bearer token"}},

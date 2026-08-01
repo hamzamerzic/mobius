@@ -27,16 +27,19 @@ printf '%s\n' \
   'BUILD_SHA=runtime-spoof-must-not-win' \
   "MOBIUS_RECOVERY_TARGET_TOKEN=$TOKEN" >"$ENV_FILE"
 
-# Add both dangerous capabilities deliberately. targetd must remove them itself
-# so this proves the invariant independently of Compose or platform defaults.
+# Add dangerous capabilities deliberately. targetd must remove them itself so
+# this proves the invariant independently of Compose or platform defaults.
 docker run -d \
   --name "$CONTAINER" \
   --read-only \
   --tmpfs /tmp \
   --tmpfs /run \
   --tmpfs /data \
+  --tmpfs /data/mounted:rw,noexec,nosuid,size=1m \
   --cap-add NET_ADMIN \
   --cap-add NET_RAW \
+  --cap-add SYS_ADMIN \
+  --cap-add SYS_PTRACE \
   --no-healthcheck \
   --env-file "$ENV_FILE" \
   -p 127.0.0.1::18002 \
@@ -62,6 +65,7 @@ headers = {
   "Authorization": f"Bearer {token}",
   "Content-Type": "application/json",
 }
+rejected_fs_checks = []
 
 
 def request(path, payload=None):
@@ -72,6 +76,19 @@ def request(path, payload=None):
   )
   with urllib.request.urlopen(req, timeout=5) as response:
     return json.load(response)
+
+
+def rejected(path, payload):
+  try:
+    request(path, payload)
+  except urllib.error.HTTPError as exc:
+    body = json.load(exc)
+    assert exc.code == 403, (path, payload, exc.code, body)
+    assert body["error"]["code"] == "path_forbidden", body
+    assert token not in json.dumps(body), body
+    rejected_fs_checks.append((path, payload.get("path")))
+  else:
+    raise AssertionError((path, payload, "request unexpectedly succeeded"))
 
 
 deadline = time.monotonic() + 30
@@ -87,6 +104,43 @@ while True:
 revision = health["build_sha"]
 assert len(revision) == 40 and all(c in "0123456789abcdef" for c in revision)
 assert revision != "runtime-spoof-must-not-win"
+
+# Target PID1 handles convenience filesystem calls itself, so nondumpability
+# alone cannot protect its memory from a confused-deputy /proc read. Prove the
+# authenticated API rejects virtual filesystems, lexical/symlink escapes, and a
+# real nested tmpfs mount while ordinary /data IO remains available.
+safe_payload = base64.b64encode(b"safe recovery data").decode("ascii")
+written = request("/v1/fs/write", {
+  "path": "/data/http-positive",
+  "data_base64": safe_payload,
+})
+assert written["bytes_written"] == len(b"safe recovery data")
+safe_read = request("/v1/fs/read", {"path": "/data/http-positive"})
+assert base64.b64decode(safe_read["data_base64"]) == b"safe recovery data"
+
+for proc_path in ("/proc/1/maps", "/proc/1/mem", "/proc/1/environ"):
+  rejected("/v1/fs/read", {"path": proc_path})
+rejected("/v1/fs/list", {"path": "/proc/1"})
+rejected("/v1/fs/read", {"path": "/sys/kernel/uevent_seqnum"})
+rejected("/v1/fs/write", {
+  "path": "/dev/null",
+  "data_base64": base64.b64encode(b"blocked").decode("ascii"),
+})
+rejected("/v1/fs/read", {"path": "/data/../proc/1/maps"})
+rejected("/v1/fs/list", {"path": "/data/mounted"})
+
+link_setup = request("/v1/exec", {
+  "argv": ["/bin/ln", "-s", "/proc", "/data/proc-link"],
+  "cwd": "/data",
+})
+assert link_setup["exit_code"] == 0, link_setup
+rejected("/v1/fs/read", {"path": "/data/proc-link/1/maps"})
+rejected("/v1/fs/list", {"path": "/data/proc-link/1"})
+rejected("/v1/fs/write", {
+  "path": "/data/proc-link/forbidden",
+  "data_base64": base64.b64encode(b"blocked").decode("ascii"),
+})
+assert len(rejected_fs_checks) == 11, rejected_fs_checks
 
 child_program = r'''
 import json
@@ -191,12 +245,13 @@ else:
 assert token not in child["proc"]["environ"]["data"]
 assert "MOBIUS_RECOVERY_TARGET_TOKEN=" not in child["proc"]["environ"]["data"]
 
-blocked_mask = (1 << 12) | (1 << 13)
+blocked_mask = (1 << 12) | (1 << 13) | (1 << 19) | (1 << 21)
 assert set(child["caps"]) == {"CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"}
 for name, raw_value in child["caps"].items():
   assert int(raw_value, 16) & blocked_mask == 0, (name, raw_value)
 
 print(json.dumps({
+  "blocked_fs_checks": len(rejected_fs_checks),
   "build_sha": revision,
   "packet_errno": child["packet"]["errno"],
   "capabilities": child["caps"],

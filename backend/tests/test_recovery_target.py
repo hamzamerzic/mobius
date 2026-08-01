@@ -29,7 +29,7 @@ def target(monkeypatch):
   assert spec and spec.loader
   module = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(module)
-  module._STARTUP_TOKEN = b"t" * 43
+  module._STARTUP_TOKEN_DIGEST = module._token_digest(b"t" * 43)
   return module
 
 
@@ -167,6 +167,85 @@ def test_file_endpoints_work_over_http(target, tmp_path):
     assert base64.b64decode(read["data_base64"]) == b"network"
 
 
+@pytest.mark.parametrize("path", [
+  "/proc/1/maps",
+  "/proc/1/mem",
+  "/proc/1/environ",
+  "/sys/kernel",
+  "/dev/null",
+  "/etc/passwd",
+])
+def test_file_api_rejects_paths_outside_explicit_recovery_roots(target, path):
+  operations = (
+    (target._read_file, {"path": path}),
+    (target._list_directory, {"path": path}),
+    (target._write_file, {
+      "path": path,
+      "data_base64": base64.b64encode(b"blocked").decode("ascii"),
+    }),
+  )
+  for operation, body in operations:
+    with pytest.raises(target.RequestError) as denied:
+      operation(body)
+    assert denied.value.code == "path_forbidden"
+    assert denied.value.status == target.HTTPStatus.FORBIDDEN
+
+
+def test_file_api_rejects_dotdot_and_symlink_escapes(target, tmp_path):
+  proc_link = tmp_path / "proc-link"
+  proc_link.symlink_to("/proc", target_is_directory=True)
+  attempts = (
+    (target._read_file, {"path": "/tmp/../proc/1/maps"}),
+    (target._read_file, {"path": str(proc_link / "1" / "maps")}),
+    (target._list_directory, {"path": str(proc_link / "1")}),
+    (target._write_file, {
+      "path": str(proc_link / "forbidden"),
+      "data_base64": base64.b64encode(b"blocked").decode("ascii"),
+    }),
+  )
+  for operation, body in attempts:
+    with pytest.raises(target.RequestError) as denied:
+      operation(body)
+    assert denied.value.code == "path_forbidden"
+
+
+def test_file_api_preserves_relative_symlinks_within_one_allowed_mount(
+  target, tmp_path,
+):
+  real = tmp_path / "real"
+  real.mkdir()
+  (real / "existing").write_bytes(b"safe")
+  link = tmp_path / "internal-link"
+  link.symlink_to("real", target_is_directory=True)
+
+  read = target._read_file({"path": str(link / "existing")})
+  assert base64.b64decode(read["data_base64"]) == b"safe"
+  target._write_file({
+    "path": str(link / "created"),
+    "data_base64": base64.b64encode(b"written").decode("ascii"),
+  })
+  assert (real / "created").read_bytes() == b"written"
+
+
+def test_openat2_rejects_cross_mount_resolution(target):
+  root_fd = os.open("/", os.O_PATH | os.O_DIRECTORY)
+  try:
+    with pytest.raises(OSError) as denied:
+      target._openat2(root_fd, Path("proc/1/maps"), os.O_RDONLY)
+  finally:
+    os.close(root_fd)
+  assert denied.value.errno == errno.EXDEV
+
+
+def test_target_startup_fails_closed_without_openat2(target, monkeypatch):
+  def unavailable(*_args, **_kwargs):
+    raise OSError(errno.ENOSYS, "openat2 unavailable")
+
+  monkeypatch.setattr(target, "_openat2", unavailable)
+  with pytest.raises(RuntimeError, match="filesystem policy is unavailable"):
+    target._assert_fs_policy_supported()
+
+
 def test_exact_eight_mib_file_write_fits_wire_budget(target, tmp_path):
   payload = b"w" * target.MAX_FILE_BYTES
   path = tmp_path / "boundary.bin"
@@ -242,7 +321,15 @@ def test_target_token_fails_closed(target, value):
 def test_direct_secret_environment_is_rejected(target, monkeypatch):
   monkeypatch.setenv("MOBIUS_RECOVERY_TARGET_TOKEN", "s" * 43)
   with pytest.raises(RuntimeError, match="must not reach"):
-    target._read_startup_token()
+    target._read_startup_token_digest()
+
+
+def test_target_retains_only_a_one_way_bearer_verifier(target):
+  raw = b"t" * 43
+  assert not hasattr(target, "_STARTUP_TOKEN")
+  assert target._STARTUP_TOKEN_DIGEST == target._token_digest(raw)
+  assert len(target._STARTUP_TOKEN_DIGEST) == 32
+  assert target._STARTUP_TOKEN_DIGEST != raw
 
 
 def test_fd_secret_is_absent_from_target_and_root_exec_proc_environments(
@@ -273,7 +360,7 @@ spec = importlib.util.spec_from_file_location("subprocess_targetd", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 module.BUILD_REVISION_PATH = Path(sys.argv[2])
-module._drop_packet_capture_capabilities = lambda: None
+module._drop_recovery_escape_capabilities = lambda: None
 module._initialize_startup_security(require_pid_one=False)
 dumpable = ctypes.CDLL(None, use_errno=True).prctl(3, 0, 0, 0, 0)
 try:
@@ -331,10 +418,10 @@ print(json.dumps({
   assert payload["exec"]["exit_code"] != 0
 
 
-def test_packet_capabilities_are_removed_from_all_sets_and_bounding(
+def test_escape_capabilities_are_removed_from_all_sets_and_bounding(
   target, monkeypatch,
 ):
-  blocked = {target.CAP_NET_ADMIN, target.CAP_NET_RAW}
+  blocked = set(target._BLOCKED_CAPABILITIES)
   data = (target._CapabilityData * 2)()
   for capability in blocked:
     mask = 1 << (capability % 32)
@@ -376,7 +463,7 @@ def test_packet_capabilities_are_removed_from_all_sets_and_bounding(
     lambda _libc: (target._CapabilityHeader(), data),
   )
 
-  target._drop_packet_capture_capabilities()
+  target._drop_recovery_escape_capabilities()
 
   assert bounding == set()
   assert ambient == set()

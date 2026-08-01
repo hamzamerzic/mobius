@@ -183,9 +183,13 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `theme.py` | Theme CSS management and HTML injection |
 | `push.py` | VAPID key management and Web Push delivery |
 
-### Recovery (the frozen island)
+### Recovery boundaries during external cutover
 
-Recovery is a SEPARATE always-up container, `recoveryd`, not a module inside `backend/app/`. Its code is a distinct package, `backend/recovery/` (baked root-owned to `/app/recovery/`, outside `backend/app/`), deliberately isolated from the SDK/chat stack — stdlib `http.server`, zero `app.*` imports — so a broken platform install cannot take recovery down. The only recovery-adjacent module left in `backend/app/` is `recovery_seed.py` (it mirrors the owner row into a DB-independent seed for a wiped-DB login; see the self-heal section).
+The legacy `recoveryd` container remains available only during the staged
+external-recovery cutover. Its code is a distinct package,
+`backend/recovery/` (baked root-owned to `/app/recovery/`, outside
+`backend/app/`) and deliberately isolated from the SDK/chat stack. The only
+recovery-adjacent module in `backend/app/` is `recovery_seed.py`.
 
 | File | Role |
 |------|------|
@@ -194,6 +198,25 @@ Recovery is a SEPARATE always-up container, `recoveryd`, not a module inside `ba
 | `recovery_chat_pages.py` | HTML + page surface for the recovery chat |
 | `recovery_chat_runner.py` | Minimal CLI runner for the recovery chat; shares no code with `chat`/`providers`/SDK (runs the standalone `claude` binary as its own subprocess) and appends to its own per-chat jsonl under `/data`, never the `Chat.messages` column |
 | `recovery_restore.sh` | Baked git-reset restore tool (`backend/scripts/recovery_restore.sh` → `/app/scripts/`) — what the "Restore platform" button drives |
+
+The replacement boundary is `backend/recovery_target/targetd.py`. In
+`MOBIUS_BOOT_MODE=recovery`, the baked entrypoint starts this stdlib daemon as
+root before initializing or importing anything from `/data`. It listens only
+on the private target port, authenticates every request with a high-entropy
+one-time bearer, and exposes bounded execution and filesystem operations to a
+separate non-root recovery worker. Normal mode never starts the listener.
+
+The entrypoint removes the target bearer from the exec environment and passes
+it once through an unlinked descriptor; targetd must be container PID 1,
+consumes and closes that descriptor, marks itself non-dumpable, and removes
+packet-capture, ptrace, and mount capabilities from every capability set
+(including bounding) before listening. The raw bearer is immediately wiped;
+only a domain-separated SHA-256 verifier remains at rest. Convenience file
+operations are kernel-confined with `openat2` to `/data`, `/app`, and `/tmp`
+(writes omit `/app`) without symlink, magic-link, `..`, or nested-mount
+escapes. Thus a root repair child can neither inspect target memory or file
+descriptors nor enlist target PID1 to read its own `/proc` memory. Target health
+reports the immutable image-baked Git revision, never a runtime identity env.
 
 `recovery_auth.py` (HMAC-cookie auth) and `recovery_db.py` (raw-`sqlite3` owner-row read, no ORM, with a DB-independent `/data/.recovery-owner.json` fallback for a wiped DB) round out the package. See the self-heal section below for the container itself.
 

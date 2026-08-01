@@ -35,7 +35,9 @@ def test_only_root_target_mounts_the_stopped_app_data():
   assert target["profiles"] == ["recovery"]
   assert target.get("init") is None
   assert target["read_only"] is True
-  assert set(target["cap_drop"]) == {"NET_ADMIN", "NET_RAW"}
+  assert set(target["cap_drop"]) == {
+    "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_PTRACE",
+  }
   assert target["tmpfs"] == ["/tmp", "/run"]
   assert target["volumes"] == ["app_data:/data"]
   assert any(
