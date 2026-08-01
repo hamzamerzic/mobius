@@ -887,12 +887,17 @@ def _resolve_asset_file(asset_path: str) -> Path | None:
   return None
 
 
-# Root-served service worker scripts. `sw.js` is the shell's caching worker;
-# `sw-push.js` owns Web Push from a scope inside the shell's PWA scope (see
-# frontend/public/sw-push.js). Both need the same delivery contract: reserved
-# as top-level names, 404 rather than SPA HTML on a miss, and a revalidating
-# full-body response so a stale or truncated worker can never stick.
+# Root-served worker scripts: `sw.js` caches the shell, `sw-push.js` owns Web
+# Push (see frontend/public/sw-push.js). Same delivery contract at every use
+# site below.
 _SERVICE_WORKER_SCRIPTS = frozenset({"sw.js", "sw-push.js"})
+
+# The push worker's scope. It exists only to name a URL prefix inside the
+# shell's PWA scope, and must never resolve to a document — a page here would
+# be controlled by a worker with no fetch handler, so it would boot the shell
+# with no precache and no offline fallback. Mirrored in the frontend's
+# swNavigationPolicy denylist for the offline path.
+_PUSH_WORKER_SCOPE = "shell/push"
 
 
 def _is_static_asset_path(path: str) -> bool:
@@ -1222,6 +1227,8 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
   @app.get("/{path:path}")
   async def spa_fallback(request: Request, path: str):
     """Serves the SPA index.html for any non-API, non-asset path."""
+    if path == _PUSH_WORKER_SCOPE or path.startswith(f"{_PUSH_WORKER_SCOPE}/"):
+      raise HTTPException(status_code=404, detail="Not found.")
     # Resolve which build serves THIS request (live dist if complete, else the
     # baked floor) once, up front — per request, never a module-load snapshot.
     static_dir = _resolve_static_dir()

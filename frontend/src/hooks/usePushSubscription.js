@@ -6,14 +6,16 @@ import { subscribeToPush } from '../lib/pushSubscription.js'
  * Runs once per session — re-subscribes each time (subscriptions can
  * rotate), but only prompts for permission once.
  *
- * The subscription deliberately lives on its own service worker rather than
- * the shell's caching worker; `lib/pushSubscription.js` explains why that
- * decides whether an Android notification opens Möbius or Chrome.
+ * Push lives on its own service worker — see `lib/pushSubscription.js`.
  */
 export default function usePushSubscription() {
   useEffect(() => {
     if (!('serviceWorker' in navigator) || !('PushManager' in window)) return
-    // Permission denied or push unsupported — nothing to surface.
+    // A denied permission can never be re-raised from here, so the whole
+    // pipeline (worker install, key fetch, subscribe) would be wasted. Only
+    // 'denied' short-circuits: 'default' is what raises the prompt.
+    if (Notification?.permission === 'denied') return
+    // Push unsupported or the prompt refused — nothing to surface.
     subscribeToPush().catch(() => {})
   }, [])
 }

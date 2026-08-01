@@ -21,20 +21,15 @@
  * in Chrome instead of Möbius.
  *
  * This worker exists solely to own the push subscription from a scope that is
- * inside the shell WebAPK's scope. `/shell/push/` is not a real route and no
- * document is ever served there, so this registration controls ZERO pages —
- * which is the point. A worker registered at `/shell/` itself would be a
- * narrower match than `sw.js` for the shell's own pages, take control of them,
- * and silently disable the shell's precache and offline behaviour.
+ * inside the shell WebAPK's scope. `/shell/push/` holds no documents — the
+ * backend 404s it and `swNavigationPolicy` keeps the shell off it — so this
+ * registration controls ZERO pages, which is the point. A worker registered at
+ * `/shell/` itself would be a narrower match than `sw.js` for the shell's own
+ * pages, take control of them, and silently disable the shell's precache and
+ * offline behaviour.
  *
- * Consequences worth knowing:
- *   - Push and notification clicks live here and ONLY here. `sw.js` has no
- *     `push`/`notificationclick` handler; a subscription left on it by an
- *     older release is retired in `src/lib/pushSubscription.js`.
- *   - This file is served verbatim from `public/` (no bundler), so it must
- *     stay dependency-free and valid as a classic worker script.
- *   - It is excluded from the shell precache (`vite.config.js` globIgnores);
- *     a precached service worker script cannot be updated.
+ * Served verbatim from `public/` (no bundler), so it must stay dependency-free
+ * and valid as a classic worker script.
  */
 
 self.addEventListener('install', () => self.skipWaiting())

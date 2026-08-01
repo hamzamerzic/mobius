@@ -2,27 +2,31 @@ import { api } from '../api/client.js'
 
 /**
  * Web Push subscription lifecycle, kept out of React so it can be exercised
- * directly.
- *
- * The subscription lives on a dedicated worker at `/shell/push/` rather than
- * the shell's `/`-scoped caching worker: Android routes a push to an installed
- * app only when the SERVICE WORKER'S SCOPE falls inside that app's manifest
- * scope, and `/` is outside the shell's `/shell/`. `public/sw-push.js` carries
- * the full reasoning, including why the extra path segment matters.
+ * directly. `public/sw-push.js` explains why push has its own worker and why
+ * its scope has to look the way it does.
  */
-export const PUSH_SW_URL = '/sw-push.js'
 export const PUSH_SW_SCOPE = '/shell/push/'
+const PUSH_SW_URL = '/sw-push.js'
+
+// Scopes an earlier release subscribed on. This is an ALLOWLIST on purpose:
+// "retire every registration that isn't ours" would silently unsubscribe a
+// standalone mini-app's own push worker the moment those exist, and the loss
+// is invisible until a notification fails to arrive on someone's phone.
+// Removable once no install can still be running the pre-/shell/push/ shell.
+const LEGACY_PUSH_SCOPES = ['/']
 
 /** Register the push worker and resolve once it has an active worker. */
-export async function activatePushWorker(container) {
+async function activatePushWorker(container) {
   const registration = await container.register(
     PUSH_SW_URL, { scope: PUSH_SW_SCOPE },
   )
   if (registration.active) return registration
-  const worker = registration.installing || registration.waiting
+  const worker = registration.installing
   if (!worker) return registration
-  // pushManager.subscribe() needs an active worker, and a fresh registration
-  // is still installing on the first load after this ships.
+  // register() resolves while the worker is still installing, and
+  // pushManager.subscribe() needs an active one. `redundant` resolves too, so
+  // a failed install surfaces as a subscribe error instead of hanging here
+  // forever on a promise nobody can settle.
   await new Promise((resolve) => {
     const onChange = () => {
       if (worker.state === 'activated' || worker.state === 'redundant') {
@@ -31,35 +35,32 @@ export async function activatePushWorker(container) {
       }
     }
     worker.addEventListener('statechange', onChange)
-    onChange()
   })
   return registration
 }
 
 /**
- * Retire subscriptions an older release left on the caching worker.
+ * Retire a subscription an older release left on the caching worker.
  *
- * That worker no longer has a `push` handler, so a send to its endpoint would
- * trip the browser's userVisibleOnly fallback and show a generic "site updated
- * in the background" notification. Drop it server-side first, then locally, so
- * a failure can't strand an endpoint in the database still receiving sends.
- * The registration itself is left alone — it is the shell's cache.
+ * That worker no longer handles `push`, so a send to its endpoint would trip
+ * the browser's userVisibleOnly fallback and show a generic "site updated in
+ * the background" notification. Drop it server-side first, then locally, so a
+ * failure can't strand an endpoint in the database still receiving sends. The
+ * registration itself is left alone — it is the shell's cache.
  */
-export async function retireLegacySubscriptions(
-  container, currentEndpoint, push = api.push,
-) {
-  const registrations = await container.getRegistrations()
-  for (const registration of registrations) {
-    if (registration.scope.endsWith(PUSH_SW_SCOPE)) continue
+async function retireLegacySubscriptions(container, push) {
+  for (const scope of LEGACY_PUSH_SCOPES) {
+    const registration = await container.getRegistration(scope)
+    if (!registration) continue
+    let stale
     try {
-      const stale = await registration.pushManager.getSubscription()
-      if (!stale || stale.endpoint === currentEndpoint) continue
-      await push.unsubscribe({ endpoint: stale.endpoint })
-      await stale.unsubscribe()
+      stale = await registration.pushManager.getSubscription()
     } catch {
-      // A registration without push, or a revoked permission — nothing to
-      // retire. The backend also prunes endpoints that answer 410.
+      continue // No push support here, or the permission was revoked.
     }
+    if (!stale) continue
+    await push.unsubscribe({ endpoint: stale.endpoint })
+    await stale.unsubscribe()
   }
 }
 
@@ -78,15 +79,18 @@ function applicationServerKey(publicKey) {
  * prompts for permission once.
  */
 export async function subscribeToPush({
-  container = globalThis.navigator?.serviceWorker,
+  container = navigator.serviceWorker,
   push = api.push,
 } = {}) {
-  const registration = await activatePushWorker(container)
+  // Independent: the worker's first install is a real fetch, and holding the
+  // key request behind it costs a round trip on every fresh install.
+  const [registration, res] = await Promise.all([
+    activatePushWorker(container),
+    push.vapidKey(),
+  ])
+  if (!res.ok) return
 
-  const res = await push.vapidKey()
-  if (!res.ok) return null
   const { publicKey } = await res.json()
-
   const subscription = await registration.pushManager.subscribe({
     userVisibleOnly: true,
     applicationServerKey: applicationServerKey(publicKey),
@@ -96,6 +100,5 @@ export async function subscribeToPush({
   await push.subscribe({ endpoint, keys })
 
   // Only once the replacement is registered server-side.
-  await retireLegacySubscriptions(container, endpoint, push)
-  return subscription
+  await retireLegacySubscriptions(container, push)
 }

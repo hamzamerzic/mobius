@@ -61,9 +61,9 @@ function stampFrameRev() {
 }
 
 // Service-worker integration uses `injectManifest` rather than the
-// `generateSW` shortcut: the SW source at `src/sw.js` still has
-// hand-written push + notification-click handlers that don't fit
-// Workbox's stock recipes, so we keep ownership of the SW and let
+// `generateSW` shortcut: the SW source at `src/sw.js` has hand-written
+// routing and offline behaviour that doesn't fit Workbox's stock
+// recipes, so we keep ownership of the SW and let
 // the plugin only INJECT the precache manifest (`self.__WB_MANIFEST`)
 // into it. That replaces the previous hand-edited `VERSION = 'vN'`
 // constant with build-content-hashed cache names — every Vite

@@ -11,8 +11,6 @@
  *     (immutable bundled libs), `esm.sh/*` (versioned remote
  *     deps), and `/api/proxy?url=*.{img|font|...}` (cacheable
  *     static assets via the CORS-bypass proxy).
- *   - Web Push handlers (push, notificationclick). These are
- *     domain-specific behavior that doesn't fit a Workbox recipe.
  *
  * Caching model for `/api/apps/{id}/{frame,module}` (ALL installed apps):
  *   - These ARE cached, by `appCodeHandler`, for EVERY installed app — loading
@@ -778,10 +776,7 @@ self.addEventListener('message', (event) => {
   if (event && typeof event.waitUntil === 'function') event.waitUntil(work)
 })
 
-// ── Web Push lives in `public/sw-push.js` ──────────────────────
-//
-// Deliberately NOT handled here: this worker is registered at `/` (it also
-// serves the standalone mini-app pages under `/apps/<slug>/`), which is
-// outside the shell's `/shell/` PWA scope, and Android routes a push to an
-// installed app only when the worker's scope falls inside that app's scope.
-// `public/sw-push.js` has the full reasoning.
+// Web Push is handled by `public/sw-push.js`, registered at `/shell/push/` so
+// Android routes notifications to the installed shell. Do not add a `push` or
+// `notificationclick` listener here — this worker's `/` scope is outside the
+// shell's PWA scope, which is the bug that moved them out.
