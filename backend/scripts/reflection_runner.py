@@ -597,21 +597,72 @@ def _bounded_max_turns(value: object) -> int:
   return max(10, min(parsed, 120))
 
 
+_LEGACY_FALLBACK_KEYS = ("fallback_provider", "fallback_model", "fallback_effort")
+
+
+def _agent_override(settings: dict) -> dict:
+  """Translate Reflection's settings screen into the platform's uniform shape.
+
+  Reflection's screen records an explicit mode per slot: ``"app"`` means the app
+  owns the choice and ``"system"`` means defer to the owner's default. Settings
+  written before those modes existed instead carry a bare ``{provider, model}``,
+  where naming a provider IS the override; that is still honored so an install
+  which never re-saved keeps the agent it chose. A bare default provider with no
+  model/effort is NOT an override — treating it as one would replace the system
+  primary's model with the SDK default.
+
+  These shapes are Reflection's own, so the translation lives with the runner
+  rather than in the shared resolver. An omitted key means "no preference"; a
+  present ``fallback`` of None means "run without a second agent".
+  Normalization is deliberately NOT repeated here — the platform cleans the
+  choice for every background agent identically.
+  """
+  override: dict = {}
+  mode = settings.get("primary_agent_mode")
+  if mode == "app":
+    claims_primary = True
+  elif mode == "system":
+    claims_primary = False
+  else:
+    provider = settings.get("provider")
+    model = settings.get("model")
+    effort = settings.get("effort")
+    claims_primary = bool(provider or model or effort) and not (
+      provider == "claude" and not model and not effort
+    )
+  if claims_primary:
+    override["primary"] = {
+      "provider": settings.get("provider"),
+      "model": settings.get("model"),
+      "effort": settings.get("effort"),
+    }
+  secondary = settings.get("secondary_agent_mode")
+  if secondary == "app" or (
+    secondary != "system"
+    and any(settings.get(key) for key in _LEGACY_FALLBACK_KEYS)
+  ):
+    override["fallback"] = {
+      "provider": settings.get("fallback_provider"),
+      "model": settings.get("fallback_model"),
+      "effort": settings.get("fallback_effort"),
+    }
+  return override
+
+
 def _resolve_agents(settings: dict) -> dict:
   """Resolve primary/fallback provider choices for the nightly run.
 
   Delegates to the platform's ONE canonical resolver so every background agent
-  (Reflection, Memory, News) shares the same resolution and can never drift —
-  see :func:`app.background_agents.resolve_background_agents`. The per-app
-  ``settings.json`` layers its primary override + ``secondary_agent_mode``
-  fallback gate on top of the owner's system-level Settings.
+  shares the same system ordering and the same normalization, and can never
+  drift — see :func:`app.background_agents.resolve_background_agents`. This
+  runner contributes only its own declared pick, via :func:`_agent_override`.
 
   Deferred import: this runner must stay importable under a bare cron
   environment, so ``app`` is reached only after the sys.path bootstrap at the
   top of this file, inside this function.
   """
   from app.background_agents import resolve_background_agents
-  return resolve_background_agents(str(DATA_DIR), settings)
+  return resolve_background_agents(str(DATA_DIR), _agent_override(settings))
 
 
 def build_goal(settings: dict) -> str:

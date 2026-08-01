@@ -776,7 +776,7 @@ def resolve_round_provider(db: Session) -> str:
   from app.background_agents import resolve_background_agents
 
   data_dir = get_settings().data_dir
-  choices = resolve_background_agents(data_dir, {})
+  choices = resolve_background_agents(data_dir)
   primary = choices.get("primary") if isinstance(choices, dict) else None
   if isinstance(primary, dict) and primary.get("provider"):
     return str(primary["provider"])
