@@ -8,6 +8,7 @@ import RecoveryLink, {
 } from '../../components/ErrorBoundary/RecoveryLink.jsx'
 
 test('recovery points outside the Mobius container with self-host guidance', () => {
+  assert.equal(RECOVERY_CONTROL_URL, 'https://www.mobius.you/')
   const defaultHtml = renderToStaticMarkup(createElement(RecoveryLink))
   assert.match(defaultHtml, /class="errbound__recovery"/)
   assert.match(defaultHtml, /If the problem continues after trying again/)
