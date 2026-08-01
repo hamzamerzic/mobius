@@ -99,7 +99,8 @@ def test_exec_uses_argv_without_shell_and_does_not_inherit_target_token(
     "env": {"GREETING": "hello"},
   })
   assert result["exit_code"] == 0
-  assert result["stdout"] == "hello"
+  assert "stdout" not in result
+  assert "stderr" not in result
   assert base64.b64decode(result["stdout_base64"]) == b"hello"
   assert result["timed_out"] is False
   assert result["truncated"] is False
@@ -160,6 +161,16 @@ def test_file_endpoints_work_over_http(target, tmp_path):
     assert write["bytes_written"] == 7
     _, read = _request(url, "/v1/fs/read", body={"path": str(path)})
     assert base64.b64decode(read["data_base64"]) == b"network"
+
+
+def test_directory_listing_has_an_aggregate_response_budget(
+  target, tmp_path, monkeypatch,
+):
+  (tmp_path / "long-link").symlink_to("x" * 512)
+  monkeypatch.setattr(target, "MAX_LIST_RESPONSE_BYTES", 128)
+  with pytest.raises(target.RequestError) as too_large:
+    target._list_directory({"path": str(tmp_path)})
+  assert too_large.value.code == "response_too_large"
 
 
 @pytest.mark.parametrize("value", ["", "short", "x" * 513])

@@ -35,6 +35,7 @@ MAX_REQUEST_BYTES = 8 * 1024 * 1024
 MAX_FILE_BYTES = 8 * 1024 * 1024
 MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 MAX_LIST_ENTRIES = 10_000
+MAX_LIST_RESPONSE_BYTES = 8 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 120.0
 MAX_TIMEOUT_SECONDS = 900.0
 MAX_ENV_ITEMS = 128
@@ -274,8 +275,6 @@ def _run_exec(body: dict[str, Any]) -> dict[str, Any]:
     elapsed_ms = round((time.monotonic() - started) * 1000)
     return {
       "exit_code": exit_code,
-      "stdout": bytes(output["stdout"]).decode("utf-8", "replace"),
-      "stderr": bytes(output["stderr"]).decode("utf-8", "replace"),
       "stdout_base64": base64.b64encode(output["stdout"]).decode("ascii"),
       "stderr_base64": base64.b64encode(output["stderr"]).decode("ascii"),
       "truncated": truncated,
@@ -382,6 +381,7 @@ def _list_directory(body: dict[str, Any]) -> dict[str, Any]:
   path = _absolute_path(body.get("path"))
   try:
     entries: list[dict[str, Any]] = []
+    encoded_bytes = len(str(path).encode("utf-8")) + 64
     with os.scandir(path) as iterator:
       for entry in iterator:
         if len(entries) >= MAX_LIST_ENTRIES:
@@ -408,6 +408,15 @@ def _list_directory(body: dict[str, Any]) -> dict[str, Any]:
         }
         if kind == "symlink":
           item["target"] = os.readlink(entry.path)
+        encoded_bytes += len(
+          json.dumps(item, separators=(",", ":")).encode("utf-8")
+        ) + 1
+        if encoded_bytes > MAX_LIST_RESPONSE_BYTES:
+          raise RequestError(
+            "response_too_large",
+            f"directory metadata exceeds {MAX_LIST_RESPONSE_BYTES} bytes",
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+          )
         entries.append(item)
     entries.sort(key=lambda item: item["name"])
     return {"path": str(path), "entries": entries}
