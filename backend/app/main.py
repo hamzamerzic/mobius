@@ -336,12 +336,23 @@ _OPAQUE_STATIC_EMBED_PREFIX = "/app-embeds/by-id/"
 _PUBLISHED_SITE_PREFIX = "/sites/"
 
 # This isolation boundary must always be enforced, never Report-Only: browsers
-# ignore the CSP sandbox directive in a Report-Only policy.
+# ignore the CSP sandbox directive in a Report-Only policy. The sandbox omits
+# allow-same-origin, so the document's active origin is opaque and CSP 'self'
+# matches none of its own relative subresources on WebKit. Name the configured
+# absolute origin explicitly in every fetch directive. This does not weaken the
+# credential boundary: packaged code already executes in the opaque document,
+# and it still cannot reach the shell's localStorage, cookies, or owner token.
+_STATIC_EMBED_ORIGIN = settings.frontend_origin.rstrip("/")
 _STATIC_EMBED_CSP = (
-  "sandbox allow-scripts allow-forms allow-pointer-lock; default-src 'self'; "
-  "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
-  "font-src 'self' data:; connect-src 'self'; img-src 'self' data: blob:; "
-  "media-src 'self' blob:; worker-src 'self' blob:"
+  "sandbox allow-scripts allow-forms allow-pointer-lock; "
+  f"default-src {_STATIC_EMBED_ORIGIN}; "
+  f"script-src {_STATIC_EMBED_ORIGIN} 'unsafe-inline'; "
+  f"style-src {_STATIC_EMBED_ORIGIN} 'unsafe-inline'; "
+  f"font-src {_STATIC_EMBED_ORIGIN} data:; "
+  f"connect-src {_STATIC_EMBED_ORIGIN}; "
+  f"img-src {_STATIC_EMBED_ORIGIN} data: blob:; "
+  f"media-src {_STATIC_EMBED_ORIGIN} blob:; "
+  f"worker-src {_STATIC_EMBED_ORIGIN} blob:"
 )
 
 # Published sites (`/sites/<token>/`) are public snapshots of the owner's own
@@ -560,6 +571,56 @@ app.add_middleware(
   # return the version token that the storage route intentionally emits.
   expose_headers=["ETag"],
 )
+
+
+class _OpaqueOriginCorsMiddleware:
+  """Answers a sandboxed app frame with `*` rather than the literal `null`.
+
+  A frame without `allow-same-origin` sends `Origin: null`, and CORSMiddleware
+  echoes the matched value back, so the response says
+  `Access-Control-Allow-Origin: null`. Chromium treats that as a match; WebKit
+  does not, and blocks the response before the page sees it. The request never
+  reaches this server, so the failure looks like the network is down — on iOS
+  every direct API call from an app frame failed this way, while the same app's
+  storage worked because that path goes through the shell instead.
+
+  `*` is the same header the opaque-frame asset routes already emit, and it is
+  legal here only because `allow_credentials=False`: no cookie or other ambient
+  credential rides along, so this widens nothing an attacker could use without
+  first holding a bearer token that lives in localStorage, out of reach of any
+  other origin. State-changing routes keep their own `reject_cross_site` guard.
+
+  Placed outside CORSMiddleware (added later == outer) so it can rewrite that
+  middleware's header on both the preflight and the real response.
+  """
+
+  def __init__(self, app):
+    self.app = app
+
+  async def __call__(self, scope, receive, send):
+    if scope["type"] != "http":
+      return await self.app(scope, receive, send)
+    origin = None
+    for key, value in scope.get("headers") or ():
+      if key == b"origin":
+        origin = value
+        break
+    if origin != b"null":
+      return await self.app(scope, receive, send)
+
+    async def send_wrapper(message):
+      if message["type"] == "http.response.start":
+        headers = [
+          (k, b"*" if k.lower() == b"access-control-allow-origin" else v)
+          for k, v in message.get("headers") or ()
+        ]
+        message = {**message, "headers": headers}
+      await send(message)
+
+    return await self.app(scope, receive, send_wrapper)
+
+
+app.add_middleware(_OpaqueOriginCorsMiddleware)
 
 # Security remains outside CORS and request-size enforcement so its headers
 # land on those generated responses. Request context is outermost so every
