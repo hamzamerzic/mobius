@@ -65,12 +65,27 @@ jobs:
           test "$GITHUB_SHA" != "$RECOVERY_CUTOVER_PREREQUISITE_SHA"
           git cat-file -e "$RECOVERY_CUTOVER_PREREQUISITE_SHA^{commit}"
           git merge-base --is-ancestor "$RECOVERY_CUTOVER_PREREQUISITE_SHA" "$GITHUB_SHA"
+          removal_root_sha=$(git rev-list --first-parent --reverse \
+            "$RECOVERY_CUTOVER_PREREQUISITE_SHA..$GITHUB_SHA" | sed -n '1p')
+          case "$removal_root_sha" in
+            *[!0-9a-f]*|'') exit 2 ;;
+          esac
+          test "${#removal_root_sha}" -eq 40
+          test "$(git rev-parse "${removal_root_sha}^1")" = \
+            "$RECOVERY_CUTOVER_PREREQUISITE_SHA"
+          echo "REMOVAL_ROOT_SHA=$removal_root_sha" >> "$GITHUB_ENV"
 
-          git ls-remote --exit-code origin refs/heads/main > "$RUNNER_TEMP/main-head"
-          test "$(wc -l < "$RUNNER_TEMP/main-head")" -eq 1
-          read -r main_sha main_ref < "$RUNNER_TEMP/main-head"
-          test "$main_ref" = refs/heads/main
-          test "$main_sha" = "$RECOVERY_CUTOVER_PREREQUISITE_SHA"
+          # Main may keep accepting compatibility fixes while its public image
+          # tag stays frozen at A'. It must still descend from A', retain the
+          # embedded recovery authority, and exclude the first removal commit.
+          git fetch --quiet --no-tags origin refs/heads/main
+          main_sha=$(git rev-parse FETCH_HEAD)
+          git merge-base --is-ancestor "$RECOVERY_CUTOVER_PREREQUISITE_SHA" "$main_sha"
+          git cat-file -e "$main_sha:backend/recovery/recoveryd.py"
+          if git merge-base --is-ancestor "$removal_root_sha" "$main_sha"; then
+            echo "Refusing a removal lineage already contained by main" >&2
+            exit 1
+          fi
 
           git ls-remote --exit-code origin "$MOBIUS_PLATFORM_RELEASE_REF" > "$RUNNER_TEMP/release-head"
           test "$(wc -l < "$RUNNER_TEMP/release-head")" -eq 1
@@ -246,8 +261,14 @@ jobs:
             --prerequisite-digest "$RECOVERY_CUTOVER_PREREQUISITE_DIGEST" \
             --target-revision "$INITIAL_TARGET_REVISION" \
             --target-digest "$INITIAL_TARGET_DIGEST"
-          main_sha=$(git ls-remote --exit-code origin refs/heads/main | awk 'NR == 1 { print $1 }')
-          test "$main_sha" = "$RECOVERY_CUTOVER_PREREQUISITE_SHA"
+          git fetch --quiet --no-tags origin refs/heads/main
+          main_sha=$(git rev-parse FETCH_HEAD)
+          git merge-base --is-ancestor "$RECOVERY_CUTOVER_PREREQUISITE_SHA" "$main_sha"
+          git cat-file -e "$main_sha:backend/recovery/recoveryd.py"
+          if git merge-base --is-ancestor "$REMOVAL_ROOT_SHA" "$main_sha"; then
+            echo "Refusing a removal lineage already contained by main" >&2
+            exit 1
+          fi
 
       - name: Log in to GitHub Container Registry
         if: steps.gate.outputs.mode != 'completed_replay'
@@ -328,8 +349,14 @@ jobs:
         env:
           RELEASE_MODE: ${{ steps.gate.outputs.mode }}
         run: |
-          main_sha=$(git ls-remote --exit-code origin refs/heads/main | awk 'NR == 1 { print $1 }')
-          test "$main_sha" = "$RECOVERY_CUTOVER_PREREQUISITE_SHA"
+          git fetch --quiet --no-tags origin refs/heads/main
+          main_sha=$(git rev-parse FETCH_HEAD)
+          git merge-base --is-ancestor "$RECOVERY_CUTOVER_PREREQUISITE_SHA" "$main_sha"
+          git cat-file -e "$main_sha:backend/recovery/recoveryd.py"
+          if git merge-base --is-ancestor "$REMOVAL_ROOT_SHA" "$main_sha"; then
+            echo "Refusing a removal lineage already contained by main" >&2
+            exit 1
+          fi
           if [ "$RELEASE_MODE" = build_cutover ] || [ "$RELEASE_MODE" = normal_release ]; then
             release_sha=$(git ls-remote --exit-code origin "$MOBIUS_PLATFORM_RELEASE_REF" | awk 'NR == 1 { print $1 }')
             if [ "$release_sha" != "$GITHUB_SHA" ]; then
@@ -404,8 +431,14 @@ jobs:
           INITIAL_TARGET_REVISION: ${{ steps.inventory.outputs.target_revision }}
           RELEASE_MODE: ${{ steps.gate.outputs.mode }}
         run: |
-          main_sha=$(git ls-remote --exit-code origin refs/heads/main | awk 'NR == 1 { print $1 }')
-          test "$main_sha" = "$RECOVERY_CUTOVER_PREREQUISITE_SHA"
+          git fetch --quiet --no-tags origin refs/heads/main
+          main_sha=$(git rev-parse FETCH_HEAD)
+          git merge-base --is-ancestor "$RECOVERY_CUTOVER_PREREQUISITE_SHA" "$main_sha"
+          git cat-file -e "$main_sha:backend/recovery/recoveryd.py"
+          if git merge-base --is-ancestor "$REMOVAL_ROOT_SHA" "$main_sha"; then
+            echo "Refusing a removal lineage already contained by main" >&2
+            exit 1
+          fi
           if [ "$RELEASE_MODE" = normal_release ]; then
             release_sha=$(git ls-remote --exit-code origin "$MOBIUS_PLATFORM_RELEASE_REF" | awk 'NR == 1 { print $1 }')
             if [ "$release_sha" != "$GITHUB_SHA" ]; then
@@ -522,5 +555,11 @@ jobs:
             --prerequisite-digest "$RECOVERY_CUTOVER_PREREQUISITE_DIGEST" \
             --released-revision "$GITHUB_SHA" \
             --released-digest "$IMAGE_DIGEST"
-          main_sha=$(git ls-remote --exit-code origin refs/heads/main | awk 'NR == 1 { print $1 }')
-          test "$main_sha" = "$RECOVERY_CUTOVER_PREREQUISITE_SHA"
+          git fetch --quiet --no-tags origin refs/heads/main
+          main_sha=$(git rev-parse FETCH_HEAD)
+          git merge-base --is-ancestor "$RECOVERY_CUTOVER_PREREQUISITE_SHA" "$main_sha"
+          git cat-file -e "$main_sha:backend/recovery/recoveryd.py"
+          if git merge-base --is-ancestor "$REMOVAL_ROOT_SHA" "$main_sha"; then
+            echo "Refusing a removal lineage already contained by main" >&2
+            exit 1
+          fi
