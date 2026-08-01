@@ -3,6 +3,50 @@
 # the 'mobius' user for the actual server.  The non-root user allows
 # --dangerously-skip-permissions in the Claude CLI.
 
+# Recovery target mode is an immutable, early boot path. It must run before
+# touching /data or importing any agent-editable platform code. The separate
+# recovery worker reaches this private listener with a one-time bearer token
+# whose canonical base-10 epoch deadline is enforced by targetd itself.
+case "${MOBIUS_BOOT_MODE:-normal}" in
+  normal) ;;
+  recovery)
+    # Never exec the target with its bearer in the process environment. Linux
+    # exposes the original exec environment through /proc even after unsetenv,
+    # so move the secret through an unlinked, inherited descriptor and build a
+    # fresh Python environment without it. The target closes fd 3 before it
+    # starts listening and refuses to run unless it is container pid 1.
+    _recovery_target_token=${MOBIUS_RECOVERY_TARGET_TOKEN:-}
+    unset MOBIUS_RECOVERY_TARGET_TOKEN
+    umask 077
+    _recovery_token_file=$(mktemp /tmp/mobius-recovery-target-token.XXXXXX) || {
+      echo "FATAL: could not allocate recovery target secret descriptor." >&2
+      exit 70
+    }
+    if ! printf '%s' "$_recovery_target_token" > "$_recovery_token_file"; then
+      rm -f "$_recovery_token_file"
+      echo "FATAL: could not stage recovery target secret." >&2
+      exit 70
+    fi
+    exec 3< "$_recovery_token_file"
+    rm -f "$_recovery_token_file"
+    unset _recovery_target_token _recovery_token_file
+    MOBIUS_RECOVERY_TARGET_TOKEN_FD=3
+    export MOBIUS_RECOVERY_TARGET_TOKEN_FD
+    exec python3 -I /app/recovery-target/targetd.py
+    ;;
+  *)
+    echo "FATAL: MOBIUS_BOOT_MODE must be normal or recovery." >&2
+    exit 64
+    ;;
+esac
+
+# Root is an externally-controlled instance capability. There is deliberately
+# no partial apt/dpkg rule: package maintainer scripts already make that rule
+# equivalent to arbitrary root. Enabling this setting is therefore explicit
+# and honest; disabling it leaves the agent with no sudo path at all.
+. /app/scripts/agent_sudo.sh
+configure_agent_sudo "${MOBIUS_AGENT_SUDO:-0}" || exit $?
+
 # Stop cron on container shutdown so it doesn't orphan processes.
 cleanup() { kill "$(cat /var/run/crond.pid 2>/dev/null)" 2>/dev/null; }
 trap cleanup TERM INT
