@@ -126,15 +126,17 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
         aria-labelledby="standalone-install-title"
         onClick={event => event.stopPropagation()}
       >
-        <button
-          ref={closeRef}
-          className="standalone-install__close"
-          type="button"
-          aria-label="Close"
-          onClick={() => close('dismiss')}
-        >
-          ×
-        </button>
+        {!installObserved && (
+          <button
+            ref={closeRef}
+            className="standalone-install__close"
+            type="button"
+            aria-label="Close"
+            onClick={() => close('dismiss')}
+          >
+            ×
+          </button>
+        )}
         {installObserved ? (
           <>
             <div className="standalone-install__success" aria-hidden="true">✓</div>

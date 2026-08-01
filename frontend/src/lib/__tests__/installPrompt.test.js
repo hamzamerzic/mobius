@@ -101,6 +101,25 @@ test('a standalone-looking launch suppresses the offer but claims nothing', asyn
   assert.equal(installPrompt.getInstallObservedSnapshot(), false)
 })
 
+test('an app-specific prompt outranks the standalone window guess', async () => {
+  const installPrompt = await freshModule()
+  const target = makeTarget({ standalone: true })
+  let prevented = false
+  installPrompt.startInstallPromptCapture(target)
+
+  // The shell itself stays suppressed until Chromium offers a prompt for the
+  // mini-app document loaded into the same standalone window.
+  assert.equal(installPrompt.getInstallPromptSnapshot(), 'installed')
+  target.dispatch('beforeinstallprompt', {
+    preventDefault() { prevented = true },
+    async prompt() { return { outcome: 'accepted' } },
+  })
+
+  assert.equal(prevented, true)
+  assert.equal(installPrompt.getInstallPromptSnapshot(), 'ready')
+  assert.deepEqual(await installPrompt.requestInstall(), { outcome: 'accepted' })
+})
+
 test('only a witnessed appinstalled event may be announced', async () => {
   const installPrompt = await freshModule()
   const target = makeTarget()
