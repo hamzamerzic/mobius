@@ -95,7 +95,8 @@ from app.chat_writer import (
   update_last_assistant_message as _update_last_assistant_message,
   wait_ack as _wait_ack,
 )
-from app.config import agent_scratch_dir, get_settings
+from app import agent_scratch
+from app.config import get_settings
 from app.events import (
   blocks_have_renderable_content,
   build_assistant_message,
@@ -4179,8 +4180,17 @@ async def _run_chat_impl_with_db(
   })
   base_env.update(app_context_env)
   # Overrides any inherited TMPDIR from _safe_keys: agent scratch belongs on
-  # the bounded data volume, never the container's unbounded overlay.
-  base_env["TMPDIR"] = str(agent_scratch_dir())
+  # the bounded data volume, never the container's unbounded overlay. TMP and
+  # TEMP travel with it so a tool reading either does not escape back to /tmp.
+  scratch = agent_scratch.scratch_for_chat(chat_id)
+  base_env["TMPDIR"] = base_env["TMP"] = base_env["TEMP"] = str(scratch)
+  # Starting a run is the moment we know which chats are idle, and it keeps
+  # scratch bounded without a second scheduler. Opportunistic: a failed sweep
+  # must never block the turn.
+  try:
+    agent_scratch.sweep_idle_scratch(db)
+  except Exception as exc:  # noqa: BLE001 - reclaiming disk is best-effort
+    log.warning("agent scratch sweep failed chat_id=%s: %s", chat_id, exc)
   # Partner viewport (sent by the React shell on each turn). The agent
   # uses these when taking screenshots so the framing matches what the
   # partner actually sees — preview_shell.sh reads them, mini-app

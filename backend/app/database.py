@@ -1,17 +1,9 @@
 """Database engine and session configuration.
 
-Boot-critical, but editable in place. main.py imports this at module
-load to set up the engine + run migrations; if I'm broken the server
-can't boot and only /recover stays reachable. (The recovery surface
-itself uses raw sqlite3 and doesn't depend on me, but main.py does.)
-So `python3 -m py_compile` this file before asking for a restart — a
-failing compile proves the next boot dies.
-
-I am NOT frozen. protected-files.txt froze the baked /app fallback,
-not the served clone; the whole-repo model moved the running backend
-to /data/platform/backend/app, which is mobius-owned and writable.
-Edit here and restart. For ad-hoc DB queries prefer raw `sqlite3`
-from stdlib — that path doesn't touch this file at all.
+Boot-critical: main.py imports this at module load to build the engine and
+run migrations, so a broken edit leaves only /recover reachable. `python3 -m
+py_compile` before a restart. (Recovery uses raw sqlite3 and does not depend
+on this module; main.py does.)
 """
 
 import json
@@ -36,20 +28,22 @@ _request_label: ContextVar[str] = ContextVar(
   "mobius_database_request_label", default="background",
 )
 _checkout_warn_seconds = float(os.environ.get("DB_CHECKOUT_WARN_SECONDS", "2"))
-# SQLite's default journal_size_limit is -1 (never truncate), so a WAL only
-# ever ratchets upward: a checkpoint copies pages back into the database but
-# leaves the file at its high-water mark. On 2026-08-01 that produced a 1.9 GB
-# WAL holding 855 live pages (~3.5 MB) against a 748 MB database — 10% of the
-# data volume, none of it reachable content. With this limit a checkpoint that
-# resets the WAL also truncates the file back down.
+# Caps RETAINED journal size, not live growth. SQLite defaults this to -1
+# (never truncate), so a WAL only ratchets upward: a checkpoint returns pages
+# to the database but leaves the file at its high-water mark, and that
+# allocation is kept forever. With a limit set, a checkpoint that resets the
+# WAL also truncates the file back down.
 #
-# The cap is not a hard ceiling: truncation happens only when a checkpoint can
-# reset the WAL, which requires no reader still holding an older snapshot. With
-# enough concurrent agent sessions there is always one, so the file can still
-# exceed this between resets. Bounding session concurrency is the other half of
-# that fix and is not yet implemented; until it is, this limit is what keeps a
-# quiet moment sufficient to reclaim the space.
-_WAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024
+# It is not a runtime ceiling. Truncation happens only on a reset, and a reset
+# needs a gap where no reader holds an older snapshot — so a single long-lived
+# read transaction is enough to let the file exceed this, regardless of how
+# many sessions are running. If it grows again, look for the transaction that
+# never ends rather than the session count.
+#
+# 64 MiB trades a little repeated growth work for a bound small against the
+# data volume. No formula: raise it if checkpoint churn shows up in write
+# latency, lower it if retained journal space becomes material.
+_SQLITE_RETAINED_JOURNAL_LIMIT_BYTES = 64 * 1024 * 1024
 _pool_metrics_lock = threading.Lock()
 _pool_metrics = {
   "checked_out": 0,
@@ -153,7 +147,9 @@ def _make_engine():
       cur.execute("PRAGMA busy_timeout=5000")
       cur.execute("PRAGMA journal_mode=WAL")
       cur.execute("PRAGMA synchronous=FULL")
-      cur.execute(f"PRAGMA journal_size_limit={_WAL_SIZE_LIMIT_BYTES}")
+      cur.execute(
+        f"PRAGMA journal_size_limit={_SQLITE_RETAINED_JOURNAL_LIMIT_BYTES}"
+      )
       cur.close()
   return eng
 
@@ -1012,9 +1008,38 @@ def _add_chat_run_goal_objective(eng) -> None:
       ), {"objective": objective, "run_id": run_id})
 
 
+def _add_chat_run_root_identity(eng) -> None:
+  """Give every physical run a stable logical identity across continuations."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chat_runs" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chat_runs")}
+  with eng.begin() as conn:
+    if "root_run_id" not in columns:
+      conn.execute(text(
+        "ALTER TABLE chat_runs ADD COLUMN root_run_id VARCHAR(64) NULL"
+      ))
+    # Idempotent backfill: pre-feature physical runs are each their own logical
+    # root. New continuation writes inherit explicitly in chat_writer.
+    conn.execute(text(
+      "UPDATE chat_runs SET root_run_id = id WHERE root_run_id IS NULL"
+    ))
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_chat_runs_root_run_id "
+      "ON chat_runs (root_run_id)"
+    ))
+    if eng.dialect.name == "postgresql":
+      conn.execute(text(
+        "ALTER TABLE chat_runs ALTER COLUMN root_run_id SET NOT NULL"
+      ))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
+  ("0003_chat_run_root_identity", _add_chat_run_root_identity),
 )
 
 

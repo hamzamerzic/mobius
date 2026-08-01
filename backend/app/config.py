@@ -1,14 +1,10 @@
 """Application settings loaded from environment variables.
 
-FROZEN at runtime (chmod 444 root-owned per protected-files.txt).
-main.py imports this at module load; if I'm broken the server
-can't boot and /recover/chat is unreachable.
+Boot-critical: main.py imports this at module load, so a broken edit
+leaves only /recover reachable. `python3 -m py_compile` before a restart.
 
-To edit me, change the source on the host repo and rebuild the
-container image. The agent should not try to edit me in-place at
-runtime — the chmod will block it and the error looks like a bug.
-Use /data/shared/agent-settings.json for per-instance settings that
-don't need code changes.
+Use /data/shared/agent-settings.json for per-instance settings that don't
+need code changes.
 """
 
 import json
@@ -179,20 +175,17 @@ def get_settings() -> Settings:
   return Settings()
 
 
-def agent_scratch_dir() -> Path:
-  """The directory agent subprocesses must use for temporary files.
+def agent_scratch_root() -> Path:
+  """Root under which each agent run gets its own scratch directory.
 
-  Deliberately on the data volume rather than the container's /tmp. The
-  container root is an overlay whose upperdir sits on the host filesystem:
-  it has no size of its own, so statvfs there reports HOST capacity and no
-  quota applies. Scratch written to /tmp therefore consumes host disk that
-  the platform neither bounds nor can measure from inside. data_dir is a
-  fixed-size volume, so the same bytes land against a limit we own.
+  On the data volume rather than the container's /tmp, because an overlay
+  upperdir has no size of its own: statvfs there reports host capacity, no
+  quota applies, and it is not a tmpfs so nothing clears it on restart.
+  data_dir is a fixed-size volume, so the same bytes land against a limit
+  the platform owns and can measure.
 
-  /tmp is also not a tmpfs in this image, so it is never cleared on restart
-  and accumulates indefinitely; anything routed here is instead reachable by
-  the data-volume retention sweep.
+  That ceiling is shared with the database, so per-run directories and their
+  removal are what keep scratch from taking durable data down with it;
+  `agent_scratch` owns that lifecycle.
   """
-  scratch = Path(get_settings().data_dir) / "tmp"
-  scratch.mkdir(parents=True, exist_ok=True)
-  return scratch
+  return Path(get_settings().data_dir) / "agent-scratch"

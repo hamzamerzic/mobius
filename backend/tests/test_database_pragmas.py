@@ -1,8 +1,7 @@
 """SQLite connections install their lock handler before lock-taking pragmas."""
 
+import sqlite3
 from types import SimpleNamespace
-
-import pytest
 
 from app import database
 
@@ -53,36 +52,30 @@ def _capture_connect_pragmas(monkeypatch, tmp_path):
 
 
 def test_sqlite_connection_pragma_order(monkeypatch, tmp_path):
+  """busy_timeout must precede journal_mode=WAL: WAL takes locks, and with no
+  busy handler installed it fails immediately instead of waiting."""
   assert _capture_connect_pragmas(monkeypatch, tmp_path) == [
     "PRAGMA busy_timeout=5000",
     "PRAGMA journal_mode=WAL",
     "PRAGMA synchronous=FULL",
-    f"PRAGMA journal_size_limit={database._WAL_SIZE_LIMIT_BYTES}",
+    f"PRAGMA journal_size_limit={database._SQLITE_RETAINED_JOURNAL_LIMIT_BYTES}",
   ]
 
 
-def test_wal_size_limit_is_set_so_the_journal_cannot_ratchet_unbounded(
-  monkeypatch, tmp_path
-):
-  """SQLite defaults journal_size_limit to -1, which never truncates the WAL:
-  a checkpoint returns pages to the database but leaves the file at its
-  high-water mark. Left unset it reached 1.9 GB holding 3.5 MB of live pages.
-  Every connection must declare a limit for a checkpoint to reclaim the file."""
-  statements = _capture_connect_pragmas(monkeypatch, tmp_path)
+def test_sqlite_journal_limit_reaches_a_real_connection(tmp_path):
+  """The list above only proves what we emit. SQLite silently ignores a
+  malformed or out-of-range pragma, so read the value back off a live
+  connection: without a limit the default is -1 and the WAL is never
+  truncated, retaining its high-water allocation forever."""
+  con = sqlite3.connect(tmp_path / "pragma.db")
+  try:
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute(
+      f"PRAGMA journal_size_limit={database._SQLITE_RETAINED_JOURNAL_LIMIT_BYTES}"
+    )
 
-  limits = [s for s in statements if "journal_size_limit" in s]
-  assert limits == [f"PRAGMA journal_size_limit={database._WAL_SIZE_LIMIT_BYTES}"]
-  assert database._WAL_SIZE_LIMIT_BYTES > 0
-
-
-@pytest.mark.parametrize("pragma", ["journal_mode=WAL", "busy_timeout=5000"])
-def test_wal_size_limit_follows_the_pragmas_it_depends_on(
-  monkeypatch, tmp_path, pragma
-):
-  """journal_size_limit only means anything in WAL mode, and the busy handler
-  must already be installed before any pragma that can contend for a lock."""
-  statements = _capture_connect_pragmas(monkeypatch, tmp_path)
-
-  assert statements.index(f"PRAGMA {pragma}") < statements.index(
-    f"PRAGMA journal_size_limit={database._WAL_SIZE_LIMIT_BYTES}"
-  )
+    assert con.execute("PRAGMA journal_size_limit").fetchone()[0] == (
+      database._SQLITE_RETAINED_JOURNAL_LIMIT_BYTES
+    )
+  finally:
+    con.close()

@@ -215,22 +215,13 @@ def _child_count(subdir: Path) -> int | None:
 
 @router.get("/disk")
 def fs_disk(_owner: models.Owner = Depends(get_owner_or_app_with_filesystem_access)):
-  """Disk usage of the volume backing the data dir, in bytes.
+  """Capacity of the filesystem containing the configured data dir, in bytes.
 
-  A single `statvfs` on the data-dir mount — no path parameter, no walk.
-
-  This reports the MÖBIUS DATA VOLUME, not the host disk. `/data` is its own
-  ext4 filesystem on a fixed-size loop image, so `used` counts only what
-  Möbius stores; the OS, container images, and anything else on the host are
-  on a different mount and cannot inflate it. (An earlier layout bind-mounted
-  `/data` onto the host root, where the opposite was true — hence the former
-  "HOST filesystem" wording, kept here so the change is searchable.)
-
-  This is therefore a real capacity ceiling and the number to act on. The
-  container's OTHER filesystem — `/` — is the one that reports host capacity,
-  because an overlay has no size of its own and statvfs falls through to the
-  backing device. Nothing bounds writes there, which is why agent scratch is
-  pinned to this volume (see `config.agent_scratch_dir`)."""
+  A single mount-level `statvfs` — not a recursive subtree size, and not a
+  Möbius-enforced quota. What else counts toward `used` depends on how the
+  deployment mounts `data_dir`: when it has its own volume this is Möbius's
+  own footprint, and when it shares a mount the mount's other tenants count
+  too."""
   data_dir = get_settings().data_dir
   usage = shutil.disk_usage(data_dir)
   return {"total": usage.total, "used": usage.used, "free": usage.free,
