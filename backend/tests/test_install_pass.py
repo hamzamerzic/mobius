@@ -72,9 +72,9 @@ def test_pass_is_opaque_and_redeems_into_a_short_owner_session(
   payload = auth_lib.decode_access_token(access_token)
   assert payload["sub"] == "test"
   assert "scope" not in payload
-  assert payload["exp"] <= int(
-    (datetime.now(UTC) + timedelta(minutes=31)).timestamp()
-  )
+  expires_at = datetime.fromtimestamp(payload["exp"], UTC)
+  assert expires_at >= datetime.now(UTC) + timedelta(days=29)
+  assert expires_at <= datetime.now(UTC) + timedelta(days=31)
   me = client.get(
     "/api/apps/", headers={"Authorization": f"Bearer {access_token}"}
   )

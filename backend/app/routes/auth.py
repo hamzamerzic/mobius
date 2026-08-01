@@ -423,7 +423,11 @@ def consume_managed_sso_session(request: Request):
 # or owner bearer can be extracted from it. The durable row owns expiry,
 # app-binding, revocation, and atomic one-use consumption across restarts.
 _INSTALL_PASS_TTL = timedelta(minutes=30)
-_INSTALL_SESSION_TTL = timedelta(minutes=30)
+# The URL-carried pass is short-lived; the credential minted after it is spent
+# is an ordinary owner session. Giving an installed app another 30-minute
+# credential would merely defer the same per-app login until half an hour after
+# installation, with no security benefit once the pass has left the URL.
+_INSTALL_SESSION_TTL = timedelta(days=30)
 
 
 def _install_pass_hash(secret: str) -> str:
