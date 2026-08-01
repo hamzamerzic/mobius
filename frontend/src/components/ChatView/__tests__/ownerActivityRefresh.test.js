@@ -16,11 +16,23 @@ function slice(source, fromNeedle, toNeedle) {
   return source.slice(from, to)
 }
 
-test('the pane gives all committed owner activity one stable row projection', () => {
+test('the pane projects ordinary activity but refreshes server truth once for the first title', () => {
   assert.match(paneChatView, /onOwnerActivity=\{handleOwnerActivity\}/)
   assert.match(paneChatView, /markChatOwnerActivity\(chatId\)/)
-  assert.doesNotMatch(paneChatView, /refreshChats/,
-    'ordinary chat activity must not fetch and reconcile the complete drawer list')
+  const firstMessage = slice(
+    paneChatView,
+    'const handleFirstMessage = useCallback',
+    'const handleOwnerActivity = useCallback',
+  )
+  assert.match(firstMessage, /refreshChats\(\)/,
+    'the first committed message must replace New chat with the server title')
+  const ordinaryActivity = slice(
+    paneChatView,
+    'const handleOwnerActivity = useCallback',
+    'const handleMessageStart = useCallback',
+  )
+  assert.doesNotMatch(ordinaryActivity, /refreshChats/,
+    'later owner activity must not fetch and reconcile the complete drawer list')
   assert.match(paneChatView, /if \(continues !== undefined\) \{[\s\S]*?refreshApps\(\)[\s\S]*?loadTheme\(\)/,
     'an idle activation 204 must not reconcile unrelated app and theme state')
   assert.doesNotMatch(paneChatView, /onQuestionAnswered/,

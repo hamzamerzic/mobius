@@ -3268,6 +3268,7 @@ export default function Shell() {
                 markVoiceListening={markVoiceListening}
                 refreshApps={refreshApps}
                 acknowledgeAppPreview={handleAppPreviewSeen}
+                refreshChats={refreshChats}
                 markChatOwnerActivity={markChatOwnerActivity}
                 loadTheme={loadTheme}
                 navTo={stablePaneNavTo}
