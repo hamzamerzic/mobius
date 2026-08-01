@@ -523,7 +523,9 @@ def test_pull_requests_run_required_suites_and_main_publishes_image():
   test_workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
     encoding="utf-8"
   )
-  image_workflow = (ROOT / ".github" / "workflows" / "main-image.yml").read_text(
+  image_workflow = (
+    ROOT / ".github" / "workflows" / "compatibility-bootstrap.yml"
+  ).read_text(
     encoding="utf-8"
   )
   test_triggers = test_workflow.split("\npermissions:\n", 1)[0]
@@ -548,12 +550,32 @@ def test_pull_requests_run_required_suites_and_main_publishes_image():
   assert "push:\n" in image_triggers
   assert "    branches: [main]\n" in image_triggers
   assert "schedule:\n" not in image_triggers
-  assert "workflow_dispatch:\n" in image_triggers
+  assert "workflow_dispatch:\n" not in image_triggers
   assert "pull_request:\n" not in image_triggers
   assert "packages: write" in image_workflow
   assert "push: true" in image_workflow
-  assert "tags: ghcr.io/mobius-os/mobius:main" in image_workflow
-  assert "docker buildx imagetools inspect ghcr.io/mobius-os/mobius:main" in image_workflow
+  assert "MOBIUS_IMAGE_REPOSITORY: ghcr.io/mobius-os/mobius" in image_workflow
+  assert "for tag in main external-recovery" in image_workflow
+  assert '--tag "$MOBIUS_IMAGE_REPOSITORY:$tag"' in image_workflow
+  assert '"$MOBIUS_IMAGE_REPOSITORY@$IMAGE_DIGEST"' in image_workflow
+  assert "--prefer-index=false" in image_workflow
+  assert 'test "$revision" = "$GITHUB_SHA"' in image_workflow
+  assert 'test "$GITHUB_REF" = refs/heads/main' in image_workflow
+  assert "git ls-remote --exit-code origin refs/heads/main" in image_workflow
+  assert "cancel-in-progress: false" in image_workflow
+  assert "group: mobius-core-image-publication" in image_workflow
+  assert "vars.MOBIUS_COMPATIBILITY_BOOTSTRAP_ENABLED == 'true'" in image_workflow
+  assert "github.sha == vars.MOBIUS_COMPATIBILITY_BOOTSTRAP_SHA" in image_workflow
+  assert "environment: compatibility-bootstrap" in image_workflow
+  assert "COMPATIBILITY_PREVIOUS_SHA:" in image_workflow
+  assert "COMPATIBILITY_PREVIOUS_DIGEST:" in image_workflow
+  assert 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in image_workflow
+  assert "steps.existing.outputs.mode == 'build'" in image_workflow
+  assert image_workflow.count("scripts/compatibility_bootstrap.py") == 3
+  assert "inventory \\" in image_workflow
+  assert "prewrite \\" in image_workflow
+  assert "final \\" in image_workflow
+  assert not (ROOT / ".github" / "workflows" / "main-image.yml").exists()
   assert "ghcr.io/mobius-os/mobius:daily" not in image_workflow
   assert "cache-to: type=gha,mode=max,ignore-error=true" in image_workflow
   assert "load: true" not in image_workflow
