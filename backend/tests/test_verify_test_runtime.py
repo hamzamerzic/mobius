@@ -617,10 +617,27 @@ def test_pull_requests_run_required_suites_and_protected_channel_publishes_image
   assert 'test "$GITHUB_REPOSITORY" = mobius-os/mobius' in image_workflow
   assert 'test "$GITHUB_EVENT_NAME" = push' in image_workflow
   assert 'test "$GITHUB_REF" = "$MOBIUS_PLATFORM_RELEASE_REF"' in image_workflow
-  assert "git merge-base --is-ancestor" in image_workflow
   assert image_workflow.count(
-    'git ls-remote --exit-code origin refs/heads/main'
-  ) >= 4
+    "git fetch --quiet --no-tags origin refs/heads/main"
+  ) == 5
+  assert image_workflow.count(
+    'git merge-base --is-ancestor "$RECOVERY_CUTOVER_PREREQUISITE_SHA" "$main_sha"'
+  ) == 5
+  assert image_workflow.count(
+    'git cat-file -e "$main_sha:backend/recovery/recoveryd.py"'
+  ) == 5
+  assert "git rev-list --ancestry-path --reverse" in image_workflow
+  assert 'git rev-parse "${removal_root_sha}^1"' in image_workflow
+  assert image_workflow.count(
+    "Refusing a removal lineage already contained by main"
+  ) == 5
+  assert image_workflow.count(
+    'git merge-base --is-ancestor "$REMOVAL_ROOT_SHA" "$main_sha"'
+  ) == 4
+  assert (
+    'git merge-base --is-ancestor "$removal_root_sha" "$main_sha"'
+    in image_workflow
+  )
   assert "Refusing to bind or publish a stale unbound release" in image_workflow
   assert "Refusing to move the channel from a stale normal release" in image_workflow
   assert 'if [ "$RELEASE_MODE" = resume_cutover ]' in image_workflow
