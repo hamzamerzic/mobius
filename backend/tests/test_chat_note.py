@@ -23,14 +23,6 @@ def _note(tmp_path, chat_id="c1", body="x"):
   return p
 
 
-def test_first_publication_keeps_message_derived_chat_name():
-  cn = _load_chat_note()
-  assert not cn._should_sync_published_title("")
-  assert cn._should_sync_published_title(
-    "---\ntype: chat\ndescription: Existing name\n---\n"
-  )
-
-
 # --- the gate -----------------------------------------------------------
 
 

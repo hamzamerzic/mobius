@@ -549,17 +549,6 @@ def _patch_title(chat_id: str, description: str) -> None:
     pass
 
 
-def _should_sync_published_title(existing_note: str) -> bool:
-  """Keep a new chat's synchronous first-message title on first publication.
-
-  ``StartTurn`` names a fresh chat from the owner's message before the agent
-  runs.  The first summary publication must not race that name with an
-  agent-generated description; later publications may continue syncing the
-  title from the durable note.
-  """
-  return bool(existing_note.strip())
-
-
 def run() -> int:
   args = [a for a in sys.argv[1:] if a.strip()]
   sync_title_only = "--sync-title" in args
@@ -618,7 +607,10 @@ def run() -> int:
     return 0
 
   m = re.search(r"^description:\s*(.+)$", out, re.MULTILINE)
-  if m and _should_sync_published_title(existing):
+  # StartTurn already names a fresh chat from its first message.  Keep that
+  # synchronous name on the first summary publication; later publications
+  # may sync the title from the durable note.
+  if m and existing.strip():
     _patch_title(chat_id, m.group(1).strip())
   return 0
 
