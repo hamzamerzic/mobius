@@ -202,6 +202,54 @@
 }
 
 .standalone-install__instructions strong { color: var(--text, #fff); }
+
+/* iOS Share steps. Sized as primary content, not as a footnote: on iPhone
+   this is the only instruction that matters, and the arrow below it points
+   down at the real Share button in Safari's toolbar. */
+.standalone-install__steps {
+  margin-top: 14px;
+  padding: 14px 15px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent, #a78bfa) 32%, var(--border, #333));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent, #a78bfa) 8%, transparent);
+}
+
+.standalone-install__steps p {
+  margin: 0;
+  color: var(--text, #fff);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.standalone-install__steps strong {
+  color: var(--accent, #a78bfa);
+  font-weight: 600;
+}
+
+.standalone-install__arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  margin: 12px auto 0;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent, #a78bfa) 34%, var(--border, #333));
+  background: color-mix(in srgb, var(--accent, #a78bfa) 10%, transparent);
+  font-size: 18px;
+  color: var(--accent, #a78bfa);
+  animation: standalone-install-arrow-cue 1.8s var(--ease-out-soft, ease-out) infinite;
+}
+
+@keyframes standalone-install-arrow-cue {
+  0%, 100% { opacity: 0.72; transform: translateY(0); }
+  50% { opacity: 1; transform: translateY(-2px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .standalone-install__arrow { animation: none; }
+}
+
 .standalone-install__message { margin-top: 12px; color: var(--muted, #aaa); font-size: 12px; }
 .standalone-install__actions { margin-top: 18px; }
 .standalone-install .standalone-install__primary {

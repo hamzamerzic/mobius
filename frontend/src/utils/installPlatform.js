@@ -5,6 +5,28 @@
 // if a browser changes its menu, Möbius still leaves installation to the
 // browser rather than pretending a guessed instruction is an API.
 
+/**
+ * True when THIS document is running as an installed standalone web app.
+ *
+ * `display-mode` is the authority. Apple's legacy `navigator.standalone`
+ * predates manifests and leaks `true` into the in-app browser iOS opens when
+ * an installed PWA follows a link out of its scope — a page that is plainly
+ * NOT the installed app. Trusting it there made the install card announce
+ * "already on your home screen" to someone who was mid-install.
+ *
+ * It stays as a fallback only where the media query is genuinely absent, so
+ * browsers too old to answer the standard question keep their old answer.
+ */
+export function isStandaloneDisplay(target = typeof window !== 'undefined' ? window : null) {
+  try {
+    const query = target?.matchMedia?.('(display-mode: standalone)')
+    if (query) return query.matches === true
+    return target?.navigator?.standalone === true
+  } catch {
+    return false
+  }
+}
+
 export function detectInstallPlatform(ua, maxTouchPoints) {
   if (ua === undefined) {
     ua = typeof navigator !== 'undefined' ? (navigator.userAgent || '') : ''

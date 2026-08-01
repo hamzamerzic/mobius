@@ -7,6 +7,8 @@
  * interface when it eventually appears.
  */
 
+import { isStandaloneDisplay } from '../utils/installPlatform.js'
+
 let captureStarted = false
 let deferredPrompt = null
 let installed = false
@@ -16,21 +18,12 @@ function emitChange() {
   for (const listener of listeners) listener()
 }
 
-function isStandalone(target) {
-  try {
-    if (target?.navigator?.standalone === true) return true
-    return target?.matchMedia?.('(display-mode: standalone)')?.matches === true
-  } catch {
-    return false
-  }
-}
-
 export function startInstallPromptCapture(
   target = typeof window !== 'undefined' ? window : null,
 ) {
   if (!target || captureStarted) return
   captureStarted = true
-  installed = isStandalone(target)
+  installed = isStandaloneDisplay(target)
 
   target.addEventListener('beforeinstallprompt', (event) => {
     if (installed) return

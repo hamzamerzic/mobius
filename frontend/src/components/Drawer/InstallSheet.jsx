@@ -4,19 +4,11 @@ import { apiFetch } from '../../api/client.js'
 import { appIconUrl } from '../appIcon.js'
 import { appQueries } from '../../hooks/queries.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
-import { detectInstallPlatform } from '../../utils/installPlatform.js'
+import {
+  detectInstallPlatform,
+  isStandaloneDisplay,
+} from '../../utils/installPlatform.js'
 import './InstallSheet.css'
-
-// True when this document is running as an installed standalone PWA.
-// iOS uses the non-standard `navigator.standalone`; everything else
-// exposes the display-mode media query. Either signal counts.
-function isStandaloneDisplay() {
-  if (typeof navigator !== 'undefined' && navigator.standalone === true) return true
-  if (typeof window !== 'undefined' && window.matchMedia) {
-    return window.matchMedia('(display-mode: standalone)').matches
-  }
-  return false
-}
 
 // Home-screen names are short; the OS truncates long ones anyway and
 // `short_name` is the first 12 chars. Cap generously but keep it sane.
@@ -62,15 +54,22 @@ export default function InstallSheet({ app, onClose }) {
   const [iconPreview, setIconPreview] = useState(null) // object URL or null
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
-  // iOS Safari can't install via a navigation to /apps/<slug>/?install=1:
-  // the standalone page asks the user to "tap the Share button below," but
-  // navigating same-tab from inside an installed Möbius PWA opens WITHIN
-  // standalone, where there is no Safari chrome and so no Share button.
-  // Instead we save the name/icon, then show the Share → Add to Home
-  // Screen steps right here in the shell, where the Safari Share button
-  // IS on screen. `iosInstructions` flips the card to that step.
+  // Only Safari's Share menu can add to the iOS Home Screen, so the final
+  // step is never ours to automate. What IS ours: which document is on
+  // screen when the user opens that menu. THIS document is the shell, whose
+  // manifest is Möbius's — adding from here installs a second Möbius, not
+  // the app. So every platform, iOS Safari included, navigates to the app's
+  // own page, which serves the app's manifest, name, and icon.
+  //
+  // The one case that cannot navigate is the installed Möbius app: it has no
+  // Share button, and iOS gives a PWA no supported way to hand off to Safari
+  // (`x-safari-https:` is undocumented and errors on some versions). There
+  // `handoff` flips the card to a tappable link plus a copyable address, so
+  // the user carries the destination across instead of retyping it.
   const [platform] = useState(() => detectInstallPlatform())
-  const [iosInstructions, setIosInstructions] = useState(false)
+  const [standalone] = useState(() => isStandaloneDisplay())
+  const [handoff, setHandoff] = useState(false)
+  const [copied, setCopied] = useState(false)
 
   // Revoke the object URL when it changes or on unmount — leaks are
   // small but the pattern should be clean.
@@ -86,11 +85,11 @@ export default function InstallSheet({ app, onClose }) {
     onClose: () => { if (!submitting) onClose?.() },
   })
 
-  // The iOS path replaces the form after saving. Move focus into its new
-  // confirmation action instead of leaving focus on an unmounted Continue.
+  // The hand-off path replaces the form after saving. Move focus into its new
+  // primary action instead of leaving focus on an unmounted Continue.
   useEffect(() => {
-    if (iosInstructions) queueMicrotask(() => primaryFocusRef.current?.focus())
-  }, [iosInstructions])
+    if (handoff) queueMicrotask(() => primaryFocusRef.current?.focus())
+  }, [handoff])
 
   // onContinue navigates the whole document away and intentionally leaves
   // `submitting` true (the page is leaving). BFCache can restore this page
@@ -123,6 +122,25 @@ export default function InstallSheet({ app, onClose }) {
     }
   }
 
+  // The app's own page — the only document whose manifest names and icons
+  // THIS app. `?install=1` opens its Add-to-Home card on arrival.
+  const installPath = `/apps/${appSlug}/?install=1`
+  const installUrl = typeof window !== 'undefined'
+    ? new URL(installPath, window.location.origin).href
+    : installPath
+
+  async function copyLink() {
+    try {
+      await navigator.clipboard.writeText(installUrl)
+      setCopied(true)
+    } catch {
+      // Clipboard access can be denied outright. The address is printed in
+      // the card either way, so this degrades to reading it off the screen.
+      setCopied(false)
+      setError('Could not copy — the address is written below.')
+    }
+  }
+
   async function onContinue() {
     const name = draftName.trim()
     if (!name || submitting) return
@@ -146,19 +164,16 @@ export default function InstallSheet({ app, onClose }) {
       }
       // Reflect the new name/icon in the drawer when the user returns.
       appQueries.list.invalidate(queryClient)
-      if (platform.iosSafari) {
-        // iOS Safari: don't navigate into standalone (Share button is
-        // absent there). Show the Share → Add to Home Screen steps in
-        // place — the Safari chrome around the shell still has the
-        // Share button on screen. Name/icon are already saved, so the
-        // manifest the OS reads on Add-to-Home is fresh.
+      if (platform.ios && standalone) {
+        // No Share button here and nowhere to navigate that would produce
+        // one. Hand the destination over instead.
         setSubmitting(false)
-        setIosInstructions(true)
+        setHandoff(true)
         return
       }
       // Same-tab navigation to the install surface. Manifest is already
       // fresh (saved above + no-cache), so the OS shows the new name.
-      window.location.href = `/apps/${appSlug}/?install=1`
+      window.location.href = installPath
     } catch (err) {
       setError(err?.message || 'Something went wrong. Try again.')
       setSubmitting(false)
@@ -181,32 +196,50 @@ export default function InstallSheet({ app, onClose }) {
         tabIndex={-1}
         onClick={e => e.stopPropagation()}
       >
-        {iosInstructions ? (
+        {handoff ? (
           <>
             <h2 className="is__title">Add {label} to your home screen</h2>
-            {isStandaloneDisplay() ? (
-              <p className="is__hint is__hint--steps">
-                You’re in the installed app, so the Share button isn’t on
-                screen. Open this page in <strong>Safari</strong>, then tap
-                the <strong>Share</strong> button and choose{' '}
-                <strong>Add to Home Screen</strong>.
-              </p>
-            ) : (
-              <p className="is__hint is__hint--steps">
-                Tap the <strong>Share</strong> button below{' '}
-                <span aria-hidden="true">(the square with the up-arrow)</span>,
-                then choose <strong>Add to Home Screen</strong>.
-                <span className="is__arrow" aria-hidden="true">↓</span>
-              </p>
-            )}
+            <p className="is__hint is__hint--steps">
+              Only Safari can put an app on your home screen, and you’re in
+              the installed Möbius app right now. Open {label}’s own page,
+              then tap <strong>Share</strong> and choose{' '}
+              <strong>Add to Home Screen</strong>.
+            </p>
+
+            <div className="is__handoff">
+              <a
+                ref={primaryFocusRef}
+                className="is__btn is__btn--primary is__btn--link"
+                href={installUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Open {label}’s page
+              </a>
+              <button
+                type="button"
+                className="is__btn is__btn--secondary"
+                onClick={copyLink}
+              >
+                {copied ? 'Link copied ✓' : 'Copy link'}
+              </button>
+            </div>
+
+            {error && <div className="is__error" role="alert">{error}</div>}
+
+            <p className="is__hint">
+              If it opens inside Möbius rather than Safari, tap the compass
+              icon to switch over. Or open Safari yourself and go to{' '}
+              <span className="is__url">{installUrl}</span>
+            </p>
+
             <div className="is__actions">
               <button
-                ref={primaryFocusRef}
                 type="button"
-                className="is__btn is__btn--primary"
+                className="is__btn is__btn--secondary"
                 onClick={() => onClose?.()}
               >
-                Got it
+                Done
               </button>
             </div>
           </>
