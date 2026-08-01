@@ -104,8 +104,9 @@ start_recovery() {
 
   trap - EXIT HUP INT TERM
   echo "Recovery is isolated from the stopped app and available only on loopback:"
-  printf '  http://127.0.0.1:%s/?token=%s\n' \
-    "$MOBIUS_RECOVERY_PORT" "$MOBIUS_RECOVERY_LOCAL_TOKEN"
+  printf '  http://127.0.0.1:%s/\n' "$MOBIUS_RECOVERY_PORT"
+  echo "Paste this one-time code into the Recovery sign-in form:"
+  printf '  %s\n' "$MOBIUS_RECOVERY_LOCAL_TOKEN"
   echo "When repair is complete: scripts/mobiusctl recovery finish"
   : "$app_was_stopped"
 }

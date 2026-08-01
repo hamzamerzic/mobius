@@ -39,6 +39,8 @@ def test_only_root_target_mounts_the_stopped_app_data():
 
 def test_lifecycle_pulls_latest_before_stopping_app_and_restores_on_finish():
   script = (ROOT / "scripts" / "mobiusctl").read_text()
+  assert "/?token=" not in script
+  assert "Paste this one-time code into the Recovery sign-in form" in script
   start = script.index("compose pull recovery")
   stop = script.index("compose stop app", start)
   launch = script.index("compose up -d --force-recreate recovery-target recovery")
