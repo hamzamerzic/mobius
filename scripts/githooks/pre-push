@@ -49,7 +49,15 @@ trap 'rm -rf "$PP_TMP"' EXIT
 
 FAIL=0
 PRIVACY_FAIL=0
-c_ok=$'\033[1;32m'; c_warn=$'\033[1;33m'; c_err=$'\033[1;31m'; c_off=$'\033[0m'
+# Colour is for a human watching a terminal. When git runs this hook inside
+# another program — Contribute's Send, CI, a log collector — the escape codes
+# survive into whatever stores the output and disfigure the diagnostic they
+# were meant to highlight. Emit none unless both streams are a terminal.
+if [ -t 1 ] && [ -t 2 ]; then
+  c_ok=$'\033[1;32m'; c_warn=$'\033[1;33m'; c_err=$'\033[1;31m'; c_off=$'\033[0m'
+else
+  c_ok=''; c_warn=''; c_err=''; c_off=''
+fi
 ok()   { printf '%s[pre-push]%s %s\n' "$c_ok"  "$c_off" "$*"; }
 warn() { printf '%s[pre-push]%s %s\n' "$c_warn" "$c_off" "$*"; }
 err()  { printf '%s[pre-push]%s %s\n' "$c_err" "$c_off" "$*" >&2; }

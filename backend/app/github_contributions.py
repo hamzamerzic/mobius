@@ -30,7 +30,11 @@ from app import (
   models,
 )
 from app.config import get_settings
-from app.contribution_errors import ContributionSubmitError
+from app.contribution_errors import (
+  ContributionSubmitError,
+  push_rejected,
+  readable_output,
+)
 from app.github_contribution_contract import (
   BRANCH_NAME as _BRANCH_NAME,
   COAUTHOR_TRAILER as _COAUTHOR_TRAILER,
@@ -382,8 +386,12 @@ def _cleanup_terminal_staging_checkout(record: dict) -> bool:
         env=env,
       )
       if removed.returncode != 0:
-        detail = (removed.stderr or removed.stdout or "git worktree remove failed").strip()
-        raise ContributionSubmitError(detail[:600])
+        raise ContributionSubmitError(
+          "Could not clear the old review checkout for this contribution.",
+          detail=readable_output(
+            removed.stderr or removed.stdout or "git worktree remove failed",
+          ),
+        )
       subprocess.run(
         ["git", f"--git-dir={common_dir}", "worktree", "prune"],
         cwd=str(data_dir),
@@ -901,6 +909,7 @@ def _mark_submit_failure(
   record_path: Path,
   message: str,
   record_patch: dict | None = None,
+  detail: str = "",
 ) -> dict | None:
   try:
     record = _read_record(record_path)
@@ -915,6 +924,12 @@ def _mark_submit_failure(
     "last_submit_error": message,
     "updated_at": _now_iso(),
   }
+  # The diagnostic belongs to exactly one attempt. Carrying a previous
+  # transcript next to a new message would explain the wrong failure.
+  if detail:
+    next_record["last_submit_error_detail"] = detail
+  else:
+    next_record.pop("last_submit_error_detail", None)
   _write_record(record_path, next_record)
   return next_record
 
@@ -939,6 +954,7 @@ def _mark_submit_success(
   if number is not None:
     next_record["number"] = number
   next_record.pop("last_submit_error", None)
+  next_record.pop("last_submit_error_detail", None)
   _write_record(record_path, next_record)
   return next_record
 
@@ -949,17 +965,22 @@ def _mark_stack_submit_failure(
   *,
   failed_id: str | None = None,
   record_patch: dict | None = None,
+  detail: str = "",
 ) -> list[dict]:
   snapshots = []
   for row in rows:
     current = _read_record(row["record_path"])
     if current.get("status") == "submitting":
-      patch = record_patch if current.get("id") == failed_id else None
+      is_failed = current.get("id") == failed_id
+      patch = record_patch if is_failed else None
       current = _mark_submit_failure(
         app_id=0,
         record_path=row["record_path"],
         message=message,
         record_patch=patch,
+        # Only the layer that actually failed owns the transcript; the
+        # siblings were stopped, not rejected.
+        detail=detail if is_failed else "",
       ) or current
     snapshots.append(current)
   return snapshots
@@ -1225,9 +1246,10 @@ def _existing_branch_pr(
   except (subprocess.TimeoutExpired, OSError) as exc:
     raise ContributionSubmitError(could_not_verify) from exc
   if proc.returncode != 0:
-    detail = (proc.stderr or proc.stdout or "").strip()
-    suffix = f" ({detail[:200]})" if detail else ""
-    raise ContributionSubmitError(could_not_verify + suffix)
+    raise ContributionSubmitError(
+      could_not_verify,
+      detail=readable_output(proc.stderr or proc.stdout or ""),
+    )
   try:
     rows = json.loads(proc.stdout or "[]")
   except ValueError:
@@ -1660,10 +1682,7 @@ def _push_reviewed_topic(
   if not last_push_error:
     return push_source, record_patch
   if not _is_workflow_scope_push_error(last_push_error):
-    raise ContributionSubmitError(
-      last_push_error[:600] or "Git push failed.",
-      record_patch=record_patch,
-    )
+    raise push_rejected(last_push_error, record_patch=record_patch)
 
   # Most topic branches can be pushed without consulting the fork's default
   # branch. GitHub only makes that state relevant when a public_repo-only
@@ -1726,10 +1745,7 @@ def _push_reviewed_topic(
       raise _git_ops._merge_error_patch(sync_exc, record_patch) from sync_exc
   last_push_error = _push_topic_branch(repo, branch, push_source)
   if last_push_error:
-    raise ContributionSubmitError(
-      last_push_error[:600] or "Git push failed.",
-      record_patch=record_patch,
-    )
+    raise push_rejected(last_push_error, record_patch=record_patch)
   return push_source, record_patch
 
 
@@ -1862,10 +1878,7 @@ def _submit_prepared_pr(
         repo, push_remote, branch, push_source,
       )
       if last_push_error:
-        raise ContributionSubmitError(
-          last_push_error[:600] or "Git push failed.",
-          record_patch=record_patch,
-        )
+        raise push_rejected(last_push_error, record_patch=record_patch)
     else:
       try:
         fork_slug = _ensure_owner_fork_remote(repo, upstream_repo, login)

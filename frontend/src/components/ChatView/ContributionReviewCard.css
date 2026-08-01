@@ -193,6 +193,52 @@
   color: var(--danger);
 }
 
+/* A failure states itself in one line. The transcript that proves it is
+   available but never the first thing read, and it is capped so a long build
+   log cannot push the card's own actions off the screen. */
+.contrib-card__failure {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.contrib-card__failure-detail > summary {
+  cursor: pointer;
+  font-size: 0.75rem;
+  line-height: 1.35;
+  color: var(--muted);
+  list-style: none;
+}
+
+.contrib-card__failure-detail > summary::-webkit-details-marker {
+  display: none;
+}
+
+.contrib-card__failure-detail > summary::before {
+  content: '▸ ';
+  color: var(--muted);
+}
+
+.contrib-card__failure-detail[open] > summary::before {
+  content: '▾ ';
+}
+
+.contrib-card__failure-detail > pre {
+  margin: 6px 0 0;
+  padding: 8px;
+  max-height: 210px;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  line-height: 1.45;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* The motivation the button cannot carry on its own: who actually benefits.
    Accent-tinted so it reads as encouragement rather than another metadata line,
    and hidden whenever the card is showing a problem instead. */
