@@ -30,11 +30,8 @@ from app import (
   models,
 )
 from app.config import get_settings
-from app.contribution_errors import (
-  ContributionSubmitError,
-  push_rejected,
-  readable_output,
-)
+from app.contribution_errors import ContributionSubmitError, push_rejected
+from app.terminal_output import readable_output
 from app.github_contribution_contract import (
   BRANCH_NAME as _BRANCH_NAME,
   COAUTHOR_TRAILER as _COAUTHOR_TRAILER,

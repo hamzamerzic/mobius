@@ -4,26 +4,16 @@ from __future__ import annotations
 
 import re
 
-# Terminal styling and stray control bytes. Colour codes are correct for a
-# terminal and wrong for everything we persist or render: they survive JSON,
-# reach the owner's review card as literal `[1;31m` noise, and disfigure the
-# very diagnostic they were meant to highlight. Strip them at the boundary
-# where command output stops being terminal output and becomes stored text.
-_TERMINAL_NOISE = re.compile(
-  r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"    # OSC ... BEL/ST
-  r"|\x1b\[[0-9;?]*[ -/]*[@-~]"           # CSI (colour, cursor moves)
-  r"|\x1b[@-Z\\-_]"                       # two-byte escapes
-  r"|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"    # other control bytes
+from app.terminal_output import readable_output
+
+# The verdict line Möbius's own pre-push gate prints when it refuses a push.
+# It is a declared contract between two Möbius-owned components — see the
+# matching printf in scripts/githooks/pre-push — so this reads structure the
+# hook already computed rather than re-deriving it from the prose above it.
+_GATE_VERDICT = re.compile(
+  r"^\[pre-push\] verdict=blocked cause=(\w+) checks=(\S*)\s*$",
+  re.MULTILINE,
 )
-
-# Möbius's own pre-push gate prefixes every line it prints, and names each
-# failing check as `[pre-push] <name> FAILED:`. Reading those two markers is a
-# contract between two Möbius-owned components, not a guess about the shape of
-# arbitrary hook output: anything unrecognized is reported as a remote refusal.
-_LOCAL_GATE = re.compile(r"^\[pre-push\]", re.MULTILINE)
-_LOCAL_GATE_CHECK = re.compile(r"^\[pre-push\]\s+(.+?)\s+FAILED\b", re.MULTILINE)
-
-_DETAIL_LIMIT = 2000
 
 
 class ContributionSubmitError(Exception):
@@ -51,30 +41,6 @@ class ContributionSubmitError(Exception):
     self.detail = detail or ""
 
 
-def readable_output(raw: str, *, limit: int = _DETAIL_LIMIT) -> str:
-  """Turn a captured command transcript into text safe to store and show.
-
-  Keeps the TAIL when it overflows: a failing command states its reason last,
-  so truncating from the front preserves the banner and discards the answer.
-  """
-  text = _TERMINAL_NOISE.sub("", str(raw or ""))
-  lines = [line.rstrip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
-
-  collapsed: list[str] = []
-  for line in lines:
-    if not line and (not collapsed or not collapsed[-1]):
-      continue
-    collapsed.append(line)
-  while collapsed and not collapsed[-1]:
-    collapsed.pop()
-
-  cleaned = "\n".join(collapsed)
-  if len(cleaned) <= limit:
-    return cleaned
-  kept = cleaned[-limit:]
-  return "…\n" + kept.split("\n", 1)[-1]
-
-
 def push_rejected(
   raw: str,
   *,
@@ -88,23 +54,21 @@ def push_rejected(
   branch now — in every case, that nothing was published.
   """
   detail = readable_output(raw)
+  verdict = _GATE_VERDICT.search(detail)
 
-  if _LOCAL_GATE.search(detail):
-    if "privacy gate" in detail:
-      message = (
-        "Möbius's privacy gate stopped this push: the branch still contains "
-        "private workspace paths. Nothing was published."
-      )
-    else:
-      checks = list(dict.fromkeys(_LOCAL_GATE_CHECK.findall(detail)))
-      named = f" ({', '.join(checks)})" if checks else ""
-      message = (
-        f"This did not pass the checks Möbius runs before publishing{named}. "
-        "Nothing was published — fix it locally, then send again."
-      )
-  elif detail:
+  if verdict is None:
     message = "GitHub would not accept this branch, so nothing was published."
+  elif verdict.group(1) == "privacy":
+    message = (
+      "Möbius's privacy gate stopped this push: the branch still contains "
+      "private workspace paths. Nothing was published."
+    )
   else:
-    message = "The push failed, so nothing was published."
+    checks = verdict.group(2).replace(",", ", ")
+    named = f" ({checks})" if checks else ""
+    message = (
+      f"This did not pass the checks Möbius runs before publishing{named}. "
+      "Nothing was published — fix it locally, then send again."
+    )
 
   return ContributionSubmitError(message, record_patch=record_patch, detail=detail)

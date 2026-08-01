@@ -331,7 +331,7 @@ function ReviewRow({
   const diffStat = diffStatSummary(record.diff_stat)
   const submitting = record.status === 'submitting'
   const cardRef = useSwipeToDismiss(onDismiss)
-  const failure = submitFailure(record, { attempt, busy: busy || submitting })
+  const failure = submitFailure(record, { attempt, sending: busy || submitting })
 
   async function send() {
     if (activeSendRef.current) return
@@ -388,16 +388,12 @@ function ReviewRow({
       {/* One sentence says what happened; the transcript that proves it stays
           collapsed next to it, so the card explains without shouting plumbing
           at someone who only needs to know nothing was published. */}
-      {failure && (
-        <div className="contrib-card__failure">
-          <p className="contrib-card__error">{failure.message}</p>
-          {failure.detail && (
-            <details className="contrib-card__failure-detail">
-              <summary>What blocked it</summary>
-              <pre>{failure.detail}</pre>
-            </details>
-          )}
-        </div>
+      {failure && <p className="contrib-card__error">{failure.message}</p>}
+      {failure?.detail && (
+        <details className="contrib-card__failure-detail">
+          <summary>What blocked it</summary>
+          <pre className="contrib-card__body">{failure.detail}</pre>
+        </details>
       )}
 
       <div className="contrib-card__actions">

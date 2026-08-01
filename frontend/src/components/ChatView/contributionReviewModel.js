@@ -122,8 +122,8 @@ export function diffStatSummary(value) {
  * previous attempt's reason while a new one is in flight. `attempt` is this
  * card's own latest outcome and always wins; otherwise the stored one speaks.
  */
-export function submitFailure(record, { attempt = null, busy = false } = {}) {
-  if (busy) return null
+export function submitFailure(record, { attempt = null, sending = false } = {}) {
+  if (sending) return null
   const source = attempt || {
     message: record?.last_submit_error,
     detail: record?.last_submit_error_detail,

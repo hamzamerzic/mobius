@@ -1,10 +1,10 @@
 """Submit failures must read as one sentence, never as a terminal transcript."""
 
-from app.contribution_errors import (
-  ContributionSubmitError,
-  push_rejected,
-  readable_output,
-)
+import re
+from pathlib import Path
+
+from app.contribution_errors import ContributionSubmitError, push_rejected
+from app.terminal_output import readable_output
 
 # The exact bytes a rejected Send stored on a real contribution record: the
 # local gate's colour codes, npm's lifecycle banner, and the one line that
@@ -23,6 +23,7 @@ REAL_PRE_PUSH_REJECTION = (
   "      - 781 source-reading cases exceeds 780\r\n"
   "    Replace implementation-text assertions with behavioral coverage.\r\n"
   "\x1b[1;31m[pre-push]\x1b[0m push blocked. Fix the above.\r\n"
+  "[pre-push] verdict=blocked cause=checks checks=frontend-unit\r\n"
 )
 
 
@@ -71,23 +72,24 @@ def test_local_gate_rejection_names_the_check_and_hides_the_transcript():
   assert "781 source-reading cases exceeds 780" in error.detail
 
 
-def test_several_failing_checks_are_all_named_once():
+def test_every_failing_check_the_gate_named_reaches_the_owner():
   error = push_rejected(
     "[pre-push] frontend-unit FAILED:\n"
     "    boom\n"
     "[pre-push] backend pytest FAILED:\n"
     "    boom\n"
-    "[pre-push] frontend-unit FAILED:\n"
     "[pre-push] push blocked. Fix the above.\n"
+    "[pre-push] verdict=blocked cause=checks checks=frontend-unit,backend-pytest\n"
   )
 
-  assert "(frontend-unit, backend pytest)" in error.message
+  assert "(frontend-unit, backend-pytest)" in error.message
 
 
 def test_privacy_rejection_gets_its_own_sentence():
   error = push_rejected(
     "[pre-push] private workspace path staged: .claude/settings.json\n"
     "[pre-push] push blocked by the privacy gate. Do not use --no-verify.\n"
+    "[pre-push] verdict=blocked cause=privacy checks=\n"
   )
 
   assert "privacy gate" in error.message
@@ -106,14 +108,53 @@ def test_an_unrecognized_refusal_is_attributed_to_github_not_to_us():
   assert "403" in error.detail
 
 
-def test_a_silent_failure_still_says_nothing_was_published():
-  error = push_rejected("")
+def test_gate_output_without_a_verdict_is_not_claimed_as_a_local_failure():
+  # An older installed hook, or a push refused before the gate ran, has no
+  # verdict line. Reporting it as a local check failure would send the owner
+  # looking for a test to fix that never ran.
+  error = push_rejected("[pre-push] some older wording\nerror: failed to push\n")
 
-  assert error.message == "The push failed, so nothing was published."
-  assert error.detail == ""
+  assert error.message == (
+    "GitHub would not accept this branch, so nothing was published."
+  )
 
 
 def test_the_record_patch_survives_classification():
   error = push_rejected("boom", record_patch={"head_repository": "owner/fork"})
 
   assert error.record_patch == {"head_repository": "owner/fork"}
+
+
+def test_the_gate_and_this_parser_agree_on_the_verdict_line():
+  """The one place the hook and this module have to stay in step.
+
+  Everything else the gate prints is prose for a human and may be reworded
+  freely. If someone changes the verdict line's shape in the hook without
+  changing the pattern here, classification silently degrades to the generic
+  remote-refusal message — so assert the two really do match, rather than
+  testing this parser against a hand-copied fixture that can drift.
+  """
+  hook = (Path(__file__).resolve().parents[2] / "scripts/githooks/pre-push").read_text()
+
+  emitted = re.search(
+    r"printf '(\[pre-push\] verdict=blocked cause=%s checks=%s)\\n'", hook,
+  )
+  assert emitted, "the pre-push gate no longer prints the verdict line this parses"
+
+  template = emitted.group(1)
+  privacy = template % ("privacy", "")
+  checks = template % ("checks", "frontend-unit,backend-pytest")
+
+  assert "privacy gate" in push_rejected(privacy).message
+  assert "(frontend-unit, backend-pytest)" in push_rejected(checks).message
+
+
+def test_every_named_check_in_the_gate_is_shell_safe_and_readable():
+  """Check names travel through a shell variable into an owner-facing sentence."""
+  hook = (Path(__file__).resolve().parents[2] / "scripts/githooks/pre-push").read_text()
+
+  names = re.findall(r"^\s*fail_check ([\w-]+)$", hook, re.MULTILINE)
+
+  assert len(names) >= 5, f"expected the gate's named checks, found {names}"
+  for name in names:
+    assert re.fullmatch(r"[a-z0-9-]+", name), f"{name!r} is not a safe check name"

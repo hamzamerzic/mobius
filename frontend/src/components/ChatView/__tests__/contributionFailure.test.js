@@ -30,8 +30,8 @@ test('this attempt outranks the failure stored before it', () => {
 test('a send in flight never shows the previous attempt as its own result', () => {
   const record = { ...READY, last_submit_error: 'the last attempt failed' }
 
-  assert.equal(submitFailure(record, { busy: true }), null)
-  assert.notEqual(submitFailure(record, { busy: false }), null)
+  assert.equal(submitFailure(record, { sending: true }), null)
+  assert.notEqual(submitFailure(record, { sending: false }), null)
 })
 
 test('a record that never failed shows nothing', () => {
