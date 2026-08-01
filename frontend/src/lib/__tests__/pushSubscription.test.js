@@ -140,7 +140,7 @@ test('the freshly created subscription is never retired', async () => {
 
 test('a registration without push support is skipped, not fatal', async () => {
   const broken = {
-    scope: `${ORIGIN}/apps/klix/`,
+    scope: `${ORIGIN}/apps/example/`,
     pushManager: { getSubscription: async () => { throw new Error('denied') } },
   }
   const stale = fakeSubscription(`${ORIGIN}/endpoint-legacy`)
