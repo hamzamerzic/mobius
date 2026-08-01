@@ -110,6 +110,48 @@ def create_app_token(
   )
 
 
+def create_install_pass(
+  *,
+  owner_username: str,
+  token_epoch: int,
+  app_slug: str,
+  expires_delta: timedelta = timedelta(minutes=30),
+) -> str:
+  """Carries an owner session across iOS's per-web-app storage wall.
+
+  iOS gives every home-screen web app its own storage container, sealed off
+  from Safari and from every other installed app on the same origin. An app
+  installed from a signed-in Safari session therefore launches with empty
+  storage and no path back to the session that installed it, so the owner
+  meets a login screen once per app they install.
+
+  This pass rides across that wall inside the manifest's `start_url`, is
+  redeemed on first launch, and is stripped from the URL immediately. It is
+  the same shape as the managed-SSO handoff: a short-lived scoped wrapper
+  around an ordinary owner token, never a second kind of session. Revocation
+  therefore still works — the wrapped token carries the owner's epoch, so
+  "sign out everywhere" invalidates a pass in flight.
+
+  `app_slug` binds the pass to the app it was minted for, so one that leaks
+  cannot be redeemed through a different app's launch URL.
+
+  TTL is 30 minutes: long enough to cover Share -> Add to Home Screen -> first
+  tap, short enough that the copy sitting in the home-screen icon's URL is
+  inert well before anyone could find it there.
+  """
+  access_token = create_access_token(
+    {"sub": owner_username}, token_epoch=token_epoch
+  )
+  return create_access_token(
+    {
+      "scope": "install_pass",
+      "access_token": access_token,
+      "app_slug": app_slug,
+    },
+    expires_delta=expires_delta,
+  )
+
+
 def create_media_token(chat_id: str, owner_username: str, token_epoch: int) -> str:
   """Creates a short-lived JWT scoped to uploads and media for one chat.
 

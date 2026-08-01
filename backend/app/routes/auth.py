@@ -416,6 +416,90 @@ def consume_managed_sso_session(request: Request):
   return response
 
 
+# One-time install passes. iOS seals every home-screen web app inside its own
+# storage container, so an app installed from a signed-in Safari session
+# launches signed out; a pass carries that session across exactly once. See
+# auth.create_install_pass for the shape and why it is not a second session
+# type.
+#
+# The pass is a signed JWT, so redemption needs no lookup — this map exists
+# only to stop a REPLAY within the pass's short lifetime. It is deliberately
+# in-memory: a restart clears it, which at worst restores replayability for
+# whatever minutes remain on a pass already delivered to the owner's own
+# device. Bounded like the login-tracking maps above so it cannot grow without
+# limit, and pruned on each use since entries carry their own expiry.
+_INSTALL_PASS_CAP = 1_000
+_consumed_install_passes: dict[str, float] = {}
+
+
+def _consume_install_pass(token: str, expires_at: float) -> bool:
+  """Marks a pass spent. Returns False when it had already been spent."""
+  now = time.time()
+  for key, expiry in list(_consumed_install_passes.items()):
+    if expiry <= now:
+      _consumed_install_passes.pop(key, None)
+  key = hashlib.sha256(token.encode("utf-8")).hexdigest()
+  if key in _consumed_install_passes:
+    return False
+  while len(_consumed_install_passes) >= _INSTALL_PASS_CAP:
+    _consumed_install_passes.pop(next(iter(_consumed_install_passes)), None)
+  _consumed_install_passes[key] = expires_at
+  return True
+
+
+@router.post("/install-pass")
+def mint_install_pass(
+  body: schemas.InstallPassRequest,
+  owner: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Mints a one-time pass for installing one app to the home screen.
+
+  Owner-authenticated: the caller must already hold the session the pass will
+  carry, so this never widens who can obtain one.
+  """
+  app_row = (
+    db.query(models.App)
+    .filter(models.App.slug == body.slug, models.App.deleted_at.is_(None))
+    .first()
+  )
+  if not app_row:
+    raise HTTPException(status_code=404, detail="App not found.")
+  return JSONResponse(
+    {
+      "install_pass": auth.create_install_pass(
+        owner_username=owner.username,
+        token_epoch=owner.token_epoch,
+        app_slug=app_row.slug,
+      )
+    },
+    headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+  )
+
+
+@router.post("/install-pass/redeem", dependencies=[Depends(reject_cross_site)])
+def redeem_install_pass(body: schemas.InstallPassRedeemRequest):
+  """Exchanges a one-time install pass for the owner session it wraps."""
+  payload = auth.decode_access_token(body.install_pass)
+  if not payload or payload.get("scope") != "install_pass":
+    raise HTTPException(status_code=401, detail="This sign-in pass has expired.")
+  if payload.get("app_slug") != body.slug:
+    raise HTTPException(
+      status_code=401, detail="This sign-in pass is for a different app."
+    )
+  access_token = payload.get("access_token")
+  if not isinstance(access_token, str) or not access_token:
+    raise HTTPException(status_code=401, detail="This sign-in pass is malformed.")
+  if not _consume_install_pass(body.install_pass, float(payload.get("exp") or 0)):
+    raise HTTPException(
+      status_code=401, detail="This sign-in pass has already been used."
+    )
+  return JSONResponse(
+    {"access_token": access_token, "token_type": "bearer"},
+    headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+  )
+
+
 # Bcrypt-verifying against this dummy hash when the username is unknown makes the
 # missing-user path cost the same as a wrong-password path (anti-enumeration —
 # the old short-circuit skipped bcrypt entirely for unknown users, leaking

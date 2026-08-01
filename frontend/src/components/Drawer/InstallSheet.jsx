@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { apiFetch } from '../../api/client.js'
+import { api, apiFetch } from '../../api/client.js'
 import { appIconUrl } from '../appIcon.js'
 import { appQueries } from '../../hooks/queries.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
@@ -69,6 +69,7 @@ export default function InstallSheet({ app, onClose }) {
   const [platform] = useState(() => detectInstallPlatform())
   const [standalone] = useState(() => isStandaloneDisplay())
   const [handoff, setHandoff] = useState(false)
+  const [handoffUrl, setHandoffUrl] = useState('')
   const [copied, setCopied] = useState(false)
 
   // Revoke the object URL when it changes or on unmount — leaks are
@@ -123,15 +124,37 @@ export default function InstallSheet({ app, onClose }) {
   }
 
   // The app's own page — the only document whose manifest names and icons
-  // THIS app. `?install=1` opens its Add-to-Home card on arrival.
-  const installPath = `/apps/${appSlug}/?install=1`
-  const installUrl = typeof window !== 'undefined'
-    ? new URL(installPath, window.location.origin).href
-    : installPath
+  // THIS app. `?install=1` opens its Add-to-Home card on arrival, and the
+  // one-time pass rides through the manifest into the installed app's first
+  // launch so it can sign itself in (see auth.create_install_pass).
+  //
+  // Minting is best-effort on purpose: if it fails the install still works,
+  // it just meets the ordinary login on first launch. A failed hand-off must
+  // never block putting an app on the home screen.
+  async function buildInstallUrl() {
+    let query = 'install=1'
+    try {
+      const res = await api.auth.installPass.mint(appSlug)
+      if (res.ok) {
+        const data = await res.json()
+        if (data?.install_pass) {
+          query += `&pass=${encodeURIComponent(data.install_pass)}`
+        }
+      }
+    } catch { /* install without the pass */ }
+    return new URL(`/apps/${appSlug}/?${query}`, window.location.origin).href
+  }
+
+  // Shown for typing by hand. Deliberately WITHOUT the one-time pass: an
+  // address a human copies off a screen should not be a credential, and a
+  // pass-less arrival degrades to the ordinary login rather than failing.
+  const plainUrl = typeof window !== 'undefined'
+    ? new URL(`/apps/${appSlug}/?install=1`, window.location.origin).href
+    : `/apps/${appSlug}/?install=1`
 
   async function copyLink() {
     try {
-      await navigator.clipboard.writeText(installUrl)
+      await navigator.clipboard.writeText(handoffUrl)
       setCopied(true)
     } catch {
       // Clipboard access can be denied outright. The address is printed in
@@ -164,16 +187,18 @@ export default function InstallSheet({ app, onClose }) {
       }
       // Reflect the new name/icon in the drawer when the user returns.
       appQueries.list.invalidate(queryClient)
+      const url = await buildInstallUrl()
       if (platform.ios && standalone) {
         // No Share button here and nowhere to navigate that would produce
         // one. Hand the destination over instead.
+        setHandoffUrl(url)
         setSubmitting(false)
         setHandoff(true)
         return
       }
       // Same-tab navigation to the install surface. Manifest is already
       // fresh (saved above + no-cache), so the OS shows the new name.
-      window.location.href = installPath
+      window.location.href = url
     } catch (err) {
       setError(err?.message || 'Something went wrong. Try again.')
       setSubmitting(false)
@@ -210,7 +235,7 @@ export default function InstallSheet({ app, onClose }) {
               <a
                 ref={primaryFocusRef}
                 className="is__btn is__btn--primary is__btn--link"
-                href={installUrl}
+                href={handoffUrl}
                 target="_blank"
                 rel="noopener noreferrer"
               >
@@ -230,7 +255,7 @@ export default function InstallSheet({ app, onClose }) {
             <p className="is__hint">
               If it opens inside Möbius rather than Safari, tap the compass
               icon to switch over. Or open Safari yourself and go to{' '}
-              <span className="is__url">{installUrl}</span>
+              <span className="is__url">{plainUrl}</span>
             </p>
 
             <div className="is__actions">

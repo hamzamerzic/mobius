@@ -42,6 +42,22 @@ class TokenResponse(BaseModel):
   token_type: str = "bearer"
 
 
+# A one-time sign-in pass handed to a mini-app being installed to the iOS home
+# screen, where the new web app gets its own empty storage container. See
+# auth.create_install_pass.
+class InstallPassRequest(BaseModel):
+  slug: str
+
+
+class InstallPassResponse(BaseModel):
+  install_pass: str
+
+
+class InstallPassRedeemRequest(BaseModel):
+  install_pass: str
+  slug: str
+
+
 # Declared storage-access level. Used on two sides of the same coin:
 #   cross_app_access  — what THIS app's token can do against others
 #   share_with_apps   — what others can do against THIS app
