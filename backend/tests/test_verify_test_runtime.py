@@ -323,11 +323,13 @@ def test_managed_release_boot_falls_back_when_exact_target_is_not_integrated():
   guard = entrypoint.index("platform_update.boot_guard_sync()", reconcile)
   proof = entrypoint.index("platform_update.managed_release_ready_sync()", guard)
   fallback = entrypoint.index("_platform_use_baked", proof)
-  served_head_gate = entrypoint.index('if [ "$_use_platform" -eq 1 ]; then', proof)
+  markers = entrypoint.index(
+    "# Write the markers only after the managed exact-release gate",
+    fallback,
+  )
 
-  assert reconcile < guard < proof < fallback < served_head_gate
+  assert reconcile < guard < proof < fallback < markers
   assert "/data/platform is preserved for recovery" in entrypoint
-  assert 'printf \'%s\\n\' "$_serve_source" > /tmp/serving-source' in entrypoint
 
 
 def test_browser_setup_fails_closed_before_auth_and_never_wipes_chats():

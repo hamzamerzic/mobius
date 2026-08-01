@@ -327,6 +327,40 @@ _use_platform=0
 _serve_workdir=/app
 _serve_source=baked
 _served_sha="${BUILD_SHA:-unknown}"
+_managed_release=0
+_managed_baked_sha=
+
+# A requested release channel is a boot-time trust boundary, not a best-effort
+# updater hint. Validate both the full branch ref and the immutable image-owned
+# SHA before inspecting the persistent checkout. Runtime BUILD_SHA is
+# deliberately ignored here because a deployment can override it.
+if [ -n "${MOBIUS_PLATFORM_RELEASE_REF:-}" ]; then
+  case "$MOBIUS_PLATFORM_RELEASE_REF" in
+    refs/heads/*) ;;
+    *)
+      echo "FATAL: MOBIUS_PLATFORM_RELEASE_REF must be a full refs/heads/... ref." >&2
+      exit 70
+      ;;
+  esac
+  _managed_release_branch=${MOBIUS_PLATFORM_RELEASE_REF#refs/heads/}
+  if ! git check-ref-format --branch "$_managed_release_branch" >/dev/null 2>&1; then
+    echo "FATAL: MOBIUS_PLATFORM_RELEASE_REF is invalid." >&2
+    exit 70
+  fi
+  unset _managed_release_branch
+  _managed_baked_sha=$(python3 -I -c '
+import json, re
+value = json.load(open("/app/build-info.json", encoding="utf-8")).get("sha", "")
+if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", value):
+  raise SystemExit(1)
+print(value.lower())
+') || {
+    echo "FATAL: managed release image has no valid immutable build SHA." >&2
+    exit 70
+  }
+  _managed_release=1
+  _served_sha=$_managed_baked_sha
+fi
 
 # Env scrub shared by the import probe and the uvicorn exec so probe and serve
 # stay identical. Drops ONLY inherited GIT_*/PYTHONPATH: a GIT_DIR/GIT_WORK_TREE
@@ -469,6 +503,15 @@ _platform_bootstrap() {
       echo "PLATFORM LAYER WARNING: baked platform seed copy failed; trying network clone." >&2
     fi
     rm -rf "$_seeding" 2>/dev/null || true
+  fi
+
+  # A managed stack image must never recover its editable checkout by cloning
+  # the repository's default branch: public main can intentionally remain on an
+  # older compatibility release. Its immutable baked tree is the only safe
+  # first-boot/fallback source for this image.
+  if [ "$_managed_release" -eq 1 ]; then
+    echo "PLATFORM LAYER WARNING: managed baked seed failed; refusing default-branch clone." >&2
+    return 1
   fi
 
   echo "Platform layer: cloning $_origin -> /data/platform (first boot fallback)."
@@ -624,7 +667,11 @@ _platform_use_baked() {
   _use_platform=0
   _serve_source=baked
   _serve_workdir=/app
-  _served_sha="${BUILD_SHA:-unknown}"
+  if [ "$_managed_release" -eq 1 ]; then
+    _served_sha=$_managed_baked_sha
+  else
+    _served_sha="${BUILD_SHA:-unknown}"
+  fi
   export PYTHONDONTWRITEBYTECODE=1
   echo "PLATFORM LAYER WARNING: serving baked floor from $_baked_app." >&2
   echo "  /data/platform is preserved untouched and is NOT served." >&2
@@ -668,10 +715,6 @@ else
   fi
 fi
 
-printf '%s\n' "$_serve_source" > /tmp/serving-source
-printf '%s\n' "$_served_sha" > /tmp/serving-sha
-chmod 644 /tmp/serving-source /tmp/serving-sha 2>/dev/null || true
-
 if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
   # A managed release image must not import the updater from the persistent
   # checkout it is about to repair. That checkout may predate release-channel
@@ -681,7 +724,7 @@ if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
   # Normal installations keep the historical persistent-updater path.
   _platform_reconciler_backend=/data/platform/backend
   _platform_reconciler_prefix=
-  if [ -n "${MOBIUS_PLATFORM_RELEASE_REF:-}" ]; then
+  if [ "$_managed_release" -eq 1 ]; then
     _platform_reconciler_backend=/app/platform-baked/backend
     _platform_reconciler_prefix="env PYTHONDONTWRITEBYTECODE=1"
   fi
@@ -717,14 +760,12 @@ if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
     echo "Platform layer: boot guard failed; refusing to serve the platform tree." >&2
     exit 1
   fi
-  # The best-effort reconcile intentionally exits zero on offline/conflict/
-  # invalid-channel outcomes. That is acceptable on the normal main channel,
-  # but a managed migration must never serve a pre-bridge persistent updater:
-  # it would ignore MOBIUS_PLATFORM_RELEASE_REF after uvicorn starts. Import the
-  # STRICT readiness proof from the baked backend. If /data/platform does not
-  # contain this image's exact baked SHA, preserve it for recovery and serve the
-  # immutable baked floor for this boot instead.
-  if [ -n "${MOBIUS_PLATFORM_RELEASE_REF:-}" ]; then
+  # Best-effort reconcile exits zero for offline/conflict/invalid-channel
+  # outcomes. That is fine on ordinary main, but a managed B image must not
+  # serve an A-prime/main-only persistent tree. Import the strict proof from the
+  # immutable baked backend and fall back to the exact baked release unless
+  # persistent HEAD contains this image's baked SHA. Local commits on top pass.
+  if [ "$_managed_release" -eq 1 ]; then
     if ! _managed_release_proof=$(su -s /bin/sh mobius -c \
       "cd '$_platform_reconciler_backend' && $_env_scrub $_platform_reconciler_prefix python3 -c \
        'from app import platform_update; print(platform_update.managed_release_ready_sync())'" \
@@ -737,18 +778,19 @@ if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
       echo "Platform layer: ${_managed_release_proof}" >&2
     fi
   fi
-  # A fast-forward / merge advanced main, so the served sha the /api/version and
-  # /api/debug/serving routes report (written to /tmp/serving-sha above) must
-  # reflect the reconciled HEAD, not the pre-reconcile clone tip.
+  # A successful reconcile may have advanced main. Report persistent HEAD only
+  # when that tree remains the selected source after the managed proof.
   if [ "$_use_platform" -eq 1 ]; then
     _served_sha=$(su -s /bin/sh mobius -c \
       'git -C /data/platform rev-parse HEAD' 2>/dev/null || echo "$_served_sha")
   fi
-  # Selection may have changed to baked after the first markers were written.
-  printf '%s\n' "$_serve_source" > /tmp/serving-source
-  printf '%s\n' "$_served_sha" > /tmp/serving-sha
-  chmod 644 /tmp/serving-source /tmp/serving-sha 2>/dev/null || true
 fi
+
+# Write the markers only after the managed exact-release gate chooses the final
+# source. /api/version and diagnostics must never report the stale pre-gate tree.
+printf '%s\n' "$_serve_source" > /tmp/serving-source
+printf '%s\n' "$_served_sha" > /tmp/serving-sha
+chmod 644 /tmp/serving-source /tmp/serving-sha 2>/dev/null || true
 
 # SECRET_KEY drift detection.
 #

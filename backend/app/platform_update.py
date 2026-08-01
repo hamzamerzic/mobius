@@ -1665,17 +1665,13 @@ def reconcile_clone_sync() -> str:
 
 
 def managed_release_ready_sync() -> str:
-  """Strict post-reconcile proof used only by managed-channel entrypoint boot.
+  """Prove the persistent checkout contains this image's exact release.
 
-  The ordinary reconcile remains best-effort so a transient fetch cannot brick
-  normal main-channel boot. A managed migration has a stronger requirement:
-  serving an old persistent checkout could also serve an old updater that does
-  not understand the release channel. The entrypoint imports this function from
-  the baked backend and falls back to the baked floor unless the image's exact
-  baked commit is already contained in the clean persistent ``HEAD``.
-
-  Unlike :func:`reconcile_clone_sync`, this deliberately raises on every failed
-  proof. It never mutates the repository.
+  Normal main-channel reconcile remains best-effort. A managed-channel image
+  cannot safely serve an older persistent checkout, because that checkout may
+  predate the release-channel updater entirely. This strict, read-only proof is
+  imported from the immutable baked backend after reconcile; every failure is
+  raised so the entrypoint can serve the exact baked floor instead.
   """
   channel = _runtime_release_channel()
   if not channel.configured:

@@ -233,20 +233,32 @@ RUN python /tmp/verify-legacy-jose.py && rm /tmp/verify-legacy-jose.py
 
 # Whole-repo platform seed. /data is a runtime volume, so bake the real clone
 # under /app and let entrypoint copy it into /data/platform on first boot. The
-# checkout is pinned when BUILD_SHA is a real commit; local builds with
-# BUILD_SHA unset/unknown keep the default branch tip.
+# checkout is pinned to BUILD_SHA. Production/self-host builds fail closed when
+# that identity is absent: otherwise this stack-branch image would silently
+# clone the frozen public main compatibility release. The disposable test
+# compose is the sole explicit exception because it mounts and verifies its
+# checkout at runtime.
 ARG MOBIUS_PLATFORM_ORIGIN=https://github.com/mobius-os/mobius.git
 ARG BUILD_SHA=unknown
 ARG BUILD_DATE=unknown
 ARG RAILWAY_GIT_COMMIT_SHA=unknown
 ARG RAILWAY_DEPLOYMENT_ID=unknown
+ARG MOBIUS_ALLOW_UNKNOWN_BUILD_SHA=0
 RUN set -eux; \
-    git clone --depth 1 "$MOBIUS_PLATFORM_ORIGIN" /app/platform-baked; \
     _build_sha="${BUILD_SHA:-unknown}"; \
     _railway_sha="${RAILWAY_GIT_COMMIT_SHA:-unknown}"; \
     if [ "$_build_sha" = "unknown" ] && [ "$_railway_sha" != "unknown" ] && [ -n "$_railway_sha" ]; then \
       _build_sha="$_railway_sha"; \
     fi; \
+    case "${MOBIUS_ALLOW_UNKNOWN_BUILD_SHA:-0}" in 0|1) ;; *) \
+      echo "FATAL: MOBIUS_ALLOW_UNKNOWN_BUILD_SHA must be 0 or 1" >&2; exit 1;; \
+    esac; \
+    if ! printf '%s' "$_build_sha" | grep -Eq '^[0-9a-fA-F]{40}$' \
+       && [ "${MOBIUS_ALLOW_UNKNOWN_BUILD_SHA:-0}" != "1" ]; then \
+      echo "FATAL: an exact 40-character BUILD_SHA is required; use scripts/mobiusctl update" >&2; \
+      exit 1; \
+    fi; \
+    git clone --depth 1 "$MOBIUS_PLATFORM_ORIGIN" /app/platform-baked; \
     _build_date="${BUILD_DATE:-unknown}"; \
     if [ "$_build_date" = "unknown" ] || [ -z "$_build_date" ]; then \
       _build_date="$(date -u +%Y-%m-%d)"; \

@@ -95,6 +95,60 @@ def test_app_sudo_is_explicit_and_defaults_off():
   assert "MOBIUS_AGENT_SUDO=${MOBIUS_AGENT_SUDO:-0}" in app_env
 
 
+def test_stack_release_ref_is_exact_and_unstamped_normal_builds_fail_closed():
+  compose = _compose()
+  app = compose["services"]["app"]
+  assert (
+    "MOBIUS_PLATFORM_RELEASE_REF=${MOBIUS_PLATFORM_RELEASE_REF:-"
+    "refs/heads/stack/external-recovery-v1}"
+  ) in app["environment"]
+
+  dockerfile = (ROOT / "Dockerfile").read_text()
+  guard = dockerfile.index("an exact 40-character BUILD_SHA is required")
+  clone = dockerfile.index('git clone --depth 1 "$MOBIUS_PLATFORM_ORIGIN"')
+  checkout = dockerfile.index("could not check out BUILD_SHA")
+  assert guard < clone < checkout
+  assert 'MOBIUS_ALLOW_UNKNOWN_BUILD_SHA:-0}" != "1"' in dockerfile
+
+  test_compose = (ROOT / "docker-compose.test.yml").read_text()
+  assert 'MOBIUS_ALLOW_UNKNOWN_BUILD_SHA: "1"' in test_compose
+
+
+def test_managed_boot_never_serves_a_persistent_tree_without_baked_release():
+  entrypoint = (ROOT / "backend/scripts/entrypoint.sh").read_text()
+  reconcile = entrypoint.index("reconcile_clone_sync()")
+  exact_gate = entrypoint.index(
+    "persistent checkout is not at this image's release"
+  )
+  baked = entrypoint.index("_platform_use_baked", exact_gate)
+  markers = entrypoint.index(
+    "# Write the markers only after the managed exact-release gate"
+  )
+  assert reconcile < exact_gate < baked < markers
+  gate = entrypoint[reconcile:markers]
+  assert "platform_update.managed_release_ready_sync()" in gate
+  assert "/data/platform is preserved for recovery" in gate
+
+  fallback_refusal = entrypoint.index(
+    "managed baked seed failed; refusing default-branch clone"
+  )
+  network_clone = entrypoint.index(
+    'echo "Platform layer: cloning $_origin -> /data/platform'
+  )
+  assert fallback_refusal < network_clone
+
+
+def test_self_host_docs_launch_and_update_from_the_protected_stack_branch():
+  readme = (ROOT / "README.md").read_text()
+  assert "git clone --branch stack/external-recovery-v1 --single-branch" in readme
+  assert "git pull --ff-only origin stack/external-recovery-v1" in readme
+  launch = readme.index("git clone --branch stack/external-recovery-v1")
+  first_update = readme.index("scripts/mobiusctl update", launch)
+  recovery = readme.index("scripts/mobiusctl recovery start", first_update)
+  assert launch < first_update < recovery
+  assert "An unstamped `docker build`" in readme
+
+
 def _mobiusctl(tmp_path, action, *, state=None, extra_env=None):
   state_path = state or tmp_path / "recovery.env"
   env = os.environ.copy()
@@ -146,6 +200,12 @@ def _fake_docker(tmp_path):
     "#!/bin/sh\n"
     "printf '%s\\n' \"$*\" >>\"$DOCKER_LOG\"\n"
     "case \"$*\" in\n"
+    "  *'up -d --build --force-recreate'*)\n"
+    "    printf 'build-env|%s|%s|%s\\n' \"${BUILD_SHA:-}\" "
+    "\"${BUILD_DATE:-}\" \"${MOBIUS_PLATFORM_RELEASE_REF:-}\" "
+    ">>\"$DOCKER_LOG\" ;;\n"
+    "esac\n"
+    "case \"$*\" in\n"
     "  *\"${DOCKER_FAIL_MATCH:-__never__}\"*) exit 42 ;;\n"
     "  *\"${DOCKER_BLOCK_MATCH:-__never__}\"*)\n"
     "    : >\"$DOCKER_BLOCK_READY\"\n"
@@ -175,11 +235,32 @@ def _fake_docker(tmp_path):
     "exit 0\n"
   )
   docker.chmod(0o755)
+  git = bin_dir / "git"
+  git.write_text(
+    "#!/bin/sh\n"
+    "printf '%s\\n' \"$*\" >>\"$GIT_LOG\"\n"
+    "case \"$*\" in\n"
+    "  *'rev-parse --is-inside-work-tree'*) exit 0 ;;\n"
+    "  *'rev-parse --verify HEAD^{commit}'*)\n"
+    "    printf '%s\\n' \"${GIT_HEAD:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}\"; exit 0 ;;\n"
+    "  *'status --porcelain --untracked-files=normal'*)\n"
+    "    printf '%s' \"${GIT_STATUS:-}\"; exit 0 ;;\n"
+    "  *'fetch --no-tags origin '*) exit \"${GIT_FETCH_RC:-0}\" ;;\n"
+    "  *'rev-parse --verify refs/remotes/origin/'*'^{commit}'*)\n"
+    "    printf '%s\\n' \"${GIT_REMOTE_TIP:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}\"; exit 0 ;;\n"
+    "  *'merge-base --is-ancestor '*) exit \"${GIT_ANCESTRY_RC:-0}\" ;;\n"
+    "  *'show -s --format=%cs '*) printf '%s\\n' \"${GIT_BUILD_DATE:-2026-08-01}\"; exit 0 ;;\n"
+    "esac\n"
+    "exit 0\n"
+  )
+  git.chmod(0o755)
   log = tmp_path / "docker.log"
+  git_log = tmp_path / "git.log"
   return {
     "PATH": f"{bin_dir}:{os.environ['PATH']}",
     "DOCKER_LOG": str(log),
     "DOCKER_LEGACY_REMOVED": str(tmp_path / "legacy.removed"),
+    "GIT_LOG": str(git_log),
   }, log
 
 
@@ -313,7 +394,7 @@ def test_start_retires_only_the_label_verified_legacy_recovery(tmp_path):
   removal = next(
     i for i, line in enumerate(commands) if line == "rm -f legacy-recovery-id"
   )
-  assert launch < app_identity < legacy_identity < removal
+  assert app_identity < legacy_identity < removal < launch
 
 
 def test_start_refuses_mismatched_legacy_identity_and_restores_app(tmp_path):
@@ -358,6 +439,58 @@ def test_update_retires_legacy_only_after_recreated_app_is_healthy(tmp_path):
     i for i, line in enumerate(commands) if line == "rm -f legacy-recovery-id"
   )
   assert recreate < health < removal
+
+
+def test_update_builds_exact_clean_checkout_from_full_stack_ref(tmp_path):
+  fake_env, log = _fake_docker(tmp_path)
+  head = "1" * 40
+  tip = "2" * 40
+  fake_env.update({"GIT_HEAD": head, "GIT_REMOTE_TIP": tip})
+
+  result, _state = _mobiusctl(
+    tmp_path, "update", extra_env=fake_env,
+  )
+
+  assert result.returncode == 0, result.stderr
+  git_commands = Path(fake_env["GIT_LOG"]).read_text().splitlines()
+  assert any(
+    "fetch --no-tags origin "
+    "+refs/heads/stack/external-recovery-v1:"
+    "refs/remotes/origin/stack/external-recovery-v1" in line
+    for line in git_commands
+  )
+  assert any(f"merge-base --is-ancestor {head} {tip}" in line for line in git_commands)
+  assert (
+    f"build-env|{head}|2026-08-01|"
+    "refs/heads/stack/external-recovery-v1"
+  ) in log.read_text().splitlines()
+
+
+@pytest.mark.parametrize(
+  ("extra", "message"),
+  [
+    ({"GIT_ANCESTRY_RC": "1"}, "not contained"),
+    ({"GIT_STATUS": " M Dockerfile\\n"}, "uncommitted files"),
+    ({"MOBIUS_PLATFORM_RELEASE_REF": "stack/external-recovery-v1"},
+     "full refs/heads"),
+  ],
+)
+def test_update_rejects_unpublished_dirty_or_short_release_identity(
+  tmp_path, extra, message,
+):
+  fake_env, log = _fake_docker(tmp_path)
+  fake_env.update(extra)
+
+  result, _state = _mobiusctl(
+    tmp_path, "update", extra_env=fake_env,
+  )
+
+  assert result.returncode != 0
+  assert message in result.stderr
+  assert not log.exists() or all(
+    "up -d --build --force-recreate" not in line
+    for line in log.read_text().splitlines()
+  )
 
 
 def test_update_refuses_active_recovery_state_before_docker_changes(tmp_path):

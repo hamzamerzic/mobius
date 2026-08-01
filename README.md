@@ -130,14 +130,20 @@ Your chats, files, apps, credentials, and agent activity stay inside that deploy
 Use a Linux server with Docker, a domain name, and Codex or Claude Code access:
 
 ```bash
-git clone https://github.com/mobius-os/mobius.git
+git clone --branch stack/external-recovery-v1 --single-branch \
+  https://github.com/mobius-os/mobius.git
 cd mobius
 cp .env.example .env
 sed -i 's/^DOMAIN=.*/DOMAIN=mobius.example.com/' .env
-docker compose up -d
+scripts/mobiusctl update
 ```
 
 Caddy configures HTTPS. Open `https://mobius.example.com` and follow the setup wizard.
+During the external-recovery cutover, public `main` remains on the compatibility
+release. `mobiusctl` fetches the protected full stack ref, proves that it contains
+the exact clean checkout, stamps that commit into the image, and only then builds.
+An unstamped `docker build` or `docker compose up --build` fails closed instead of
+silently seeding the compatibility release.
 
 If the instance cannot boot, start the latest isolated recovery worker without
 custom proxy configuration:
@@ -169,7 +175,7 @@ deadline. Operators who need a different bounded window can prefix `start` or
 Update a self-hosted instance with:
 
 ```bash
-git pull
+git pull --ff-only origin stack/external-recovery-v1
 scripts/mobiusctl update
 ```
 
@@ -180,7 +186,9 @@ current installation. Data under `/data` survives rebuilds.
 
 Full root for the in-product agent is explicit and off by default. After the
 owner confirms, set `MOBIUS_AGENT_SUDO=1` in `.env` and recreate the app. Set it
-back to `0` and recreate from a clean image to revoke it.
+back to `0` and run `scripts/mobiusctl update` to revoke it by rebuilding and
+recreating from the exact clean release image; a process in the old writable
+container overlay cannot survive that replacement.
 
 To connect a full web service such as Tandoor, point a sibling DNS name at the same server. For example, use `services.mobius.example.com`, then set it as `MOBIUS_SERVICE_GATEWAY_ORIGIN` in `.env`. Caddy serves integrations below `/services/<slug>`, so you do not need wildcard DNS or a new record for each service. See [.env.example](.env.example) for setup and [ARCHITECTURE.md](ARCHITECTURE.md#app-execution-tiers) for the trust boundaries.
 

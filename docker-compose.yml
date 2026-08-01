@@ -52,6 +52,10 @@ services:
       # Full root is opt-in because it persists for the lifetime of this
       # container. Set MOBIUS_AGENT_SUDO=1 only after the owner confirms.
       - MOBIUS_AGENT_SUDO=${MOBIUS_AGENT_SUDO:-0}
+      # This cutover is released from a protected stack branch while public
+      # main remains on the compatibility image. The image-owned updater
+      # fetches this full ref but reconciles only to its exact baked SHA.
+      - MOBIUS_PLATFORM_RELEASE_REF=${MOBIUS_PLATFORM_RELEASE_REF:-refs/heads/stack/external-recovery-v1}
     volumes:
       - app_data:/data
     expose:

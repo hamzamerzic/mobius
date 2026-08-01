@@ -31,6 +31,10 @@ services:
       args:
         BUILD_SHA: ${BUILD_SHA:-unknown}
         BUILD_DATE: ${BUILD_DATE:-unknown}
+        # Disposable tests mount and verify the checkout under /workspace, so
+        # they are the only supported build path that may use an unstamped
+        # image. Normal/release images fail closed without an exact SHA.
+        MOBIUS_ALLOW_UNKNOWN_BUILD_SHA: "1"
     container_name: ${MOBIUS_CONTAINER:-mobius-test}
     init: true
     # Settings restart SIGTERMs uvicorn and relies on Docker bringing the
