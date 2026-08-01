@@ -31,6 +31,7 @@ from app.chat_writer import (
 
 async def start_programmatic_chat_turn(
   *, chat_id: str, title: str, content: str, provider: str,
+  initiated_by_app_id: int | None = None,
 ) -> bool:
   """Durably start one system-initiated turn if the chat can be claimed.
 
@@ -62,6 +63,7 @@ async def start_programmatic_chat_turn(
       user_msg=user_msg,
       title_source=title,
       default_provider=provider,
+      initiated_by_app_id=initiated_by_app_id,
     )))
 
     if current_run_generation(chat_id) != start_gen:

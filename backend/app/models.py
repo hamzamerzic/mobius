@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
   Boolean, Column, DateTime, Float, ForeignKey, Integer, JSON, LargeBinary,
-  String, Text, event, false, or_, true,
+  String, Text, UniqueConstraint, event, false, or_, true,
 )
 
 from sqlalchemy.orm import column_property
@@ -203,6 +203,14 @@ class ChatRun(Base):
 
   # The run_token, verbatim — one durable identity for the turn.
   id = Column(String(64), primary_key=True)
+  # Stable identity for one logical turn across physical restart/resume runs.
+  # A fresh turn points at itself; durable continuation markers inherit the
+  # first physical run's id. Provider processes may come and go while this
+  # value remains the join key used by delegation idempotency + Workflows.
+  root_run_id = Column(
+    String(64), nullable=True, index=True,
+    default=lambda context: context.get_current_parameters().get("id"),
+  )
   chat_id = Column(
     String(64), ForeignKey("chats.id"), nullable=False, index=True
   )
@@ -262,6 +270,48 @@ class ChatRun(Base):
   # authorizes replay when the frozen supervisor's root-owned boot ledger binds
   # the same nonce + exact run id to the current boot.
   restart_nonce = Column(String(128), nullable=True, default=None)
+
+
+class Delegation(Base):
+  """Immutable control plane for one durable delegated task.
+
+  The child conversation is an ordinary hidden app-owned ``Chat`` and its
+  physical execution state remains authoritative in ``ChatRun``. This row
+  stores only the immutable intent/policy needed to attach retries, constrain
+  the SDK runner, and relate the child back to its parent logical run. Status is
+  deliberately NOT duplicated here: every read derives it from the child run.
+  """
+
+  __tablename__ = "delegations"
+  __table_args__ = (
+    UniqueConstraint(
+      "parent_root_run_id", "task_key",
+      name="uq_delegations_parent_root_task",
+    ),
+  )
+
+  id = Column(String(64), primary_key=True)
+  app_id = Column(Integer, ForeignKey("apps.id"), nullable=False, index=True)
+  parent_chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=False, index=True
+  )
+  # References the first physical run by value. Kept free of an FK so durable
+  # audit history can outlive an unusual run-row repair without orphaning the
+  # child chat or weakening the idempotency key.
+  parent_root_run_id = Column(String(64), nullable=False, index=True)
+  task_key = Column(String(128), nullable=False)
+  child_chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=False, unique=True, index=True
+  )
+  provider = Column(String(32), nullable=False)
+  model = Column(String(256), nullable=True)
+  effort = Column(String(32), nullable=True)
+  scope = Column(String(16), nullable=False)
+  cwd = Column(String(1024), nullable=False)
+  prompt_sha256 = Column(String(64), nullable=False)
+  max_budget_usd = Column(Float, nullable=True)
+  created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+  cancelled_at = Column(DateTime, nullable=True, default=None)
 
 
 class ChatSessionLink(Base):

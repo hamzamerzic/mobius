@@ -649,10 +649,26 @@ def list_agent_lifecycle(
   rows = fetched[:limit]
 
   run_query = (
-    db.query(models.AgentLifecycleRunUpdate)
+    db.query(
+      models.AgentLifecycleRunUpdate,
+      models.ChatRun.root_run_id,
+    )
     .join(models.Chat, models.Chat.id == models.AgentLifecycleRunUpdate.chat_id)
+    .outerjoin(
+      models.ChatRun,
+      models.ChatRun.id == models.AgentLifecycleRunUpdate.chat_run_id,
+    )
+    .outerjoin(
+      models.Delegation,
+      models.Delegation.child_chat_id
+      == models.AgentLifecycleRunUpdate.chat_id,
+    )
     .filter(
       models.Chat.deleted_at.is_(None),
+      # Durable delegation children are projected as normalized lifecycle
+      # events under their parent root. Suppressing their private child
+      # ChatRun here prevents Workflows from rendering a duplicate root.
+      models.Delegation.id.is_(None),
       models.AgentLifecycleRunUpdate.id > runs_after_id,
     )
     .order_by(models.AgentLifecycleRunUpdate.id.asc())
@@ -691,15 +707,18 @@ def list_agent_lifecycle(
     } for row in rows],
     "runs": [{
       "update_id": run.id,
-      "id": run.chat_run_id,
+      # Continuations/restart resumes update one logical Workflows root even
+      # though each provider process has a distinct physical ChatRun id.
+      "id": root_run_id or run.chat_run_id,
+      "physical_run_id": run.chat_run_id,
       "chat_id": run.chat_id,
       "provider": run.provider,
       "status": run.status,
       "started_at": _iso(run.started_at),
       "ended_at": _iso(run.ended_at),
-    } for run in runs],
+    } for run, root_run_id in runs],
     "next_after_id": rows[-1].id if rows else after_id,
-    "next_runs_after_id": runs[-1].id if runs else runs_after_id,
+    "next_runs_after_id": runs[-1][0].id if runs else runs_after_id,
     "has_more": has_more,
     "runs_has_more": runs_has_more,
   }

@@ -128,11 +128,17 @@ def _env_flag_on(name: str, *, default: bool) -> bool:
   return raw.strip().lower() not in ("off", "0", "false", "no", "")
 
 
-def _codex_config_overrides() -> list[str]:
+def _codex_config_overrides(
+  *,
+  allow_questions: bool = True,
+  allow_multi_agent: bool = True,
+  allow_goals: bool = True,
+) -> list[str]:
   """Assemble the Codex ``CodexConfig.config_overrides`` for a turn.
 
-  ``request_user_input`` (AskUserQuestion parity) is always on. Multi-agent
-  (collab / spawn_agent — the Codex analog of Claude's Task fleet, whose
+  ``request_user_input`` (AskUserQuestion parity) is on for ordinary chats and
+  deliberately absent for delegated children. Multi-agent (collab /
+  spawn_agent — the Codex analog of Claude's Task fleet, whose
   ``collabAgentToolCall`` items the dispatch surfaces as ordinary background
   activity) is on by DEFAULT but behind a RUNTIME kill switch: set the env var
   ``MOEBIUS_CODEX_MULTI_AGENT`` to off/0/false/no to disable it and restart
@@ -149,14 +155,18 @@ def _codex_config_overrides() -> list[str]:
   robust to a rollout change, not just to the binary we probed. Re-run the
   delegate probe after any @openai/codex bump.
   """
-  overrides = [
-    "features.default_mode_request_user_input=true",
-    # Codex owns goal durability in its thread store.  Enabling the native
-    # goal extension lets a new app-server resume the logical operation after
+  overrides = []
+  if allow_questions:
+    overrides.append("features.default_mode_request_user_input=true")
+  if allow_goals:
+    # Codex owns goal durability in its thread store. Enabling the native goal
+    # extension lets a new app-server resume the logical operation after
     # Möbius deliberately tears the previous process down for a restart.
-    "features.goals=true",
-  ]
-  if _env_flag_on("MOEBIUS_CODEX_MULTI_AGENT", default=True):
+    overrides.append("features.goals=true")
+  if (
+    allow_multi_agent
+    and _env_flag_on("MOEBIUS_CODEX_MULTI_AGENT", default=True)
+  ):
     overrides += [
       "features.multi_agent_v2.enabled=true",
       "features.multi_agent_v2.tool_namespace=agents",
@@ -1340,6 +1350,7 @@ async def run_codex_sdk_turn(
   goal_mode: bool = False,
   goal_continue: bool = False,
   fallback_goal_objective: str | None = None,
+  run_policy=None,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -1437,8 +1448,14 @@ async def run_codex_sdk_turn(
   # config_overrides carries the request_user_input (AskUserQuestion parity) and
   # multi-agent enablement flags — assembled, with the #31864 tool_namespace pin
   # and the MOEBIUS_CODEX_MULTI_AGENT kill switch, in _codex_config_overrides().
+  # Delegated children disable both at this provider-owned seam.
   codex_bin = shutil.which("codex")
-  config_overrides = _codex_config_overrides()
+  delegated = run_policy is not None
+  config_overrides = _codex_config_overrides(
+    allow_questions=not delegated,
+    allow_multi_agent=not delegated,
+    allow_goals=not delegated,
+  )
   launch_args = _codex_app_server_launch_args(codex_bin, config_overrides)
   config_kwargs: dict[str, Any] = dict(
     codex_bin=codex_bin,
@@ -1580,14 +1597,15 @@ async def run_codex_sdk_turn(
       # resulting concurrent.futures.Future. That keeps the JSON-RPC
       # round-trip blocked (correct — the app-server is waiting for our
       # response) while letting asyncio handle the user's answer POST.
-      _install_request_user_input_handler(
-        codex,
-        loop=asyncio.get_running_loop(),
-        chat_id=chat_id,
-        bc=bc,
-        pending_questions=pending_questions,
-        db=db,
-      )
+      if not delegated:
+        _install_request_user_input_handler(
+          codex,
+          loop=asyncio.get_running_loop(),
+          chat_id=chat_id,
+          bc=bc,
+          pending_questions=pending_questions,
+          db=db,
+        )
 
       # We use the SDK's `ApprovalMode.auto_review`, which maps to
       # `approvalPolicy=on_request` with `approvalsReviewer=auto_review`
@@ -1609,7 +1627,13 @@ async def run_codex_sdk_turn(
       # screenshots. Full access here follows the same reasoning, and
       # Möbius's design philosophy
       # ("trust the agent; container is the sandbox") is consistent.
-      _sandbox = sdk["Sandbox"].full_access
+      _sandbox = (
+        sdk["Sandbox"].read_only
+        if delegated and run_policy.scope == "read"
+        else sdk["Sandbox"].workspace_write
+        if delegated
+        else sdk["Sandbox"].full_access
+      )
       persisted_goal = None
       goal_store_available = True
       if session_id is not None and goal_mode:
@@ -1698,6 +1722,18 @@ async def run_codex_sdk_turn(
         # silent to the user, not to operators. A genuine resume ERROR still
         # raises upstream and surfaces; only this "different thread returned"
         # case (a lost session) reseeds.
+        if delegated and not run_policy.allow_session_reseed:
+          from app.delegations import REVIEW_REQUIRED_MARKER
+          return {
+            "session_id": current_session_id,
+            "cost_usd": None,
+            "error": (
+              f"{REVIEW_REQUIRED_MARKER}: The delegated write session could "
+              "not be resumed after restart. Its durable history is intact, "
+              "but Möbius will not replay write work automatically. Review "
+              "the child history and start a new task if another pass is needed."
+            ),
+          }
         log.warning(
           "Codex session lost for chat %s (requested=%s actual=%s); reseeding "
           "from DB transcript",
