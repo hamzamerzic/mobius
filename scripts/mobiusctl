@@ -14,10 +14,12 @@ RECOVERY_TARGET_DEFAULT_TTL_SECONDS=3600
 
 usage() {
   cat >&2 <<'EOF'
-Usage: scripts/mobiusctl recovery start|status|finish
+Usage: scripts/mobiusctl recovery start|reopen|status|finish
 
   start   stop Mobius, pull the latest approved recovery image, and expose the
           recovery UI on loopback (default http://127.0.0.1:18003)
+  reopen  keep Mobius stopped, rotate both credentials, and recreate a clean
+          recovery target + latest worker with a new one-time sign-in code
   status  show the isolated recovery services
   finish  remove recovery services, restart Mobius, and verify app health
 EOF
@@ -165,7 +167,7 @@ validate_token() {
   esac
 }
 
-write_state() {
+generate_state() {
   recovery_target_token=$(new_token)
   recovery_local_token=$(new_token)
   recovery_port=${MOBIUS_RECOVERY_PORT:-18003}
@@ -202,15 +204,42 @@ write_state() {
   if ! (
     umask 077
     set -C
-    {
-      printf 'MOBIUS_RECOVERY_TARGET_TOKEN=%s\n' "$recovery_target_token"
-      printf 'MOBIUS_RECOVERY_LOCAL_TOKEN=%s\n' "$recovery_local_token"
-      printf 'MOBIUS_RECOVERY_PORT=%s\n' "$recovery_port"
-      printf 'MOBIUS_RECOVERY_IMAGE=%s\n' "$recovery_image"
-    } > "$STATE_FILE"
+    emit_state > "$STATE_FILE"
   ); then
     die_state "could not create $STATE_FILE exclusively"
   fi
+}
+
+rotate_state() {
+  old_target_token=$recovery_target_token
+  old_local_token=$recovery_local_token
+  rotation_attempt=0
+  while [ "$rotation_attempt" -lt 3 ]; do
+    generate_state
+    if [ "$recovery_target_token" != "$old_target_token" ] &&
+       [ "$recovery_local_token" != "$old_local_token" ]; then
+      break
+    fi
+    rotation_attempt=$((rotation_attempt + 1))
+  done
+  [ "$recovery_target_token" != "$old_target_token" ] &&
+    [ "$recovery_local_token" != "$old_local_token" ] ||
+    die_state "could not rotate recovery credentials"
+
+  # Replace the already-validated single-link state atomically. A crash before
+  # rename leaves the old valid state; a crash after rename leaves the new one,
+  # so `reopen` is always safely retryable while the ordinary app stays down.
+  state_tmp=$(mktemp "${STATE_FILE}.tmp.XXXXXX") ||
+    die_state "could not create temporary recovery state"
+  chmod 600 "$state_tmp" || {
+    rm -f -- "$state_tmp"
+    die_state "could not secure temporary recovery state"
+  }
+  if ! emit_state > "$state_tmp" || ! mv -f -- "$state_tmp" "$STATE_FILE"; then
+    rm -f -- "$state_tmp"
+    die_state "could not atomically rotate recovery state"
+  fi
+  unset state_tmp old_target_token old_local_token rotation_attempt
 }
 
 load_state() {
@@ -350,7 +379,7 @@ show_recovery_access() {
 
 start_recovery() {
   if [ -f "$STATE_FILE" ]; then
-    echo "Recovery state already exists. Run 'scripts/mobiusctl recovery status' or finish it first." >&2
+    echo "Recovery state already exists. Run 'scripts/mobiusctl recovery reopen' for a new code, or finish it first." >&2
     exit 1
   fi
   write_state
@@ -384,12 +413,43 @@ start_recovery() {
   compose up -d --force-recreate recovery-target recovery
 
   trap - EXIT HUP INT TERM
-  echo "Recovery is isolated from the stopped app and available only on loopback:"
-  printf '  http://127.0.0.1:%s/\n' "$MOBIUS_RECOVERY_PORT"
-  echo "Paste this one-time code into the Recovery sign-in form:"
-  printf '  %s\n' "$MOBIUS_RECOVERY_LOCAL_TOKEN"
-  echo "When repair is complete: scripts/mobiusctl recovery finish"
+  show_recovery_access
   : "$app_was_stopped"
+}
+
+reopen_recovery() {
+  if ! load_state; then
+    echo "Recovery is not active; run 'scripts/mobiusctl recovery start' first." >&2
+    exit 1
+  fi
+
+  services_stopped=0
+  cleanup_failed_reopen() {
+    status=$?
+    if [ "$status" -ne 0 ]; then
+      echo "Recovery reopen failed; the ordinary Mobius app remains stopped." >&2
+      if [ "$services_stopped" -eq 1 ]; then
+        recovery_down
+      fi
+    fi
+    exit "$status"
+  }
+  trap cleanup_failed_reopen EXIT HUP INT TERM
+
+  echo "Ensuring the ordinary Mobius app stays stopped..."
+  compose stop app
+  echo "Pulling the latest approved recovery worker..."
+  compose pull recovery
+  echo "Removing the previous isolated recovery services..."
+  recovery_down_strict
+  services_stopped=1
+  rotate_state
+  load_state
+  compose up -d --force-recreate recovery-target recovery
+
+  trap - EXIT HUP INT TERM
+  echo "Previous recovery credentials were revoked."
+  show_recovery_access
 }
 
 status_recovery() {
@@ -427,6 +487,7 @@ finish_recovery() {
 
 case "$action" in
   start) start_recovery ;;
+  reopen) reopen_recovery ;;
   status) status_recovery ;;
   finish) finish_recovery ;;
   *) usage ;;
