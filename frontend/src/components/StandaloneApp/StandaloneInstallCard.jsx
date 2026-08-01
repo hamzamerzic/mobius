@@ -192,7 +192,7 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose, onIconU
             <p className="standalone-install__hint">
               Tap the icon to customise it, or keep the current one.
             </p>
-            {showInstructions && (platform.ios ? (
+            {showInstructions && (platform.iosSafari && !platform.ipad ? (
               // This document's manifest is the app's, so Add to Home Screen
               // here produces the app — the whole reason the shell sends
               // people to this page. The arrow points at Safari's toolbar.

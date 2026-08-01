@@ -467,7 +467,7 @@ def _standalone_index_html(app: models.App, install_pass: str = "") -> str:
 
   `install_pass` is forwarded onto the manifest URL so the OS reads a manifest
   whose `start_url` carries it, and the installed app's first launch can redeem
-  the owner session (see auth.create_install_pass). Rendering it server-side
+  the opaque server-stored grant. Rendering it server-side
   rather than patching the link from JS means the manifest the OS fetches at
   Add-to-Home time is the right one on the first read.
   """
@@ -575,7 +575,10 @@ def standalone_shell(
   }
   if install_pass:
     headers["Referrer-Policy"] = "no-referrer"
-  if app.offline_capable:
+  # An older controlling service worker decides whether to store this response
+  # from this header and ignores Cache-Control. Never opt a pass-bearing body
+  # into that cache: its manifest link echoes the secret.
+  if app.offline_capable and not install_pass:
     headers["X-Mobius-Offline"] = "1"
   return HTMLResponse(
     content=_standalone_index_html(app, install_pass=install_pass),

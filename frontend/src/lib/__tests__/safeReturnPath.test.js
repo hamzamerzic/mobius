@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { safeReturnPath } from '../safeReturnPath.js'
+import { loginBoundaryPath, safeReturnPath } from '../safeReturnPath.js'
 
 const ORIGIN = 'https://mobius.example'
 
@@ -40,4 +40,11 @@ test('return paths reject cross-origin and backslash forms', () => {
 
 test('double-encoded backslashes retain the existing normalization policy', () => {
   assert.equal(safeReturnPath('/%255cstill-encoded', ORIGIN), '/%255cstill-encoded')
+})
+
+test('login boundary preserves a complete install target as one return value', () => {
+  const target = '/apps/notes/?install=1&pass=opaque#install'
+  const boundary = new URL(loginBoundaryPath(target), ORIGIN)
+  assert.equal(boundary.pathname, '/')
+  assert.equal(boundary.searchParams.get('return'), target)
 })

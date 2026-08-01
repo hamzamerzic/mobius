@@ -44,6 +44,7 @@ test('iPadOS desktop UA is not mistaken for desktop Safari', () => {
   const copy = installCopyForPlatform(platform)
 
   assert.equal(platform.ios, true)
+  assert.equal(platform.ipad, true)
   assert.equal(platform.desktopSafari, false)
   assert.match(copy.body, /Add to Home Screen/)
 })
@@ -165,15 +166,35 @@ test('custom app identity replaces Möbius throughout install guidance', () => {
 test('display-mode wins over the legacy iOS standalone flag', () => {
   const inAppBrowser = {
     navigator: { standalone: true },
-    matchMedia: () => ({ matches: false }),
+    matchMedia: query => ({ media: query, matches: false }),
   }
   assert.equal(isStandaloneDisplay(inAppBrowser), false)
 
   const installedApp = {
     navigator: { standalone: true },
-    matchMedia: () => ({ matches: true }),
+    matchMedia: query => ({
+      media: query,
+      matches: query.includes('standalone'),
+    }),
   }
   assert.equal(isStandaloneDisplay(installedApp), true)
+})
+
+test('every installed manifest display mode counts as standalone', () => {
+  for (const mode of ['standalone', 'fullscreen', 'minimal-ui']) {
+    let asked = ''
+    const target = {
+      navigator: { standalone: false },
+      matchMedia: query => {
+        asked = query
+        return { matches: query.includes(`display-mode: ${mode}`) }
+      },
+    }
+    assert.equal(isStandaloneDisplay(target), true, mode)
+    assert.match(asked, /standalone/)
+    assert.match(asked, /fullscreen/)
+    assert.match(asked, /minimal-ui/)
+  }
 })
 
 test('the legacy flag still answers where display-mode is unavailable', () => {
