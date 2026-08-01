@@ -12,9 +12,9 @@ export default function ContinuationCard({ msg }) {
   // disappeared with the parked turn.
   const title = manual ? 'Resumed manually' : 'Resumed automatically'
   const subtitle = !manual && reason === 'restart'
-    ? 'After the server restarted'
+    ? 'Server restarted — continuing automatically'
     : (!manual && reason === 'usage_limit'
-        ? 'Usage became available again'
+        ? 'Usage available again — continuing automatically'
         : undefined)
 
   return (
