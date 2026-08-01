@@ -177,3 +177,22 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
   """Returns the cached application settings singleton."""
   return Settings()
+
+
+def agent_scratch_dir() -> Path:
+  """The directory agent subprocesses must use for temporary files.
+
+  Deliberately on the data volume rather than the container's /tmp. The
+  container root is an overlay whose upperdir sits on the host filesystem:
+  it has no size of its own, so statvfs there reports HOST capacity and no
+  quota applies. Scratch written to /tmp therefore consumes host disk that
+  the platform neither bounds nor can measure from inside. data_dir is a
+  fixed-size volume, so the same bytes land against a limit we own.
+
+  /tmp is also not a tmpfs in this image, so it is never cleared on restart
+  and accumulates indefinitely; anything routed here is instead reachable by
+  the data-volume retention sweep.
+  """
+  scratch = Path(get_settings().data_dir) / "tmp"
+  scratch.mkdir(parents=True, exist_ok=True)
+  return scratch

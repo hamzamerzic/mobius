@@ -95,7 +95,7 @@ from app.chat_writer import (
   update_last_assistant_message as _update_last_assistant_message,
   wait_ack as _wait_ack,
 )
-from app.config import get_settings
+from app.config import agent_scratch_dir, get_settings
 from app.events import (
   blocks_have_renderable_content,
   build_assistant_message,
@@ -4178,6 +4178,9 @@ async def _run_chat_impl_with_db(
     "CHAT_ID": chat_id,
   })
   base_env.update(app_context_env)
+  # Overrides any inherited TMPDIR from _safe_keys: agent scratch belongs on
+  # the bounded data volume, never the container's unbounded overlay.
+  base_env["TMPDIR"] = str(agent_scratch_dir())
   # Partner viewport (sent by the React shell on each turn). The agent
   # uses these when taking screenshots so the framing matches what the
   # partner actually sees — preview_shell.sh reads them, mini-app
