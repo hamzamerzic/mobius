@@ -134,8 +134,8 @@
 }
 
 .shell__logo {
-  width: 34px;
-  height: 34px;
+  width: 28px;
+  height: 28px;
   border-radius: 6px;
   /* CHARGE model, composed via the INDEPENDENT rotate/scale transform properties
      (so the hold compress and the mode twist never clobber each other): the mark
