@@ -560,7 +560,14 @@ export function _anchorReapplyNeeded(scrollEl, mode, lastAnchorTop) {
   // As with a send pin, overshooting an unchanged anchor belongs to the
   // reader. Browser clamps only shorten scrollTop; target movement is already
   // represented by offsetTop changing.
-  return anchorTop !== lastAnchorTop || clampedShort
+  // A part anchor holds a position INSIDE the addressed element, scaled by
+  // that element's height. Late highlighting or math can change that height
+  // without moving its top, which silently rescales the held position — so an
+  // own-height change is a repair case exactly like a moved top.
+  const heightChanged = Number(mode.targetH) > 0
+    && el.offsetHeight > 0
+    && el.offsetHeight !== Number(mode.targetH)
+  return anchorTop !== lastAnchorTop || clampedShort || heightChanged
 }
 
 
@@ -2053,6 +2060,7 @@ export default function useScrollMode({
     // same ResizeObserver keeps ANCHOR_AT stable if a measured ratio differs.
     // REVEAL_CAP_MS remains the escape hatch for a request that stalls.
     let revealTimer = 0
+    let mountMutationObserver = null
     const entryReady = () => initialEntryPhaseRef.current === 'cached'
       || initialEntryPhaseRef.current === 'ready'
     const requestRevealOnQuiet = () => {
@@ -2066,6 +2074,7 @@ export default function useScrollMode({
         revealedRef.current = true
         mountStabilizingRef.current = initialEntryPhaseRef.current !== 'ready'
         setRevealed(true)
+        if (!mountStabilizingRef.current) mountMutationObserver?.disconnect()
       }, 50)
     }
     const forceReveal = () => {
@@ -2170,11 +2179,25 @@ export default function useScrollMode({
     ro.observe(scrollEl)  // catches form-row growth (file chips, queue tray)
     const queuedTrayEl = scrollEl.parentElement?.querySelector('.queued')
     if (queuedTrayEl) ro.observe(queuedTrayEl)
-    // DOM activity is not itself a layout change. ResizeObserver above owns
-    // the reveal quiet window, so token-resolved images and live text can keep
-    // arriving without holding an already-stable frame behind the old chat.
-    // Reserved image frames cover byte arrival; actual geometry changes still
-    // reset the quiet window through the observer.
+    // ResizeObserver alone is not a sufficient reveal gate. It reports that a
+    // box ALREADY changed size, so it cannot hold the reveal for asynchronous
+    // renderers that have not started yet: KaTeX is loaded on demand and then
+    // REPLACES raw TeX, the first syntax-highlight pass replaces code markup,
+    // and webfonts swap in and rewrap. Each lands after the 50ms size-quiet
+    // window has elapsed, so the chat is revealed and the reader then watches
+    // the position being corrected under them — the reported "we land
+    // somewhere and then it moves while the chat is open".
+    //
+    // Mount stabilization therefore also waits for DOM activity to stop, and
+    // for in-flight media to settle (a reserved frame gains its image without
+    // its own box changing). Both were present before the tech-debt refactor
+    // and removing them is what made entry visibly unstable.
+    if (mountStabilizingRef.current && typeof MutationObserver !== 'undefined') {
+      mountMutationObserver = new MutationObserver(requestRevealOnQuiet)
+      mountMutationObserver.observe(listEl, { childList: true, subtree: true })
+    }
+    scrollEl.addEventListener('load', requestRevealOnQuiet, true)
+    scrollEl.addEventListener('error', requestRevealOnQuiet, true)
 
     // User-gesture detection. The scroll event itself stays intentionally
     // cheap: it records ownership/intent and restarts one quiet-settle timer.
@@ -2570,6 +2593,9 @@ export default function useScrollMode({
       if (resumeLayoutAfterGestureRef.current === resumeLayoutAfterGesture) {
         resumeLayoutAfterGestureRef.current = null
       }
+      mountMutationObserver?.disconnect()
+      scrollEl.removeEventListener('load', requestRevealOnQuiet, true)
+      scrollEl.removeEventListener('error', requestRevealOnQuiet, true)
       ro.disconnect()
       if (paneResizeRunRef.current === runPaneResize) paneResizeRunRef.current = null
       if (composerResizeRunRef.current === runComposerResize) {
