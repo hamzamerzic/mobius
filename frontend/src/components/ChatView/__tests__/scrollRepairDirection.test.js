@@ -170,14 +170,14 @@ test('two gestures inside one quiet settlement advance two generations', () => {
     version: 4,
   })
   assert.deepEqual(firstGesture, {
-    claimedSequence: 11, version: 5, advanced: true,
+    claimedSequence: 11, version: 5,
   })
   assert.deepEqual(readerIntentAfterScroll({
     gestureSequence: 11,
     claimedSequence: firstGesture.claimedSequence,
     version: firstGesture.version,
   }), {
-    claimedSequence: 11, version: 5, advanced: false,
+    claimedSequence: 11, version: 5,
   }, 'more scroll frames from the same input sequence share its generation')
 
   const secondGesture = readerIntentAfterScroll({
@@ -186,7 +186,7 @@ test('two gestures inside one quiet settlement advance two generations', () => {
     version: firstGesture.version,
   })
   assert.deepEqual(secondGesture, {
-    claimedSequence: 12, version: 6, advanced: true,
+    claimedSequence: 12, version: 6,
   }, 'a newer input sequence advances even before the shared quiet edge')
 })
 

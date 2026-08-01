@@ -745,12 +745,11 @@ export function readerIntentAfterScroll({
   version,
 }) {
   if (gestureSequence === claimedSequence) {
-    return { claimedSequence, version, advanced: false }
+    return { claimedSequence, version }
   }
   return {
     claimedSequence: gestureSequence,
     version: version + 1,
-    advanced: true,
   }
 }
 
