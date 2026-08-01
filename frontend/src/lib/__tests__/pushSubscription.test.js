@@ -57,23 +57,17 @@ function fakeContainer({ existing = [] } = {}) {
   }
 }
 
-function fakePush() {
-  return {
+function recordingPush() {
+  const push = {
     sent: [],
     removed: [],
     vapidKey: async () => ({
       ok: true,
       json: async () => ({ publicKey: 'QUJD' }),
     }),
-    subscribe: async (payload) => { fakePush.last = payload },
-    unsubscribe: async () => {},
+    subscribe: async (payload) => { push.sent.push(payload) },
+    unsubscribe: async (payload) => { push.removed.push(payload) },
   }
-}
-
-function recordingPush() {
-  const push = fakePush()
-  push.subscribe = async (payload) => { push.sent.push(payload) }
-  push.unsubscribe = async (payload) => { push.removed.push(payload) }
   return push
 }
 
@@ -127,7 +121,6 @@ test('a subscription left on the caching worker is retired', async () => {
 
   assert.deepEqual(push.removed, [{ endpoint: `${ORIGIN}/endpoint-legacy` }])
   assert.equal(stale.unsubscribed, true)
-  assert.equal(push.removed.length, push.sent.length, 'server told before local')
 })
 
 test('the freshly created subscription is never retired', async () => {

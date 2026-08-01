@@ -780,13 +780,8 @@ self.addEventListener('message', (event) => {
 
 // ── Web Push lives in `public/sw-push.js` ──────────────────────
 //
-// Push and notificationclick are NOT handled here. Android routes a web push
-// to an installed WebAPK only when the SERVICE WORKER'S SCOPE falls inside
-// that WebAPK's manifest scope. This worker is registered at `/` so it can
-// also serve the standalone mini-app pages under `/apps/<slug>/`, which puts
-// it outside the shell's `/shell/` scope — so notifications shown from here
-// were owned by Chrome, and tapping one opened Chrome instead of Möbius.
-//
-// The push subscription therefore lives on a separate, page-controlling-
-// nothing worker registered at `/shell/push/`. See `public/sw-push.js` for the
-// full reasoning and `hooks/usePushSubscription.js` for the registration.
+// Deliberately NOT handled here: this worker is registered at `/` (it also
+// serves the standalone mini-app pages under `/apps/<slug>/`), which is
+// outside the shell's `/shell/` PWA scope, and Android routes a push to an
+// installed app only when the worker's scope falls inside that app's scope.
+// `public/sw-push.js` has the full reasoning.

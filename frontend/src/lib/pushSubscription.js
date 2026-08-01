@@ -4,22 +4,11 @@ import { api } from '../api/client.js'
  * Web Push subscription lifecycle, kept out of React so it can be exercised
  * directly.
  *
- * WHERE THE SUBSCRIPTION LIVES, AND WHY IT MATTERS
- * -----------------------------------------------
- * Android decides which installed app receives a web push by resolving the
- * SERVICE WORKER'S SCOPE URL against the intent filters of installed WebAPKs,
- * whose pathPrefix is the PWA manifest `scope`. Möbius's shell is installed
- * with `scope: "/shell/"`, but the caching worker (`sw.js`) is registered at
- * `/` because it also serves the standalone mini-app pages under
- * `/apps/<slug>/` — separate PWAs on the same origin. `/` is outside
- * `/shell/`, so no WebAPK matched, Chrome itself owned every notification, and
- * tapping one opened Chrome rather than Möbius.
- *
- * So the subscription lives on a dedicated worker registered at
- * `/shell/push/`: inside the shell's scope, and holding no documents, so it
- * controls no pages. Registering at `/shell/` itself would instead make it a
- * narrower match than the caching worker for the shell's own pages, take
- * control of them, and disable the shell precache.
+ * The subscription lives on a dedicated worker at `/shell/push/` rather than
+ * the shell's `/`-scoped caching worker: Android routes a push to an installed
+ * app only when the SERVICE WORKER'S SCOPE falls inside that app's manifest
+ * scope, and `/` is outside the shell's `/shell/`. `public/sw-push.js` carries
+ * the full reasoning, including why the extra path segment matters.
  */
 export const PUSH_SW_URL = '/sw-push.js'
 export const PUSH_SW_SCOPE = '/shell/push/'
