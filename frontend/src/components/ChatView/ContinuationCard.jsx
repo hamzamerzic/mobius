@@ -5,16 +5,22 @@ import MarkerCard from './MarkerCard.jsx'
 
 export default function ContinuationCard({ msg }) {
   const manual = msg?.continuation_reason === 'manual'
-  const restarted = msg?.continuation_reason === 'restart'
-  const title = manual
-    ? 'Resumed manually'
-    : (restarted
-        ? 'Server restarted — continuing automatically'
-        : 'Usage available again — continuing automatically')
+  const reason = msg?.continuation_reason
+  // Automatic recovery is a durable product event, not provider prose. Keep
+  // one stable label across restart and usage-limit resumes so the transcript
+  // clearly records that the chat resumed itself after the old Resume action
+  // disappeared with the parked turn.
+  const title = manual ? 'Resumed manually' : 'Resumed automatically'
+  const subtitle = !manual && reason === 'restart'
+    ? 'After the server restarted'
+    : (!manual && reason === 'usage_limit'
+        ? 'Usage became available again'
+        : undefined)
 
   return (
     <MarkerCard
       title={title}
+      subtitle={subtitle}
       icon={<ArrowRotateCw width={14} height={14} aria-hidden="true" />}
     />
   )
