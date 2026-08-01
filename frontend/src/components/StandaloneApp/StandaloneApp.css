@@ -6,39 +6,6 @@
   color: var(--text, #e8e8e8);
 }
 
-.standalone-app__mobius-link {
-  position: fixed;
-  right: max(14px, env(safe-area-inset-right));
-  bottom: max(14px, env(safe-area-inset-bottom));
-  z-index: 20;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 42px;
-  padding: 0 13px;
-  border: 1px solid color-mix(in srgb, var(--text, #fff) 14%, transparent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--bg, #0d0d0d) 86%, transparent);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
-  color: var(--text, #fff);
-  font: 600 12px/1 var(--font, system-ui, sans-serif);
-  text-decoration: none;
-  backdrop-filter: blur(14px);
-  opacity: 0.72;
-  transition: opacity 160ms ease, transform 160ms ease;
-}
-
-.standalone-app__mobius-link:hover,
-.standalone-app__mobius-link:focus-visible {
-  opacity: 1;
-  transform: translateY(-1px);
-}
-
-.standalone-app--immersive .standalone-app__mobius-link {
-  opacity: 0;
-  pointer-events: none;
-}
-
 .standalone-app__update {
   position: fixed;
   top: max(14px, env(safe-area-inset-top));
@@ -129,9 +96,9 @@
 
 .standalone-install {
   position: relative;
-  width: min(430px, 100%);
+  width: min(370px, 100%);
   max-height: calc(100dvh - 32px);
-  padding: 22px;
+  padding: 30px 26px 26px;
   overflow: auto;
   border: 1px solid var(--border, #333);
   border-radius: 20px;
@@ -142,11 +109,11 @@
 
 .standalone-install__identity {
   display: flex;
+  flex-direction: column;
   align-items: center;
   gap: 14px;
 }
 
-.standalone-install__identity p,
 .standalone-app--message p {
   margin: 5px 0 0;
   color: var(--muted, #aaa);
@@ -155,12 +122,19 @@
 }
 
 .standalone-install__icon {
-  flex: 0 0 64px;
-  width: 64px;
-  height: 64px;
+  width: 72px;
+  height: 72px;
   display: block;
-  border-radius: 15px;
+  border-radius: 21px;
   object-fit: cover;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.38);
+}
+
+.standalone-install__identity h1 {
+  text-align: center;
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .standalone-install__instructions {
@@ -179,26 +153,19 @@
 
 .standalone-install__instructions strong { color: var(--text, #fff); }
 
-/* iOS Share steps. Sized as primary content, not as a footnote: on iPhone
-   this is the only instruction that matters, and the arrow below it points
-   down at the real Share button in Safari's toolbar. */
+/* The iOS instruction is the card's body, not an inset panel: on iPhone it is
+   the only thing the card has to say, so it gets the room rather than a border. */
 .standalone-install__steps {
-  margin-top: 14px;
-  padding: 14px 15px 12px;
-  border: 1px solid color-mix(in srgb, var(--accent, #a78bfa) 32%, var(--border, #333));
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--accent, #a78bfa) 8%, transparent);
-}
-
-.standalone-install__steps p {
-  margin: 0;
-  color: var(--text, #fff);
-  font-size: 14px;
-  line-height: 1.5;
+  margin: 18px 0 0;
+  text-align: center;
+  text-wrap: balance;
+  color: var(--muted, #aaa);
+  font-size: 15px;
+  line-height: 1.55;
 }
 
 .standalone-install__steps strong {
-  color: var(--accent, #a78bfa);
+  color: var(--text, #fff);
   font-weight: 600;
 }
 
@@ -206,9 +173,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
-  margin: 12px auto 0;
+  width: 34px;
+  height: 34px;
+  margin: 20px auto 2px;
   border-radius: 999px;
   border: 1px solid color-mix(in srgb, var(--accent, #a78bfa) 34%, var(--border, #333));
   background: color-mix(in srgb, var(--accent, #a78bfa) 10%, transparent);
@@ -226,7 +193,7 @@
   .standalone-install__arrow { animation: none; }
 }
 
-.standalone-install__actions { margin-top: 18px; }
+.standalone-install__actions { margin-top: 18px; justify-content: center; }
 
 /* Corner dismissal, replacing a worded "Maybe later" that competed with the
    one action worth taking. Larger touch target than the glyph it draws. */
@@ -273,7 +240,3 @@
 
 .standalone-install__success + h1 { text-align: center; }
 .standalone-install__success ~ .standalone-install__primary { display: block; margin: 18px auto 0; }
-
-@media (prefers-reduced-motion: reduce) {
-  .standalone-app__mobius-link { transition: none; }
-}

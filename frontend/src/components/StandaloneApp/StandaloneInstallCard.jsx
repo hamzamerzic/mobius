@@ -56,6 +56,7 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
   )
   const dialogRef = useRef(null)
   const primaryRef = useRef(null)
+  const closeRef = useRef(null)
   const previousInstallStateRef = useRef(installState)
 
   useEffect(() => {
@@ -86,17 +87,32 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
       close('installed')
       return
     }
+    // `showAction` gates this button out once instructions are on screen, so
+    // the only reachable case here is revealing them for the first time.
     if (installState !== 'ready') {
-      if (showInstructions) {
-        close('instructions-read')
-        return
-      }
-      setShowInstructions(true)
+      revealInstructions()
       return
     }
     const result = await requestInstall()
-    if (result.outcome !== 'accepted') setShowInstructions(true)
+    if (result.outcome !== 'accepted') revealInstructions()
   }
+
+  // Revealing instructions unmounts the button that was just activated —
+  // `showAction` flips false. Focus would land on <body> while the dialog is
+  // open and its siblings are inert, stranding keyboard and screen-reader
+  // users outside a trap whose Tab handler matches neither edge. Hand focus to
+  // the control that survives.
+  function revealInstructions() {
+    setShowInstructions(true)
+    queueMicrotask(() => closeRef.current?.focus())
+  }
+
+  // The action button earns its place only when it can DO something: fire a
+  // native install prompt, or reveal guidance not yet on screen. On iPhone
+  // neither is ever true — there is no install API and the steps show on
+  // arrival — so the card ends at the sentence rather than at a button whose
+  // only effect is to close a dialog that already has a close.
+  const showAction = installState === 'ready' || !showInstructions
 
   if (!open) return null
 
@@ -111,6 +127,7 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
         onClick={event => event.stopPropagation()}
       >
         <button
+          ref={closeRef}
           className="standalone-install__close"
           type="button"
           aria-label="Close"
@@ -139,38 +156,39 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
                 src={`/apps/${encodeURIComponent(app.slug)}/icon-192.png?v=${encodeURIComponent(app.updated_at || '0')}`}
                 alt=""
               />
-              <div>
-                <h1 id="standalone-install-title">Install {app.name}</h1>
-                <p>Keep it one tap away, without opening the Möbius workspace first.</p>
-              </div>
+              <h1 id="standalone-install-title">Install {app.name}</h1>
             </div>
             {showInstructions && (platform.ios ? (
-              // This document's manifest is the app's, so Add to Home Screen
-              // here produces the app — the whole reason the shell sends
-              // people to this page. The arrow points at Safari's toolbar.
-              <div className="standalone-install__steps" role="status">
-                <p>
-                  Tap the <strong>Share</strong> button below, then choose{' '}
-                  <strong>Add to Home Screen</strong>.
-                </p>
-                <span className="standalone-install__arrow" aria-hidden="true">↓</span>
-              </div>
+              // On iPhone the sentence IS the card, so it gets no box of its
+              // own — a bordered panel inside a bordered card is nesting that
+              // buys nothing. This document's manifest is the app's, so Add to
+              // Home Screen here produces the app, and the arrow points down
+              // at the real Share button in Safari's toolbar.
+              <p className="standalone-install__steps">
+                Tap the <strong>Share</strong> button below, then choose{' '}
+                <strong>Add to Home Screen</strong>.
+              </p>
             ) : (
               <div className="standalone-install__instructions" role="status">
                 <strong>{copy.summary}</strong>
                 <span>{copy.body}</span>
               </div>
             ))}
-            <div className="standalone-install__actions">
-              <button
-                ref={primaryRef}
-                className="standalone-install__primary"
-                type="button"
-                onClick={install}
-              >
-                {installState === 'ready' ? 'Install' : (showInstructions ? 'Got it' : copy.ctaLabel)}
-              </button>
-            </div>
+            {platform.ios && showInstructions && (
+              <span className="standalone-install__arrow" aria-hidden="true">↓</span>
+            )}
+            {showAction && (
+              <div className="standalone-install__actions">
+                <button
+                  ref={primaryRef}
+                  className="standalone-install__primary"
+                  type="button"
+                  onClick={install}
+                >
+                  {installState === 'ready' ? 'Install' : copy.ctaLabel}
+                </button>
+              </div>
+            )}
           </>
         )}
       </section>
