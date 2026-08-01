@@ -20,6 +20,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from sqlalchemy.pool import NullPool
 
+from app import sqlite_policy
 from app.config import get_settings
 
 
@@ -28,22 +29,6 @@ _request_label: ContextVar[str] = ContextVar(
   "mobius_database_request_label", default="background",
 )
 _checkout_warn_seconds = float(os.environ.get("DB_CHECKOUT_WARN_SECONDS", "2"))
-# Caps RETAINED journal size, not live growth. SQLite defaults this to -1
-# (never truncate), so a WAL only ratchets upward: a checkpoint returns pages
-# to the database but leaves the file at its high-water mark, and that
-# allocation is kept forever. With a limit set, a checkpoint that resets the
-# WAL also truncates the file back down.
-#
-# It is not a runtime ceiling. Truncation happens only on a reset, and a reset
-# needs a gap where no reader holds an older snapshot — so a single long-lived
-# read transaction is enough to let the file exceed this, regardless of how
-# many sessions are running. If it grows again, look for the transaction that
-# never ends rather than the session count.
-#
-# 64 MiB trades a little repeated growth work for a bound small against the
-# data volume. No formula: raise it if checkpoint churn shows up in write
-# latency, lower it if retained journal space becomes material.
-_SQLITE_RETAINED_JOURNAL_LIMIT_BYTES = 64 * 1024 * 1024
 _pool_metrics_lock = threading.Lock()
 _pool_metrics = {
   "checked_out": 0,
@@ -122,34 +107,14 @@ def _make_engine():
         label,
       )
   if is_sqlite:
-    # SQLite under concurrent writes:
-    # - WAL lets readers run while a single writer writes (no
-    #   blanket lock the way the default DELETE journal does).
-    # - busy_timeout waits up to N ms for a lock instead of
-    #   immediately raising "database is locked" when two
-    #   coroutines try to commit in the same window.
-    # - synchronous=FULL fsyncs the WAL on every commit so an
-    #   OOM kill (which this host suffers periodically) or a
-    #   power loss can't leave the last N commits in the kernel
-    #   page cache but not on disk. NORMAL skips that fsync and
-    #   risks losing the last committed transaction on an abrupt
-    #   kill; FULL adds ~1 fsync per write transaction, acceptable
-    #   given write frequency on this platform.
+    # NullPool opens a fresh connection per session, so this runs constantly
+    # under load. The policy itself lives in sqlite_policy so the standalone
+    # scripts writing this same database apply it identically.
     @event.listens_for(eng, "connect")
     def _set_sqlite_pragmas(dbapi_conn, _record):
       cur = dbapi_conn.cursor()
-      # busy_timeout must come first: journal_mode=WAL takes locks and,
-      # with no busy handler yet installed, fails immediately instead of
-      # waiting when another connection holds them. NullPool opens a
-      # fresh connection per session, so this pragma sequence runs under
-      # load constantly. (True disk exhaustion still fails here — that
-      # cause is owned by the disk-headroom work, not this ordering.)
-      cur.execute("PRAGMA busy_timeout=5000")
-      cur.execute("PRAGMA journal_mode=WAL")
-      cur.execute("PRAGMA synchronous=FULL")
-      cur.execute(
-        f"PRAGMA journal_size_limit={_SQLITE_RETAINED_JOURNAL_LIMIT_BYTES}"
-      )
+      for pragma in sqlite_policy.connection_pragmas():
+        cur.execute(pragma)
       cur.close()
   return eng
 

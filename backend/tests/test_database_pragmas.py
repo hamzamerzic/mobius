@@ -1,9 +1,11 @@
 """SQLite connections install their lock handler before lock-taking pragmas."""
 
+import importlib.util
 import sqlite3
+from pathlib import Path
 from types import SimpleNamespace
 
-from app import database
+from app import database, sqlite_policy
 
 
 def _capture_connect_pragmas(monkeypatch, tmp_path):
@@ -58,7 +60,7 @@ def test_sqlite_connection_pragma_order(monkeypatch, tmp_path):
     "PRAGMA busy_timeout=5000",
     "PRAGMA journal_mode=WAL",
     "PRAGMA synchronous=FULL",
-    f"PRAGMA journal_size_limit={database._SQLITE_RETAINED_JOURNAL_LIMIT_BYTES}",
+    f"PRAGMA journal_size_limit={sqlite_policy.RETAINED_JOURNAL_LIMIT_BYTES}",
   ]
 
 
@@ -71,11 +73,39 @@ def test_sqlite_journal_limit_reaches_a_real_connection(tmp_path):
   try:
     con.execute("PRAGMA journal_mode=WAL")
     con.execute(
-      f"PRAGMA journal_size_limit={database._SQLITE_RETAINED_JOURNAL_LIMIT_BYTES}"
+      f"PRAGMA journal_size_limit={sqlite_policy.RETAINED_JOURNAL_LIMIT_BYTES}"
     )
 
     assert con.execute("PRAGMA journal_size_limit").fetchone()[0] == (
-      database._SQLITE_RETAINED_JOURNAL_LIMIT_BYTES
+      sqlite_policy.RETAINED_JOURNAL_LIMIT_BYTES
+    )
+  finally:
+    con.close()
+
+
+def test_standalone_writer_applies_the_same_policy_as_the_engine(tmp_path):
+  """chat_note.py opens this database directly, outside SQLAlchemy. Because
+  journal_size_limit is per-connection, a writer that skips it leaves the WAL's
+  retained allocation in place no matter what the engine's connections declare.
+  Exercise its configurator rather than reading its source, so the test tracks
+  the behaviour and not the wiring."""
+  spec = importlib.util.spec_from_file_location(
+    "chat_note_under_test",
+    Path(__file__).resolve().parents[1] / "scripts" / "chat_note.py",
+  )
+  chat_note = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(chat_note)
+
+  con = sqlite3.connect(tmp_path / "note.db")
+  try:
+    con.execute("PRAGMA journal_mode=WAL")
+    chat_note._apply_sqlite_policy(con)
+
+    assert con.execute("PRAGMA journal_size_limit").fetchone()[0] == (
+      sqlite_policy.RETAINED_JOURNAL_LIMIT_BYTES
+    )
+    assert con.execute("PRAGMA busy_timeout").fetchone()[0] == (
+      sqlite_policy.BUSY_TIMEOUT_MS
     )
   finally:
     con.close()
