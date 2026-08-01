@@ -158,7 +158,7 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
               />
               <h1 id="standalone-install-title">Install {app.name}</h1>
             </div>
-            {showInstructions && (platform.ios ? (
+            {showInstructions && (platform.iosSafari && !platform.ipad ? (
               // On iPhone the sentence IS the card, so it gets no box of its
               // own — a bordered panel inside a bordered card is nesting that
               // buys nothing. This document's manifest is the app's, so Add to

@@ -4,6 +4,7 @@ import { api, apiFetch } from '../../api/client.js'
 import { appIconUrl } from '../appIcon.js'
 import { appQueries } from '../../hooks/queries.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
+import { loginBoundaryPath } from '../../lib/safeReturnPath.js'
 import {
   detectInstallPlatform,
   isStandaloneDisplay,
@@ -125,33 +126,42 @@ export default function InstallSheet({ app, onClose }) {
 
   // The app's own page — the only document whose manifest names and icons
   // THIS app. `?install=1` opens its Add-to-Home card on arrival, and the
-  // one-time pass rides through the manifest into the installed app's first
-  // launch so it can sign itself in (see auth.create_install_pass).
+  // opaque one-time pass rides through the manifest into the installed app's
+  // first launch so it can sign itself in.
   //
   // Minting is best-effort on purpose: if it fails the install still works,
   // it just meets the ordinary login on first launch. A failed hand-off must
   // never block putting an app on the home screen.
+  const installPath = `/apps/${appSlug}/?install=1`
   async function buildInstallUrl() {
-    let query = 'install=1'
+    const url = new URL(installPath, window.location.origin)
     try {
       const res = await api.auth.installPass.mint(appSlug)
       if (res.ok) {
         const data = await res.json()
         if (data?.install_pass) {
-          query += `&pass=${encodeURIComponent(data.install_pass)}`
+          url.searchParams.set('pass', data.install_pass)
         }
       }
     } catch { /* install without the pass */ }
-    return new URL(`/apps/${appSlug}/?${query}`, window.location.origin).href
+    return url.href
   }
+
+  // Copying never places even the short-lived pass on the system clipboard.
+  // The pass-free fallback enters through the login boundary so a signed-out
+  // browser still returns to this app rather than falling through to the shell.
+  const plainHandoffPath = loginBoundaryPath(installPath)
+  const plainHandoffUrl = typeof window !== 'undefined'
+    ? new URL(plainHandoffPath, window.location.origin).href
+    : plainHandoffPath
 
   async function copyLink() {
     try {
-      await navigator.clipboard.writeText(handoffUrl)
+      await navigator.clipboard.writeText(plainHandoffUrl)
       setCopied(true)
     } catch {
       setCopied(false)
-      setError('Could not copy — use the button above instead.')
+      setError('Could not copy — the address is written below.')
     }
   }
 
@@ -178,7 +188,12 @@ export default function InstallSheet({ app, onClose }) {
       }
       // Reflect the new name/icon in the drawer when the user returns.
       appQueries.list.invalidate(queryClient)
-      const url = await buildInstallUrl()
+      // Only iOS partitions each installed web app into fresh storage. Other
+      // platforms already share the browser session, so minting a pass there
+      // would add credential exposure without buying a sign-in handoff.
+      const url = platform.ios
+        ? await buildInstallUrl()
+        : new URL(installPath, window.location.origin).href
       if (platform.ios && standalone) {
         // No Share button here and nowhere to navigate that would produce
         // one. Hand the destination over instead.
@@ -253,6 +268,12 @@ export default function InstallSheet({ app, onClose }) {
             </div>
 
             {error && <div className="is__error" role="alert">{error}</div>}
+
+            <p className="is__hint">
+              If it opens inside Möbius rather than Safari, tap the compass
+              icon to switch over. Or open Safari yourself and go to{' '}
+              <span className="is__url">{plainHandoffUrl}</span>
+            </p>
           </>
         ) : (
         <>

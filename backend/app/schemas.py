@@ -43,10 +43,9 @@ class TokenResponse(BaseModel):
 
 
 # A one-time sign-in pass handed to a mini-app being installed to the iOS home
-# screen, where the new web app gets its own empty storage container. See
-# auth.create_install_pass.
+# screen, where the new web app gets its own empty storage container.
 class InstallPassRequest(BaseModel):
-  slug: str
+  slug: str = Field(min_length=1, max_length=128)
 
 
 class InstallPassResponse(BaseModel):
@@ -54,8 +53,8 @@ class InstallPassResponse(BaseModel):
 
 
 class InstallPassRedeemRequest(BaseModel):
-  install_pass: str
-  slug: str
+  install_pass: str = Field(min_length=1, max_length=512)
+  slug: str = Field(min_length=1, max_length=128)
 
 
 # Declared storage-access level. Used on two sides of the same coin:

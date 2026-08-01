@@ -258,3 +258,10 @@
   outline: 2px solid var(--accent, #a78bfa);
   outline-offset: 2px;
 }
+
+/* The address is a pass-free recovery path to read or retype by hand. */
+.is__url {
+  color: var(--text, #d4d4d8);
+  overflow-wrap: anywhere;
+  user-select: all;
+}

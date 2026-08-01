@@ -447,6 +447,28 @@ class ChatEmbedGrant(Base):
   revoked_at = Column(DateTime, nullable=True, default=None, index=True)
 
 
+class InstallPassGrant(Base):
+  """Opaque, one-use bridge into an iOS Home Screen app.
+
+  Only a SHA-256 digest of the browser-visible random secret is stored. The
+  row binds that secret to one app and owner epoch; redemption atomically
+  stamps ``consumed_at`` before a fresh short session is minted. A restart
+  therefore cannot make a spent pass usable again.
+
+  This is a new table, so ``create_all`` adds it to existing installations.
+  """
+
+  __tablename__ = "install_pass_grants"
+
+  id = Column(Integer, primary_key=True, autoincrement=True)
+  token_hash = Column(String(64), nullable=False, unique=True, index=True)
+  app_id = Column(Integer, ForeignKey("apps.id"), nullable=False, index=True)
+  owner_epoch = Column(Integer, nullable=False)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  expires_at = Column(DateTime, nullable=False, index=True)
+  consumed_at = Column(DateTime, nullable=True, default=None, index=True)
+
+
 class App(Base):
   """A mini-app created and managed by the agent."""
 
