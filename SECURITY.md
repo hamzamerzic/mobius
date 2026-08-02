@@ -79,6 +79,29 @@ editable platform is broken. This is appropriate because:
 3. Recovery is isolated from the editable production process and provides the
    rollback boundary.
 
+Full agent root is the default normal-instance capability. The root-owned baked
+entrypoint creates an unrestricted sudo rule unless an operator sets
+`MOBIUS_AGENT_SUDO=0`; changing that boundary requires recreating the container.
+Recovery mode branches before the rule is installed. The recovery worker never
+shares the normal container: it is non-root/read-only and reaches a separate
+root target through a one-time authenticated, bounded protocol. The target removes the bearer from
+its exec environment, wipes it after deriving a one-way verifier, blocks child
+access to its memory and descriptors, drops packet-capture/ptrace/mount
+capabilities, and confines its own file helpers to explicit roots with Linux
+`openat2`. It independently requires a base-10 Unix-epoch expiry no more than
+24 hours ahead, rejects authority at that deadline, kills/reaps active repair
+process trees, discards the verifier, and closes the listener without entering
+a restart loop. Repair commands retain root over the stopped `/data` instance
+but cannot inspect target PID1, survive their request, or modify the recovery
+worker itself.
+
+Self-hosted recovery containers never restart automatically. A worker restart
+would reconstruct its tmpfs-backed one-time-code state from unchanged
+environment credentials, while a target restart would retain the same bearer.
+If either exits, use `scripts/mobiusctl recovery reopen`; it removes both
+containers, rotates both credentials, pulls the latest worker, and recreates a
+clean pair while keeping the ordinary app stopped.
+
 ## Opaque embedded-chat contract
 
 `window.mobius.chat` creates three documents. The outer sandbox restriction
@@ -124,7 +147,7 @@ exposes only public packaged assets, while protected API access from null
 origins still requires the scoped principal. Ordinary `/app-assets/` remains
 frame-denied. A configured shared service-gateway hostname is reserved to
 explicitly enabled `/services/<slug>` prefixes and frames only through each
-direct, same-origin-readable adapter; shell/API/recovery and non-enabled
+direct, same-origin-readable adapter; shell/API and non-enabled
 service paths return 404 there. The gateway isolates its owner-trusted service
 group from the Möbius shell, but paths are not origins: services on that
 gateway can reach one another and require dedicated origins when they are not

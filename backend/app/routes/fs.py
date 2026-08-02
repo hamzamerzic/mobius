@@ -86,8 +86,8 @@ _GIT_LIST_CAP = 200  # per-category status list cap; counts stay exact
 # internal MIME-sidecar tree (routes/storage.py), kept out of the owner's
 # File Explorer so it can't be mistaken for app data or hand-edited (the card
 # 085 contract that sidecars never leak into listings or agent edits). The DB
-# stays *listable* (size visible) but not raw-readable — the /recover backup
-# is the right channel for a consistent copy.
+# stays *listable* (size visible) but not raw-readable — the host-side backup
+# flow is the right channel for a consistent copy.
 _DENY_RELPATHS = (
   "cli-auth",
   "service-token.txt",
@@ -99,10 +99,9 @@ _DENY_RELPATHS = (
   ".storage-meta",
 )
 # Defense in depth: a secret-shaped filename anywhere in the tree is denied,
-# in case one is copied outside its canonical home. `.recovery-secret` is the
-# HMAC key that signs recovery session cookies (forging it grants the recovery
-# surface); `.recovery-owner.json` holds the owner's password hash for the
-# DB-independent recovery fallback.
+# in case one is copied outside its canonical home. The two `.recovery-*`
+# entries are retired legacy credentials and remain denied until old instances
+# have naturally removed them.
 _SECRET_NAMES = {
   ".env", ".secret-key", ".recovery-secret", ".recovery-owner.json",
   ".credentials.json", "service-token.txt",

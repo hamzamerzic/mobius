@@ -2,14 +2,10 @@
 
 The Codex CLI prints a human-readable login banner to stdout: a
 verification URL and a device code interleaved with prose and ANSI color
-codes. There is no `--json` mode for device-auth, so both the normal
-provider-auth flow (`routes/auth.py`) and the break-glass recovery flow
-(`recover_oauth.py`) parse this free-form text. These two pure helpers are
-the shared half — the readline-loop readiness predicate and the
-URL/code extraction — so the two flows can't drift to different banner
-expectations (the recovery copy is the one you least want to discover is
-stale). The process lifecycle (spawn, registry, timeout cleanup) stays in
-each caller, which legitimately differs.
+codes. There is no `--json` mode for device-auth, so the normal provider-auth
+flow (`routes/auth.py`) uses these pure helpers for its readline readiness
+predicate and URL/code extraction. Process lifecycle, registry, and timeout
+cleanup stay with the caller.
 
 The input is the trusted first-party `codex` binary's own output, not user
 input, so the regexes carry no ReDoS/injection concern — they're simple

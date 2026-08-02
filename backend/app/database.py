@@ -1,9 +1,10 @@
 """Database engine and session configuration.
 
-Boot-critical: main.py imports this at module load to build the engine and
-run migrations, so a broken edit leaves only /recover reachable. `python3 -m
-py_compile` before a restart. (Recovery uses raw sqlite3 and does not depend
-on this module; main.py does.)
+Served from the editable platform checkout. main.py imports this at module load
+to set up the engine and migrations; if a local edit breaks it, normal boot
+falls back to the baked platform and external recovery can repair the preserved
+checkout. For ad-hoc DB queries use raw stdlib `sqlite3` instead of changing
+this module.
 """
 
 import json

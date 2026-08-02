@@ -119,6 +119,38 @@ test('transition entry authority prevents layout and reader paths creating pins'
   assert.equal(modeForScrollTransition(hold, pin, 'send:pin-user-message'), pin)
 })
 
+test('question viewport release restores only its captured base authority', () => {
+  const follow = { kind: 'FOLLOW_BOTTOM' }
+  const pin = { kind: 'PIN_USER_MSG', cid: 'c-2', followWhenFilled: true }
+  const followOverlay = {
+    kind: 'ANCHOR_AT',
+    key: 'q-1',
+    offset: 40,
+    questionSubmitViewportH: 720,
+    questionSubmitBaseMode: follow,
+  }
+  const pinOverlay = {
+    ...followOverlay,
+    questionSubmitBaseMode: pin,
+  }
+
+  assert.equal(modeForScrollTransition(
+    followOverlay,
+    follow,
+    'layout:question-viewport-release',
+  ), follow)
+  assert.equal(modeForScrollTransition(
+    pinOverlay,
+    pin,
+    'layout:question-viewport-release',
+  ), pin)
+  assert.equal(modeForScrollTransition(
+    followOverlay,
+    { kind: 'FOLLOW_BOTTOM' },
+    'layout:question-viewport-release',
+  ), followOverlay, 'an equivalent-looking mode is not the overlay\'s authority')
+})
+
 test('only real-bottom or an armed pin handoff can enter follow', () => {
   const hold = { kind: 'ANCHOR_AT', key: 'a-1', offset: 30 }
   const follow = { kind: 'FOLLOW_BOTTOM' }

@@ -44,7 +44,13 @@ default). Routed into two archives:
                   + .git are git-tracked but the git repo dies WITH the
                   volume, so a true DR artifact carries them too.
   secrets.tar.*   cli-auth/, app-secrets/, push/, service-token.txt,
-                  .secret-key, .recovery-secret, .recovery-owner.json.
+                  .secret-key.
+
+Retired embedded-recovery credentials/sentinels are never captured. Normal
+boot removes `.recovery-secret`, `.recovery-owner.json`, and `.recover-pending`
+before importing persisted code. The user-authored legacy
+`recovery_chat.jsonl` transcript is retained as ordinary owner data and is
+included in `data.tar.gz` when present.
 
 Encryption policy (secrets never plaintext-offsite)
 ---------------------------------------------------
@@ -122,13 +128,13 @@ EXCLUDE_NAMES = {
   "platform",                # own git repo, re-seeded from the image
   "shell",                   # retired legacy residue
   "lost+found",
-  ".recover-pending",        # transient recovery marker
-  "recovery_chat.jsonl",     # transient recovery-chat scratch
+  ".recovery-secret",        # retired embedded-recovery credential
+  ".recovery-owner.json",    # retired embedded-recovery owner seed
+  ".recover-pending",        # retired embedded-recovery sentinel
 }
 # Transient marker files at the /data root — runtime signals, not data.
-# Deliberately NOT ".recover" (that would also match the SECRET files
-# .recovery-secret / .recovery-owner.json); those transient names are in
-# EXCLUDE_NAMES instead.
+# Deliberately NOT ".recover"; retired recovery names are enumerated in
+# EXCLUDE_NAMES so similarly named owner files remain ordinary backup data.
 EXCLUDE_PREFIXES = (".platform", ".boot", ".last-successful", ".pm-commit")
 # Prefixes for platform bootstrap scratch/quarantine dirs (platform.*)
 # and this run's own transient restore staging/rollback dirs.
@@ -141,7 +147,6 @@ EXCLUDE_STARTSWITH = (
 SECRET_NAMES = {
   "cli-auth", "app-secrets", "push",
   "service-token.txt", ".secret-key",
-  ".recovery-secret", ".recovery-owner.json",
 }
 
 # The live DB dir is handled specially: we inject a consistent snapshot

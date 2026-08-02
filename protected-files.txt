@@ -4,22 +4,13 @@
 # and read-only modes after the chown sweep that hands /data/platform to the
 # mobius user.
 #
-# Two categories live here:
-#
-# 1. **Credential surfaces** — files that handle password / token
-#    input. Agent could exfiltrate by tampering. Keep root-owned.
-#
-# 2. **Boot / restore infra** — the platform container always starts
-#    from baked entrypoint.sh, and recovery_restore.sh is the baked
-#    restore tool. recoveryd is the separate recovery floor for HTTP.
-
-# --- Boot / restore infra (scripts) ---
+# --- Baked boot/runtime infrastructure ---
 # The whole-repo model un-freezes the backend: the SERVED code is
 # /data/platform/backend/app (mobius-owned, editable in place), so the old
 # /app/app/* freeze protected the baked FALLBACK, not the live code — moot now.
-# Recovery no longer depends on freezing the boot chain; the separate recoveryd
-# container is the floor. Only the baked boot/restore scripts stay frozen.
+# The externally launched recovery target starts through the baked entrypoint
+# before /data is touched. Ordinary restart authorization remains baked too.
 /app/scripts/entrypoint.sh
 /app/scripts/boot_attempt_counter.py
-/app/scripts/railway_supervision.sh
-/app/scripts/recovery_restore.sh
+/app/scripts/agent_sudo.sh
+/app/runtime/restart_ledger.py

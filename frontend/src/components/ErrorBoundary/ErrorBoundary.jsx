@@ -3,16 +3,14 @@ import { api, BASE } from '../../api/client.js'
 import { recordClientError } from '../../lib/errorLog.js'
 import {
   buildAgentRepairPrompt,
-  clearErrorRecoveryAttempt,
-  ERROR_RECOVERY_STABLE_MS,
   errorRecoveryFingerprint,
   readErrorRecoveryAttempt,
-  recoveryPhaseForAttempt,
-  repairChatPath,
-  startAgentRepair,
-  writeErrorRecoveryAttempt,
+  redactDiagnosticText,
+  recoveryViewForAttempt,
+  runAgentRepair,
+  writeRefreshedRecoveryAttempt,
 } from '../../lib/errorRecovery.js'
-import RecoveryLink from './RecoveryLink.jsx'
+import RecoveryPanel from './RecoveryPanel.jsx'
 import './ErrorBoundary.css'
 
 /**
@@ -39,14 +37,15 @@ import './ErrorBoundary.css'
 export default class ErrorBoundary extends Component {
   state = {
     error: null,
-    phase: 'refresh',
-    agentError: '',
+    phase: 'resolving',
     repairChatId: null,
+    attemptPhase: null,
   }
 
-  stableTimer = null
   crashContext = null
-  agentStarting = false
+  repairController = null
+  pageShowListening = false
+  headingRef = null
 
   static getDerivedStateFromError(error) {
     return { error }
@@ -54,8 +53,8 @@ export default class ErrorBoundary extends Component {
 
   componentDidCatch(error, info) {
     clearTimeout(this.stableTimer)
-    // Record through the shared client-error log (console + ring buffer the
-    // recovery surface can read), same sink the global window handlers use.
+    // Record through the shared client-error log (console + owner-readable ring
+    // buffer), same sink the global window handlers use.
     recordClientError({
       where: this.props.label || 'app',
       message: error?.message || error,
@@ -64,49 +63,62 @@ export default class ErrorBoundary extends Component {
     })
     const message = String(error?.message || error)
     const surfaceKey = this.surfaceKey()
-    const fingerprint = errorRecoveryFingerprint(surfaceKey, message)
+    const componentStack = info?.componentStack || ''
+    const fingerprint = errorRecoveryFingerprint(surfaceKey, message, componentStack)
     const attempt = readErrorRecoveryAttempt({ surfaceKey, fingerprint })
     this.crashContext = {
       surfaceKey,
       fingerprint,
       message,
-      componentStack: info?.componentStack || '',
+      componentStack,
+      attempt,
     }
-    this.setState({
-      phase: recoveryPhaseForAttempt(attempt, {
-        canAskAgent: this.props.canAskAgent !== false,
-      }),
-      agentError: attempt?.phase === 'agent-failed'
-        ? 'Möbius couldn’t start the repair chat.'
-        : '',
-      repairChatId: attempt?.chatId || null,
-    })
+    this.listenForPageShow()
+    this.setState(recoveryViewForAttempt(attempt, {
+      canAskAgent: this.props.canAskAgent !== false,
+    }))
   }
 
-  componentDidMount() {
-    this.armStableClear()
+  componentDidUpdate(_prevProps, prevState) {
+    if (prevState.phase === 'resolving' && this.state.phase !== 'resolving') {
+      this.headingRef?.focus()
+    }
   }
 
   componentWillUnmount() {
-    clearTimeout(this.stableTimer)
+    this.repairController?.abort()
+    if (this.pageShowListening) window.removeEventListener('pageshow', this.handlePageShow)
   }
 
   surfaceKey = () => this.props.recoveryKey || this.props.label || 'app'
 
-  armStableClear = () => {
-    clearTimeout(this.stableTimer)
-    this.stableTimer = setTimeout(() => {
-      if (!this.state.error) clearErrorRecoveryAttempt(this.surfaceKey())
-    }, ERROR_RECOVERY_STABLE_MS)
+  listenForPageShow = () => {
+    if (this.pageShowListening) return
+    window.addEventListener('pageshow', this.handlePageShow)
+    this.pageShowListening = true
+  }
+
+  handlePageShow = (event) => {
+    const context = this.crashContext
+    if (!event.persisted || !context) return
+    this.repairController = null
+    const attempt = readErrorRecoveryAttempt({
+      surfaceKey: context.surfaceKey,
+      fingerprint: context.fingerprint,
+    })
+    context.attempt = attempt
+    this.setState(recoveryViewForAttempt(attempt, {
+      canAskAgent: this.props.canAskAgent !== false,
+    }))
   }
 
   handleRefresh = () => {
+    if (this.repairController) return
     const context = this.crashContext
     if (context) {
-      writeErrorRecoveryAttempt({
+      writeRefreshedRecoveryAttempt({
         surfaceKey: context.surfaceKey,
         fingerprint: context.fingerprint,
-        phase: 'refreshed',
       })
     }
     this.props.onReset?.()
@@ -121,13 +133,24 @@ export default class ErrorBoundary extends Component {
 
   handleAgentRepair = async () => {
     const context = this.crashContext
-    if (!context || this.agentStarting) return
-    this.agentStarting = true
-    this.setState({ phase: 'agent-starting', agentError: '' })
+    if (!context || this.repairController || this.props.canAskAgent === false) return
+    const controller = new AbortController()
+    this.repairController = controller
     try {
-      const result = await startAgentRepair({
+      const result = await runAgentRepair({
         client: api,
         base: BASE,
+        surfaceKey: context.surfaceKey,
+        fingerprint: context.fingerprint,
+        previousAttempt: context.attempt,
+        signal: controller.signal,
+        onAttempt: (attempt, { active }) => {
+          context.attempt = attempt
+          this.setState(recoveryViewForAttempt(attempt, {
+            active,
+            canAskAgent: this.props.canAskAgent !== false,
+          }))
+        },
         prompt: buildAgentRepairPrompt({
           surface: context.surfaceKey,
           message: context.message,
@@ -135,91 +158,37 @@ export default class ErrorBoundary extends Component {
           pathname: window.location.pathname,
         }),
       })
-      writeErrorRecoveryAttempt({
-        surfaceKey: context.surfaceKey,
-        fingerprint: context.fingerprint,
-        phase: 'agent-directed',
-        chatId: result.chatId,
-      })
       window.location.assign(result.path)
-    } catch {
-      this.agentStarting = false
-      writeErrorRecoveryAttempt({
-        surfaceKey: context.surfaceKey,
-        fingerprint: context.fingerprint,
-        phase: 'agent-failed',
-      })
-      this.setState({
-        phase: 'recovery',
-        agentError: 'Möbius couldn’t start the repair chat.',
-      })
-    }
-  }
-
-  openRepairChat = () => {
-    if (this.state.repairChatId) {
-      window.location.assign(repairChatPath(this.state.repairChatId, BASE))
+    } catch (error) {
+      if (error?.name === 'AbortError') return
+    } finally {
+      if (this.repairController === controller) this.repairController = null
     }
   }
 
   render() {
     if (!this.state.error) return this.props.children
-    const message = String(this.state.error?.message || this.state.error)
+    const message = redactDiagnosticText(this.state.error?.message || this.state.error)
     const cls = this.props.variant === 'inline' ? 'errbound errbound--inline' : 'errbound'
-    const { phase } = this.state
-    const afterRefresh = phase !== 'refresh'
-    const recovery = phase === 'recovery'
+    const { phase, attemptPhase, repairChatId } = this.state
+    const canAskAgent = this.props.canAskAgent !== false
     return (
-      <div className={cls} role="alert" aria-live="assertive">
-        <div className="errbound__card">
-          <h1 className="errbound__title">Something broke</h1>
-          <p className="errbound__body">
-            {phase === 'refresh' && (
-              <>This screen hit an unexpected error. Your chats and data are safe. Refresh the screen to try it again.</>
-            )}
-            {(phase === 'agent' || phase === 'agent-starting') && (
-              <>Refreshing didn’t fix this screen. Möbius can send the error to a new repair chat for your agent to investigate.</>
-            )}
-            {recovery && this.state.repairChatId && (
-              <>The repair chat started, but this screen still can’t open. System recovery is the remaining fallback.</>
-            )}
-            {recovery && !this.state.repairChatId && (
-              <>The repair chat couldn’t start. You can try the agent again or use system recovery as a last resort.</>
-            )}
-          </p>
-          <pre className="errbound__detail">{message}</pre>
-          {this.state.agentError && (
-            <p className="errbound__status" role="status">{this.state.agentError}</p>
-          )}
-          <div className="errbound__actions">
-            {afterRefresh && (
-              <button type="button" className="errbound__btn" onClick={this.handleRefresh}>
-                Refresh again
-              </button>
-            )}
-            {recovery && this.state.repairChatId && (
-              <button type="button" className="errbound__btn" onClick={this.openRepairChat}>
-                Open repair chat
-              </button>
-            )}
-            {!(recovery && this.state.repairChatId) && (
-              <button
-                type="button"
-                className="errbound__btn errbound__btn--primary"
-                onClick={phase === 'refresh' ? this.handleRefresh : this.handleAgentRepair}
-                disabled={phase === 'agent-starting'}
-              >
-                {phase === 'refresh' && 'Refresh screen'}
-                {phase === 'agent' && 'Ask agent to fix'}
-                {phase === 'agent-starting' && 'Starting repair chat…'}
-                {recovery && 'Try agent again'}
-              </button>
-            )}
-          </div>
-          {recovery && (
-            <RecoveryLink lead="If the repair chat can’t get you back in," />
-          )}
-        </div>
+      <div className={cls}>
+        <RecoveryPanel
+          variant="boundary"
+          className="errbound__card"
+          headingRef={node => { this.headingRef = node }}
+          title="Something broke"
+          subject="screen"
+          diagnostic={message}
+          phase={phase}
+          attemptPhase={attemptPhase}
+          repairChatId={repairChatId}
+          canAskAgent={canAskAgent}
+          refreshLabel="Refresh screen"
+          onRefresh={this.handleRefresh}
+          onAgentRepair={this.handleAgentRepair}
+        />
       </div>
     )
   }

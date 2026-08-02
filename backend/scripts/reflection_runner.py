@@ -17,11 +17,9 @@ Why this is its own runner (not `run_claude_sdk_turn`):
     actor) exists to serve a live chat. Reflection has none of that — it
     streams to a log file and returns when done. Reusing the chat
     runner would mean stubbing every one of those collaborators.
-  - **Isolation, like recovery.** `recover_chat_runner.py` is
-    deliberately kept off the production chat path so a broken chat
-    stack can't take down recovery. Reflection follows the same instinct
-    for the opposite reason: a long autonomous run that forks chats,
-    edits skills, reviews app health, and writes a brief should not
+  - **Isolation.** Reflection stays off the production chat path so a long
+    autonomous run that forks chats, edits skills, reviews app health, and
+    writes a brief should not
     share mutable state (registries, the writer actor, active-client
     maps) with the daytime chat path it may be operating on while the
     partner sleeps.

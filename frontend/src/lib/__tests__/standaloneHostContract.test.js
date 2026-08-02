@@ -22,10 +22,20 @@ test('standalone route selects the shared opaque AppCanvas host', () => {
   assert.doesNotMatch(standalone, /localStorage\.getItem\(['"]token/)
 })
 
-test('standalone chat navigation delegates draft and autosend ownership', () => {
+test('standalone navigation delegates chat ownership and shares crash recovery', () => {
   const standalone = read('src/components/StandaloneApp/StandaloneApp.jsx')
   assert.match(standalone, /stageComposerHandoff\(request\.chatId, request\.draft\)/)
   assert.match(standalone,
     /stageComposerHandoff\(chat\.id, request\.draft, \{ autoSend: request\.autoSend \}\)/)
   assert.doesNotMatch(standalone, /sessionStorage\.(?:setItem|removeItem)/)
+
+  const boundary = read('src/components/ErrorBoundary/ErrorBoundary.jsx')
+  const panel = read('src/components/ErrorBoundary/RecoveryPanel.jsx')
+
+  assert.match(standalone, /<RecoveryPanel/)
+  assert.match(boundary, /<RecoveryPanel/)
+  assert.match(panel, /Refreshing didn’t fix/)
+  assert.match(panel, /Repair chat request failed/)
+  assert.doesNotMatch(standalone, /agentError|Repair chat request failed/)
+  assert.doesNotMatch(boundary, /agentError|Repair chat request failed/)
 })

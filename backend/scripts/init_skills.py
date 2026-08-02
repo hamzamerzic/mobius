@@ -34,7 +34,7 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
 VERSION_FILE = SKILLS / ".seed-version"
-SEED_VERSION = "22"  # v22: add symmetric Claude delegation
+SEED_VERSION = "23"  # v23: move platform recovery outside the app container
 # Update only byte-for-byte baked copies; an owner/agent-edited file is never
 # touched. A set preserves every known unmodified predecessor when one skill
 # needs more than one fix-forward migration over its lifetime.
@@ -57,6 +57,12 @@ _UNMODIFIED_MIGRATIONS = {
   "recovery.md": {
     "ef62abb0d03d740f99add1b6f3938f780b34439cb0025616cb9dc5f74f779633",
     "6e6e82e02287e8bb38195fb021ea25cee2dc4e27da1a6ce1e2a0143fb1d82d87",
+    # v22 baked copy: remove the retired in-container /recover surface.
+    "c679f6e1f1cee15f18704e21b88c6ef1acdb67ca10ca0e80757987a1d935465b",
+  },
+  "theming.md": {
+    # v22 baked copy: point shell-break guidance at external recovery.
+    "7fb5ed4c1e29e6822b56394c089984a1a7e5da1bdf552a21ff0cbdc6413bd998",
   },
   "workflows-app.md": {
     # Resolved the app by slug=="workflows". An install whose preferred slug

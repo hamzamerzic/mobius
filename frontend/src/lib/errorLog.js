@@ -2,13 +2,15 @@
 // rather than a silent white screen — in the spirit of the recovery-over-
 // prevention model. recordClientError does three things, each best-effort and
 // non-throwing: logs to console for live devtools, keeps a small ring buffer
-// of recent errors in sessionStorage (so the recovery surface + the owner can
-// answer "what just broke?"), and POSTs to /api/client-error so uncaught SHELL
+// of recent errors in sessionStorage (so the owner can answer "what just
+// broke?"), and POSTs to /api/client-error so uncaught SHELL
 // errors land in the activity log as `app_error` events (no app_id == shell;
 // the nightly Reflection digest reads these). The POST is standalone here — no
 // api/client.js import — so this leaf logger can never cause an import cycle
 // or route through apiFetch's 401-reload path, and a failed report can never
 // itself throw.
+
+import { redactDiagnosticText } from './diagnosticRedaction.js'
 
 const RING_KEY = 'mobius:error-log' // ring buffer of the last MAX errors
 const MAX = 10
@@ -58,7 +60,9 @@ function postClientError(record) {
         message: String(record.message).slice(0, 2000),
         where: record.where,
         stack: detail ? String(detail).slice(0, 8000) : undefined,
-        url: (typeof location !== 'undefined') ? location.href : undefined,
+        url: (typeof location !== 'undefined')
+          ? redactDiagnosticText(location.href).slice(0, 2000)
+          : undefined,
       }),
       keepalive: true,
     }).catch(() => {})
@@ -74,10 +78,12 @@ function postClientError(record) {
  */
 export function recordClientError({ where, message, error, stack, componentStack } = {}) {
   const record = {
-    where: where || 'unknown',
-    message: String(message ?? error?.message ?? error ?? 'Unknown error'),
-    stack: String(stack ?? error?.stack ?? '').slice(0, 2000),
-    componentStack: String(componentStack ?? '').slice(0, 2000),
+    where: redactDiagnosticText(where || 'unknown').slice(0, 200),
+    message: redactDiagnosticText(
+      message ?? error?.message ?? error ?? 'Unknown error',
+    ).slice(0, 2000),
+    stack: redactDiagnosticText(stack ?? error?.stack ?? '').slice(0, 2000),
+    componentStack: redactDiagnosticText(componentStack ?? '').slice(0, 2000),
     at: new Date().toISOString(),
   }
   console.error(`[mobius:error:${record.where}]`, record.message)

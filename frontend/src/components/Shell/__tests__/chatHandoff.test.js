@@ -77,7 +77,7 @@ test('activation reuses an unchanged retained transcript before stream catch-up'
   assert.match(initialLoad,
     /if \(activationCache && cacheCoversSavedAnchor\) \{[\s\S]*applyMessagesToView\(refreshed\.messages, refreshed\.offset\)[\s\S]*settleRuntime\(runtime, refreshed\.messages\)[\s\S]*return[\s\S]*const renderFrames = coldTranscriptRenderFrames/,
     'a warm version mismatch must settle atomically before the cold prefix scheduler')
-  assert.match(initialLoad,
+  assert.match(chatView,
     /cacheIsSafeFallback[\s\S]*CHAT_READING_ANCHOR_NOT_FOUND[\s\S]*applyMessagesToView\(\[\], 0\)[\s\S]*setLoadError\(!cacheIsSafeFallback\)/,
     'an incomplete or rejected cache must be cleared before the error surface paints')
   assert.match(

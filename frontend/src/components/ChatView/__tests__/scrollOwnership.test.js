@@ -116,7 +116,52 @@ test('gesture scroll frames defer anchor, spacer, and persistence work until set
   )
 })
 
-test('newer semantic actions cannot be overwritten by an older quiet settlement', () => {
+test('automatic geometry owners and newer semantic actions share reader authority', () => {
+  const writeStart = ownerSource.indexOf('const writeMode = useCallback(')
+  const writeEnd = ownerSource.indexOf('const persistMode =', writeStart)
+  const writePath = ownerSource.slice(writeStart, writeEnd)
+  assert.match(writePath, /scrollAuthorityAllowsCommit/,
+    'direct scroll writes must reject stale generations')
+
+  const spacerStart = ownerSource.indexOf('function sizeSpacer(')
+  const spacerEnd = ownerSource.indexOf('function maybeApplyMode(', spacerStart)
+  const spacerPath = ownerSource.slice(spacerStart, spacerEnd)
+  assert.match(spacerPath, /layoutOwnsScroll\(authorityVersion\)/)
+  assert.ok(
+    spacerPath.indexOf('layoutOwnsScroll(authorityVersion)')
+      < spacerPath.indexOf("style.setProperty('--composer-h'"),
+    'composer clearance must be gated before it mutates layout',
+  )
+  assert.ok(
+    spacerPath.indexOf('layoutOwnsScroll(authorityVersion)')
+      < spacerPath.indexOf('spacerEl.style.height ='),
+    'spacer height must be gated before it mutates layout',
+  )
+
+  const terminalStart = ownerSource.indexOf('const settleStreamingPin =')
+  const terminalEnd = ownerSource.indexOf('const paneResized =', terminalStart)
+  const terminalPath = ownerSource.slice(terminalStart, terminalEnd)
+  assert.match(terminalPath, /terminalAuthorityVersion/)
+  assert.match(terminalPath, /scrollAuthorityAllowsCommit/,
+    'terminal rAF work must reject a later reader generation')
+
+  const readerHotStart = ownerSource.indexOf('const onScroll = () => {')
+  const readerHotEnd = ownerSource.indexOf(
+    "scrollEl.addEventListener('scroll', onScroll",
+    readerHotStart,
+  )
+  const readerHotPath = ownerSource.slice(readerHotStart, readerHotEnd)
+  assert.match(
+    readerHotPath,
+    /readerIntentAfterScroll\(\{/,
+    'actual scrolls must claim generations by input sequence, not quiet batch',
+  )
+
+  assert.match(terminalPath, /authority === 'wait'/)
+  assert.match(terminalPath, /requestAnimationFrame\(inspectCommittedLayout\)/,
+    'terminal settlement must wait through a no-scroll tap instead of retiring pin')
+  assert.doesNotMatch(terminalPath, /terminal:reader-owns/)
+
   const supersedeStart = ownerSource.indexOf(
     'const supersedePendingReaderGesture =',
   )

@@ -19,7 +19,7 @@ def _ensure_mobius_writable(path: Path) -> None:
 
   The entrypoint runs as root, so a file/dir it creates comes out root-owned
   and often without the execute bit on directories. The agent process (Claude
-  SDK / Codex runner, plus the recovery CLI subprocess) runs as `mobius` and
+  SDK / Codex runner) runs as `mobius` and
   silently fails any Read/Edit against a root-owned file — or any `cd`/`stat`
   into a directory without the execute bit. Chown to mobius:mobius with the
   correct mode: 775 for directories (rwx + traverse), 664 for files.

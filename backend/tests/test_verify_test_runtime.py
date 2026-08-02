@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 from scripts.verify_test_runtime import PLATFORM_ROOT, platform_head, validate_runtime
 
@@ -179,6 +180,53 @@ def test_image_deduplicates_agent_cli_payloads_without_breaking_sdk_contracts():
   assert "declared cli-bin package is retained for SDK compatibility" in requirements
 
 
+def test_production_image_keeps_persistent_sso_checkouts_bootable():
+  dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+  fingerprint = (
+    ROOT / "scripts" / "test-image-fingerprint.sh"
+  ).read_text(encoding="utf-8")
+  requirements = (ROOT / "backend" / "requirements.txt").read_text(
+    encoding="utf-8"
+  )
+  requirements_lock = (ROOT / "backend" / "requirements.lock").read_text(
+    encoding="utf-8"
+  )
+  shim_root = ROOT / "backend" / "legacy_runtime"
+  probe_path = shim_root / "verify_jose.py"
+  probe = probe_path.read_text(encoding="utf-8")
+  subprocess.run(
+    [sys.executable, "-B", str(probe_path)],
+    check=True,
+    capture_output=True,
+    text=True,
+    env={**os.environ, "PYTHONPATH": str(shim_root)},
+  )
+
+  for unsafe_dependency in ("python-jose", "ecdsa"):
+    assert unsafe_dependency not in requirements.lower()
+    assert unsafe_dependency not in requirements_lock.lower()
+  assert (
+    "COPY backend/legacy_runtime/jose/ "
+    "/usr/local/lib/python3.12/site-packages/jose/"
+  ) in dockerfile
+  assert dockerfile.index("> /app/test-image-fingerprint") < dockerfile.index(
+    "COPY backend/legacy_runtime/jose/ "
+    "/usr/local/lib/python3.12/site-packages/jose/"
+  )
+  assert "from jose import JWTError, jwt" in probe
+  assert "jwt.encode" in probe
+  assert "jwt.decode" in probe
+  assert "except JWTError:" in probe
+  assert "backend/legacy_runtime/jose/__init__.py" in fingerprint
+  assert "backend/legacy_runtime/verify_jose.py" in fingerprint
+  assert "COPY backend/legacy_runtime/verify_jose.py" in dockerfile
+  assert (
+    "COPY backend/legacy_runtime/ "
+    "/tmp/test-image-inputs/backend/legacy_runtime/"
+  ) in dockerfile
+  assert "python /tmp/verify-legacy-jose.py" in dockerfile
+
+
 def test_pre_push_syntax_check_keeps_bytecode_out_of_checkout():
   hook = (ROOT / "scripts" / "githooks" / "pre-push").read_text(
     encoding="utf-8"
@@ -233,6 +281,16 @@ def test_submit_pr_rechecks_landed_hooks_after_refresh():
   assert "scripts/git-doctor.sh --fix" in refreshed_segment
 
 
+def test_submit_pr_blocks_non_main_release_before_git_mutation():
+  submit = (ROOT / "scripts" / "submit-pr.sh").read_text(encoding="utf-8")
+  guard = submit.index('MOBIUS_PLATFORM_RELEASE_REF}" != "refs/heads/main"')
+  doctor = submit.index("scripts/git-doctor.sh --fix")
+  fetch = submit.index("git fetch origin main")
+
+  assert guard < doctor < fetch
+  assert "platform contributions are disabled" in submit
+
+
 def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
   entrypoint = (
     ROOT / "backend" / "scripts" / "entrypoint.sh"
@@ -244,6 +302,34 @@ def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
     'if [ "$_use_platform" -eq 1 ] && '
     '[ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then'
   ) in entrypoint
+
+
+def test_managed_release_boot_uses_the_baked_updater():
+  entrypoint = (
+    ROOT / "backend" / "scripts" / "entrypoint.sh"
+  ).read_text(encoding="utf-8")
+
+  assert 'if [ -n "${MOBIUS_PLATFORM_RELEASE_REF:-}" ]; then' in entrypoint
+  assert "_platform_reconciler_backend=/app/platform-baked/backend" in entrypoint
+  assert '_platform_reconciler_prefix="env PYTHONDONTWRITEBYTECODE=1"' in entrypoint
+  assert "cd '$_platform_reconciler_backend'" in entrypoint
+
+
+def test_managed_release_boot_falls_back_when_exact_target_is_not_integrated():
+  entrypoint = (
+    ROOT / "backend" / "scripts" / "entrypoint.sh"
+  ).read_text(encoding="utf-8")
+  reconcile = entrypoint.index("platform_update.reconcile_clone_sync()")
+  guard = entrypoint.index("platform_update.boot_guard_sync()", reconcile)
+  proof = entrypoint.index("platform_update.managed_release_ready_sync()", guard)
+  fallback = entrypoint.index("_platform_use_baked", proof)
+  markers = entrypoint.index(
+    "# Write the markers only after the managed exact-release gate",
+    fallback,
+  )
+
+  assert reconcile < guard < proof < fallback < markers
+  assert "/data/platform is preserved for recovery" in entrypoint
 
 
 def test_browser_setup_fails_closed_before_auth_and_never_wipes_chats():
@@ -274,8 +360,6 @@ def test_local_browser_e2e_is_explicit_and_disposable():
   assert "down -v --remove-orphans" in runner
   assert 'value.get("test_runtime") is not True' in runner
   assert 'MOBIUS_AUTH_FILE="$auth_file"' in runner
-  assert 'recovery_test_port="$(docker port "$recovery_container" 8001/tcp' in runner
-  assert 'MOBIUS_RECOVER_URL="http://localhost:${recovery_test_port}"' in runner
   assert 'git clone --quiet --no-local "$ROOT" "$snapshot_dir"' in runner
   assert '--project-directory "$snapshot_dir"' in runner
   assert 'cd "$snapshot_dir"' in runner
@@ -283,7 +367,7 @@ def test_local_browser_e2e_is_explicit_and_disposable():
   assert 'MOBIUS_LOCAL_E2E_WORKERS must be a positive integer' in runner
   assert '"$snapshot_dir/node_modules/.bin/playwright" test "$@" --workers="$e2e_workers"' in runner
   assert "Local E2E artifacts retained at:" in runner
-  assert 'compose logs --no-color app caddy recoveryd fake-tandoor' in runner
+  assert 'compose logs --no-color app caddy fake-tandoor' in runner
   assert 'MOBIUS_LOCAL_E2E_KEEP_CACHE' in runner
   assert 'MOBIUS_LOCAL_E2E_KEEP_CACHE:-0' in runner
   assert 'mobius-local-e2e-cache-${checkout_id}:test' in runner
@@ -471,13 +555,14 @@ def test_documented_browser_commands_use_disposable_runner():
   assert '/home/' not in test_script
 
 
-def test_pull_requests_run_required_suites_and_main_publishes_image():
+def test_pull_requests_run_required_suites_and_protected_channel_publishes_image():
   test_workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
     encoding="utf-8"
   )
-  image_workflow = (ROOT / ".github" / "workflows" / "main-image.yml").read_text(
-    encoding="utf-8"
-  )
+  image_workflow = (
+    ROOT / ".github" / "workflows" / "external-recovery-image.yml"
+  ).read_text(encoding="utf-8")
+  assert not (ROOT / ".github" / "workflows" / "main-image.yml").exists()
   test_triggers = test_workflow.split("\npermissions:\n", 1)[0]
   image_triggers = image_workflow.split("\npermissions:\n", 1)[0]
   backend = test_workflow.split("\n  backend:\n", 1)[1].split(
@@ -498,15 +583,73 @@ def test_pull_requests_run_required_suites_and_main_publishes_image():
   assert "cache-to:" not in e2e
 
   assert "push:\n" in image_triggers
-  assert "    branches: [main]\n" in image_triggers
+  assert "    branches: [stack/external-recovery-v1]\n" in image_triggers
   assert "schedule:\n" not in image_triggers
-  assert "workflow_dispatch:\n" in image_triggers
+  assert "workflow_dispatch:\n" not in image_triggers
   assert "pull_request:\n" not in image_triggers
   assert "packages: write" in image_workflow
   assert "push: true" in image_workflow
-  assert "tags: ghcr.io/mobius-os/mobius:main" in image_workflow
-  assert "docker buildx imagetools inspect ghcr.io/mobius-os/mobius:main" in image_workflow
+  immutable_tag = (
+    "tags: ${{ env.MOBIUS_IMAGE_REPOSITORY }}:sha-${{ github.sha }}-"
+    "run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
+  )
+  prepublish = image_workflow.index("/internal/core-releases/prepublish")
+  registry_login = image_workflow.index("docker/login-action@")
+  build = image_workflow.index("docker/build-push-action@")
+  bind = image_workflow.index("/internal/core-releases/bind")
+  move_channel = image_workflow.index('--tag "$MOBIUS_RELEASE_CHANNEL"')
+  redeploy = image_workflow.index("/internal/core-releases/postpublish")
+  assert immutable_tag in image_workflow
+  assert prepublish < registry_login < build < bind < move_channel < redeploy
+  assert "--prefer-index=false" in image_workflow
+  assert "completed_replay" in image_workflow
+  assert "steps.gate.outputs.mode != 'completed_replay'" in image_workflow
+  assert "MOBIUS_RECOVERY_IMAGE_REPOSITORY" in image_workflow
+  assert "steps.gate.outputs.current_recovery_digest" in image_workflow
+  assert "steps.gate.outputs.current_recovery_sha" in image_workflow
+  assert "steps.gate.outputs.frozen_recovery_digest" in image_workflow
+  assert "group: mobius-core-image-publication" in image_workflow
+  assert "cancel-in-progress: false" in image_workflow
+  assert "MOBIUS_EXTERNAL_RECOVERY_RELEASE_ENABLED == 'true'" in image_workflow
+  assert "environment: external-recovery-release" in image_workflow
+  assert "RECOVERY_CUTOVER_PREREQUISITE_SHA:" in image_workflow
+  assert "RECOVERY_CUTOVER_PREREQUISITE_DIGEST:" in image_workflow
+  assert 'test "$GITHUB_REPOSITORY" = mobius-os/mobius' in image_workflow
+  assert 'test "$GITHUB_EVENT_NAME" = push' in image_workflow
+  assert 'test "$GITHUB_REF" = "$MOBIUS_PLATFORM_RELEASE_REF"' in image_workflow
+  assert image_workflow.count(
+    "git fetch --quiet --no-tags origin refs/heads/main"
+  ) == 5
+  assert image_workflow.count(
+    'git merge-base --is-ancestor "$RECOVERY_CUTOVER_PREREQUISITE_SHA" "$main_sha"'
+  ) == 5
+  assert image_workflow.count(
+    'git cat-file -e "$main_sha:backend/recovery/recoveryd.py"'
+  ) == 5
+  assert "git rev-list --first-parent --reverse" in image_workflow
+  assert 'git rev-parse "${removal_root_sha}^1"' in image_workflow
+  assert image_workflow.count(
+    "Refusing a removal lineage already contained by main"
+  ) == 5
+  assert image_workflow.count(
+    'git merge-base --is-ancestor "$REMOVAL_ROOT_SHA" "$main_sha"'
+  ) == 4
+  assert (
+    'git merge-base --is-ancestor "$removal_root_sha" "$main_sha"'
+    in image_workflow
+  )
+  assert "Refusing to bind or publish a stale unbound release" in image_workflow
+  assert "Refusing to move the channel from a stale normal release" in image_workflow
+  assert 'if [ "$RELEASE_MODE" = resume_cutover ]' in image_workflow
+  assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" in image_workflow
+  assert "persist-credentials: false" in image_workflow
+  assert "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c" in image_workflow
+  assert "docker/login-action@dbcb813823bdd20940b903addbd779551569679f" in image_workflow
+  assert "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a" in image_workflow
   assert "ghcr.io/mobius-os/mobius:daily" not in image_workflow
+  assert '--tag "$MOBIUS_IMAGE_REPOSITORY:main"' not in image_workflow
+  assert '--tag "$MOBIUS_IMAGE_REPOSITORY:daily"' not in image_workflow
+  assert image_workflow.count('--tag "$MOBIUS_RELEASE_CHANNEL"') == 1
   assert "cache-to: type=gha,mode=max,ignore-error=true" in image_workflow
   assert "load: true" not in image_workflow
 

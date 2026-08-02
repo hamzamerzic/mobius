@@ -886,6 +886,13 @@ const FOLLOW_ENTRY_EVENTS = new Set([
  */
 export function modeForScrollTransition(previousMode, proposedMode, event) {
   if (!proposedMode) return previousMode
+  const restoresQuestionSubmissionBase =
+    event === 'layout:question-viewport-release'
+    && previousMode?.kind === 'ANCHOR_AT'
+    && Number.isFinite(previousMode.questionSubmitViewportH)
+    && previousMode.questionSubmitBaseMode === proposedMode
+  if (restoresQuestionSubmissionBase) return proposedMode
+
   const samePin = previousMode?.kind === 'PIN_USER_MSG'
     && proposedMode.kind === 'PIN_USER_MSG'
     && previousMode.cid === proposedMode.cid
@@ -1934,10 +1941,6 @@ export default function useScrollMode({
       viewportChange = false,
       authorityVersion = currentAuthority(),
     } = {}) {
-      if (!layoutOwnsScroll(authorityVersion)) {
-        deferLayoutUntilReaderYields(authorityVersion)
-        return false
-      }
       const preserveBottom = viewportChange && nearScrollBottomRef.current
       const questionSubmissionWasActive = viewportChange
         && modeRef.current?.kind === 'ANCHOR_AT'
@@ -1953,6 +1956,15 @@ export default function useScrollMode({
         if (released !== modeRef.current) {
           transitionMode(released, 'layout:question-viewport-release')
         }
+      }
+      // Releasing the submitted-question overlay is a semantic state change,
+      // not a scroll write. It must happen even while the input gate retains
+      // viewport ownership; the deferred layout pass below then applies the
+      // restored mode after the reader yields.
+      if (!layoutOwnsScroll(authorityVersion)) {
+        deferLayoutUntilReaderYields(authorityVersion)
+        nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
+        return false
       }
       sizeSpacer(authorityVersion)
       if (viewportChange) {

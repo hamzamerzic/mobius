@@ -1,10 +1,12 @@
 """Application settings loaded from environment variables.
 
-Boot-critical: main.py imports this at module load, so a broken edit
-leaves only /recover reachable. `python3 -m py_compile` before a restart.
+Served from the editable platform checkout. main.py imports this at module load;
+if a local edit breaks it, normal boot falls back to the baked platform and the
+deployment's external recovery service can repair the preserved checkout.
 
-Use /data/shared/agent-settings.json for per-instance settings that don't
-need code changes.
+Use /data/shared/agent-settings.json for per-instance settings that do not need
+code changes. Source edits require a restart and should be committed in the
+platform checkout for rollback.
 """
 
 import json

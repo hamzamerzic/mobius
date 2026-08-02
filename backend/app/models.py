@@ -1,11 +1,11 @@
 """SQLAlchemy ORM models.
 
-FROZEN at runtime (chmod 444 root-owned per protected-files.txt).
-main.py and many route modules import these at module load; if I'm
-broken the server can't boot and /recover/chat is unreachable.
+Served from the editable platform checkout. main.py and many route modules
+import these at module load; if a local edit breaks them, normal boot falls back
+to the baked platform and external recovery can repair the preserved checkout.
 
-To add a column to an existing table: edit me on the host repo and
-rebuild. For per-chat fields you can usually skip a migration by
+To add a column to an existing table, edit and restart. For per-chat fields you
+can usually skip a migration by
 adding to `Chat.agent_settings_json` (a JSON column intentionally
 included as the no-migration escape hatch). For non-secret app-scoped data
 you'd otherwise add a column for, use per-app storage at

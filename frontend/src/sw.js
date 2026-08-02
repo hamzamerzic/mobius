@@ -648,13 +648,7 @@ registerRoute(
 // with ChatEmbed.useTheme() now reapplying client-side, the embed must still
 // reach the server so its FIRST paint already carries the injected theme (no
 // unthemed flash) and so it tracks server-side theme.css changes. So deny
-// `/shell/embed/*` here and let it hit the network like `/recover`.
-//
-// `/recover*` is server-rendered (routes/recover.py) and is the safety net
-// when the shell itself is broken — it MUST reach the network/server, never the
-// precached shell. Without this denylist entry the installed PWA served the
-// cached index.html for /recover, so the user landed on the shell instead of the
-// recovery page (and recovery was unreachable exactly when it's needed most).
+// `/shell/embed/*` here and let it hit the network.
 
 // Owner-configured backend web services live under one reserved namespace.
 // They are server-served, multi-page applications rather than SPA routes, so

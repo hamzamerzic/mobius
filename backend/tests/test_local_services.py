@@ -412,7 +412,7 @@ def test_surface_requires_distinct_gateway_origin_and_owner(
 
 
 @pytest.mark.parametrize("path", [
-  "/", "/shell/", "/api/health", "/recover", "/services/recipes/",
+  "/", "/shell/", "/api/health", "/services/recipes/",
 ])
 def test_shared_gateway_host_never_serves_other_platform_paths(
   client, clean_local_services_config, monkeypatch, path,

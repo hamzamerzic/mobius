@@ -6,10 +6,6 @@
     # SAMEORIGIN nor CSP frame-ancestors 'self'. Keep the exception exact and
     # retain the rest of the resource/security policy while the blank document
     # establishes its server-verified one-use capability.
-    # /recover* is excluded from the frame-policy replacements below because
-    # recoveryd sets STRICTER headers (X-Frame-Options: DENY, frame-ancestors
-    # 'none'); replacing them here would silently weaken the recovery surface
-    # to SAMEORIGIN/'self'.
     @chatEmbed path /shell/embed/chat
     @staticEmbed path /app-embeds/by-id/*
     # App frames execute compiled code transferred by their exact parent as a
@@ -19,7 +15,7 @@
     # Published sites (/sites/<token>/) are public snapshots of the owner's own
     # agent-authored artifacts + Web Studio builds. They must run at an opaque
     # origin (CSP `sandbox`, no allow-same-origin) so their JS cannot read the
-    # shell origin's localStorage/JWT. Like /app-embeds and /recover, /sites is
+    # shell origin's localStorage/JWT. Like /app-embeds, /sites is
     # EXCLUDED from @notFrameableEmbed and given its own X-Frame-Options + CSP
     # block below — Caddy does not guarantee that a later `header >Set` on the
     # same field wins over an earlier one, so overlapping matchers on the same
@@ -28,15 +24,7 @@
     # X-Frame-Options SAMEORIGIN while replacing the CSP, so the boundary holds
     # identically at both the proxy and the origin.
     @publishedSite path /sites/*
-    @notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/* /api/apps/*/frame /recover* /sites/*
-    # recoveryd sets its OWN stricter Referrer-Policy: same-origin (no referrer
-    # cross-origin). The site-wide replacement below is
-    # strict-origin-when-cross-origin (leaks the origin cross-origin), so it
-    # must not touch the recovery surface — a disjoint matcher, since a later
-    # `header >Set` on the same field is not guaranteed to win. The other
-    # site-wide headers (nosniff, HSTS, Permissions-Policy) are equal-or-
-    # stronger and stay applied to /recover*.
-    @notRecover not path /recover*
+    @notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/* /api/apps/*/frame /sites/*
 
     header {
         # Defer replacements until after reverse_proxy copies the backend
@@ -48,10 +36,9 @@
         >Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
         # script-src notes:
         #   'unsafe-inline' — cannot be removed: index.html, app-frame.html,
-        #   standalone.py, and recover_html.py all contain inline <script>
-        #   blocks (error handlers, postMessage init, BIP capture, factory-
-        #   reset localStorage wipe). Replacing them with nonce/hash-based CSP
-        #   requires server-side rendering changes across all four surfaces.
+        #   standalone.py contain inline <script> blocks (error handlers,
+        #   postMessage init, BIP capture). Replacing them with nonce/hash-based
+        #   CSP requires server-side rendering changes across these surfaces.
         #   https://esm.sh — remains for apps that deliberately use an absolute
         #   dynamic import while online. Supported bare imports are bundled by
         #   the app compiler and do not depend on this origin.
@@ -60,7 +47,7 @@
     # previews (useFileUpload), the image lightbox, and install-sheet icon
     # previews; without blob: those render as broken images under an
     # enforced policy.
-    header @notRecover >Referrer-Policy "strict-origin-when-cross-origin"
+    header >Referrer-Policy "strict-origin-when-cross-origin"
     header @notFrameableEmbed >X-Frame-Options "SAMEORIGIN"
     header @notFrameableEmbed >Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data: blob:; frame-src 'self' {$MOBIUS_SERVICE_GATEWAY_ORIGIN}; frame-ancestors 'self'"
     header @appFrame >X-Frame-Options "SAMEORIGIN"
@@ -80,15 +67,6 @@
     # _PUBLISHED_SITE_CSP in main.py.
     header @publishedSite >X-Frame-Options "SAMEORIGIN"
     header @publishedSite >Content-Security-Policy "sandbox allow-scripts allow-forms allow-popups; object-src 'none'; base-uri 'none'; frame-ancestors 'self'"
-
-    # Recovery floor lives in the separate recoveryd container (its own
-    # cgroup + pid1) so a broken or crash-looping platform can't take
-    # recovery down. Route the recovery surface to it BEFORE the catch-all
-    # proxy below — `handle` is terminal on match, so /recover* never falls
-    # through to app:8000. recoveryd exposes 8001 on the compose network.
-    handle /recover* {
-        reverse_proxy recoveryd:8001
-    }
 
     reverse_proxy app:8000
 }

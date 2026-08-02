@@ -261,9 +261,9 @@ def test_login_wrong_password(client):
   assert r.status_code == 401
 
 
-def test_login_upgrades_legacy_hash_and_recovery_seed(client, db):
-  """A successful legacy login migrates both durable credential copies."""
-  from app import auth, models, recovery_seed
+def test_login_upgrades_legacy_hash(client, db):
+  """A successful legacy login migrates the authoritative owner credential."""
+  from app import auth, models
 
   password = "a" * 100
   legacy_hash = bcrypt.hashpw(
@@ -282,11 +282,6 @@ def test_login_upgrades_legacy_hash_and_recovery_seed(client, db):
   stored = db.query(models.Owner).filter_by(username="legacy").one()
   assert stored.hashed_password.startswith(auth.PASSWORD_HASH_PREFIX)
   assert auth.verify_password(password, stored.hashed_password) is True
-  seed = json.loads(recovery_seed.OWNER_SEED_PATH.read_text())
-  assert seed == {
-    "username": "legacy",
-    "hashed_password": stored.hashed_password,
-  }
 
 
 def test_provider_login_rejects_cross_site_request(client, auth):
@@ -333,8 +328,8 @@ def test_providers_models_requires_auth(client):
 
 
 def test_providers_models_accepts_app_token(client, auth):
-  """App-scoped JWTs (minted for the news Settings tab, the future
-  Reflection Settings tab, recovery chat picker) must read the full
+  """App-scoped JWTs (minted for the news Settings tab and the future
+  Reflection Settings tab) must read the full
   model list — otherwise the picker silently falls back to one model
   per provider. The endpoint is read-only and the same list is
   already visible to every running mini-app via the CLI runtime,

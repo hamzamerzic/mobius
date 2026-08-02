@@ -1,6 +1,6 @@
 # Recovery, backend edits, and data layout
 
-How backend edits load (restart, not live-reload), how to make them permanent, the SQLite migration gotcha, `/data`-as-a-git-repo, file locations, chat recovery, and the recovery surface. `Read` this before editing backend Python or doing anything you might need to undo.
+How backend edits load (restart, not live-reload), how to make them permanent, the SQLite migration gotcha, `/data`-as-a-git-repo, file locations, soft-delete recovery, and the external recovery boundary. `Read` this before editing backend Python or doing anything you might need to undo.
 
 ---
 
@@ -14,8 +14,8 @@ surface. Two failure modes to respect:
 
 - **A bad import keeps the edited tree from serving.** Boot import-probes the
   persistent clone and falls back to the baked backend when that probe fails,
-  leaving the local tree intact for repair; `/recover` remains independently
-  available. Always `python3 -m py_compile <file>` before asking for a restart;
+  leaving the local tree intact for repair. Always `python3 -m py_compile
+  <file>` before asking for a restart;
   a failing compile proves the edited tree cannot pass that gate.
 - **A local fix is persistent but not upstream.** Boot preserves committed local
   changes and reconciles them over newer `origin/main`, so an edit can survive
@@ -31,9 +31,9 @@ All chat-persistence writes must route through the `chat_writer` actor — never
 
 1. Edit `/data/platform/backend/app/...py` in place; `py_compile` it.
 2. If the main shell is healthy, ask the partner to open Settings -> Server and click **"Restart server"** (POSTs `/api/admin/restart`).
-3. If the main shell is broken, ask the partner to **open `/recover/chat` in a new browser tab** (they stay in your current chat — your session survives the restart). That chat may prompt for login: it uses the **same owner password** as the main shell, just behind a separate form. In that tab they click **"Restart server"** (POSTs `/recover/restart`, SIGTERMs uvicorn, container restarts).
+3. If the main shell is broken, ask the partner to open Recovery from their managed deployment. A self-hosted server operator runs `scripts/mobiusctl recovery start` in the installation checkout. Do not invent or link to an in-app `/recover` route; recovery is deliberately outside this container.
 4. Restart takes ~5–15s; the page auto-reloads when healthy.
-4. Verify the fix in the original chat (still open, full history intact).
+5. Verify the fix in the original chat (still open, full history intact).
 
 ---
 
@@ -83,45 +83,41 @@ git -C /data checkout <sha> -- shared/<path>  # restore just that file
 
 ---
 
-## The recovery surface
+## The external recovery boundary
 
-If you break a live copy, the partner recovers via the `/recover` dashboard, or a fresh you in the recovery chat at `/recover/chat`. The recovery chat runs its own minimal stack (separate auth, separate runner, separate per-chat storage at `/data/recovery/chats/<chat_id>.jsonl`, stdlib-only — no shared code with the production chat path) so it stays reachable when production chat code is broken. The partner can start multiple recovery chats with different providers (Claude or Codex).
-
-**There is no "Restore backend/shell/scripts" button** on the `/recover` dashboard. The dashboard has four actions:
-
-Recovery is intelligence on a floor it cannot break: the primary path is **Run Recovery Agent** reasoning from the broken instance's actual state — inspecting git, logs, runtime behavior, and owner intent, then repairing in place. A deterministic restore is the floor you fall back to when the state is clearly bad, not the default repair model; recovery is not a menu of canned reversions.
-
-1. **Run Recovery Agent** (`/recover/chat`) — a fresh you with **filesystem write access via Bash** (but no `$AGENT_TOKEN`, no `$API_BASE_URL` — production API plumbing may be broken, so it does NOT call `/api/...`). It edits the backend, frontend, platform clone, and `/data` in place to fix the instance; recovery's own code is a read-only mount it can't touch. This is the primary reasoning repair path: inspect the broken instance, diagnose what actually happened, edit the live code, and run a restore itself only when that is the right repair.
-2. **Restore platform** — reverts *uncommitted* platform edits and restarts. Deterministic, offline, no agent or network needed; use it as the recovery floor for clearly bad uncommitted edits.
-3. **Reset to baked floor** — last resort. Wipes uncommitted platform edits, recopies the baked image's code, and restarts.
-4. **Update Recovery** — shown only when a newer recovery release exists. The one narrow deterministic mutation of recovery itself: a root-owned, integrity-checked pull + restart; your chats and data are untouched.
-
-**The dashboard's "Restore platform" and "Reset to baked floor" buttons run those restores for you; the recovery-chat agent can also run any restore mode itself.** Inside `/recover/chat`, a fresh you restores the immutable baked source by running the restore script with Bash:
+Recovery does not run beside this agent. Managed deployments create or wake a
+separate Serverless recovery service inside the same deployment project.
+Self-hosted operators start the same worker with:
 
 ```sh
-sh /app/scripts/recovery_restore.sh <mode>
+scripts/mobiusctl recovery start
 ```
 
-Modes (run with no argument to print what each does):
+That lifecycle stops the ordinary app first, pulls the latest approved recovery
+image, starts a clean baked root target over the `/data` volume, and exposes the
+unprivileged recovery worker only on loopback. The worker has no Docker socket,
+Railway credential, sudo, or writable copy of its own code. When repair is done,
+the operator runs `scripts/mobiusctl recovery finish`; managed deployments offer
+the equivalent action in their control plane.
 
-| Mode | What it restores |
+If the worker restarts or the browser loses its signed-in session, the operator
+runs `scripts/mobiusctl recovery reopen`. It keeps the ordinary app stopped,
+revokes both old credentials, recreates clean target and worker containers from
+the latest approved image, and prints a new one-time sign-in code.
+
+Recovery is a fresh reasoning agent, not a fixed menu of restore scripts. It can
+inspect and repair all of `/data` through the target, or quarantine and reseed
+the platform clone when that is the correct diagnosis. This running agent never
+receives the one-time recovery target token and cannot start, update, or modify
+the recovery worker.
+
+| Situation | Action |
 |---|---|
-| `platform` | `git -C /data/platform reset --hard HEAD` — reverts *uncommitted* platform edits; commits are kept. Fast; no image needed. |
-| `platform-baked` | Quarantine + re-seed the full served clone tree `/data/platform` from `/app/platform-baked`. Use when a bad change was already committed, or a git reset isn't enough. |
-
-The backend and frontend served by uvicorn are both in the `/data/platform` clone, so `platform` and `platform-baked` are the modes that repair running code.
-
-After a `platform` or `platform-baked` restore, tell the partner to click **"Restart server"** at the top of the recovery chat page so uvicorn reloads the restored code.
-
-| Situation | URL | Action |
-|---|---|---|
-| Backend edit, main shell healthy | Settings -> Server | Click "Restart server" |
-| Backend edit, main shell broken | `/recover/chat` | Click "Restart server" |
-| Agent stuck or unable to fix in place | `/recover/chat` | A fresh you runs `recovery_restore.sh <mode>`, then partner clicks "Restart server" |
-| Bad uncommitted platform edit broke the server | `/recover` | Click "Restore platform" |
-| Committed a bad change, or a reset wasn't enough | `/recover` | Click "Reset to baked floor" |
-| A newer recovery release is available | `/recover` | Click "Update Recovery" |
-| Lost ability to log in to main shell | `/recover` | Log in (owner password), then the options above |
+| Backend edit, main shell healthy | Settings -> Server -> Restart |
+| Main shell or backend broken | Partner opens the deployment's Recovery action |
+| Self-hosted instance broken | Operator runs `scripts/mobiusctl recovery start` |
+| Self-hosted recovery session lost | Operator runs `scripts/mobiusctl recovery reopen` |
+| Repair finished | Deployment finishes recovery, or operator runs `scripts/mobiusctl recovery finish` |
 
 ---
 
