@@ -1090,8 +1090,11 @@ test.describe('Scroll edge cases', () => {
       const expectedMode = top === 'bottom' ? 'FOLLOW_BOTTOM' : 'ANCHOR_AT'
       await page.waitForFunction(kind => {
         const id = localStorage.getItem('moebius_active_chat')
-        const modes = JSON.parse(sessionStorage.getItem('chat-mode') || '{}')
-        return !!id && modes[id]?.kind === kind
+        const modes = JSON.parse(localStorage.getItem('chat-reading-position') || '{}')
+        const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+        return !!id
+          && scroll?.dataset.scrollMode === kind
+          && modes[id]?.kind === kind
       }, expectedMode, { timeout: 3000 })
     }
 

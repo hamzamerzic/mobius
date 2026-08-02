@@ -1,8 +1,8 @@
 """Recurring schedule discovery, supervision, and job routes."""
 
 import json
+import logging
 import re
-import subprocess
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,6 +21,7 @@ from app.resource_access import live_app_or_404
 
 
 router = APIRouter()
+log = logging.getLogger(__name__)
 
 
 def _cron_replay_dirs_for_app(app: models.App, source_dir: Path) -> list[Path]:
@@ -70,17 +71,13 @@ def _parse_cron_job_line(line: str) -> tuple[str, str] | None:
 
 
 def _read_live_crontab() -> str:
-  try:
-    result = subprocess.run(
-      ["crontab", "-u", "mobius", "-l"],
-      capture_output=True,
-      text=True,
-      timeout=10,
-      check=False,
-    )
-  except OSError:
-    return ""
-  return result.stdout if result.returncode == 0 else ""
+  """The live crontab, for read-only discovery only.
+
+  Flattening an unreadable spool to "" is safe here and only here: discovery
+  then falls through to the durable declaration and the manifest. Mutating
+  callers must use ``app_cron.read_crontab()`` and respect its ``None``.
+  """
+  return app_cron.read_crontab() or ""
 
 
 def _manifest_schedule(source_dir: Path) -> tuple[str, str] | None:
@@ -119,8 +116,22 @@ def _schedule_from_crontab_text(
     # stable after an entry is supervised (and can still migrate old direct
     # entries on the next boot).
     command_path = app_cron.crontab_command_path(line)
-    if command_path.startswith(needle):
-      return cron, Path(command_path).name
+    if not command_path.startswith(needle):
+      continue
+    # A line whose job script is gone is DEBRIS, not a declaration. Cron
+    # registration is add-only — the scaffold rewrites the line for the path
+    # it installs and leaves every other line alone — so an app that renames
+    # its job leaves the old entry behind forever. Trusting it here let the
+    # dead line win purely because it sorted first, which then (a) reported a
+    # phantom job and cadence on /api/apps/schedules, and (b) failed the
+    # reconciler's own is_file() guard, so the app's REAL schedule was never
+    # re-registered and the whole supervision pass reported a warning.
+    # Skipping debris lets discovery fall through to the durable init-cron.sh
+    # declaration and then the manifest — both of which state real intent.
+    # Legacy unsupervised entries still migrate: their script exists.
+    if not Path(command_path).exists():
+      continue
+    return cron, Path(command_path).name
   return None
 
 
@@ -158,6 +169,62 @@ def _app_zone_declaration(app: models.App) -> tuple[str, str] | None:
     if declaration is not None:
       return declaration
   return None
+
+
+def _is_orphaned_supervised_entry(line: str, apps_root: Path) -> bool:
+  """True when `line` is a supervised app entry whose job script is gone.
+
+  Deliberately narrow. Only a platform-supervised entry (one routed through
+  app-job-runner) naming a job directly under the apps root qualifies, so
+  unsupervised owner lines, env assignments, comments, and legacy direct
+  entries — which migration, not pruning, owns — are never candidates.
+  """
+  if _parse_cron_job_line(line) is None:
+    return False
+  if "/app-job-runner.py" not in line:
+    return False
+  command_path = app_cron.crontab_command_path(line)
+  if not command_path:
+    return False
+  job = Path(command_path)
+  try:
+    if job.parent.parent != apps_root:
+      return False
+  except (OSError, ValueError):
+    return False
+  return not job.exists()
+
+
+def _prune_orphaned_supervised_entries(apps_root: Path) -> list[str]:
+  """Drop live supervised entries whose job script no longer exists.
+
+  Registration converges the entry for the job path it installs, but nothing
+  retires the entry for a job path an app has stopped shipping. Such a line is
+  provably dead — the runner rejects it on every fire — yet it wakes a Python
+  interpreter on its cadence forever (news-2's renamed job.sh fired once a
+  minute for weeks) and, before the discovery fix above, could shadow the
+  app's real schedule.
+
+  Only the LIVE crontab is rewritten. The durable init-cron.sh declaration is
+  left untouched on purpose: this removes a dead materialization, never an
+  app's stated intent, so an app whose tree is briefly incomplete simply
+  re-arms from its declaration on the next reconciliation. Returns the dropped
+  lines. Best-effort — an unreadable spool or a failed write changes nothing.
+  """
+  current = app_cron.read_crontab()
+  if current is None:
+    return []
+  kept, dropped = [], []
+  for line in current.splitlines():
+    if _is_orphaned_supervised_entry(line, apps_root):
+      dropped.append(line)
+    else:
+      kept.append(line)
+  if not dropped:
+    return []
+  if not app_cron.write_crontab(("\n".join(kept) + "\n") if kept else ""):
+    return []
+  return dropped
 
 
 def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
@@ -223,6 +290,12 @@ def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
       warnings.append(f"app {app.id}: {exc}")
       continue
     reconciled += 1
+  # After every live declaration has been converged, retire the entries no
+  # declaration claims any more. Pruning last means a job path this pass just
+  # registered is present in the crontab we read, so it can never be mistaken
+  # for debris.
+  for line in _prune_orphaned_supervised_entries(resolved_root):
+    log.info("retired orphaned cron entry (job script gone): %s", line.strip())
   return reconciled, warnings
 
 
@@ -396,7 +469,9 @@ def get_app_job_context(
     )
   app = live_app_or_404(db, app_id)
   from app.background_agents import resolve_background_agents
-  choices = resolve_background_agents(get_settings().data_dir, {})
+  # No override: this is the owner's system default, which the job then layers
+  # its own declared pick on top of.
+  choices = resolve_background_agents(get_settings().data_dir)
   return {
     "app_id": app_id,
     # The supervisor binds the scheduled script to this exact app before

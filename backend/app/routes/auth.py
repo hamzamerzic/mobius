@@ -28,6 +28,7 @@ from app.deps import (
   get_current_owner, get_current_owner_or_app,
   get_owner_app_or_chat_embed_for_models, reject_cross_site,
 )
+from app.timeutil import now_naive_utc
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 _limiter = Limiter(key_func=get_remote_address)
@@ -407,6 +408,133 @@ def consume_managed_sso_session(request: Request):
   response.delete_cookie("mobius_sso_handoff", path="/api/auth/sso/session")
   response.headers["Cache-Control"] = "no-store"
   return response
+
+
+# One-time install passes. iOS seals every Home Screen web app inside its own
+# storage container, so an app installed from a signed-in Safari session
+# launches signed out. The URL carries only a random opaque reference; no JWT
+# or owner bearer can be extracted from it. The durable row owns expiry,
+# app-binding, revocation, and atomic one-use consumption across restarts.
+_INSTALL_PASS_TTL = timedelta(minutes=30)
+# The URL-carried pass is short-lived; the credential minted after it is spent
+# is an ordinary owner session. Giving an installed app another 30-minute
+# credential would merely defer the same per-app login until half an hour after
+# installation, with no security benefit once the pass has left the URL.
+_INSTALL_SESSION_TTL = timedelta(days=30)
+
+
+def _install_pass_hash(secret: str) -> str:
+  return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+def _invalid_install_pass() -> None:
+  raise HTTPException(
+    status_code=401, detail="This sign-in pass is invalid or has expired."
+  )
+
+
+@router.post(
+  "/install-pass",
+  response_model=schemas.InstallPassResponse,
+  dependencies=[Depends(reject_cross_site)],
+)
+def mint_install_pass(
+  body: schemas.InstallPassRequest,
+  owner: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Mints a one-time pass for installing one app to the home screen.
+
+  Owner-authenticated: the caller must already hold the session the pass will
+  carry, so this never widens who can obtain one.
+  """
+  app_row = (
+    db.query(models.App)
+    .filter(models.App.slug == body.slug, models.App.deleted_at.is_(None))
+    .first()
+  )
+  if not app_row:
+    raise HTTPException(status_code=404, detail="App not found.")
+  now = now_naive_utc()
+  # Expired references carry no value and need not accumulate forever. This
+  # cleanup is inside the ordinary mint transaction, so no background job or
+  # second lifecycle mechanism is needed.
+  db.query(models.InstallPassGrant).filter(
+    models.InstallPassGrant.expires_at <= now,
+  ).delete(synchronize_session=False)
+
+  # A collision is cryptographically implausible, but the unique constraint is
+  # the authority. Retry rather than turning it into a 500 if it ever happens.
+  secret = ""
+  for _attempt in range(3):
+    secret = secrets.token_urlsafe(32)
+    db.add(models.InstallPassGrant(
+      token_hash=_install_pass_hash(secret),
+      app_id=app_row.id,
+      owner_epoch=owner.token_epoch,
+      expires_at=now + _INSTALL_PASS_TTL,
+    ))
+    try:
+      db.commit()
+      break
+    except IntegrityError:
+      db.rollback()
+  else:
+    raise HTTPException(status_code=503, detail="Could not create a sign-in pass.")
+
+  return JSONResponse(
+    {"install_pass": secret},
+    headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+  )
+
+
+@router.post(
+  "/install-pass/redeem",
+  response_model=schemas.TokenResponse,
+  dependencies=[Depends(reject_cross_site)],
+)
+def redeem_install_pass(
+  body: schemas.InstallPassRedeemRequest,
+  db: Session = Depends(get_db),
+):
+  """Atomically spends an opaque pass and mints a fresh short session."""
+  now = now_naive_utc()
+  grant = db.query(models.InstallPassGrant).filter(
+    models.InstallPassGrant.token_hash == _install_pass_hash(body.install_pass),
+  ).first()
+  if grant is None or grant.consumed_at is not None or grant.expires_at <= now:
+    _invalid_install_pass()
+
+  app_row = db.query(models.App).filter(
+    models.App.id == grant.app_id,
+    models.App.slug == body.slug,
+    models.App.deleted_at.is_(None),
+  ).first()
+  owner = db.query(models.Owner).first()
+  if app_row is None or owner is None or owner.token_epoch != grant.owner_epoch:
+    _invalid_install_pass()
+
+  # The conditional UPDATE is the one-use boundary. Two workers may both read
+  # the row above, but only one can transition consumed_at from NULL.
+  consumed = db.query(models.InstallPassGrant).filter(
+    models.InstallPassGrant.id == grant.id,
+    models.InstallPassGrant.consumed_at.is_(None),
+    models.InstallPassGrant.expires_at > now,
+  ).update({models.InstallPassGrant.consumed_at: now}, synchronize_session=False)
+  if consumed != 1:
+    db.rollback()
+    _invalid_install_pass()
+  db.commit()
+
+  access_token = auth.create_access_token(
+    {"sub": owner.username},
+    token_epoch=owner.token_epoch,
+    expires_delta=_INSTALL_SESSION_TTL,
+  )
+  return JSONResponse(
+    {"access_token": access_token, "token_type": "bearer"},
+    headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+  )
 
 
 # Bcrypt-verifying against this dummy hash when the username is unknown makes the

@@ -7,6 +7,7 @@ import { del as idbDel } from 'idb-keyval'
 import * as setupSession from '../lib/setupSession.js'
 import { clearLatchedTokens } from '../lib/appToken.js'
 import { clearOwnerDraftStorage } from '../lib/ownerDraftStorage.js'
+import { clearReadingPositions } from '../components/ChatView/useScrollMode.js'
 import { clearDurableComposerDrafts } from '../components/ChatView/composerDraft.js'
 import { verifyConnectivity } from '../lib/connectivityStore.js'
 import { SHELL_DATA_CACHE } from '../sw-cache-policy.js'
@@ -102,6 +103,11 @@ export function clearToken() {
   // owner hasn't seen the walkthrough, and the server stamp should
   // reflect their own dismissal, not a stale browser flag.
   try { localStorage.removeItem('mobius:walkthrough-completed') } catch {}
+  // Reading positions became durable so they survive a PWA relaunch, which
+  // also means they now outlive a session unless cleared here. Where the owner
+  // had scrolled to in each conversation is owner-scoped, so it leaves with
+  // the rest of their persisted state.
+  try { clearReadingPositions() } catch {}
 }
 
 // Wipes persisted client state on logout / token expiry: the
@@ -365,6 +371,20 @@ export const api = {
         `${BASE}/api/auth/sso/start?return_path=${encodeURIComponent(returnPath)}`
       ),
       consume: () => apiFetch('/auth/sso/session', { method: 'POST' }),
+    },
+    // One-time sign-in pass for an app being added to the iOS home screen,
+    // where the new web app gets its own empty storage container. `mint`
+    // needs the current session; `redeem` runs in the installed app, which
+    // by definition has none yet.
+    installPass: {
+      mint: (slug) => apiFetch('/auth/install-pass', {
+        method: 'POST',
+        body: JSON.stringify({ slug }),
+      }),
+      redeem: (installPass, slug) => apiFetch('/auth/install-pass/redeem', {
+        method: 'POST',
+        body: JSON.stringify({ install_pass: installPass, slug }),
+      }),
     },
     setup: {
       status: () => apiFetch('/auth/setup/status'),

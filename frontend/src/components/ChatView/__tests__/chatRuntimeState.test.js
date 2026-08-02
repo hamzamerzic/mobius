@@ -12,7 +12,6 @@ import {
   continuationRowsFromPromotedMessage,
   isContinuationMessage,
   isOwnerUserMessage,
-  mergeRecentMessagesIntoLoadedWindow,
   openAppCtaViewModel,
   previewReadyAnnouncement,
   previewUpdatedAnnouncement,
@@ -26,6 +25,7 @@ import {
   stripInternalUserMessageFields,
   systemEventForChat,
 } from '../chatRuntimeState.js'
+import { mergeRecentMessagesIntoLoadedWindow } from '../../../lib/chatDetailCache.js'
 
 test('automatic and manual continuations are product markers, not owner messages', () => {
   const marker = {
@@ -228,6 +228,7 @@ test('R4: a non-overlapping or rewritten recent page replaces stale loaded histo
   }), {
     messages: recent,
     offset: 20,
+    verified: false,
   })
 })
 

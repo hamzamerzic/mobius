@@ -190,6 +190,41 @@ def prompt_for_chat(
   return composed
 
 
+def exact_prompt_for_chat(
+  chat: models.Chat,
+  content: str,
+  db: Session,
+  *,
+  persist: bool,
+) -> str:
+  """Capture an exact policy prompt without installed-app composition.
+
+  Delegated child chats intentionally receive neither the owner constitution nor
+  installed system-app fragments. They still need the same immutable,
+  content-addressed snapshot semantics as ordinary chats, so this is the narrow
+  shared primitive beneath that policy rather than a parallel prompt store.
+  """
+  existing = read_prompt_snapshot(chat, db)
+  if existing is not None:
+    return existing
+  if not persist:
+    return content
+  digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+  if db.get(models.SystemPromptSnapshot, digest) is None:
+    try:
+      with db.begin_nested():
+        db.add(models.SystemPromptSnapshot(id=digest, content=content))
+        db.flush()
+    except IntegrityError:
+      pass
+  row = db.get(models.SystemPromptSnapshot, digest)
+  if row is None or row.content != content:
+    raise RuntimeError("could not persist exact system prompt snapshot")
+  chat.system_prompt_snapshot_id = digest
+  db.flush()
+  return content
+
+
 def backfill_started_chat_prompt_snapshots(
   db: Session,
   base_for_chat: Callable[[models.Chat], str],

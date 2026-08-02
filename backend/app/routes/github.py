@@ -114,6 +114,7 @@ from app.github_contribution_git import (
   _run_cmd,
   _assert_clean_worktree,
   _assert_coauthor_trailer,
+  _conflicts_with_recorded_upstream,
   _connected_git_identity,
   _head_commit_metadata,
   _head_sha_patch,
@@ -626,6 +627,10 @@ _REVIEW_STATUS_MESSAGES = {
   "missing_coauthor": (
     "The staged commit is missing its Möbius Agent co-author marker."
   ),
+  "upstream_conflict": (
+    "This no longer merges cleanly with the branch it targets, so it has to "
+    "be refreshed before it can be sent."
+  ),
   "invalid_stack": "The linked PR chain no longer matches its reviewed order.",
   "parent_merged": (
     "A parent PR has merged, so the remaining private layer must be refreshed "
@@ -694,6 +699,12 @@ def _inspect_prepared_review(
         author_name=author_name,
         author_email=author_email,
       )
+    # Last, because it is the only verdict here that is not about the staged
+    # checkout: the source can match its review exactly and still be
+    # unmergeable. A dirty or moved checkout is the more urgent thing to say,
+    # so those are reported first.
+    if _conflicts_with_recorded_upstream(record, repo, branch):
+      return _review_status_problem(record_id, code="upstream_conflict")
   except ContributionSubmitError as exc:
     return _review_status_problem(
       record_id,
@@ -905,6 +916,7 @@ def _chat_review_projection(record: dict, app_id: int) -> dict:
     "files": _diff_file_paths(diff_path),
     "labels": labels,
     "last_submit_error": text(record.get("last_submit_error")),
+    "last_submit_error_detail": text(record.get("last_submit_error_detail")),
     "updated_at": text(record.get("updated_at")),
     # `is_stack` keeps an invalid/legacy stack safely non-sendable. `stack`
     # carries only the display identity/order the chat needs to collapse every
@@ -1086,10 +1098,11 @@ async def submit_contribution(
         record_path=record_path,
         message=exc.message,
         record_patch=exc.record_patch,
+        detail=exc.detail,
       )
     raise HTTPException(
       status_code=exc.status_code,
-      detail={"message": exc.message, "record": record},
+      detail={"message": exc.message, "detail": exc.detail, "record": record},
     )
   except Exception as exc:
     log.exception("Contribution submit failed for %s/%s", app_id, record_id)
@@ -1247,11 +1260,13 @@ async def submit_contribution_stack(
               exc.message,
               failed_id=str(record.get("id") or ""),
               record_patch=exc.record_patch,
+              detail=exc.detail,
             )
           raise HTTPException(
             status_code=exc.status_code,
             detail={
               "message": exc.message,
+              "detail": exc.detail,
               "records": snapshots,
               "submitted": submitted_urls,
             },
@@ -1287,10 +1302,11 @@ async def submit_contribution_stack(
         rows,
         exc.message,
         record_patch=exc.record_patch,
+        detail=exc.detail,
       )
     raise HTTPException(
       status_code=exc.status_code,
-      detail={"message": exc.message, "records": snapshots},
+      detail={"message": exc.message, "detail": exc.detail, "records": snapshots},
     ) from exc
   except Exception as exc:
     log.exception("Contribution stack submit failed for app %s", app_id)

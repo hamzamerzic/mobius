@@ -56,7 +56,7 @@ from app import activity, models
 from app.routes import (
   admin_router, apps_router, auth_router,
   chat_embed_router, chat_logs_router, chat_router, chats_router, chats_stream_router,
-  debug_router, fs_router, github_router, media_router,
+  debug_router, delegations_router, fs_router, github_router, media_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
   secrets_router, self_reminders_router, settings_router, skills_router,
   client_error_router, client_signal_router, standalone_router, storage_router,
@@ -643,6 +643,7 @@ app.include_router(chat_router)
 app.include_router(chat_embed_router)
 app.include_router(chats_router)
 app.include_router(chats_stream_router)
+app.include_router(delegations_router)
 app.include_router(chat_logs_router)
 # App-attributed chat contract (design §1) — a SECOND router defined in
 # routes/chats.py under /api/app-chats, so it's imported directly rather

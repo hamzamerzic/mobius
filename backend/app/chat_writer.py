@@ -2105,6 +2105,7 @@ class ChatWriterActor:
     self._close_nonterminal_runs(db, cmd.chat_id, "interrupted")
     db.add(ChatRun(
       id=cmd.run_token, chat_id=cmd.chat_id, status="running",
+      root_run_id=cmd.run_token,
       provider=chat.provider, started_at=started_at,
       initiated_by_app_id=cmd.initiated_by_app_id,
       goal_objective=goal_objective,
@@ -2499,15 +2500,31 @@ class ChatWriterActor:
     # continuation. Close its run record and open the continuation's in the
     # SAME commit as the queue handoff.
     from app.models import ChatRun
+    from app.continuations import is_continuation_message
     from app.run_state import goal_objective_for_run_start
     goal_objective = goal_objective_for_run_start(
       db, cmd.chat_id, agent_pending.get("content"),
+    )
+    prior_run = (
+      db.query(ChatRun)
+      .filter(
+        ChatRun.chat_id == cmd.chat_id,
+        ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
+      )
+      .order_by(ChatRun.started_at.desc(), ChatRun.id.desc())
+      .first()
+    )
+    root_run_id = (
+      (prior_run.root_run_id or prior_run.id)
+      if prior_run is not None and is_continuation_message(agent_pending)
+      else cmd.run_token
     )
     self._close_nonterminal_runs(
       db, cmd.chat_id, cmd.ending_status, except_token=cmd.run_token
     )
     db.add(ChatRun(
       id=cmd.run_token, chat_id=cmd.chat_id, status="running",
+      root_run_id=root_run_id,
       provider=chat.provider, started_at=started_at,
       initiated_by_app_id=initiated_by_app_id,
       goal_objective=goal_objective,

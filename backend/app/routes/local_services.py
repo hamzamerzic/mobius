@@ -141,6 +141,29 @@ def _read_config() -> dict | None:
   return services
 
 
+def configured_service_slugs() -> tuple[str, ...]:
+  """Slugs of the owner-configured local services, for diagnostics attribution.
+
+  A full web service runs from its own directory (Tandoor lives in
+  ``<DATA_DIR>/tandoor``), so process accounting cannot attribute it from the
+  ``/data/apps`` layout alone. This registry is the only generic record of
+  which services the owner actually runs, so labelling derives from it rather
+  than from hardcoded service names.
+
+  Deliberately never raises: a malformed or unreadable registry must degrade
+  one process label, not break an observability read.
+  """
+  try:
+    services = _read_config()
+  except ServiceConfigError:
+    return ()
+  if not isinstance(services, dict):
+    return ()
+  return tuple(
+    slug for slug in services if isinstance(slug, str) and _SLUG.match(slug)
+  )
+
+
 def _validated_upstream(value: object) -> str:
   if not isinstance(value, str):
     raise ServiceConfigError("upstream must be a URL string")

@@ -4,10 +4,7 @@ A "background agent" is a nightly cron app (Reflection, Memory/dreaming, News)
 that drives a Claude/Codex turn, with a fallback provider for the nights the
 primary is unavailable (usage limit, outage). The platform once carried several
 copies of this resolution and they drifted. This module is the source of truth
-for the system ordering and for platform-owned runners such as Reflection.
-Installable app jobs do not import platform internals: ``job-context`` gives
-them the resolved system primary/fallback without credentials, and an app may
-then layer its explicit local override.
+for the system ordering and for the normalization every background agent shares.
 
 Two layers:
 
@@ -16,16 +13,12 @@ Two layers:
   ``providers`` list (one row per provider, ordered, with enabled flags) is the
   source of truth, with legacy ``primary``/``fallback`` dicts as a fallback.
 
-- **Per-app override** — an app's own ``settings.json`` may pin its primary
-  and/or its fallback source. TWO shapes are supported on purpose, because the
-  apps have different Settings UIs (do not collapse to mode-only):
-    * Explicit mode (Reflection, Memory): ``primary_agent_mode`` /
-      ``secondary_agent_mode`` = ``"app"`` (use the app's choice) or ``"system"``
-      (defer to the system default).
-    * Presence (News): a bare ``{provider, model}`` / ``{fallback_*}`` with no
-      mode — picking a provider IS the override. Exception: the bare default
-      ``{"provider": "claude"}`` with no model/effort means "inherit the system
-      default" (else it would drop the system primary's model to the SDK default).
+- **Caller override** — a background agent may declare its own pick in ONE
+  uniform shape (see :func:`resolve_background_agents`). Each app owns the
+  translation from its own settings screen into that shape, so this module
+  knows no app's name, settings format, or UI conventions. Normalization stays
+  here so every background agent cleans a choice identically: a per-app copy of
+  that step is exactly what drifted before and must not grow back.
 
 A "choice" is ``{"provider", "model", "effort"}``; model/effort stay None when
 unset so the provider SDK uses its own default (this is deliberately NOT
@@ -48,10 +41,9 @@ log = logging.getLogger(__name__)
 
 DEFAULT_PROVIDER = providers.DEFAULT_PROVIDER
 _PROVIDERS = ("claude", "codex")
-_FALLBACK_KEYS = ("fallback_provider", "fallback_model", "fallback_effort")
 
 
-def _clean_choice(raw: dict | None, *, fallback_provider: str | None = None,
+def _clean_choice(raw: dict | None, *, default_provider: str | None = None,
                   label: str = "settings") -> dict | None:
   """Normalize one ``{provider, model, effort}`` choice, or None if unusable.
 
@@ -65,7 +57,7 @@ def _clean_choice(raw: dict | None, *, fallback_provider: str | None = None,
     return None
   provider = raw.get("provider")
   if provider not in _PROVIDERS:
-    provider = fallback_provider if fallback_provider in _PROVIDERS else None
+    provider = default_provider if default_provider in _PROVIDERS else None
   if provider not in _PROVIDERS:
     return None
   model = raw.get("model")
@@ -88,31 +80,6 @@ def _same_choice(a: dict | None, b: dict | None) -> bool:
   )
 
 
-def _has_app_primary_override(app_settings: dict) -> bool:
-  # Two settings shapes are BOTH live and supported — do not "simplify" this to
-  # mode-only, it would break the second:
-  #   1. Explicit mode (Reflection, Memory): their Settings UIs write
-  #      primary_agent_mode "app"/"system" directly.
-  #   2. Presence (News): its Settings UI writes a bare {provider, model} with NO
-  #      mode — picking a provider IS the override. The heuristic below reads that.
-  mode = app_settings.get("primary_agent_mode")
-  if mode == "system":
-    return False
-  if mode == "app":
-    return True
-  # Presence path. EXCLUDE the default {"provider": "claude"} with no
-  # model/effort: that shape means "inherit the system default" (e.g. the stale
-  # reflection app-56 row), so treating it as an override would replace the
-  # system primary's model with None — dropping opus-4-8 to the SDK default. A
-  # real presence override names a non-default provider, or a model/effort.
-  provider = app_settings.get("provider")
-  model = app_settings.get("model")
-  effort = app_settings.get("effort")
-  if provider == DEFAULT_PROVIDER and not model and not effort:
-    return False
-  return bool(provider or model or effort)
-
-
 def _system_choices(data_dir: str) -> list[dict]:
   """The ordered, de-duplicated system provider choices from Settings."""
   global_settings = providers._load_agent_settings(data_dir)
@@ -129,7 +96,7 @@ def _system_choices(data_dir: str) -> list[dict]:
 
   if not choices:
     primary = _clean_choice(background.get("primary"),
-                            fallback_provider=DEFAULT_PROVIDER, label="system primary")
+                            default_provider=DEFAULT_PROVIDER, label="system primary")
     fallback = _clean_choice(background.get("fallback"), label="system fallback")
     if primary:
       choices.append(primary)
@@ -140,7 +107,7 @@ def _system_choices(data_dir: str) -> list[dict]:
     primary = _clean_choice(
       {"provider": DEFAULT_PROVIDER, "model": global_settings.get("model"),
        "effort": global_settings.get("effort")},
-      fallback_provider=DEFAULT_PROVIDER, label="system default")
+      default_provider=DEFAULT_PROVIDER, label="system default")
     if primary:
       choices.append(primary)
 
@@ -149,38 +116,42 @@ def _system_choices(data_dir: str) -> list[dict]:
   return choices
 
 
-def resolve_background_agents(data_dir: str, app_settings: dict | None = None) -> dict:
+def resolve_background_agents(data_dir: str, override: dict | None = None) -> dict:
   """Resolve ``{"primary", "fallback"}`` choices for a background-agent run.
 
-  ``app_settings`` is the app's own ``settings.json`` (None/empty → system
-  defaults only). ``fallback`` is None when there is no distinct second agent.
+  ``override`` is the caller's own declaration, in one uniform shape shared by
+  every background agent::
+
+    {"primary":  {"provider", "model", "effort"} | None,
+     "fallback": {"provider", "model", "effort"} | None}
+
+  An ABSENT key means "no preference — inherit the system default". A PRESENT
+  key owns that slot outright, so an explicit ``None`` fallback means "run
+  without a second agent" rather than "inherit one". A present primary that
+  normalizes to nothing usable falls back to the system primary rather than
+  leaving the run with no agent at all.
+
+  Each app translates its own settings screen into this shape; this module
+  deliberately knows no app's name or settings format. ``fallback`` is None
+  when there is no distinct second agent.
   """
-  app = app_settings if isinstance(app_settings, dict) else {}
+  declared = override if isinstance(override, dict) else {}
 
   choices = _system_choices(data_dir)
   primary = choices[0]
   fallback = choices[1] if len(choices) > 1 else None
 
-  if _has_app_primary_override(app):
-    app_primary = _clean_choice(
-      {"provider": app.get("provider"), "model": app.get("model"), "effort": app.get("effort")},
-      fallback_provider=(primary or {}).get("provider") or DEFAULT_PROVIDER,
-      label="app primary",
+  if "primary" in declared:
+    declared_primary = _clean_choice(
+      declared.get("primary"),
+      default_provider=(primary or {}).get("provider") or DEFAULT_PROVIDER,
+      label="caller primary",
     )
-    if app_primary:
-      primary = app_primary
+    if declared_primary:
+      primary = declared_primary
 
-  # Same two shapes as the primary override: explicit secondary_agent_mode
-  # (Reflection/Memory), or presence of fallback_* fields with no mode (News).
-  secondary_mode = app.get("secondary_agent_mode")
-  if secondary_mode == "app" or (
-    secondary_mode != "system" and any(app.get(k) for k in _FALLBACK_KEYS)
-  ):
-    fallback = _clean_choice(
-      {"provider": app.get("fallback_provider"), "model": app.get("fallback_model"),
-       "effort": app.get("fallback_effort")},
-      label="app fallback",
-    )
+  if "fallback" in declared:
+    fallback = _clean_choice(declared.get("fallback"), label="caller fallback")
 
   if _same_choice(primary, fallback):
     fallback = None

@@ -83,6 +83,13 @@ _UNMODIFIED_MIGRATIONS = {
     # v22 baked copy: point shell-break guidance at external recovery.
     "7fb5ed4c1e29e6822b56394c089984a1a7e5da1bdf552a21ff0cbdc6413bd998",
   },
+  "workflows-app.md": {
+    # Resolved the app by slug=="workflows". An install whose preferred slug
+    # is taken gets a fallback (this instance's row is 'workflows-2'), so the
+    # lookup silently found nothing and the skill's own "skip silently" branch
+    # hid the failure. Now keyed on the manifest id, as bootstrap already is.
+    "895dfa031e1a633ceac9a1f16895d43e5084d052c0616bd79a7a4005d06ba324",
+  },
   "images.md": {
     "248ea31e13d2d2d84a5acfca13526aa8ebfa3d90e9ee4bf55cfb72d47937f7d1",
     # v20 baked copy: publish the exact generated image, never newest-by-time.

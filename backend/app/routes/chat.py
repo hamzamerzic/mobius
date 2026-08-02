@@ -36,4 +36,23 @@ async def chat_stop(
   if body.chat_id:
     require_active_chat_access(db, body.chat_id, principal)
   stopped, cleared_pending_cids = await stop_chat(body.chat_id or None, db=db)
-  return {"stopped": stopped, "cleared_pending_cids": cleared_pending_cids}
+  cancelled_delegations = []
+  if body.chat_id and stopped:
+    # This route is the owner's explicit Stop. Planned restart draining bypasses
+    # it and therefore leaves durable child tasks parked/resumable.
+    from app.routes.delegations import cancel_active_for_parent
+    cancelled_delegations = await cancel_active_for_parent(db, body.chat_id)
+  elif not body.chat_id and stopped:
+    from app.routes.delegations import cancel_active_for_parent
+    parent_ids = {
+      row[0] for row in db.query(models.Delegation.parent_chat_id).distinct()
+    }
+    for parent_chat_id in parent_ids:
+      cancelled_delegations.extend(
+        await cancel_active_for_parent(db, parent_chat_id)
+      )
+  return {
+    "stopped": stopped,
+    "cleared_pending_cids": cleared_pending_cids,
+    "cancelled_delegations": cancelled_delegations,
+  }

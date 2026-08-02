@@ -279,7 +279,7 @@ export default function StandaloneApp({ initialApp }) {
   }
 
   return (
-    <main className={`standalone-app${immersive ? ' standalone-app--immersive' : ''}`}>
+    <main className="standalone-app">
       <AppCanvas
         ref={canvasRef}
         appId={app.id}
@@ -298,17 +298,6 @@ export default function StandaloneApp({ initialApp }) {
         onHostRequest={onHostRequest}
         onAppError={captureCrash}
       />
-
-      {!crash && (
-        <a
-          className="standalone-app__mobius-link"
-          href={shellUrl({ app: app.id })}
-          aria-label={`Open ${app.name} in Möbius`}
-        >
-          <span aria-hidden="true">∞</span>
-          <span>Open in Möbius</span>
-        </a>
-      )}
 
       {updateAvailable && !crash && (
         <button
