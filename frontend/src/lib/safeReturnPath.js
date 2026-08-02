@@ -17,3 +17,11 @@ export function safeReturnPath(raw, origin) {
     return null
   }
 }
+
+// Send a browser context that may not share the owner's session through the
+// authentication boundary, then return it to the exact same-origin app path.
+// Encoding the complete target as one query value preserves its own query and
+// hash without letting either become part of the outer login URL.
+export function loginBoundaryPath(returnPath) {
+  return `/?return=${encodeURIComponent(returnPath)}`
+}

@@ -64,8 +64,11 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose, onIconU
     forceOpen,
     dismissed: wasDismissed(app.slug),
   }))
+  // iOS has no install API, so its steps are the whole answer rather than an
+  // extra detail — show them on arrival instead of behind a "Show me" tap.
+  // Other platforms keep the prompt primary and reveal steps only if it fails.
   const [showInstructions, setShowInstructions] = useState(
-    () => installState === 'manual' && forceOpen,
+    () => installState === 'manual' && (forceOpen || platform.ios),
   )
   const [uploading, setUploading] = useState(false)
   const [message, setMessage] = useState('')
@@ -189,12 +192,24 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose, onIconU
             <p className="standalone-install__hint">
               Tap the icon to customise it, or keep the current one.
             </p>
-            {showInstructions && (
+            {showInstructions && (platform.iosSafari && !platform.ipad ? (
+              // This document's manifest is the app's, so Add to Home Screen
+              // here produces the app — the whole reason the shell sends
+              // people to this page. The arrow points at Safari's toolbar.
+              <div className="standalone-install__steps" role="status">
+                <p>
+                  Tap the <strong>Share</strong> button below{' '}
+                  <span aria-hidden="true">(the square with an up-arrow)</span>,
+                  then choose <strong>Add to Home Screen</strong>.
+                </p>
+                <span className="standalone-install__arrow" aria-hidden="true">↓</span>
+              </div>
+            ) : (
               <div className="standalone-install__instructions" role="status">
                 <strong>{copy.summary}</strong>
                 <span>{copy.body}</span>
               </div>
-            )}
+            ))}
             {message && <div className="standalone-install__message" role="status">{message}</div>}
             <div className="standalone-install__actions">
               <button type="button" onClick={() => close('later')}>Maybe later</button>

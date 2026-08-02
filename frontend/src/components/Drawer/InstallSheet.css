@@ -196,9 +196,8 @@
   border: 1px solid var(--border, #252b36);
 }
 
-/* iOS Safari Share-step copy: larger, higher-contrast than the form
-   hint since it's now the card's main content, with a quiet directional
-   arrow that points down at the Safari Share button in the browser chrome. */
+/* Hand-off step copy: larger and higher-contrast than the form hint, since
+   once the form is replaced this IS the card's main content. */
 .is__hint--steps {
   margin-top: 4px;
   font-size: 14px;
@@ -211,22 +210,26 @@
   font-weight: 600;
 }
 
-.is__arrow {
+/* Two equal-weight ways across to Safari — tap the link, or take the
+   address. Stacked rather than side-by-side: the labels carry app names
+   and wrap badly in half a phone-width card. */
+.is__handoff {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  margin: 12px auto 0;
-  border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--accent, #a78bfa) 34%, var(--border, #252b36));
-  background: color-mix(in srgb, var(--accent, #a78bfa) 10%, transparent);
-  font-size: 18px;
-  color: var(--accent, #a78bfa);
-  animation: is-arrow-cue 1.8s var(--ease-out-soft, ease-out) infinite;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 18px;
 }
 
-@keyframes is-arrow-cue {
-  0%, 100% { opacity: 0.72; transform: translateY(0); }
-  50% { opacity: 1; transform: translateY(-2px); }
+.is__btn--link {
+  display: block;
+  text-align: center;
+  text-decoration: none;
+}
+
+/* The address is a fallback to read and retype by hand, so keep it
+   selectable and break it anywhere rather than overflowing the card. */
+.is__url {
+  color: var(--text, #d4d4d8);
+  overflow-wrap: anywhere;
+  user-select: all;
 }
