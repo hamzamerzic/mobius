@@ -9,6 +9,7 @@ const indexCss = readFileSync(new URL('../../../index.css', import.meta.url), 'u
 const chatSurfaceModel = readFileSync(new URL('../chatSurfaceModel.js', import.meta.url), 'utf8')
 const workspaceChrome = readFileSync(new URL('../WorkspaceChrome.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../../ChatView/ChatView.jsx', import.meta.url), 'utf8')
+const scrollMode = readFileSync(new URL('../../ChatView/useScrollMode.js', import.meta.url), 'utf8')
 const apiClient = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
 
 function ruleBody(selector, source = shellCss) {
@@ -17,9 +18,16 @@ function ruleBody(selector, source = shellCss) {
 }
 
 test('chat display readiness preserves the authoritative transcript reveal gate', () => {
+  assert.match(chatView, /const \[loading, setLoading\] = useState\(true\)/,
+    'cache is restoration material, never freshness proof')
+  assert.match(chatView, /const \[initialEntryPhase, setInitialEntryPhase\] = useState\('history'\)/)
+  assert.doesNotMatch(scrollMode, /initialEntryPhaseRef\.current === 'cached'/,
+    'no stale-cache phase may bypass authoritative readiness')
+  assert.match(scrollMode, /if \(initialEntryPhaseRef\.current !== 'ready'\) return[\s\S]*forceRevealRef/,
+    'the reveal deadline may release slow layout but never unvalidated data')
   assert.match(
     chatView,
-    /const displayReady = !loading && \(revealed \|\| showEmpty \|\| showLoadError\)/,
+    /const transcriptPaintable = initialEntryPhase === 'ready' && revealed[\s\S]*const displayReady = !loading && \(transcriptPaintable \|\| showEmpty \|\| showLoadError\)/,
     'a cached transcript cannot paint before the live chat read confirms it',
   )
   assert.match(chatView, /useLayoutEffect\(\(\) => \{[\s\S]*onDisplayReady\?\.\(chatId\)/,
@@ -47,8 +55,8 @@ test('activation reuses an unchanged retained transcript before stream catch-up'
   )?.[0] || ''
   assert.match(
     initialLoad,
-    /\/runtime`[\s\S]*chatSnapshotMatchesRuntime\(activationCache, runtime\)[\s\S]*reused = true/,
-    'an unchanged row version must reuse the retained transcript',
+    /cacheCoversSavedAnchor && typeof activationCache\?\.updated_at[\s\S]*\/runtime`[\s\S]*const latestCache = queryClient\.getQueryData\(queryKey\)[\s\S]*chatSnapshotMatchesRuntime\(latestCache, runtime\)[\s\S]*detailCache = latestCache[\s\S]*reused = true/,
+    'an unchanged row version reuses the newest complete cache, never its captured predecessor',
   )
   assert.match(
     initialLoad,
@@ -57,9 +65,21 @@ test('activation reuses an unchanged retained transcript before stream catch-up'
   )
   assert.match(
     initialLoad,
-    /if \(reused\) \{[\s\S]*updateChatRuntimeCache[\s\S]*settleRuntime\(runtime, msgs\)[\s\S]*return/,
-    'the fast path may update liveness but must not republish messages',
+    /if \(reused\) \{[\s\S]*updateChatRuntimeCache[\s\S]*applyMessagesToView\(msgs, detailCache\.offset\)[\s\S]*settleRuntime\(runtime, msgs\)[\s\S]*return/,
+    'the fast path must reconcile a retained hidden owner before revealing it',
   )
+  assert.match(initialLoad,
+    /anchorParam = savedAnchorKey[\s\S]*&anchor=\$\{encodeURIComponent\(savedAnchorKey\)\}/,
+    'every authoritative return read must contain the exact saved row')
+  assert.match(initialLoad,
+    /runtime\.requested_anchor_found === false[\s\S]*CHAT_READING_ANCHOR_NOT_FOUND/,
+    'a rejected saved address must fail closed instead of revealing the recent tail')
+  assert.match(initialLoad,
+    /if \(activationCache && cacheCoversSavedAnchor\) \{[\s\S]*applyMessagesToView\(refreshed\.messages, refreshed\.offset\)[\s\S]*settleRuntime\(runtime, refreshed\.messages\)[\s\S]*return[\s\S]*const renderFrames = coldTranscriptRenderFrames/,
+    'a warm version mismatch must settle atomically before the cold prefix scheduler')
+  assert.match(initialLoad,
+    /cacheIsSafeFallback[\s\S]*CHAT_READING_ANCHOR_NOT_FOUND[\s\S]*applyMessagesToView\(\[\], 0\)[\s\S]*setLoadError\(!cacheIsSafeFallback\)/,
+    'an incomplete or rejected cache must be cleared before the error surface paints')
   assert.match(
     chatView,
     /setInitialEntryPhase\('ready'\)[\s\S]*if \(running\) \{[\s\S]*connectToStream\(false\)/,

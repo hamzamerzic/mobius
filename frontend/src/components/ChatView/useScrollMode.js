@@ -154,6 +154,42 @@ const _scrollModes = (() => {
   catch { return {} }
 })()
 
+/** The durable message row an activation must contain before reveal.
+ * ChatView uses only the row identity; this module keeps ownership of the
+ * nested part and exact pixel offset.
+ */
+export function savedReadingAnchorKey(chatId) {
+  const mode = _scrollModes[String(chatId || '')]
+  return mode?.kind === 'ANCHOR_AT' && typeof mode.key === 'string'
+    ? mode.key
+    : null
+}
+
+/** Replace one saved alias with the server's canonical row key before the
+ * ready-phase restore consumes it. */
+export function remapSavedReadingAnchor(chatId, fromKey, toKey) {
+  const id = String(chatId || '')
+  const mode = _scrollModes[id]
+  if (mode?.kind !== 'ANCHOR_AT'
+      || mode.key !== fromKey
+      || typeof toKey !== 'string'
+      || !toKey) return false
+  _scrollModes[id] = { ...mode, key: toKey, at: Date.now() }
+  _persistScrollModes()
+  return true
+}
+
+/** A server-confirmed missing row makes its old coordinate impossible. Retire
+ * that address once so the authoritative recent snapshot can settle normally
+ * instead of retrying the same unresolvable key forever. */
+export function retireSavedReadingPosition(chatId) {
+  const id = String(chatId || '')
+  if (!(id in _scrollModes)) return false
+  delete _scrollModes[id]
+  _persistScrollModes()
+  return true
+}
+
 /** Reading positions are owner-scoped: they leave with the owner's session.
  *  Clearing storage alone is not enough — logout reloads the shell, and a
  *  still-mounted ChatView's pagehide write would put the in-memory map
@@ -495,6 +531,7 @@ function _anchorRow(scrollEl, key) {
   if (!scrollEl || key == null) return null
   const esc = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(key) : key
   return scrollEl.querySelector(`[data-key="${esc}"]`)
+    || scrollEl.querySelector(`[data-cid="${esc}"]`)
 }
 
 
@@ -1132,8 +1169,8 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  *     controller methods returned by this hook.
  *   - Read `gestureWindowUntilRef.current` in any custom scroll
  *     handlers (e.g., pagination triggers) to gate on user intent
- *   - Apply `revealed` as `style={revealed ? undefined : {visibility:
- *     'hidden'}}` on the scroll container.
+ *   - Combine `revealed` with the caller's authoritative-data gate before
+ *     painting the scroll container.
  *
  * @param {object} args
  * @param {string} args.chatId
@@ -1156,10 +1193,9 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  *   shows/hides because the tray's margin shrinks the spacer math).
  * @param {React.MutableRefObject<boolean>} args.loadingOlderRef
  *   When true, scroll events from pagination shouldn't mutate mode.
- * @param {'history'|'cached'|'preparing'|'ready'} args.initialEntryPhase
- *   One entry-readiness state: history blocks reveal, cached permits an
- *   immediate first paint while layout stabilizes, and ready means the
- *   authoritative history read has settled.
+ * @param {'history'|'preparing'|'ready'} args.initialEntryPhase
+ *   History blocks reveal, preparing is a hidden progressive cold render, and
+ *   ready means authoritative history has settled.
  */
 export default function useScrollMode({
   chatId,
@@ -1280,6 +1316,7 @@ export default function useScrollMode({
       if (initialEntryPhaseRef.current === 'preparing') {
         preparationDeadline = setTimeout(() => {
           if (revealedRef.current) return
+          if (initialEntryPhaseRef.current !== 'ready') return
           if (forceRevealRef.current) forceRevealRef.current()
           else {
             revealedRef.current = true
@@ -1288,6 +1325,9 @@ export default function useScrollMode({
         }, PREPARING_REVEAL_CAP_MS - REVEAL_CAP_MS)
         return
       }
+      // A deadline may release slow layout, never unvalidated data. Shell
+      // keeps the outgoing chat painted until activation reaches `ready`.
+      if (initialEntryPhaseRef.current !== 'ready') return
       if (forceRevealRef.current) forceRevealRef.current()
       else {
         // Defensive fallback for a mount whose scroll DOM never materialized.
@@ -2031,15 +2071,15 @@ export default function useScrollMode({
     }
     paneResizeRunRef.current = runPaneResize
 
-    // Reveal from trusted cache or after authoritative history once transcript
-    // layout stays quiet for 50ms. Lazy image previews
+    // Reveal after authoritative history once transcript layout stays quiet
+    // for 50ms. Lazy image previews
     // are not a reveal dependency: their frames already reserve space and the
     // same ResizeObserver keeps ANCHOR_AT stable if a measured ratio differs.
-    // REVEAL_CAP_MS remains the escape hatch for a request that stalls.
+    // REVEAL_CAP_MS is a layout escape hatch only; data readiness remains owned
+    // by the caller and cannot be bypassed by a timer.
     let revealTimer = 0
     let mountMutationObserver = null
-    const entryReady = () => initialEntryPhaseRef.current === 'cached'
-      || initialEntryPhaseRef.current === 'ready'
+    const entryReady = () => initialEntryPhaseRef.current === 'ready'
     const requestRevealOnQuiet = () => {
       clearTimeout(revealTimer)
       if (revealedRef.current && !mountStabilizingRef.current) return
@@ -2056,11 +2096,11 @@ export default function useScrollMode({
     }
     const forceReveal = () => {
       if (revealedRef.current || scrollRef.current !== scrollEl) return
+      if (!entryReady()) return
       syncLayout({ authorityVersion: currentAuthority() })
-      mountStabilizingRef.current = true
+      mountStabilizingRef.current = false
       revealedRef.current = true
       setRevealed(true)
-      requestRevealOnQuiet()
     }
     forceRevealRef.current = forceReveal
 

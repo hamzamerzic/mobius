@@ -20,9 +20,7 @@ import { indexedDB } from 'fake-indexeddb'
 import { get } from 'idb-keyval'
 import {
   awaitCacheFlushBeforeReload,
-  compactPersistedChatDetails,
   flushPersistedQueryCache,
-  retainChatDetailQuery,
   shouldPersistQueryKey,
 } from '../../queryClient.js'
 
@@ -61,63 +59,17 @@ test('unrelated keys do not persist', () => {
   assert.equal(shouldPersistQueryKey(['owner', 'walkthrough']), false)
 })
 
-test('persistence projects every chat to one activation page without an entry ceiling', () => {
-  const queries = ['a', 'b'].map(id => ({
-    queryKey: ['chat-messages', id],
-    state: {
-      data: {
-        messages: Array.from({ length: 28 }, (_, i) => ({ content: `${id}-${i}` })),
-        offset: 4,
-      },
-    },
-  }))
-  const compacted = compactPersistedChatDetails({ clientState: { queries } })
-  assert.equal(compacted.clientState.queries.length, 2)
-  for (const query of compacted.clientState.queries) {
-    assert.equal(query.state.data.messages.length, 20)
-    assert.equal(query.state.data.offset, 12)
-  }
-  assert.equal(queries[0].state.data.messages.length, 28,
-    'persistence projection never mutates the live cache')
-})
-
-test('the last mounted reader release compacts only that inactive working set', async () => {
-  const client = new QueryClient()
-  const messages = Array.from({ length: 30 }, (_, i) => ({ content: String(i) }))
-  client.setQueryData(['chat-messages', 'chat-1'], { messages, offset: 3 })
-  const releaseOne = retainChatDetailQuery(client, 'chat-1')
-  const releaseTwo = retainChatDetailQuery(client, 'chat-1')
-  releaseOne()
-  assert.equal(client.getQueryData(['chat-messages', 'chat-1']).messages.length, 30)
-  releaseTwo()
-  await Promise.resolve()
-  const compacted = client.getQueryData(['chat-messages', 'chat-1'])
-  assert.equal(compacted.messages.length, 20)
-  assert.equal(compacted.offset, 13)
-})
-
-test('a same-tick owner handoff cancels inactive compaction', async () => {
-  const client = new QueryClient()
-  const messages = Array.from({ length: 30 }, (_, i) => ({ content: String(i) }))
-  client.setQueryData(['chat-messages', 'chat-1'], { messages, offset: 0 })
-  const releaseFirstMount = retainChatDetailQuery(client, 'chat-1')
-  releaseFirstMount()
-  const releaseSecondMount = retainChatDetailQuery(client, 'chat-1')
-  await Promise.resolve()
-  assert.equal(client.getQueryData(['chat-messages', 'chat-1']).messages.length, 30,
-    'StrictMode cleanup/setup and owner handoffs keep the live working set')
-  releaseSecondMount()
-  await Promise.resolve()
-  assert.equal(client.getQueryData(['chat-messages', 'chat-1']).messages.length, 20)
-})
-
-test('explicit reload handoff flushes the latest allowlisted chat cache', async () => {
+test('explicit reload handoff preserves the complete loaded chat window', async () => {
   const previousIndexedDb = globalThis.indexedDB
   globalThis.indexedDB = indexedDB
   try {
     const client = new QueryClient()
     client.setQueryData(['chat-messages', 'chat-1'], {
-      messages: [{ role: 'assistant', content: 'terminal line' }],
+      offset: 4,
+      messages: Array.from({ length: 30 }, (_, index) => ({
+        role: 'assistant',
+        content: `line-${index}`,
+      })),
     })
     client.setQueryData(['models', 'registry'], { mustNotPersist: true })
 
@@ -126,10 +78,10 @@ test('explicit reload handoff flushes the latest allowlisted chat cache', async 
     const persisted = JSON.parse(raw)
     const keys = persisted.clientState.queries.map(q => q.queryKey)
     assert.deepEqual(keys, [['chat-messages', 'chat-1']])
-    assert.equal(
-      persisted.clientState.queries[0].state.data.messages[0].content,
-      'terminal line',
-    )
+    const data = persisted.clientState.queries[0].state.data
+    assert.equal(data.offset, 4)
+    assert.equal(data.messages.length, 30)
+    assert.equal(data.messages[0].content, 'line-0')
   } finally {
     globalThis.indexedDB = previousIndexedDb
   }

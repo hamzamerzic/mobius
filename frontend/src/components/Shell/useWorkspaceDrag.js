@@ -84,9 +84,9 @@ export default function useWorkspaceDrag({
   // builder preview a single-mode drag unfolds (point 15: dragging IS
   // building). Render-only: the reducer viewMode stays 'single' until the drop
   // commits 'panes', so ONE undo reverts both the tree AND the mode. The leave
-  // call carries the outcome — committed:true means the drop's OPEN_TAB_AT
-  // flipped the tree, so the descriptor must drag-commit (not cancel) in the
-  // same batch. (Settings needs no conversion across the flip — its tab survives;
+  // call carries the outcome for drawer restoration. Presentation does not
+  // predict that outcome: OPEN_TAB_AT owns the durable mode and Shell mirrors
+  // its actual result in the same batch. (Settings needs no conversion across the flip — its tab survives;
   // single mode paints its own slot, never a forced takeover.)
 }) {
   useEffect(() => {
@@ -556,15 +556,11 @@ export default function useWorkspaceDrag({
       function cleanup({ suppressClick = false, committed = false } = {}) {
         if (cleaned) return
         cleaned = true
-        // Leave the live builder preview, telling the mode machine WHICH way it
-        // ended. On a COMMITTED drop the reducer is now in 'panes' (OPEN_TAB_AT
-        // flipped it) and the descriptor must commit in the SAME pointerup batch
-        // (drag-commit → committedMode 'panes'; INV 7 one-transaction) — routing
-        // a successful drop through drag-cancel left one committed render where
-        // the tree said 'panes' but the descriptor painted single (preview
-        // collapse + logo untwist) until the passive sync-committed net caught
-        // up. On CANCEL the reducer never left 'single', so the cancel reverts
-        // the render with no mutation.
+        // Leave the live builder preview. This callback can retire transient
+        // preview state only. On a committed drop OPEN_TAB_AT has already
+        // changed the workspace and Shell's actual-transition synchronizer has
+        // committed presentation; on cancel the workspace never changed and
+        // the preview simply folds away.
         onPreviewBuilder?.(false, { committed })
         clearTimeout(holdTimer)
         if (moveRAF) { cancelAnimationFrame(moveRAF); moveRAF = 0 }
