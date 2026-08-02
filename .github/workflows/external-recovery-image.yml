@@ -97,7 +97,7 @@ jobs:
             *[!0-9a-f]*|'') exit 2 ;;
           esac
           test "${#release_head}" -eq 40
-          echo "release_head=$release_head" >> "$GITHUB_OUTPUT"
+          test "$release_head" = "$GITHUB_SHA"
           echo "date=$(git show -s --format=%cs HEAD)" >> "$GITHUB_OUTPUT"
           echo "epoch=external-recovery-v1-$GITHUB_SHA" >> "$GITHUB_OUTPUT"
 
@@ -160,6 +160,8 @@ jobs:
           current_r_sequence=""
           current_r_sha=""
           current_r_digest=""
+          current_sha=$(git ls-remote --exit-code origin "$MOBIUS_PLATFORM_RELEASE_REF" | awk 'NR == 1 { print $1 }')
+          test "$current_sha" = "$GITHUB_SHA"
           while true; do
             http_status=$(curl --silent --show-error --retry 3 --retry-all-errors \
               --connect-timeout 10 --max-time 45 \

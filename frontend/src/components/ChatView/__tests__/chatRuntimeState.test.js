@@ -8,14 +8,16 @@ import {
   canFastForwardQueue,
   shouldFreezeStreamingReturn,
   cidOf,
+  coldTranscriptRenderFrames,
   continuationRowsFromPromotedMessage,
-  isAutoContinuationMessage,
+  isContinuationMessage,
   isOwnerUserMessage,
   mergeRecentMessagesIntoLoadedWindow,
   openAppCtaViewModel,
   previewReadyAnnouncement,
   previewUpdatedAnnouncement,
   serverSnapshotBehindLocal,
+  shouldAttachRunningStream,
   shouldRetryStopAfterConfirm,
   shouldShowOpenAppCta,
   startedMessagesFromResponse,
@@ -25,14 +27,15 @@ import {
   systemEventForChat,
 } from '../chatRuntimeState.js'
 
-test('automatic continuations are product markers, not owner messages', () => {
+test('automatic and manual continuations are product markers, not owner messages', () => {
   const marker = {
     role: 'user',
     content: 'continue',
-    kind: 'auto_continuation',
-    continuation_reason: 'restart',
+    kind: 'continuation',
+    continuation_reason: 'manual',
   }
-  assert.equal(isAutoContinuationMessage(marker), true)
+  assert.equal(isContinuationMessage(marker), true)
+  assert.equal(isContinuationMessage({ ...marker, kind: 'auto_continuation' }), true)
   assert.equal(isOwnerUserMessage(marker), false)
   assert.equal(isOwnerUserMessage({ role: 'user', content: 'hello' }), true)
   assert.equal(isOwnerUserMessage({ role: 'user', hidden: true }), false)
@@ -97,6 +100,72 @@ test('only a recovered question answer starts a new hidden turn', () => {
 test('answer turn ownership requires the explicit semantic field', () => {
   assert.equal(answerTurnDisposition({ status: 'answer_delivered' }), 'unknown')
   assert.equal(answerTurnDisposition({ status: 'started' }), 'unknown')
+})
+
+test('a parked owner question uses compact history until its answer resumes the turn', () => {
+  assert.equal(shouldAttachRunningStream({
+    running: true,
+    pendingQuestionId: 'question-1',
+  }), false)
+  assert.equal(shouldAttachRunningStream({
+    running: true,
+    pendingQuestionId: null,
+  }), true)
+  assert.equal(shouldAttachRunningStream({
+    running: false,
+    pendingQuestionId: null,
+  }), false)
+})
+
+test('a pathological cold transcript is prepared as stable prefix frames', () => {
+  const large = {
+    role: 'assistant',
+    ts: 2,
+    blocks: Array.from({ length: 9 }, (_, index) => ({
+      type: 'text',
+      content: `report-${index}-${'x'.repeat(4000)}`,
+    })),
+  }
+  const messages = [{ role: 'user', ts: 1, content: 'audit' }, large]
+  const frames = coldTranscriptRenderFrames(messages, {
+    minCost: 1,
+    frameBudget: 4,
+  })
+
+  assert.equal(frames.length, 5)
+  assert.deepEqual(
+    frames.slice(0, -1).map(frame => frame.at(-1).blocks.length),
+    [2, 4, 6, 8],
+  )
+  assert.equal(frames.at(-1), messages,
+    'the reveal frame is the authoritative transcript array')
+  assert.equal(frames[0][0], messages[0],
+    'already-complete prefix messages retain identity across frames')
+})
+
+test('ordinary cold transcripts keep the one-commit path', () => {
+  const messages = [{
+    role: 'assistant',
+    blocks: [{ type: 'text', content: 'Short answer' }],
+  }]
+  assert.deepEqual(coldTranscriptRenderFrames(messages), [messages])
+})
+
+test('one long markdown block grows by token fractions instead of one giant frame', () => {
+  const block = { type: 'text', content: 'x'.repeat(48000) }
+  const messages = [{ role: 'assistant', ts: 1, blocks: [block] }]
+  const frames = coldTranscriptRenderFrames(messages, {
+    minCost: 1,
+    frameBudget: 4,
+  })
+
+  assert.deepEqual(
+    frames.slice(0, -1).map(frame => frame[0].blocks[0]._coldRenderFraction),
+    [4 / 12, 8 / 12],
+  )
+  assert.equal(frames.at(-1), messages)
+  assert.equal('_coldRenderFraction' in block, false,
+    'the read-side render plan never mutates transcript data')
 })
 
 test('an unknown explicit answer-turn value fails closed to a separate boundary', () => {

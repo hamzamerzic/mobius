@@ -58,7 +58,6 @@ from app.routes import (
   chat_embed_router, chat_logs_router, chat_router, chats_router, chats_stream_router,
   debug_router, fs_router, github_router, media_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
-  speech_router,
   secrets_router, self_reminders_router, settings_router, skills_router,
   client_error_router, client_signal_router, standalone_router, storage_router,
   theme_router, uploads_router, platform_router,
@@ -337,12 +336,23 @@ _OPAQUE_STATIC_EMBED_PREFIX = "/app-embeds/by-id/"
 _PUBLISHED_SITE_PREFIX = "/sites/"
 
 # This isolation boundary must always be enforced, never Report-Only: browsers
-# ignore the CSP sandbox directive in a Report-Only policy.
+# ignore the CSP sandbox directive in a Report-Only policy. The sandbox omits
+# allow-same-origin, so the document's active origin is opaque and CSP 'self'
+# matches none of its own relative subresources on WebKit. Name the configured
+# absolute origin explicitly in every fetch directive. This does not weaken the
+# credential boundary: packaged code already executes in the opaque document,
+# and it still cannot reach the shell's localStorage, cookies, or owner token.
+_STATIC_EMBED_ORIGIN = settings.frontend_origin.rstrip("/")
 _STATIC_EMBED_CSP = (
-  "sandbox allow-scripts allow-forms allow-pointer-lock; default-src 'self'; "
-  "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
-  "font-src 'self' data:; connect-src 'self'; img-src 'self' data: blob:; "
-  "media-src 'self' blob:; worker-src 'self' blob:"
+  "sandbox allow-scripts allow-forms allow-pointer-lock; "
+  f"default-src {_STATIC_EMBED_ORIGIN}; "
+  f"script-src {_STATIC_EMBED_ORIGIN} 'unsafe-inline'; "
+  f"style-src {_STATIC_EMBED_ORIGIN} 'unsafe-inline'; "
+  f"font-src {_STATIC_EMBED_ORIGIN} data:; "
+  f"connect-src {_STATIC_EMBED_ORIGIN}; "
+  f"img-src {_STATIC_EMBED_ORIGIN} data: blob:; "
+  f"media-src {_STATIC_EMBED_ORIGIN} blob:; "
+  f"worker-src {_STATIC_EMBED_ORIGIN} blob:"
 )
 
 # Published sites (`/sites/<token>/`) are public snapshots of the owner's own
@@ -562,6 +572,56 @@ app.add_middleware(
   expose_headers=["ETag"],
 )
 
+
+class _OpaqueOriginCorsMiddleware:
+  """Answers a sandboxed app frame with `*` rather than the literal `null`.
+
+  A frame without `allow-same-origin` sends `Origin: null`, and CORSMiddleware
+  echoes the matched value back, so the response says
+  `Access-Control-Allow-Origin: null`. Chromium treats that as a match; WebKit
+  does not, and blocks the response before the page sees it. The request never
+  reaches this server, so the failure looks like the network is down — on iOS
+  every direct API call from an app frame failed this way, while the same app's
+  storage worked because that path goes through the shell instead.
+
+  `*` is the same header the opaque-frame asset routes already emit, and it is
+  legal here only because `allow_credentials=False`: no cookie or other ambient
+  credential rides along, so this widens nothing an attacker could use without
+  first holding a bearer token that lives in localStorage, out of reach of any
+  other origin. State-changing routes keep their own `reject_cross_site` guard.
+
+  Placed outside CORSMiddleware (added later == outer) so it can rewrite that
+  middleware's header on both the preflight and the real response.
+  """
+
+  def __init__(self, app):
+    self.app = app
+
+  async def __call__(self, scope, receive, send):
+    if scope["type"] != "http":
+      return await self.app(scope, receive, send)
+    origin = None
+    for key, value in scope.get("headers") or ():
+      if key == b"origin":
+        origin = value
+        break
+    if origin != b"null":
+      return await self.app(scope, receive, send)
+
+    async def send_wrapper(message):
+      if message["type"] == "http.response.start":
+        headers = [
+          (k, b"*" if k.lower() == b"access-control-allow-origin" else v)
+          for k, v in message.get("headers") or ()
+        ]
+        message = {**message, "headers": headers}
+      await send(message)
+
+    return await self.app(scope, receive, send_wrapper)
+
+
+app.add_middleware(_OpaqueOriginCorsMiddleware)
+
 # Security remains outside CORS and request-size enforcement so its headers
 # land on those generated responses. Request context is outermost so every
 # request receives one diagnostic label before middleware can touch the DB.
@@ -599,7 +659,6 @@ except Exception as _exc:  # pragma: no cover - defensive boot guard
 app.include_router(notify_router)
 app.include_router(proxy_router)
 app.include_router(local_services_router)
-app.include_router(speech_router)
 app.include_router(client_error_router)
 app.include_router(client_signal_router)
 app.include_router(settings_router)
@@ -894,6 +953,19 @@ def _resolve_asset_file(asset_path: str) -> Path | None:
   return None
 
 
+# Root-served worker scripts: `sw.js` caches the shell, `sw-push.js` owns Web
+# Push (see frontend/public/sw-push.js). Same delivery contract at every use
+# site below.
+_SERVICE_WORKER_SCRIPTS = frozenset({"sw.js", "sw-push.js"})
+
+# The push worker's scope. It exists only to name a URL prefix inside the
+# shell's PWA scope, and must never resolve to a document — a page here would
+# be controlled by a worker with no fetch handler, so it would boot the shell
+# with no precache and no offline fallback. Mirrored in the frontend's
+# swNavigationPolicy denylist for the offline path.
+_PUSH_WORKER_SCOPE = "shell/push"
+
+
 def _is_static_asset_path(path: str) -> bool:
   """True for paths that must 404 on a miss rather than fall through to
   the SPA HTML.
@@ -919,7 +991,7 @@ def _is_static_asset_path(path: str) -> bool:
     # First path segment — catches both `vendor` and `vendor/<file>`
     # without over-matching a route like `vendorfoo`.
     path.split("/", 1)[0] in {"vendor", "assets"}
-    or path == "sw.js"
+    or path in _SERVICE_WORKER_SCRIPTS
     or path.rsplit(".", 1)[-1] in {
       "js", "mjs", "css", "html", "map", "wasm", "json",
     }
@@ -937,8 +1009,8 @@ _RESERVED_TOP_LEVEL_APP_ALIASES = {
   # owner's old break-glass bookmark and impersonate a privileged surface.
   "recover",
   "shell",
-  "sw.js",
   "vendor",
+  *_SERVICE_WORKER_SCRIPTS,
 }
 
 
@@ -1223,6 +1295,8 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
   @app.get("/{path:path}")
   async def spa_fallback(request: Request, path: str):
     """Serves the SPA index.html for any non-API, non-asset path."""
+    if path == _PUSH_WORKER_SCOPE or path.startswith(f"{_PUSH_WORKER_SCOPE}/"):
+      raise HTTPException(status_code=404, detail="Not found.")
     # Resolve which build serves THIS request (live dist if complete, else the
     # baked floor) once, up front — per request, never a module-load snapshot.
     static_dir = _resolve_static_dir()
@@ -1285,10 +1359,9 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
       # If-None-Match on every request, so a 304 keeps the
       # download cheap when nothing changed.
       headers = _public_static_headers(path)
-      if path == "sw.js":
+      if path in _SERVICE_WORKER_SCRIPTS:
         headers["Cache-Control"] = "no-cache, must-revalidate"
-      if path == "sw.js":
-        # sw.js is a REVALIDATING response (no-cache + the mtime ETag
+        # A worker script is a REVALIDATING response (no-cache + the mtime ETag
         # FileResponse sets), so it must never answer a 206. A
         # `Range: bytes=0-0` probe would otherwise let Chromium store the
         # 1-byte slice and later serve it as a status-200 full body — a

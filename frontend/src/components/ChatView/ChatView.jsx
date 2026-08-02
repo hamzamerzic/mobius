@@ -1,4 +1,5 @@
 import {
+  startTransition,
   useState,
   useRef,
   useEffect,
@@ -6,6 +7,7 @@ import {
   useCallback,
   useMemo,
 } from 'react'
+import { flushSync } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
@@ -73,11 +75,13 @@ import {
   builtAppPulseDecision,
   canFastForwardQueue,
   cidOf,
+  coldTranscriptRenderFrames,
   continuationRowsFromPromotedMessage,
-  isAutoContinuationMessage,
+  isContinuationMessage,
   isOwnerUserMessage,
   mergeRecentMessagesIntoLoadedWindow,
   openAppCtaViewModel,
+  shouldAttachRunningStream,
   shouldRetryStopAfterConfirm,
   stopConfirmedIdle,
   stopRequestSucceeded,
@@ -100,6 +104,7 @@ import {
   consumeComposerHandoff,
 } from './composerDraft.js'
 import {
+  composerRoom,
   reconcileComposerTextarea,
   resetComposerTextarea,
 } from './composerTextareaSizing.js'
@@ -131,6 +136,14 @@ const MESSAGE_META_VISIBLE_MS = 5000
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function yieldToMainThread() {
+  // scheduler.yield() continuations retain enough priority for React to batch
+  // every prefix update into one final commit in Chromium. A fresh timer task
+  // gives React a real commit/paint/input boundary without imposing a whole
+  // animation-frame delay on every hidden slice.
+  return new Promise(resolve => setTimeout(resolve, 0))
 }
 
 function appendMessageBatch(prev, rows) {
@@ -429,10 +442,8 @@ export default function ChatView({
     }, MESSAGE_META_VISIBLE_MS)
   }, [])
   useEffect(() => {
-    setActiveGoalObjective(
-      queryClient.getQueryData(chatMessagesQueryKey(chatId))
-        ?.activeGoalObjective ?? '',
-    )
+    const runtime = queryClient.getQueryData(chatMessagesQueryKey(chatId))
+    setActiveGoalObjective(runtime?.running ? (runtime.activeGoalObjective ?? '') : '')
   }, [chatId, queryClient])
 
   // Pending queue (the items shown in the queued-tray above the
@@ -473,12 +484,42 @@ export default function ChatView({
   // current() to fire the bar's hidden picker. ChatInputBar's layout
   // effect installs the function.
   const attachTriggerRef = useRef(null)
+  // The model/effort picker can accept another choice before the prior save
+  // settles. Keep its serialized write tail at ChatView scope so both a closed
+  // + popover and an immediate Send still observe the same ordering boundary.
+  const settingsSaveTailRef = useRef(Promise.resolve())
   // Refs for the absolutely-positioned foot. Its ResizeObserver notifies the
   // scroll controller, which owns publishing composer clearance together with
   // every other indirect scroll-geometry write.
   const chatRef = useRef(null)
   const footRef = useRef(null)
-
+  // `--composer-room` — how much of this chat the reader can actually SEE,
+  // read by the composer's growth cap (`.chat__input` max-height).
+  //
+  // This is deliberately NOT part of the pass above. `--composer-h` is scroll
+  // geometry: it feeds the list's bottom padding and has to be sequenced with
+  // spacer math, so the scroll controller owns when it runs. The room owns
+  // nothing of the sort — it describes the pane and the visible viewport, and
+  // an empty chat has both. Publishing it from the scroll controller's pass
+  // made it inherit that pass's early return for chats that render no scroll
+  // node, so on a NEW chat the var was never set at all, the cap fell back to
+  // its `100dvh` default, and — because iOS does not shrink `dvh` for the soft
+  // keyboard — the composer could still cover the conversation in the exact
+  // flow most likely to hit it. It publishes on its own terms now.
+  const composerRoomRef = useRef(0)
+  const publishComposerRoom = useCallback(() => {
+    const chatEl = chatRef.current
+    if (!chatEl) return
+    const room = composerRoom({
+      paneHeight: chatEl.clientHeight,
+      viewportHeight: window.visualViewport?.height || window.innerHeight,
+    })
+    // Write only on a real change: this also runs from a ResizeObserver on
+    // `.chat`, and an unconditional style write there is an easy feedback loop.
+    if (room <= 0 || room === composerRoomRef.current) return
+    composerRoomRef.current = room
+    chatEl.style.setProperty('--composer-room', `${room}px`)
+  }, [])
   // One explicit Shell-to-composer handoff owns both New-chat focus and drafts
   // supplied by app navigation. Storage restores unmounted chats; applying the
   // same request here is what updates a retained ChatView without sacrificing
@@ -828,6 +869,7 @@ export default function ChatView({
       }
       return {
         running: !!data.running,
+        pendingQuestionId: data.pending_question_id || null,
         pendingLimitResume: !!tailResumableBlock(msgs)?.pause?.resets_at,
       }
     } catch {
@@ -953,6 +995,13 @@ export default function ChatView({
     patchQuestionAnswers,
     flushStreamSnapshot,
   } = useStreamConnection(chatId, {
+    onConnectionLost: () => {
+      // Browser transport ownership is uncertain here: the backend turn may
+      // still be parked on a question or producing output. Preserve the
+      // last-good assistant payload without retiring any run-owned state;
+      // onNeedsRefresh below is the authority for whether the run truly ended.
+      promoteStreamToMessages({ keepTurnOpen: true })
+    },
     onStreamEnd: ({ continues, promotedMessage } = {}) => {
       if (embedded && continues === false) setEmbeddedRunActive(false)
       promoteStreamToMessages()
@@ -1001,6 +1050,7 @@ export default function ChatView({
         setSending(false)
         sendingRef.current = false
         setServerRunningState(false)
+        setActiveGoalState('')
         // Stream ended without continuation. If we have local pending
         // entries, server may have cleared them (auth fail, error) —
         // refetch to reconcile. Skip when pending empty.
@@ -1138,6 +1188,13 @@ export default function ChatView({
       fetchMessages({ force: true })
     },
   })
+  // The composer clears before this boundary, so a slow picker save delays
+  // transport without swallowing text entered after Send.
+  const sendAfterSettingsSaved = useCallback(async (text, attachments, options) => {
+    await settingsSaveTailRef.current
+    return streamSend(text, attachments, options)
+  }, [streamSend])
+
   useEffect(() => {
     if (retiredAssistantItemsRef.current !== streamItems) {
       retiredAssistantItemsRef.current = null
@@ -1211,7 +1268,10 @@ export default function ChatView({
           setEmbeddedRunActive(true)
         }
         if (
-          (running === true || (snapshot === null && delta.started))
+          shouldAttachRunningStream({
+            running: running === true || (snapshot === null && delta.started),
+            pendingQuestionId: snapshot?.pendingQuestionId,
+          })
           && !delta.finished
           && !isStreamingRef.current
         ) {
@@ -1237,7 +1297,10 @@ export default function ChatView({
   const ensureRuntimeStreamConnected = useCallback(() => {
     if (hiddenRef.current) return
     if (connectionError === 'disconnected') return
-    if (!serverRunningRef.current) return
+    if (!shouldAttachRunningStream({
+      running: serverRunningRef.current,
+      pendingQuestionId: liveQuestionId,
+    })) return
     if (isStreamingRef.current) return
     if (runtimeReconnectInFlightRef.current) return
 
@@ -1251,7 +1314,7 @@ export default function ChatView({
       .finally(() => {
         runtimeReconnectInFlightRef.current = false
       })
-  }, [connectToStream, connectionError, isStreamingRef])
+  }, [connectToStream, connectionError, isStreamingRef, liveQuestionId])
 
   const wasHiddenRef = useRef(hidden)
   useLayoutEffect(() => {
@@ -1444,13 +1507,21 @@ export default function ChatView({
 
     let raf1 = 0
     let raf2 = 0
-    const applySoon = () => {
+    // The room is published unconditionally; the foot measurement goes through
+    // the scroll controller, which may decline while the reader owns the
+    // scroll. Keeping them in one settle sequence means the cap and the list
+    // padding still land from the same events.
+    const applyNow = () => {
+      publishComposerRoom()
       composerResized()
+    }
+    const applySoon = () => {
+      applyNow()
       if (raf1) cancelAnimationFrame(raf1)
       if (raf2) cancelAnimationFrame(raf2)
       raf1 = requestAnimationFrame(() => {
-        composerResized()
-        raf2 = requestAnimationFrame(composerResized)
+        applyNow()
+        raf2 = requestAnimationFrame(applyNow)
       })
     }
     const reconcileForegroundGeometry = () => {
@@ -1470,6 +1541,14 @@ export default function ChatView({
       ? new ResizeObserver(applySoon)
       : null
     ro?.observe(footEl)
+    // The pane is the room's other input, and it can change without any window
+    // or viewport event at all — dragging a workspace split resizes this chat
+    // while the window stands still. Observe it directly rather than hoping a
+    // neighbouring event fires.
+    const paneRo = typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(publishComposerRoom)
+      : null
+    if (chatRef.current) paneRo?.observe(chatRef.current)
     window.addEventListener('resize', applySoon)
     window.addEventListener('pageshow', reconcileForegroundGeometry)
     window.visualViewport?.addEventListener('resize', applySoon)
@@ -1480,13 +1559,14 @@ export default function ChatView({
       if (raf1) cancelAnimationFrame(raf1)
       if (raf2) cancelAnimationFrame(raf2)
       ro?.disconnect()
+      paneRo?.disconnect()
       window.removeEventListener('resize', applySoon)
       window.removeEventListener('pageshow', reconcileForegroundGeometry)
       window.visualViewport?.removeEventListener('resize', applySoon)
       window.visualViewport?.removeEventListener('scroll', applySoon)
       document.removeEventListener('visibilitychange', onVisible)
     }
-  }, [composerResized])
+  }, [composerResized, publishComposerRoom])
 
   useEffect(() => {
     composerResized()
@@ -1577,7 +1657,12 @@ export default function ChatView({
       pendingQueue.hydrate(runtime.pending_messages || [])
       if (running) {
         setSending(true)
-        connectToStream(false)
+        if (shouldAttachRunningStream({
+          running,
+          pendingQuestionId: runtime.pending_question_id,
+        })) {
+          connectToStream(false)
+        }
       } else {
         setSending(false)
         sendingRef.current = false
@@ -1672,7 +1757,44 @@ export default function ChatView({
         messages: refreshed.messages,
         offset: refreshed.offset,
       })
-      applyMessagesToView(refreshed.messages, refreshed.offset)
+      const renderFrames = coldTranscriptRenderFrames(refreshed.messages)
+      if (renderFrames.length === 1) {
+        // An ordinary cold transcript stays one interruptible commit. Readiness
+        // remains in the SAME transition, so the shell cannot reveal a partial
+        // transcript; cached activations above remain immediate.
+        startTransition(() => {
+          applyMessagesToView(refreshed.messages, refreshed.offset)
+          settleRuntime(runtime, refreshed.messages)
+        })
+        return
+      }
+
+      // A single agentic turn can contain hundreds of interleaved worklog,
+      // activity, and report blocks. React cannot interrupt one DOM commit, so
+      // prepare that hidden destination in prefix-complete frame-sized slices.
+      // Each await yields a real paint opportunity to the outgoing chat and
+      // drawer. Only the final authoritative frame settles loading/readiness,
+      // preserving the existing hide-then-reveal scroll contract.
+      setInitialEntryPhase('preparing')
+      for (const frame of renderFrames) {
+        await yieldToMainThread()
+        if (cancelled) return
+        if (fetchGenRef.current !== gen) {
+          // A newer generation owns the runtime now (a fresh send, or Stop
+          // clearing the queue), so this fetch must NOT apply its own runtime
+          // state — settleRuntime would re-hydrate the queue Stop just
+          // cleared. But 'preparing' is a hidden gate that only this path
+          // sets, and neither superseding path releases it: returning here
+          // without releasing it strands the chat blank until remount.
+          setInitialEntryPhase('ready')
+          setLoading(false)
+          return
+        }
+        // React may batch state updates across async task yields and discard
+        // every intermediate prefix. Commit each hidden slice explicitly; the
+        // flush is scoped to this cold, off-screen preparation path only.
+        flushSync(() => applyMessagesToView(frame, refreshed.offset))
+      }
       settleRuntime(runtime, refreshed.messages)
     }
 
@@ -1831,6 +1953,7 @@ export default function ChatView({
     if (!hasSendablePayload(text, attachments)) return
 
     const pin = opts.pin !== false  // default true
+    const continuation = opts.continuation === 'manual' ? 'manual' : undefined
     setSendFailure(null)
 
     // Stop voice recognition so a late onresult doesn't refill input
@@ -1888,7 +2011,13 @@ export default function ChatView({
       if (usesComposerFiles) releaseFiles(composerFileSnapshot)
     }
     function restoreComposerAfterFailedSend() {
-      restoreComposerText(text, { preserveFailedAttempt: true })
+      // Resume is a product action whose provider-facing prompt never belonged
+      // in the composer. A failed request keeps the resumable card in place;
+      // restoring the internal word "continue" as a draft would misattribute
+      // it to the owner and make a retry look like ordinary prose.
+      if (!continuation) {
+        restoreComposerText(text, { preserveFailedAttempt: true })
+      }
       if (usesComposerFiles) restoreFiles(composerFileSnapshot)
     }
 
@@ -1919,6 +2048,10 @@ export default function ChatView({
     // latest commit and dodge that.
     if (queuesBehindActiveTurn) {
       const queuedMsg = { role: 'user', content: text, ts: Date.now(), cid, queued: true }
+      if (continuation) {
+        queuedMsg.kind = 'continuation'
+        queuedMsg.continuation_reason = continuation
+      }
       if (attachments.length > 0) queuedMsg.attachments = attachments
       if (!directSteer) pendingQueue.add(queuedMsg, { inFlight: true })
       // The shared send decision was captured AT SEND TIME, before blur or the
@@ -1947,12 +2080,12 @@ export default function ChatView({
       }
       let queueRequest = null
       try {
-        queueRequest = streamSend(
+        queueRequest = sendAfterSettingsSaved(
           text,
           attachments.length > 0 ? attachments : undefined,
           directSteer
-            ? { directSteer: true, cid }
-            : { queueOnly: true, cid },
+            ? { directSteer: true, cid, continuation }
+            : { queueOnly: true, cid, continuation },
         )
         if (!directSteer) queuedSendRequestsRef.current.set(cid, queueRequest)
         const result = await queueRequest
@@ -2159,12 +2292,14 @@ export default function ChatView({
         // Roll back optimistic + restore input.
         if (!directSteer) pendingQueue.cancelByCid(queuedMsg.cid)
         forgetSendIntent({ cid: queuedMsg.cid })
-        rememberFailedAttempt({
-          cid,
-          draftIdentity,
-          text,
-          attachments: composerFileSnapshot,
-        })
+        if (!continuation) {
+          rememberFailedAttempt({
+            cid,
+            draftIdentity,
+            text,
+            attachments: composerFileSnapshot,
+          })
+        }
         restoreComposerAfterFailedSend()
         setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
       } finally {
@@ -2197,6 +2332,10 @@ export default function ChatView({
     const freshPinIntent = sendPinIntent
 
     const userMsg = { role: 'user', content: text, ts: Date.now(), cid, optimistic: true }
+    if (continuation) {
+      userMsg.kind = 'continuation'
+      userMsg.continuation_reason = continuation
+    }
     if (attachments.length > 0) userMsg.attachments = attachments
     commitMessages(prev => [...prev, userMsg])
     setComposerInput('')
@@ -2239,14 +2378,14 @@ export default function ChatView({
     }
 
     try {
-      const result = await streamSend(
+      const result = await sendAfterSettingsSaved(
         sendText,
         attachments.length > 0 ? attachments : undefined,
         // The minted cid rides the POST so the durable row carries the same
         // identity the optimistic row (and its pin) already use — without it
         // the server row derives legacy-<ts> and the strict data-cid pin
         // selector goes blind after the ack re-render.
-        { cid },
+        { cid, continuation },
       )
       clearFailedAttempt()
       releaseComposerFilesAfterAccepted()
@@ -2332,12 +2471,14 @@ export default function ChatView({
       setSending(false)
       sendingRef.current = false
       setServerRunningState(false)
-      rememberFailedAttempt({
-        cid,
-        draftIdentity,
-        text,
-        attachments: composerFileSnapshot,
-      })
+      if (!continuation) {
+        rememberFailedAttempt({
+          cid,
+          draftIdentity,
+          text,
+          attachments: composerFileSnapshot,
+        })
+      }
       restoreComposerAfterFailedSend()
       // Ambiguity recovery already verified reachability and safely replayed
       // this exact cid once. If even that acknowledgement was lost, keep the
@@ -2363,7 +2504,7 @@ export default function ChatView({
     // stale-closure trap for callers like handleStop).
   }, [
     chatId,
-    streamSend,
+    sendAfterSettingsSaved,
     pendingFiles,
     commitMessages,
     fetchMessages,
@@ -2814,6 +2955,7 @@ export default function ChatView({
       promoteStreamToMessages()
       setSending(false)
       setServerRunningState(false)
+      setActiveGoalState('')
       // Sync sendingRef to the just-committed state so the synchronous
       // doSend(resendText) call below reads the post-stop value.
       // setSending(false) queues a render — the next render will write
@@ -3082,10 +3224,7 @@ export default function ChatView({
   // (The fast-forward identity/readiness gates are computed separately below.)
   const turnActive = sending || isStreaming || serverRunning
   useEffect(() => {
-    if (!turnActive) {
-      if (activeGoalObjective) setActiveGoalState('')
-      return
-    }
+    if (!turnActive) return
     // Ordinary live turns set this synchronously at their run-start seam. This
     // branch is the cold remount/reconnect recovery path. The query cache
     // retains a known goal across keyed chat switches, including after a
@@ -3513,7 +3652,9 @@ export default function ChatView({
     .map(app => ({ app, vm: openAppCtaViewModel(app, turnActive) }))
     .filter(entry => entry.vm)
   const buildPhaseRail = buildPhaseRailViewModel(buildPhases)
-  const visibleGoalObjective = turnActive ? activeGoalObjective : ''
+  // Goal ownership comes from explicit run boundaries and authoritative
+  // runtime reconciliation, never a momentary browser transport signal.
+  const visibleGoalObjective = activeGoalObjective
   const progressRail = progressRailViewModel(
     visibleGoalObjective,
     buildPhaseRail,
@@ -3603,7 +3744,7 @@ export default function ChatView({
             )
           ) : (
             <div className="chat__empty">
-              <img className="chat__empty-glyph" src="/moebius.png" alt="" width="120" height="120" />
+              <img className="chat__empty-glyph" src="/moebius.png" alt="" width="76" height="76" />
               <p className="chat__empty-title">What's on your mind?</p>
             </div>
           )}
@@ -3649,7 +3790,7 @@ export default function ChatView({
 
           {messages.map((msg, i) => {
             if (msg.hidden) return null
-            const continuationMarker = isAutoContinuationMessage(msg)
+            const continuationMarker = isContinuationMessage(msg)
             const isLastMsg = i === lastVisibleMessageIndex
             // The mirrored DB row is rendered below by the SAME active
             // MsgContent instance that consumes live payloads. Suppress only
@@ -3816,9 +3957,9 @@ export default function ChatView({
             attention actions → build-progress rail → connection/retry → queued
             messages → composer. The shell owns the one persistent offline
             explanation; the composer retains contextual send-failure copy. */}
-        {/* A LOST connection empties the stack: while the terminal
-            'disconnected' state is set, nudges, rail, and the queued tray
-            hide so the one thing on screen is the problem and its Retry
+        {/* A LOST connection hides transient actions: while the terminal
+            'disconnected' state is set, nudges hide so the one thing on screen
+            is the problem and its Retry
             (owner ask, 2026-07-17). ONLY 'disconnected' gates: 'retrying'
             is a transient bare-EOF auto-reconnect that clears itself in
             ~300ms — blanking and popping the whole stack on every mobile
@@ -3867,12 +4008,12 @@ export default function ChatView({
               </button>
             )}
           </div>
-          <ProgressRail
-            items={progressRail}
-            ariaLabel={visibleGoalObjective ? 'Goal progress' : 'Build progress'}
-          />
           </>
         )}
+        <ProgressRail
+          items={progressRail}
+          ariaLabel={visibleGoalObjective ? 'Goal progress' : 'Build progress'}
+        />
         {/* Contribution staged from THIS chat: approve it where the work
             happened. Renders nothing unless something is actually waiting.
             Owner-shell only: an app-embedded chat runs on a capability token
@@ -3961,6 +4102,7 @@ export default function ChatView({
                 }
                 onChangeChatInfo={mergeChatInfo}
                 providerSwitchState={providerSwitchState}
+                settingsSaveTailRef={settingsSaveTailRef}
                 onOpenInspector={() => setShowInspector(true)}
                 onOpenSummary={() => setShowSummary(true)}
                 embedded={embedded}

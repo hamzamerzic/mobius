@@ -598,11 +598,26 @@ def test_pull_requests_run_required_suites_and_cutover_publishes_immutable_image
     "run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
   )
   prepublish = image_workflow.index("/internal/core-releases/prepublish")
+  identity_head_guard = image_workflow.index(
+    'test "$release_head" = "$GITHUB_SHA"'
+  )
+  gate_head_guard_contract = (
+    "          current_sha=$(git ls-remote --exit-code origin "
+    '"$MOBIUS_PLATFORM_RELEASE_REF" | awk \'NR == 1 { print $1 }\')\n'
+    '          test "$current_sha" = "$GITHUB_SHA"\n'
+    "          while true; do\n"
+    "            http_status=$(curl"
+  )
+  gate_head_guard = image_workflow.index(gate_head_guard_contract)
   registry_login = image_workflow.index("docker/login-action@")
   build = image_workflow.index("docker/build-push-action@")
   bind = image_workflow.index("/internal/core-releases/bind")
   redeploy = image_workflow.index("/internal/core-releases/postpublish")
   assert immutable_tag in image_workflow
+  assert identity_head_guard < gate_head_guard < prepublish
+  assert image_workflow.count('test "$release_head" = "$GITHUB_SHA"') == 1
+  assert image_workflow.count('test "$current_sha" = "$GITHUB_SHA"') == 1
+  assert 'echo "release_head=$release_head"' not in image_workflow
   assert prepublish < registry_login < build < bind < redeploy
   between_bind_and_redeploy = image_workflow[bind:redeploy]
   assert "docker buildx imagetools create" not in between_bind_and_redeploy

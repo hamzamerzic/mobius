@@ -175,3 +175,19 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
   """Returns the cached application settings singleton."""
   return Settings()
+
+
+def agent_scratch_root() -> Path:
+  """Root under which each chat gets its own agent scratch directory.
+
+  On the data volume rather than the container's /tmp, because an overlay
+  upperdir has no size of its own: statvfs there reports host capacity, no
+  quota applies, and it is not a tmpfs so nothing clears it on restart.
+  data_dir is a fixed-size volume, so the same bytes land against a limit
+  the platform owns and can measure.
+
+  That ceiling is shared with the database, so per-chat directories and their
+  removal are what keep scratch from taking durable data down with it;
+  `agent_scratch` owns that lifecycle.
+  """
+  return Path(get_settings().data_dir) / "agent-scratch"

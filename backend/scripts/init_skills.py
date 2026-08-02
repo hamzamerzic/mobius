@@ -13,7 +13,16 @@ boot we add missing seed skills and apply only explicit, hash-gated migrations:
 an existing file is replaced when it is byte-for-byte a known baked predecessor,
 while every owner/agent-edited copy is preserved. A normal baked-seed edit does
 not propagate until its predecessor hash is deliberately registered below; this
-keeps urgent fix-forward migrations possible without blind overwrites. App-owned
+keeps urgent fix-forward migrations possible without blind overwrites.
+
+One narrow exception, and it is deliberate: a registered digest may name a
+known-bad OWNER-CURATED generation rather than a baked one, when that exact
+content is unsafe to leave in place (today: a `cron.md` copy that tells app
+jobs to read the owner service token). Such an entry is annotated with its
+provenance, because it cannot be reproduced from this repository's history and
+a reviewer would otherwise have no way to audit what is being overwritten. It
+remains an exact-hash match -- an owner edit that differs by one byte is still
+preserved. App-owned
 skills are not part of this seed tree; they arrive through manifests and their
 generic ownership sidecar.
 `.seed-version`/`SEED_VERSION` are kept as a
@@ -50,8 +59,18 @@ _UNMODIFIED_MIGRATIONS = {
   "cron.md": {
     "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
     "ed100cb496b887a7951adc967e92cda1449c4f8594f7859fbd32762221d24914",
+    # Every remaining baked generation that still shows the owner service token
+    # as the example an app job should read.  An instance sitting on one of
+    # these keeps the pre-app-token guidance until it is registered here, so
+    # the migration is only as complete as this set.
+    "76ab03fd128157715b388b16146239217f57bba62c5248b8192a39639d0200b1",
+    "e4539739815b80b4c52ca2c56f2a4055e7a4a12cd1843c0cb5077a149547acd1",
     # Locally curated pre-app-token copy. It tells scheduled app jobs to read
     # the owner service token, contradicting supervised $APP_TOKEN authority.
+    # Not a baked generation: it exists only on instances whose owner edited
+    # this skill before the app-token migration, which is why the digest
+    # cannot be reproduced from this repository's history.  Registered
+    # deliberately -- see the propagation policy note in the module docstring.
     "16055ea6ba6e4663636f87fde9868aa98d49ab39c5037ff90fa673d96c259cd9",
   },
   "recovery.md": {
@@ -92,6 +111,11 @@ _UNMODIFIED_MIGRATIONS = {
   "resolving-app-git.md": {
     # v17 baked copy: resolution is an explicit installer replay.
     "6d462f1711891a182c26e212a1ec8fc922eeb02faee45e70ab9b2becfba24f5a",
+    # Pre-v17 baked copy still describing the retired source watcher
+    # ("finish by saving — the watcher does the rest"). It contradicts the
+    # resolver prompt in routes/apps.py, which sends the agent here and then
+    # tells it to run resolve_app_update.py. Unmodified copies migrate.
+    "4911c6db2d3d47eb7c3c206b53ca9be9459619f149a78c06c02711422b941127",
   },
   "app-component-shapes.md": {
     "0320609ff924a0954c20d5e5db91ed3681d421d76f6804b24552eb6e8fa5eb31",

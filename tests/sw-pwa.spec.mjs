@@ -7,7 +7,8 @@
  *     content-hashed shell assets (no manual VERSION bump).
  *   - Workbox routing rules cover `/vendor/*`, `esm.sh/*`, and
  *     `/api/proxy?url=*.{img/font}` (SWR).
- *   - Push + notificationclick handlers are present in the built SW.
+ *   - Push + notificationclick handlers are present in the built push
+ *     worker, and its scope stays inside the PWA manifest scope.
  *
  * What this test guards against: any future refactor that
  * accidentally drops precache injection or runtime caching, or
@@ -17,6 +18,15 @@
  */
 import { test, expect } from '@playwright/test'
 import { applyApp } from './app-source.mjs'
+// Import the cache names rather than repeating them. They are deliberately
+// bumped whenever a cached response's policy changes, so a literal here turns
+// every future bump into an unrelated e2e failure 5 minutes into the run —
+// which is exactly what the v4 → v5 CSP bump did.
+import {
+  APP_ASSETS_CACHE,
+  OFFLINE_APPS_CACHE,
+  STANDALONE_APPS_CACHE,
+} from '../frontend/src/sw-cache-policy.js'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const HOSTILE_ORIGIN = process.env.MOBIUS_TEST_HOSTILE_ORIGIN || null
@@ -40,11 +50,45 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
     // SW. Without precacheAndRoute, the migration is incomplete.
     expect(body).toContain('precache')
     expect(body).toMatch(/mobius-vendor|mobius-esm|mobius-proxy/)
-    expect(body).toContain('notificationclick')
-    expect(body).toContain('notification-click')
-    expect(body).toContain('postMessage')
-    expect(body).toMatch(/\.navigate\(/)
+    // Push deliberately does NOT live here — see the push-worker test below.
+    expect(body).not.toContain('notificationclick')
   })
+
+  test('the push worker owns notification handling, inside the PWA scope',
+    async ({ page }) => {
+      // Android hands a push to the installed shell only when the SERVICE
+      // WORKER'S SCOPE resolves to that WebAPK, and a WebAPK's intent filter
+      // carries the manifest `scope` as its pathPrefix. The caching worker is
+      // registered at `/` so it can also serve the standalone mini-app pages,
+      // which puts it outside `/shell/` — so push lives on its own worker.
+      // Get this wrong and every notification becomes a Chrome notification
+      // whose tap leaves the app, which nothing else in CI can see.
+      const res = await page.request.get(`${BASE}/sw-push.js`)
+      expect(res.status()).toBe(200)
+      const body = await res.text()
+      expect(body).toContain('notificationclick')
+      expect(body).toContain('notification-click')
+      expect(body).toContain('postMessage')
+      expect(body).toMatch(/\.navigate\(/)
+
+      const manifest = JSON.parse(
+        await (await page.request.get(`${BASE}/manifest.webmanifest`)).text(),
+      )
+      await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+      const scope = await page.evaluate(async () => {
+        const reg = await navigator.serviceWorker.register(
+          '/sw-push.js', { scope: '/shell/push/' },
+        )
+        return reg.scope
+      })
+      expect(new URL(scope).pathname.startsWith(manifest.scope)).toBe(true)
+
+      // The scope must hold no documents: a page there would be controlled by
+      // this worker, which has no fetch handler, so it would boot the shell
+      // with no precache and no offline fallback.
+      const doc = await page.request.get(`${BASE}/shell/push/`)
+      expect(doc.status()).toBe(404)
+    })
 
   test('manifest is reachable', async ({ page }) => {
     const res = await page.request.get(`${BASE}/manifest.webmanifest`)
@@ -102,8 +146,8 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
       '/vendor/pdfjs/pdf.worker.mjs',
       '/vendor/katex/katex.min.css',
       '/vendor/katex/fonts/KaTeX_Main-Regular.woff2',
-      '/vendor/katex@0.17.0/katex.min.css',
-      '/vendor/katex@0.17.0/fonts/KaTeX_Main-Regular.woff2',
+      '/vendor/katex@0.18.1/katex.min.css',
+      '/vendor/katex@0.18.1/fonts/KaTeX_Main-Regular.woff2',
     ]
 
     await context.setOffline(true)
@@ -169,10 +213,10 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
 
       await page.goto(standaloneUrl, { waitUntil: 'domcontentloaded' })
       await expect(standaloneMarker()).toHaveText(firstMarker)
-      await expect.poll(() => page.evaluate(async url => {
-        const cache = await caches.open('mobius-standalone-v3')
+      await expect.poll(() => page.evaluate(async ({ url, cacheName }) => {
+        const cache = await caches.open(cacheName)
         return !!await cache.match(url)
-      }, standaloneUrl)).toBe(true)
+      }, { url: standaloneUrl, cacheName: STANDALONE_APPS_CACHE })).toBe(true)
 
       // Close the standalone page before applying the edit, so its SSE cannot
       // observe app_updated and mask a stale-navigation-cache regression.
@@ -261,8 +305,8 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
       const appVersion = String(app.updated_at ?? '0').trim() || '0'
       const frameRev = await page.locator('meta[name="mobius-frame-rev"]').getAttribute('content')
       const frameVersion = frameRev ? `${appVersion}-${frameRev}` : appVersion
-      await expect.poll(() => page.evaluate(async ({ appId, appVersion, frameVersion }) => {
-        const cache = await caches.open('mobius-offline-apps-v4')
+      await expect.poll(() => page.evaluate(async ({ appId, appVersion, frameVersion, cacheName }) => {
+        const cache = await caches.open(cacheName)
         const keys = await cache.keys()
         const has = (route, version) => keys.some(request => {
           const url = new URL(request.url)
@@ -273,7 +317,9 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
           frame: has('frame', frameVersion),
           module: has('module', appVersion),
         }
-      }, { appId: app.id, appVersion, frameVersion })).toEqual({
+      }, {
+        appId: app.id, appVersion, frameVersion, cacheName: OFFLINE_APPS_CACHE,
+      })).toEqual({
         frame: true,
         module: true,
       })
@@ -403,10 +449,10 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
         }
       })).toBe('SecurityError')
 
-      const keys = await page.evaluate(async () => {
-        const cache = await caches.open('mobius-app-assets-v2')
+      const keys = await page.evaluate(async cacheName => {
+        const cache = await caches.open(cacheName)
         return (await cache.keys()).map(request => new URL(request.url).pathname)
-      })
+      }, APP_ASSETS_CACHE)
       expect(keys).toContain(`/app-embeds/by-id/${app.id}/index.html`)
       expect(keys).not.toContain(`/app-assets/by-id/${app.id}/index.html`)
       // A response-sandboxed child has an opaque effective origin and is not
