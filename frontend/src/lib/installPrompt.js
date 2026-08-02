@@ -11,7 +11,21 @@ import { isStandaloneDisplay } from '../utils/installPlatform.js'
 
 let captureStarted = false
 let deferredPrompt = null
-let installed = false
+// Two different questions, deliberately kept apart.
+//
+// `launchedInstalled` — "does this document look like it is running AS an
+// installed app?" Inferred from display mode at boot. Good enough to stop the
+// product nagging someone to install what they are already using, and safe
+// when wrong in that direction.
+//
+// `observedInstall` — "did the browser TELL us an install just happened?"
+// Only `appinstalled` sets it. Nothing else may, because no browser on iOS
+// answers "is this app on the home screen"; the in-app browser view iOS opens
+// from a PWA even reports standalone display mode. Inferring installation
+// there made the card congratulate people mid-install. A claim that specific
+// needs evidence that specific.
+let launchedInstalled = false
+let observedInstall = false
 const listeners = new Set()
 
 function emitChange() {
@@ -23,10 +37,9 @@ export function startInstallPromptCapture(
 ) {
   if (!target || captureStarted) return
   captureStarted = true
-  installed = isStandaloneDisplay(target)
+  launchedInstalled = isStandaloneDisplay(target)
 
   target.addEventListener('beforeinstallprompt', (event) => {
-    if (installed) return
     event.preventDefault?.()
     deferredPrompt = event
     emitChange()
@@ -34,15 +47,30 @@ export function startInstallPromptCapture(
 
   target.addEventListener('appinstalled', () => {
     deferredPrompt = null
-    installed = true
+    observedInstall = true
     emitChange()
   })
 }
 
 export function getInstallPromptSnapshot() {
-  if (installed) return 'installed'
+  // An actual prompt is app-specific evidence and outranks the window's
+  // boot-time display-mode guess. This matters when an installed Möbius window
+  // navigates to a mini-app document: the window still looks standalone, but
+  // Chromium may offer a prompt for the mini-app whose manifest is now active.
+  if (observedInstall) return 'installed'
   if (deferredPrompt) return 'ready'
+  if (launchedInstalled) return 'installed'
   return 'manual'
+}
+
+/**
+ * True only when this page WATCHED an install complete. Use this — never the
+ * snapshot above — to tell someone their app is on the home screen. The
+ * snapshot answers "should we stop offering to install", which tolerates a
+ * guess; this answers "did it work", which does not.
+ */
+export function getInstallObservedSnapshot() {
+  return observedInstall
 }
 
 export function subscribeInstallPrompt(listener) {

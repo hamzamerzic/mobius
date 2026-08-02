@@ -10,6 +10,7 @@ import { queryClient, persistOptions } from './queryClient.js'
 import { shellReload } from './lib/shellReloadState.js'
 import { beginEmbedBootstrap } from './lib/chatEmbedBootstrap.js'
 import { startInstallPromptCapture } from './lib/installPrompt.js'
+import { readInstallPass, withoutInstallPass } from './lib/installPassUrl.js'
 import { safeReturnPath } from './lib/safeReturnPath.js'
 import { readStandaloneBoot } from './lib/standaloneBoot.js'
 
@@ -48,6 +49,11 @@ if (EMBED_ROUTE) {
   // Capture Chromium's one-shot install event before setup or sign-in can keep
   // the first-use shell card from mounting.
   startInstallPromptCapture()
+}
+
+function clearInstallPassFromUrl() {
+  const next = withoutInstallPass(window.location.href)
+  if (next) window.history.replaceState(null, '', next)
 }
 
 export default function App() {
@@ -90,22 +96,60 @@ function AppRoot() {
   const savedResumeStep = hasToken ? setupSession.getResumeStep() : null
   const resumeStep = savedResumeStep === 'account' ? savedResumeStep : null
   let ssoSignal = ''
+  // A one-time install pass on a standalone app's FIRST launch. iOS gives the
+  // newly installed web app its own empty storage, so this is the only moment
+  // it can inherit the session that installed it. Read it even when this
+  // container already has a token so the stale credential is still stripped.
+  let installPass = ''
   try {
     const params = new URLSearchParams(window.location.search)
     if (params.get('mobius_sso') === '1') ssoSignal = 'handoff'
     if (params.get('mobius_sso_error') === '1') ssoSignal = 'error'
+    installPass = readInstallPass(window.location.search, STANDALONE_APP)
   } catch { /* ignore */ }
   const initialStatus = resumeStep
     ? 'setup'
     : (hasToken
         ? 'shell'
-        : (ssoSignal === 'handoff'
-            ? 'sso'
-            : (ssoSignal === 'error' ? 'sso-error' : 'loading')))
+        : (installPass
+            ? 'install-pass'
+            : (ssoSignal === 'handoff'
+                ? 'sso'
+                : (ssoSignal === 'error' ? 'sso-error' : 'loading'))))
   const [status, setStatus] = useState(initialStatus)
   const setupStatusQuery = setupQueries.status.useQuery({
-    enabled: !hasToken && !ssoSignal,
+    enabled: !hasToken && !ssoSignal && status !== 'install-pass',
   })
+  useEffect(() => {
+    if (installPass && hasToken) clearInstallPassFromUrl()
+  }, [installPass, hasToken])
+  useEffect(() => {
+    if (status !== 'install-pass') return undefined
+    let cancelled = false
+    // Strip the pass from the URL whichever way this goes: it is spent on
+    // redemption, and the address stays in the home-screen icon forever.
+    async function redeem() {
+      try {
+        const response = await api.auth.installPass.redeem(
+          installPass, STANDALONE_APP.slug,
+        )
+        if (!response.ok) throw new Error('INSTALL_PASS_REJECTED')
+        const data = await response.json()
+        if (!data?.access_token) throw new Error('INSTALL_PASS_REJECTED')
+        setToken(data.access_token)
+        clearInstallPassFromUrl()
+        if (!cancelled) setStatus('shell')
+      } catch {
+        // An expired or spent pass is not an error worth showing: fall
+        // through to the ordinary sign-in, which is where this launch would
+        // have landed anyway.
+        clearInstallPassFromUrl()
+        if (!cancelled) setStatus('loading')
+      }
+    }
+    void redeem()
+    return () => { cancelled = true }
+  }, [status, installPass])
   useEffect(() => {
     if (status !== 'sso') return undefined
     let cancelled = false
@@ -214,6 +258,7 @@ function AppRoot() {
     return <RouteLoading />
   }
   if (status === 'sso') return <RouteLoading />
+  if (status === 'install-pass') return <RouteLoading />
   if (status === 'sso-error') return (
     <ManagedSignInError
       onRetry={() => window.location.replace(api.auth.sso.startUrl('/shell/'))}

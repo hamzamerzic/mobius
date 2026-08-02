@@ -366,6 +366,20 @@ export const api = {
       ),
       consume: () => apiFetch('/auth/sso/session', { method: 'POST' }),
     },
+    // One-time sign-in pass for an app being added to the iOS home screen,
+    // where the new web app gets its own empty storage container. `mint`
+    // needs the current session; `redeem` runs in the installed app, which
+    // by definition has none yet.
+    installPass: {
+      mint: (slug) => apiFetch('/auth/install-pass', {
+        method: 'POST',
+        body: JSON.stringify({ slug }),
+      }),
+      redeem: (installPass, slug) => apiFetch('/auth/install-pass/redeem', {
+        method: 'POST',
+        body: JSON.stringify({ install_pass: installPass, slug }),
+      }),
+    },
     setup: {
       status: () => apiFetch('/auth/setup/status'),
       create: (payload) => apiFetch('/auth/setup', {

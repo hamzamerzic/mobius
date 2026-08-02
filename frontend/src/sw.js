@@ -68,6 +68,8 @@ import {
   shouldServeCacheFirst,
   shouldFallBackToCacheOnError,
   isAppCodeRoute,
+  appCodeCacheKey,
+  appCodeRequestMayBeStored,
   appCodeStoreAction,
   supersededVersionKeys,
   entriesToTrim,
@@ -466,11 +468,8 @@ function appCodeHandler(cacheName, { gated }) {
     // The module URL carries a rotating auth token and a retry `_=` buster;
     // strip both so the cache key is stable across token rotation (else
     // every load is a miss and the offline entry is unreachable).
-    const key = new URL(request.url)
-    key.searchParams.delete('token')
-    key.searchParams.delete('_')
-    key.searchParams.delete('install')
-    const cacheKey = key.href
+    const cacheKey = appCodeCacheKey(request.url)
+    const requestMayBeStored = appCodeRequestMayBeStored(request.url)
 
     // The (bounded) network fetch that refreshes the cache. cache:'reload'
     // bypasses the browser HTTP cache so we get a full 200 body, never a 304
@@ -498,7 +497,7 @@ function appCodeHandler(cacheName, { gated }) {
       // ungated (frame/module) stores every 200; gated (standalone) stores
       // only X-Mobius-Offline:1 and PURGES a header-less 200 so an app
       // toggled offline_capable OFF self-heals on the next refresh.
-      const store = resp
+      const store = resp && requestMayBeStored
         ? applyAppCodeStore(cache, cacheKey, resp, gated)
         : Promise.resolve()
       return { resp, store }
@@ -711,9 +710,8 @@ setCatchHandler(async ({ request, url }) => {
 // Message payload (at least one URL):
 //   { type: 'moebius:precache-app', frameUrl?: string, moduleUrl?: string }
 //
-// Key-normalization mirrors appCodeHandler exactly (strips token, _,
-// install query params) so the warmed cache entries are found on the next
-// cache.match(). Storage follows the UNGATED frame/module policy
+// Key-normalization uses appCodeHandler's shared policy so warmed entries are
+// found on the next cache.match(). Storage follows the UNGATED frame/module policy
 // (appCodeStoreAction with gated=false): any 200 lands, matching the live
 // open path. URLs are validated against isAppCodeRoute so a page message
 // can only prime the frame/module routes, nothing else.
@@ -726,21 +724,8 @@ self.addEventListener('message', (event) => {
   const { frameUrl, moduleUrl } = msg
   if (!frameUrl && !moduleUrl) return
 
-  // Normalize a URL to its cache key (strip token/_ /install params).
-  function normKey(rawUrl) {
-    try {
-      const u = new URL(rawUrl, self.location.origin)
-      u.searchParams.delete('token')
-      u.searchParams.delete('_')
-      u.searchParams.delete('install')
-      return u.href
-    } catch {
-      return null
-    }
-  }
-
   async function warmOne(rawUrl, cacheName) {
-    const key = normKey(rawUrl)
+    const key = appCodeCacheKey(rawUrl, self.location.origin)
     if (!key) return
     const url = new URL(key)
     if (url.origin !== self.location.origin || !isAppCodeRoute(url.pathname)) return
