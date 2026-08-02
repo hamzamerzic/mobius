@@ -555,7 +555,7 @@ def test_documented_browser_commands_use_disposable_runner():
   assert '/home/' not in test_script
 
 
-def test_pull_requests_run_required_suites_and_protected_channel_publishes_image():
+def test_pull_requests_run_required_suites_and_cutover_publishes_immutable_image():
   test_workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
     encoding="utf-8"
   )
@@ -563,6 +563,10 @@ def test_pull_requests_run_required_suites_and_protected_channel_publishes_image
     ROOT / ".github" / "workflows" / "external-recovery-image.yml"
   ).read_text(encoding="utf-8")
   assert not (ROOT / ".github" / "workflows" / "main-image.yml").exists()
+  assert not (
+    ROOT / ".github" / "workflows" / "compatibility-bootstrap.yml"
+  ).exists()
+  assert not (ROOT / "scripts" / "compatibility_bootstrap.py").exists()
   test_triggers = test_workflow.split("\npermissions:\n", 1)[0]
   image_triggers = image_workflow.split("\npermissions:\n", 1)[0]
   backend = test_workflow.split("\n  backend:\n", 1)[1].split(
@@ -594,14 +598,30 @@ def test_pull_requests_run_required_suites_and_protected_channel_publishes_image
     "run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
   )
   prepublish = image_workflow.index("/internal/core-releases/prepublish")
+  identity_head_guard = image_workflow.index(
+    'test "$release_head" = "$GITHUB_SHA"'
+  )
+  gate_head_guard_contract = (
+    "          current_sha=$(git ls-remote --exit-code origin "
+    '"$MOBIUS_PLATFORM_RELEASE_REF" | awk \'NR == 1 { print $1 }\')\n'
+    '          test "$current_sha" = "$GITHUB_SHA"\n'
+    "          while true; do\n"
+    "            http_status=$(curl"
+  )
+  gate_head_guard = image_workflow.index(gate_head_guard_contract)
   registry_login = image_workflow.index("docker/login-action@")
   build = image_workflow.index("docker/build-push-action@")
   bind = image_workflow.index("/internal/core-releases/bind")
-  move_channel = image_workflow.index('--tag "$MOBIUS_RELEASE_CHANNEL"')
   redeploy = image_workflow.index("/internal/core-releases/postpublish")
   assert immutable_tag in image_workflow
-  assert prepublish < registry_login < build < bind < move_channel < redeploy
-  assert "--prefer-index=false" in image_workflow
+  assert identity_head_guard < gate_head_guard < prepublish
+  assert image_workflow.count('test "$release_head" = "$GITHUB_SHA"') == 1
+  assert image_workflow.count('test "$current_sha" = "$GITHUB_SHA"') == 1
+  assert 'echo "release_head=$release_head"' not in image_workflow
+  assert prepublish < registry_login < build < bind < redeploy
+  between_bind_and_redeploy = image_workflow[bind:redeploy]
+  assert "docker buildx imagetools create" not in between_bind_and_redeploy
+  assert "finalization starts" in between_bind_and_redeploy
   assert "completed_replay" in image_workflow
   assert "steps.gate.outputs.mode != 'completed_replay'" in image_workflow
   assert "MOBIUS_RECOVERY_IMAGE_REPOSITORY" in image_workflow
@@ -619,27 +639,26 @@ def test_pull_requests_run_required_suites_and_protected_channel_publishes_image
   assert 'test "$GITHUB_REF" = "$MOBIUS_PLATFORM_RELEASE_REF"' in image_workflow
   assert image_workflow.count(
     "git fetch --quiet --no-tags origin refs/heads/main"
-  ) == 5
+  ) == 4
   assert image_workflow.count(
     'git merge-base --is-ancestor "$RECOVERY_CUTOVER_PREREQUISITE_SHA" "$main_sha"'
-  ) == 5
+  ) == 4
   assert image_workflow.count(
     'git cat-file -e "$main_sha:backend/recovery/recoveryd.py"'
-  ) == 5
+  ) == 4
   assert "git rev-list --first-parent --reverse" in image_workflow
   assert 'git rev-parse "${removal_root_sha}^1"' in image_workflow
   assert image_workflow.count(
     "Refusing a removal lineage already contained by main"
-  ) == 5
+  ) == 4
   assert image_workflow.count(
     'git merge-base --is-ancestor "$REMOVAL_ROOT_SHA" "$main_sha"'
-  ) == 4
+  ) == 3
   assert (
     'git merge-base --is-ancestor "$removal_root_sha" "$main_sha"'
     in image_workflow
   )
   assert "Refusing to bind or publish a stale unbound release" in image_workflow
-  assert "Refusing to move the channel from a stale normal release" in image_workflow
   assert 'if [ "$RELEASE_MODE" = resume_cutover ]' in image_workflow
   assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" in image_workflow
   assert "persist-credentials: false" in image_workflow
@@ -649,7 +668,10 @@ def test_pull_requests_run_required_suites_and_protected_channel_publishes_image
   assert "ghcr.io/mobius-os/mobius:daily" not in image_workflow
   assert '--tag "$MOBIUS_IMAGE_REPOSITORY:main"' not in image_workflow
   assert '--tag "$MOBIUS_IMAGE_REPOSITORY:daily"' not in image_workflow
-  assert image_workflow.count('--tag "$MOBIUS_RELEASE_CHANNEL"') == 1
+  assert '--tag "$MOBIUS_RELEASE_CHANNEL"' not in image_workflow
+  assert "docker buildx imagetools create" not in image_workflow
+  assert "normal_release" not in image_workflow
+  assert "prewrite" not in image_workflow
   assert "cache-to: type=gha,mode=max,ignore-error=true" in image_workflow
   assert "load: true" not in image_workflow
 

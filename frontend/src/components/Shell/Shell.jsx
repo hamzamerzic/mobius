@@ -135,6 +135,7 @@ const APP_SETTINGS_SECTIONS = new Set([
   'background-agents',
   'models',
 ])
+const EMPTY_LIST = Object.freeze([])
 // Mode timing lives with the pure snapshot geometry in workspaceView.js; browser
 // transition completion owns its lifetime, so Shell has no animation timers.
 const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
@@ -456,8 +457,8 @@ export default function Shell() {
   const chatsQuery = chatQueries.list.useQuery({
     reconcile: reconcileCreatedChats,
   })
-  const apps = appsQuery.data ?? []
-  const chats = chatsQuery.data ?? []
+  const apps = appsQuery.data ?? EMPTY_LIST
+  const chats = chatsQuery.data ?? EMPTY_LIST
   const appsStatus = apps.length > 0 || appsQuery.isSuccess
     ? 'success'
     : (appsQuery.isError ? 'error' : 'loading')
@@ -1118,10 +1119,6 @@ export default function Shell() {
     const position = placeContextMenu({
       clientPoint: { x: tabMenu.x, y: tabMenu.y },
       clientViewport: rootRect,
-      layoutViewport: {
-        width: root.offsetWidth || root.clientWidth || rootRect.width,
-        height: root.offsetHeight || root.clientHeight || rootRect.height,
-      },
       menuSize: { width: menu.offsetWidth, height: menu.offsetHeight },
     })
     menu.style.setProperty('--workspace-menu-x', `${position.x}px`)
@@ -1199,7 +1196,14 @@ export default function Shell() {
   const handleToggleViewMode = useCallback((cause) => {
     const ws = workspaceStateRef.current.ws
     const leavingBuilder = ws.viewMode !== 'single'
-    const to = leavingBuilder ? 'single' : 'panes'
+    const requestedTo = leavingBuilder ? 'single' : 'panes'
+    const to = paneModel.setViewMode(ws, requestedTo).viewMode
+    // Builder has no empty state. The model seeds an empty tree from Standard's
+    // current screen; only the New Chat landing has no concrete tab to seed. Do
+    // not arm a browser scene or twist the logo for that honest no-op.
+    if (to === ws.viewMode) {
+      return { animated: false, totalMs: 0, transitionId: null, to, changed: false }
+    }
     const plan = deriveModeSnapshotPlan({ workspace: ws, projection, contentRect })
 
     // One browser-owned scene transaction commits BOTH durable authorities. The

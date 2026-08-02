@@ -53,9 +53,9 @@
  * ║   plugs a different platform's behaviour. Don't simplify       ║
  * ║   without re-verifying on iOS Safari AND Android Chrome.       ║
  * ║                                                                ║
- * ║   `reqIdRef` lives in THIS file (not ChatSettingsPanel) so     ║
- * ║   the stale-PATCH monotonic counter survives panel unmount.    ║
- * ║   A panel-local ref would reset between popover opens.         ║
+ * ║   `settingsSaveTailRef` comes from ChatView and outlives this  ║
+ * ║   popover. Picker writes therefore keep their order when the   ║
+ * ║   panel closes, and message sends can share the same boundary. ║
  * ║                                                                ║
  * ╚════════════════════════════════════════════════════════════════╝
  */
@@ -87,6 +87,7 @@ export default function ComposerPopover({
   restartResumeError,
   onRestartResumeChange,
   providerSwitchState,
+  settingsSaveTailRef,
   onOpenInspector,
   onOpenSummary,
   embedded = false,
@@ -94,11 +95,6 @@ export default function ComposerPopover({
   const [open, setOpen] = useState(false)
   const wrapRef = useRef(null)
   const triggerRef = useRef(null)
-  // Monotonic PATCH request counter. Lives here (not in ChatSettingsPanel)
-  // because the panel unmounts on popover close; a panel-local ref would
-  // reset between opens and break the stale-response guard. See
-  // ChatSettingsPanel's `reqIdRef` prop for the rationale.
-  const reqIdRef = useRef(0)
   // Tracks whether the chat textarea was focused at the moment the
   // popover opened. If yes, refocus after a picker action so the
   // soft keyboard stays open. If no (user tapped + with keyboard
@@ -123,9 +119,17 @@ export default function ComposerPopover({
     const measure = () => {
       const trigger = triggerRef.current
       if (!trigger) return
+      const rect = trigger.getBoundingClientRect()
       setMaxHeight(popoverMaxHeight({
-        triggerTop: trigger.getBoundingClientRect().top,
+        triggerTop: rect.top,
+        // `triggerBottom` + `viewportHeight` are not extra precision — they are
+        // how the helper tells which coordinate space `rect` is in. iOS reports
+        // fixed-layer rects against the VISUAL viewport once the keyboard
+        // offsets it, and subtracting `offsetTop` as well collapsed the panel
+        // to a 14px sliver. See composerPopoverHeight.js.
+        triggerBottom: rect.bottom,
         viewportTop: window.visualViewport?.offsetTop || 0,
+        viewportHeight: window.visualViewport?.height || 0,
         clipTop: nearestClipTop(trigger),
       }))
     }
@@ -279,7 +283,7 @@ export default function ComposerPopover({
                 onRestartResumeChange={onRestartResumeChange}
                 onChange={onChangeChatInfo}
                 providerSwitchState={providerSwitchState}
-                reqIdRef={reqIdRef}
+                settingsSaveTailRef={settingsSaveTailRef}
                 wasInputFocusedRef={wasInputFocusedRef}
               />
             </div>

@@ -1847,7 +1847,7 @@ async def _auto_resume_chat(
                 "role": "user",
                 "content": "continue",
                 "ts": int(time.time() * 1000),
-                "kind": "auto_continuation",
+                "kind": "continuation",
                 "continuation_reason": resume_reason,
                 # A retry after AppendPending succeeded but a later step failed
                 # must not enqueue a second synthetic continuation.
@@ -1997,36 +1997,17 @@ async def sweep_reset_parks(
           "fall back to manual recovery",
           exc_info=True,
         )
-  owner_loaded = False
-  owner = None
+  # Notification persistence/delivery is deliberately outside the state loop.
+  # A Web Push endpoint can take tens of seconds to fail; doing that before the
+  # next restart continuation made a six-chat recovery batch take minutes and
+  # let manual Resume taps race the still-authorized automatic work. First
+  # settle every durable continuation, then deliver the best-effort notices
+  # concurrently through push.notify_owner_async (which keeps remote I/O off
+  # the event loop).
+  notification_requests: list[tuple[str, bool]] = []
 
-  def notify_due(chat_id: str, run: models.ChatRun) -> None:
-    nonlocal owner, owner_loaded
-    try:
-      if not owner_loaded:
-        owner = db.query(models.Owner).first()
-        owner_loaded = True
-      if owner is not None:
-        from app import push
-        restarted = run.park_reason == "restart"
-        push.notify_owner(
-          db,
-          owner.id,
-          title=("Möbius restarted" if restarted else LIMIT_RESET_NOTIFY_TITLE),
-          body=(
-            "Your paused turn is ready."
-            if restarted
-            else LIMIT_RESET_NOTIFY_BODY
-          ),
-          source_type="system",
-          source_id=chat_id,
-          target=f"/shell/?chat={chat_id}",
-        )
-    except Exception:
-      owner_loaded = True
-      log.warning(
-        "continuation notify failed chat_id=%s", chat_id, exc_info=True,
-      )
+  def queue_due_notification(chat_id: str, run: models.ChatRun) -> None:
+    notification_requests.append((chat_id, run.park_reason == "restart"))
 
   def auto_resume_rejection(chat, run) -> str | None:
     pending = list(chat.pending_messages or []) if chat is not None else []
@@ -2123,11 +2104,11 @@ async def sweep_reset_parks(
           continue
         resolved.append(chat_id)
         if prepared.get("notify") and not chat_gone:
-          notify_due(chat_id, run)
+          queue_due_notification(chat_id, run)
         continue
 
       if prepared.get("notify"):
-        notify_due(chat_id, run)
+        queue_due_notification(chat_id, run)
       if (
         not restart_auto_resume
         and not _claim_limit_auto_resume_slot()
@@ -2170,7 +2151,47 @@ async def sweep_reset_parks(
       continue
     resolved.append(chat_id)
     if should_notify and not chat_gone:
-      notify_due(chat_id, run)
+      queue_due_notification(chat_id, run)
+  if notification_requests:
+    try:
+      owner_row = db.query(models.Owner.id).first()
+      owner_id = owner_row[0] if owner_row is not None else None
+    except Exception:
+      owner_id = None
+      log.warning("continuation notification owner lookup failed", exc_info=True)
+    if owner_id is not None:
+      from app import push
+      from app.database import SessionLocal
+
+      async def deliver_due_notification(
+        chat_id: str, restarted: bool,
+      ) -> None:
+        try:
+          with SessionLocal() as notification_db:
+            await push.notify_owner_async(
+              notification_db,
+              owner_id,
+              title=(
+                "Möbius restarted" if restarted else LIMIT_RESET_NOTIFY_TITLE
+              ),
+              body=(
+                "Your paused turn is ready."
+                if restarted
+                else LIMIT_RESET_NOTIFY_BODY
+              ),
+              source_type="system",
+              source_id=chat_id,
+              target=f"/shell/?chat={chat_id}",
+            )
+        except Exception:
+          log.warning(
+            "continuation notify failed chat_id=%s", chat_id, exc_info=True,
+          )
+
+      await asyncio.gather(*(
+        deliver_due_notification(chat_id, restarted)
+        for chat_id, restarted in notification_requests
+      ))
   if resolved:
     log.info(
       "continuation sweep resolved %d park(s): %s",
@@ -2737,6 +2758,8 @@ async def _terminal_setup_error_cleanup(
   chat_id: str,
   run_token: str = "",
   run_gen: int | None = None,
+  *,
+  error_message: str,
 ) -> chat_queue.TerminalDisposition:
   """Bounded terminal cleanup for a setup-time error before any runner ran.
 
@@ -2748,9 +2771,9 @@ async def _terminal_setup_error_cleanup(
   StartTurn's marker can't be erased and a wedged writer/lock can't hang
   teardown):
 
-    (0) ownership gate, (1) await ClearPending (strict),
-    (2) await FinishRun (strict), (3) discard_starting,
-    (4) forget (if-current), all inside
+    (0) ownership gate, (1) await Finalize with the error (strict),
+    (2) await ClearPending (strict), (3) await FinishRun (strict),
+    (4) discard_starting, (5) forget (if-current), all inside
     `asyncio.timeout(TERMINAL_LOCK_TIMEOUT_SECS)` around the queue lock.
 
   The ownership gate (step 0) mirrors `_complete_turn`'s `we_own_gen` check:
@@ -2783,6 +2806,14 @@ async def _terminal_setup_error_cleanup(
       async with chat_queue.get_lock(chat_id):
         if run_gen is not None and current_run_generation(chat_id) != run_gen:
           return chat_queue.TerminalDisposition.STALE_NO_ACTION
+        if run_token:
+          await _await_ack(get_writer().submit(Finalize(
+            chat_id=chat_id,
+            run_token=run_token,
+            snapshot=build_assistant_message([
+              {"type": "error", "message": error_message},
+            ]),
+          )))
         await _clear_pending_strict(chat_id)
         await _finish_run_strict(
           chat_id, run_token, terminal_status="failed",
@@ -4121,8 +4152,11 @@ async def _run_chat_impl_with_db(
 
   owner = db.query(models.Owner).first()
   if not owner:
-    bc.publish({"type": "error", "message": "No owner configured."})
-    disposition = await _terminal_setup_error_cleanup(chat_id, run_token or "", run_gen)
+    error_message = "No owner configured."
+    bc.publish({"type": "error", "message": error_message})
+    disposition = await _terminal_setup_error_cleanup(
+      chat_id, run_token or "", run_gen, error_message=error_message,
+    )
     bc.publish({"type": "done"})
     clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
     bc.mark_completed()
@@ -4157,6 +4191,12 @@ async def _run_chat_impl_with_db(
     "CHAT_ID": chat_id,
   })
   base_env.update(app_context_env)
+  # Overrides any inherited TMPDIR from _safe_keys: agent scratch belongs on
+  # the bounded data volume, never the container's unbounded overlay. TMP and
+  # TEMP travel with it so a tool reading either does not escape back to /tmp.
+  from app.agent_scratch import scratch_for_chat
+  scratch = scratch_for_chat(chat_id)
+  base_env["TMPDIR"] = base_env["TMP"] = base_env["TEMP"] = str(scratch)
   # Partner viewport (sent by the React shell on each turn). The agent
   # uses these when taking screenshots so the framing matches what the
   # partner actually sees — preview_shell.sh reads them, mini-app
@@ -4257,12 +4297,10 @@ async def _run_chat_impl_with_db(
   except Exception:
     log.exception("failed to snapshot system prompt chat_id=%s", chat_id)
     db.rollback()
-    bc.publish({
-      "type": "error",
-      "message": "Could not preserve this chat's system prompt snapshot.",
-    })
+    error_message = "Could not preserve this chat's system prompt snapshot."
+    bc.publish({"type": "error", "message": error_message})
     disposition = await _terminal_setup_error_cleanup(
-      chat_id, run_token or "", run_gen,
+      chat_id, run_token or "", run_gen, error_message=error_message,
     )
     bc.publish({"type": "done"})
     clear_active_broadcast_if(bc)
@@ -4344,7 +4382,9 @@ async def _run_chat_impl_with_db(
         provider_free=True,
       )
     bc.publish({"type": "error", "message": auth_error})
-    disposition = await _terminal_setup_error_cleanup(chat_id, run_token or "", run_gen)
+    disposition = await _terminal_setup_error_cleanup(
+      chat_id, run_token or "", run_gen, error_message=auth_error,
+    )
     bc.publish({"type": "done"})
     clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
     bc.mark_completed()
@@ -4610,11 +4650,11 @@ async def _run_chat_impl_with_db(
     "unsupported provider chat_id=%s provider=%s — no SDK path",
     chat_id, provider.name,
   )
-  bc.publish({
-    "type": "error",
-    "message": f"Provider {provider.name!r} has no supported runtime.",
-  })
-  disposition = await _terminal_setup_error_cleanup(chat_id, run_token or "", run_gen)
+  error_message = f"Provider {provider.name!r} has no supported runtime."
+  bc.publish({"type": "error", "message": error_message})
+  disposition = await _terminal_setup_error_cleanup(
+    chat_id, run_token or "", run_gen, error_message=error_message,
+  )
   clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
   bc.publish({"type": "done"})
   bc.mark_completed()

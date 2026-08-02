@@ -21,15 +21,12 @@ import {
 } from './streamReducers.js'
 import {
   readStoredStreamSnapshot,
-  writeStoredStreamSnapshot,
+  bufferStreamSnapshot,
   clearStoredStreamSnapshot,
   flushStoredStreamSnapshot,
-  registerMountedChat,
-  unregisterMountedChat,
 } from './streamSnapshotCache.js'
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 import { ChatTransportError, chatHttpError } from './sendErrors.js'
-import { perfTime } from '../../lib/perfProbe.js'
 import {
   reportNetworkReachable,
   verifyConnectivity,
@@ -161,6 +158,10 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  * @param {(info?: {continues: boolean, promotedTs: number|null}) => void} [callbacks.onStreamEnd]
  *   Fired one rAF after the `done` event so React commits before the
  *   caller promotes streamItems to messages.
+ * @param {() => void} [callbacks.onConnectionLost]
+ *   Fired when this browser exhausts its reconnect attempts but the backend
+ *   turn may still be running. Callers may preserve the last-good payload,
+ *   but must not treat this as a terminal run boundary.
  * @param {(event: object) => void} [callbacks.onSystemEvent]
  *   Fired for non-chat SSE events (theme/app/shell). Not buffered.
  * @param {(opts?: {force?: boolean}) => void} [callbacks.onNeedsRefresh]
@@ -195,6 +196,7 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  *   sendMessage: (text: string, attachments?: Array<object>,
  *                 opts?: {hidden?: boolean, queueOnly?: boolean, cid?: string,
  *                         forceSteer?: boolean, directSteer?: boolean,
+ *                         continuation?: 'manual',
  *                         consumePendingCids?: string[], answers?: object})
  *                 => Promise<object>,
  *   connectToStream: () => void,
@@ -213,6 +215,7 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  */
 export default function useStreamConnection(chatId, {
   onStreamEnd,
+  onConnectionLost,
   onSystemEvent,
   onNeedsRefresh,
   onQueuedTurnStarting,
@@ -253,16 +256,11 @@ export default function useStreamConnection(chatId, {
     const next = typeof updater === 'function' ? updater(latestItemsRef.current) : updater
     if (next.length > 0) lastGoodItemsRef.current = next
     latestItemsRef.current = next
-    // Counted because this serialises the whole live turn to sessionStorage on
-    // every reveal commit — up to once per animation frame — so its cost grows
-    // with the length of the answer being streamed. sessionStorage is a
-    // synchronous main-thread write, and mobile flash is far slower than a
-    // desktop page cache, so the same call is not the same cost on a phone.
+    // Keep the latest reconnect snapshot in the cache's write-behind buffer.
+    // sessionStorage serialization happens only at lifecycle/terminal flush
+    // boundaries, never on this frame-paced reveal path.
     if (next.length > 0) {
-      perfTime(
-        'stream.snapshotWrite',
-        () => writeStoredStreamSnapshot(activeStreamChatIdRef.current, next),
-      )
+      bufferStreamSnapshot(activeStreamChatIdRef.current, next)
     }
     _setStreamItems(next)
   }
@@ -545,6 +543,10 @@ export default function useStreamConnection(chatId, {
     // captures its ts from the initial DB fetch, not from streamItems;
     // clearing streamItems here does not interact with that gate.
     disconnect()
+    // disconnect() flushes any final text reveal into setStreamItems. The
+    // recovery snapshot is write-behind, so land that completed old-chat frame
+    // before activeStreamChatIdRef moves to the next chat below.
+    flushStoredStreamSnapshot(activeStreamChatIdRef.current)
     setStreamItems([])
     textBufferRef.current = ''
     textBufferItemIdRef.current = null
@@ -567,18 +569,10 @@ export default function useStreamConnection(chatId, {
     _setStreamItems(stored)
   }, [chatId])
 
-  // Multi-pane snapshot throttle lifecycle (design §2 "Perf budget"). Counting
-  // this mounted ChatView arms the >=250ms trailing-edge throttle in
-  // streamSnapshotCache ONLY once a second chat is mounted; a lone chat writes
-  // synchronously (byte-identical). The flush half of the contract runs here:
-  // pagehide and the shell-reload handoff must land the pending trailing write
-  // synchronously, and so must this hook's own unmount — otherwise the
-  // remount/reconnect fallback could roll back to a stale frame across the
-  // handoff. ChatView drives the visibility-swap flush (a pane hidden) via
-  // flushStreamSnapshot below; the terminal-promotion flush lives in the `done`
-  // / EOF paths.
+  // Lifecycle exits synchronously flush the latest buffered recovery snapshot.
+  // Chat switches, terminal promotion, and pane visibility own their equivalent
+  // boundaries at the call sites where those transitions happen.
   useEffect(() => {
-    registerMountedChat()
     const flushSelf = () => flushStoredStreamSnapshot(activeStreamChatIdRef.current)
     window.addEventListener('pagehide', flushSelf)
     window.addEventListener(BEFORE_SHELL_RELOAD_EVENT, flushSelf)
@@ -586,7 +580,6 @@ export default function useStreamConnection(chatId, {
       window.removeEventListener('pagehide', flushSelf)
       window.removeEventListener(BEFORE_SHELL_RELOAD_EVENT, flushSelf)
       flushSelf()
-      unregisterMountedChat()
     }
   }, [])
 
@@ -606,6 +599,8 @@ export default function useStreamConnection(chatId, {
   const connectRef = useRef(null)
   const onStreamEndRef = useRef(onStreamEnd)
   onStreamEndRef.current = onStreamEnd
+  const onConnectionLostRef = useRef(onConnectionLost)
+  onConnectionLostRef.current = onConnectionLost
   const onSystemEventRef = useRef(onSystemEvent)
   onSystemEventRef.current = onSystemEvent
   const onNeedsRefreshRef = useRef(onNeedsRefresh)
@@ -1170,7 +1165,7 @@ export default function useStreamConnection(chatId, {
             // Terminal promotion (design §2 flush contract): land the final
             // streamed frame synchronously before the promote, so a reload
             // landing between `done` and ChatView's clearStreamItems restores
-            // the terminal content, not a coalesced-away earlier frame.
+            // the terminal content, not an earlier stored frame.
             flushStoredStreamSnapshot(activeStreamChatIdRef.current)
             // Promote before flipping `isStreaming` false. `flushBuffer()`,
             // `commitCatchUp()`, and setStreamItems keep latestItemsRef
@@ -1202,7 +1197,7 @@ export default function useStreamConnection(chatId, {
         // EOF without an explicit done is still terminal here. Promote and
         // clear running state in the same batch so the final live row does not
         // briefly collapse into the generic thinking dots. Flush the pending
-        // trailing snapshot first (terminal-promotion flush, design §2).
+        // buffered snapshot first (terminal-promotion flush, design §2).
         flushStoredStreamSnapshot(activeStreamChatIdRef.current)
         clearReconnectingNote()
         onStreamEndRef.current?.()
@@ -1258,14 +1253,13 @@ export default function useStreamConnection(chatId, {
           _setStreamItems(saved)
         }
         // Retries are exhausted for THIS browser connection, not necessarily
-        // for the backend turn. Signal stream-end so any last-good partial can
-        // be promoted locally, then force a DB refresh; ChatView rehydrates
-        // `running` from the server and flips the composer back to active if
-        // the agent is still working. Without that refresh, a mobile sleep /
-        // network handoff could make the UI look idle while the server was
-        // still running.
+        // for the backend turn. Preserve any last-good partial through the
+        // explicitly non-terminal callback, then force an authoritative DB
+        // refresh. A connection failure must never masquerade as a run-end:
+        // doing so briefly retired run-owned UI (including the active goal)
+        // before the refresh restored `running` from the server.
         requestAnimationFrame(() => {
-          onStreamEndRef.current?.()
+          onConnectionLostRef.current?.()
           onNeedsRefreshRef.current?.({ force: true })
         })
       } else {
@@ -1303,6 +1297,7 @@ export default function useStreamConnection(chatId, {
       steeredMessages = undefined,
       answers = undefined,
       question_id = undefined,
+      continuation = undefined,
     } = {},
   ) => {
     activeStreamChatIdRef.current = chatIdRef.current
@@ -1355,6 +1350,7 @@ export default function useStreamConnection(chatId, {
       // recovered hidden continuation.
       if (answers) body.answers = answers
       if (question_id) body.question_id = question_id
+      if (continuation) body.continuation = continuation
       if (attachments && attachments.length > 0) {
         body.attachments = attachments
       }
@@ -1451,7 +1447,17 @@ export default function useStreamConnection(chatId, {
       // streaming whatever the runner emits next. Returning here
       // prevents a redundant reconnect that would close the live
       // stream and replay the full catch-up burst.
-      if (data.status === 'answer_delivered') return data
+      if (data.status === 'answer_delivered') {
+        // A cold entry on a parked question intentionally skips replaying the
+        // settled pre-question event log. The answer releases that barrier, so
+        // attach now before the runner can publish its continuation. Existing
+        // live viewers retain their socket and avoid a redundant full replay.
+        if (!isStreamingRef.current) {
+          wantsReconnectRef.current = true
+          connectRef.current?.(true)
+        }
+        return data
+      }
       // A recovered AskUserQuestion answer (the process restarted after
       // persisting the question block) starts a fresh hidden continuation.
       // Its response declares `answer_turn: "new"` for ChatView's bridge
@@ -1668,7 +1674,7 @@ export default function useStreamConnection(chatId, {
     })
   }
 
-  // Flush the pending trailing stream snapshot on demand. ChatView calls this
+  // Flush the pending buffered stream snapshot on demand. ChatView calls this
   // on the visibility-swap boundary (a pane hidden) — the one flush trigger the
   // hook can't observe on its own — completing the design §2 flush contract.
   const flushStreamSnapshot = useCallback(() => {

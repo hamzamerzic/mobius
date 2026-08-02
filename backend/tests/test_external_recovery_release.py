@@ -99,7 +99,7 @@ def test_gate_resumes_only_an_exact_durably_bound_digest():
     release.classify_gate_response(active, 202, EXPECTED)
 
 
-def test_completed_b_is_noop_but_later_head_is_normal_release():
+def test_completed_b_is_noop_but_later_head_requires_digest_release_protocol():
   completed = response(
     status="cutover_already_complete", removal_digest=B_DIGEST
   )
@@ -115,8 +115,8 @@ def test_completed_b_is_noop_but_later_head_is_normal_release():
     prerequisite_image_digest=A_DIGEST,
     removal_build_sha=C_SHA,
   )
-  normal = release.classify_gate_response(completed, 200, later)
-  assert normal.decision == "normal_release"
+  with pytest.raises(release.ReleaseError, match="immutable digest release protocol"):
+    release.classify_gate_response(completed, 200, later)
 
   advanced = response(
     status="cutover_already_complete",
@@ -125,11 +125,14 @@ def test_completed_b_is_noop_but_later_head_is_normal_release():
     current_sha=D_SHA,
     current_digest=NEXT_R_DIGEST,
   )
-  advanced_normal = release.classify_gate_response(advanced, 200, later)
-  assert advanced_normal.frozen_recovery == release.RecoveryIdentity(
+  with pytest.raises(release.ReleaseError, match="immutable digest release protocol"):
+    release.classify_gate_response(advanced, 200, later)
+
+  advanced_replay = release.classify_gate_response(advanced, 200, EXPECTED)
+  assert advanced_replay.frozen_recovery == release.RecoveryIdentity(
     123, C_SHA, R_DIGEST
   )
-  assert advanced_normal.current_recovery == release.RecoveryIdentity(
+  assert advanced_replay.current_recovery == release.RecoveryIdentity(
     124, D_SHA, NEXT_R_DIGEST
   )
 
@@ -192,6 +195,25 @@ def test_legacy_and_target_state_machine_is_exact():
     )
 
 
+def test_inventory_requires_external_recovery_to_remain_frozen_at_prerequisite(
+  monkeypatch,
+):
+  prerequisite = release.ImageIdentity(A_DIGEST, A_SHA)
+  identities = {
+    "main": prerequisite,
+    "daily": None,
+    "external-recovery": prerequisite,
+  }
+  monkeypatch.setattr(
+    release, "inspect_tag", lambda _repository, tag: identities[tag]
+  )
+  assert release.inventory_channels("ghcr.io/mobius-os/mobius", prerequisite) == prerequisite
+
+  identities["external-recovery"] = release.ImageIdentity(B_DIGEST, B_SHA)
+  with pytest.raises(release.ReleaseError, match="compatibility floor"):
+    release.inventory_channels("ghcr.io/mobius-os/mobius", prerequisite)
+
+
 def test_registry_absence_requires_repeated_reference_specific_not_found():
   repository = "ghcr.io/mobius-os/mobius"
   reference = f"{repository}:daily"
@@ -220,12 +242,56 @@ def test_registry_absence_requires_repeated_reference_specific_not_found():
     )
 
 
-def test_worker_stable_must_equal_the_controller_frozen_identity(monkeypatch):
+def test_digest_inspection_requires_exact_reference_specific_identity():
+  repository = "ghcr.io/mobius-os/mobius-recovery"
+  reference = f"{repository}@{R_DIGEST}"
+  commands = []
+
+  def exact_runner(command, **_kwargs):
+    commands.append(command)
+    return subprocess.CompletedProcess([], 0, f"{R_DIGEST}|{C_SHA}\n", "")
+
+  assert release.inspect_digest(
+    repository,
+    R_DIGEST,
+    attempts=1,
+    runner=exact_runner,
+    sleeper=lambda _seconds: None,
+  ) == release.ImageIdentity(R_DIGEST, C_SHA)
+  assert reference in commands[0]
+  assert f"{repository}:stable" not in commands[0]
+
+  def redirected_runner(*_args, **_kwargs):
+    return subprocess.CompletedProcess([], 0, f"{NEXT_R_DIGEST}|{C_SHA}\n", "")
+
+  with pytest.raises(release.ReleaseError, match="different digest"):
+    release.inspect_digest(
+      repository,
+      R_DIGEST,
+      attempts=1,
+      runner=redirected_runner,
+      sleeper=lambda _seconds: None,
+    )
+
+  def absent_runner(*_args, **_kwargs):
+    return subprocess.CompletedProcess([], 1, "", f"ERROR: {reference}: not found")
+
+  with pytest.raises(release.ReleaseError, match="immutable image .* is absent"):
+    release.inspect_digest(
+      repository,
+      R_DIGEST,
+      attempts=2,
+      runner=absent_runner,
+      sleeper=lambda _seconds: None,
+    )
+
+
+def test_worker_digest_must_equal_the_controller_approved_identity(monkeypatch):
   expected = release.ImageIdentity(R_DIGEST, C_SHA)
-  monkeypatch.setattr(release, "inspect_tag", lambda *_args, **_kwargs: expected)
+  monkeypatch.setattr(release, "inspect_digest", lambda *_args, **_kwargs: expected)
   release.assert_worker_release("ghcr.io/mobius-os/mobius-recovery", expected)
 
   wrong = release.ImageIdentity("sha256:" + "d" * 64, C_SHA)
-  monkeypatch.setattr(release, "inspect_tag", lambda *_args, **_kwargs: wrong)
+  monkeypatch.setattr(release, "inspect_digest", lambda *_args, **_kwargs: wrong)
   with pytest.raises(release.ReleaseError, match="does not match"):
     release.assert_worker_release("ghcr.io/mobius-os/mobius-recovery", expected)

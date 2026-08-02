@@ -26,9 +26,13 @@ const REACT_SHIM = new URL(
 const REACT_SHIMMED_MODULES = [
   '/components/Shell/useAppIntentNavigation.js',
   '/components/ChatView/useFileUpload.js',
+  '/hooks/useNavigation.js',
 ]
 
 export async function resolve(specifier, context, nextResolve) {
+  if (specifier.endsWith('.css')) {
+    return { url: 'data:text/javascript,export default {}', shortCircuit: true }
+  }
   if (
     specifier === 'react'
     && REACT_SHIMMED_MODULES.some(m => context.parentURL?.endsWith(m))
