@@ -115,6 +115,9 @@ LOCAL_BRANCH = "main"
 # points resolve through release_channel so managed images can fetch a release
 # branch while targeting only their exact baked commit.
 DEFAULT_TARGET_REF = release_channel.DEFAULT_TARGET_REF
+OWNER_UPDATE_FETCH_REFSPEC = (
+  "+refs/heads/main:refs/remotes/origin/main"
+)
 # Keeps an off-tree semantic merge-base tree reachable while an owner may leave
 # a platform conflict unresolved across Git maintenance or server restarts.
 _CONFLICT_MERGE_BASE_REF = "refs/mobius/platform-conflict-base"
@@ -208,26 +211,6 @@ def _runtime_release_channel() -> release_channel.PlatformReleaseChannel:
     raise PlatformUpdateError(str(exc)) from exc
 
 
-def _managed_status_fields(
-  channel: release_channel.PlatformReleaseChannel,
-) -> dict[str, object]:
-  return {
-    "updates_disabled": channel.updates_disabled,
-    "update_disabled_reason": (
-      release_channel.UPDATE_DISABLED_REASON
-      if channel.updates_disabled else None
-    ),
-    "release_ref": channel.release_ref,
-  }
-
-
-def _require_interactive_updates(
-  channel: release_channel.PlatformReleaseChannel,
-) -> None:
-  if channel.updates_disabled:
-    raise PlatformUpdateError("platform_updates_managed_by_release_channel")
-
-
 class PlatformUpdateState(str, Enum):
   """User-visible state for the platform updater."""
 
@@ -258,12 +241,6 @@ class PlatformStatus(TypedDict):
   # the owner straight to it. None unless ``state == "conflict"`` AND the id was
   # recorded.
   conflict_chat_id: str | None
-  # Non-main release channels are upgraded by pulling/redeploying the next
-  # image. The in-app fetch/apply UI is disabled so it cannot follow main or
-  # imply that a moving branch tip is safe to apply from this image.
-  updates_disabled: bool
-  update_disabled_reason: str | None
-  release_ref: str | None
 
 
 class PlatformApplyResult(TypedDict):
@@ -1704,19 +1681,18 @@ def boot_guard_sync() -> str:
 def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
   """Compute update availability on demand (no daemon, no polling, no fetch).
 
-  Availability is an EXACT ancestry check against the configured target. Normal
-  installations read ``origin/main``; managed images read their baked SHA after
-  boot proved it belongs to the configured release branch. Conflict and
-  rolled-back states take precedence over a bare "available".
+  Availability is an EXACT ancestry check against ``origin/main``. Deployment
+  release channels constrain boot to the image's baked commit, but never change
+  the release the owner checks, reviews, or applies here. Conflict and rolled-
+  back states take precedence over a bare "available".
   """
-  channel = _runtime_release_channel()
   image_sha = current_build_sha()
   upstream_sha = recorded_upstream_sha(repo)
   conflict = CONFLICT_FLAG.exists() or _reconcile_in_progress(repo)
   rolled_back = ROLLED_BACK_FLAG.exists()
   restart_needed = RESTART_NEEDED_FLAG.exists() or _platform_tree_needs_restart(repo)
   local = _local_branch(repo)
-  target = _rev(repo, channel.target_ref)
+  target = _rev(repo, DEFAULT_TARGET_REF)
   target_contained = bool(target) and _is_ancestor(repo, target, local)
   contained_upstream_sha = target if target_contained else upstream_sha
 
@@ -1730,7 +1706,6 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
       contained_upstream_sha=contained_upstream_sha,
       seed_required=False,
       conflict_paths=paths, conflict_chat_id=flag.get("chat_id"),
-      **_managed_status_fields(channel),
     )
 
   available = bool(target) and not target_contained
@@ -1751,15 +1726,14 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
     current_build_sha=image_sha, recorded_upstream_sha=upstream_sha,
     contained_upstream_sha=contained_upstream_sha,
     seed_required=False, conflict_paths=[], conflict_chat_id=None,
-    **_managed_status_fields(channel),
   )
 
 
 def check_for_updates(repo: Path = PLATFORM_REPO) -> PlatformStatus:
   """Owner-triggered "Check for updates": fetch origin, THEN report availability.
 
-  :func:`platform_status` is deliberately fetch-free — it reads the
-  configured target left by the last boot/apply fetch — so this is
+  :func:`platform_status` is deliberately fetch-free — it reads
+  ``origin/main`` left by the last boot/owner fetch — so this is
   the one on-demand path that refreshes that ref without waiting for a reboot.
   A missing clone/origin or failed fetch is an explicit error: returning status
   from a stale remote-tracking ref would tell the owner "No updates found" when
@@ -1768,41 +1742,17 @@ def check_for_updates(repo: Path = PLATFORM_REPO) -> PlatformStatus:
   and ``main`` are untouched — a fetch only advances remote-tracking refs, so
   this is safe to run anytime and never mutates the served code.
   """
-  channel = _runtime_release_channel()
-  _require_interactive_updates(channel)
   if not (repo / ".git").exists():
     raise PlatformUpdateError("platform_repo_missing")
   if not _has_origin(repo):
     raise PlatformUpdateError("platform_origin_missing")
   with _reconcile_flock():
-    fetched = (
-      _fetch(repo)
-      if channel.fetch_refspec is None
-      else _fetch(repo, refspec=channel.fetch_refspec)
-    )
-    if not fetched:
+    # Do not rely on remote.origin.fetch: the external-recovery transition
+    # deliberately produced single-branch stack checkouts whose configured
+    # refspec cannot advance origin/main.
+    if not _fetch(repo, refspec=OWNER_UPDATE_FETCH_REFSPEC):
       raise PlatformUpdateError("platform_fetch_failed")
-    target = _rev(repo, channel.target_ref)
-    if channel.configured:
-      release_tip = _rev(repo, channel.tracking_ref)
-      membership_proven = bool(
-        target
-        and release_tip
-        and _is_ancestor(repo, target, release_tip)
-      )
-      if not membership_proven and _is_shallow(repo):
-        _fetch_unshallow(repo, refspec=channel.fetch_refspec)
-        target = _rev(repo, channel.target_ref)
-        release_tip = _rev(repo, channel.tracking_ref)
-        membership_proven = bool(
-          target
-          and release_tip
-          and _is_ancestor(repo, target, release_tip)
-        )
-      if not target:
-        raise PlatformUpdateError("release_target_missing")
-      if not membership_proven:
-        raise PlatformUpdateError("release_target_outside_ref")
+    target = _rev(repo, DEFAULT_TARGET_REF)
     local = _local_branch(repo)
     if target and _is_ancestor(repo, target, local):
       _set_upstream(repo, target)
@@ -1915,14 +1865,12 @@ def platform_update_preview(repo: Path = PLATFORM_REPO) -> PlatformUpdatePreview
   """Read-only preview of the incoming platform update, for the Settings review
   step before Apply (fetch-free, never mutates the tree).
 
-  Shows the upstream-side changes the configured target brings since the shared merge
+  Shows the upstream-side changes ``origin/main`` brings since the shared merge
   base — local edits are excluded, so the owner reviews exactly what a clean Apply
   would pull. Availability is the same ancestry check :func:`platform_status`
   uses; an up-to-date instance returns an empty preview. Degrades to an empty
   preview (never raises) when the clone or ancestry can't be read, so it can never
   break Settings."""
-  channel = _runtime_release_channel()
-  _require_interactive_updates(channel)
   # A missing/non-clone tree has no source snapshot to protect. Return before
   # touching the durable /data lock so read-only diagnostics and recovery
   # surfaces still degrade cleanly when DATA_DIR itself is unavailable.
@@ -1931,23 +1879,16 @@ def platform_update_preview(repo: Path = PLATFORM_REPO) -> PlatformUpdatePreview
   if not (repo / ".git").exists():
     return empty_platform_update_preview()
   with _reconcile_flock():
-    return _platform_update_preview_unlocked(repo, channel=channel)
+    return _platform_update_preview_unlocked(repo)
 
 
-def _platform_update_preview_unlocked(
-  repo: Path,
-  *,
-  channel: release_channel.PlatformReleaseChannel | None = None,
-) -> PlatformUpdatePreview:
+def _platform_update_preview_unlocked(repo: Path) -> PlatformUpdatePreview:
   """Build one preview while the reconcile lock holds its source snapshot."""
-  if channel is None:
-    channel = _runtime_release_channel()
-  _require_interactive_updates(channel)
   if not (repo / ".git").exists() or not _has_origin(repo):
     return empty_platform_update_preview()
   local = _local_branch(repo)
   local_sha = _rev(repo, local) or None
-  target = _rev(repo, channel.target_ref) or None
+  target = _rev(repo, DEFAULT_TARGET_REF) or None
   available = bool(target) and not _is_ancestor(repo, target, local)
   if not target or not available:
     return empty_platform_update_preview(
@@ -1996,7 +1937,6 @@ async def apply_platform_update(
   recorded and Settings offers an owner-clicked resolver chat. Rolled back ->
   the tree stayed on the old code and the state says so. Offline/skipped -> a
   ``409`` via :class:`PlatformUpdateError`. Never restarts on its own."""
-  _require_interactive_updates(_runtime_release_channel())
   async with _APPLY_LOCK:
     _set_update_progress(
       PlatformUpdatePhase.PREPARING,
@@ -2129,8 +2069,7 @@ async def create_platform_conflict_resolver_chat(
       )
 
   conflict_paths = flag.get("paths") or _unmerged_paths(repo)
-  channel = _runtime_release_channel()
-  target_sha = flag.get("upstream") or _rev(repo, channel.target_ref)
+  target_sha = flag.get("upstream") or _rev(repo, DEFAULT_TARGET_REF)
   merge_base = flag.get("merge_base")
   if not target_sha:
     raise PlatformUpdateError("Platform conflict target is unavailable.")

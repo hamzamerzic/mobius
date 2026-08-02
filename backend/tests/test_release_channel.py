@@ -12,8 +12,6 @@ def test_default_channel_preserves_origin_main_behavior(monkeypatch):
   assert channel.target_ref == "origin/main"
   assert channel.tracking_ref == "origin/main"
   assert channel.fetch_refspec is None
-  assert channel.updates_disabled is False
-  assert channel.contributions_disabled is False
 
 
 def test_managed_channel_targets_baked_sha_and_fetches_only_configured_ref(
@@ -38,8 +36,6 @@ def test_managed_channel_targets_baked_sha_and_fetches_only_configured_ref(
     "+refs/heads/release/external-recovery:"
     "refs/remotes/origin/release/external-recovery"
   )
-  assert channel.updates_disabled is True
-  assert channel.contributions_disabled is True
 
 
 @pytest.mark.parametrize(
@@ -62,7 +58,6 @@ def test_invalid_release_ref_fails_closed(monkeypatch, ref):
     match="platform_release_ref_invalid",
   ):
     release_channel.platform_release_channel()
-  assert release_channel.platform_contributions_disabled() is True
 
 
 @pytest.mark.parametrize(
@@ -89,7 +84,7 @@ def test_missing_or_invalid_baked_sha_fails_closed(
     release_channel.platform_release_channel()
 
 
-def test_configured_main_is_exact_but_keeps_interactive_flows(
+def test_configured_main_boot_is_exact(
   monkeypatch, tmp_path,
 ):
   sha = "b" * 40
@@ -104,5 +99,3 @@ def test_configured_main_is_exact_but_keeps_interactive_flows(
   channel = release_channel.platform_release_channel()
 
   assert channel.target_ref == sha
-  assert channel.updates_disabled is False
-  assert channel.contributions_disabled is False

@@ -1060,6 +1060,15 @@ async def test_apply_restarts_and_rebuilds_when_update_touches_backend(
 
   monkeypatch.setattr(pu, "_reconcile_under_lock", fake_reconcile)
   monkeypatch.setattr(pu, "_rebuild_frontend_after_update_if_needed", fake_rebuild)
+  # Owner Apply is independent of an image-managed boot channel. A missing
+  # build-info file would make any accidental release-channel lookup fail.
+  monkeypatch.setenv(
+    release_channel.PLATFORM_RELEASE_REF_ENV,
+    "refs/heads/release/external-recovery",
+  )
+  monkeypatch.setattr(
+    release_channel, "BUILD_INFO_PATH", platform / "missing-build-info.json",
+  )
 
   res = await pu.apply_platform_update(
     SimpleNamespace(), **_apply_plan(served, new, platform),
@@ -1111,7 +1120,17 @@ async def test_platform_conflict_resolver_chat_is_click_gated(
   origin, platform = clone_env
   target = _advance_origin(origin, edits={"backend/app/main.py":
     _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'UPSTREAM'")})
-  pu._write_conflict_flag(target, ["backend/app/main.py"])
+  pu._fetch(platform)
+  # Legacy/incomplete flags fall back to moving origin/main even when boot is
+  # managed. No baked build identity is needed on this owner-triggered path.
+  pu._write_conflict_flag(None, ["backend/app/main.py"])
+  monkeypatch.setenv(
+    release_channel.PLATFORM_RELEASE_REF_ENV,
+    "refs/heads/release/external-recovery",
+  )
+  monkeypatch.setattr(
+    release_channel, "BUILD_INFO_PATH", platform / "missing-build-info.json",
+  )
   calls = []
 
   async def fake_spawn(db, paths, target_sha, merge_base):
@@ -1723,7 +1742,8 @@ async def test_frontend_build_failure_rolls_back_source_and_is_not_success(
   assert "frontend_build_failed" in progress["error"]
 
 
-def test_stack_release_migrates_persisted_main_to_baked_sha_and_keeps_local_edits(
+@pytest.mark.asyncio
+async def test_stack_release_boot_is_exact_while_owner_updates_follow_main(
   clone_env, monkeypatch, tmp_path,
 ):
   origin, platform = clone_env
@@ -1777,20 +1797,56 @@ def test_stack_release_migrates_persisted_main_to_baked_sha_and_keeps_local_edit
   assert not pu._is_ancestor(platform, newer_sha, "main")
   assert "managed_release[ready]" in pu.managed_release_ready_sync()
 
+  # The release channel above is a boot-only constraint. Owner status follows
+  # origin/main, which is already contained in the release-derived local tree.
   status = pu.platform_status(platform)
-  assert status["contained_upstream_sha"] == baked_sha
-  assert status["updates_disabled"] is True
-  assert status["release_ref"] == release_ref
-  with pytest.raises(
-    pu.PlatformUpdateError,
-    match="platform_updates_managed_by_release_channel",
-  ):
-    pu.check_for_updates(platform)
-  with pytest.raises(
-    pu.PlatformUpdateError,
-    match="platform_updates_managed_by_release_channel",
-  ):
-    pu.platform_update_preview(platform)
+  original_main = pu._rev(platform, pu.DEFAULT_TARGET_REF)
+  assert status["contained_upstream_sha"] == original_main
+  assert status["available"] is False
+  assert "updates_disabled" not in status
+
+  # A later main release is visible, reviewable, and applicable without
+  # changing the managed image's exact boot target. Model the real protected
+  # stack clone: its configured default fetch refspec does not include main, so
+  # the owner check must request main explicitly.
+  _git(platform, "config", "--unset-all", "remote.origin.fetch")
+  _git(
+    platform, "config", "--add", "remote.origin.fetch",
+    f"+{release_ref}:refs/remotes/origin/{release_branch}",
+  )
+  _git(work, "checkout", "-q", "main")
+  owner_target = _advance_origin(
+    origin,
+    edits={"owner-update.txt": "available from Settings\n"},
+    msg="owner-visible main update",
+  )
+  checked = pu.check_for_updates(platform)
+  assert pu._rev(platform, pu.DEFAULT_TARGET_REF) == owner_target
+  assert checked["available"] is True
+  assert checked["contained_upstream_sha"] == baked_sha
+
+  preview = pu.platform_update_preview(platform)
+  assert preview["available"] is True
+  assert preview["target_sha"] == owner_target
+  result = await pu.apply_platform_update(
+    SimpleNamespace(),
+    plan_id=preview["plan_id"],
+    current_sha=preview["current_sha"],
+    target_sha=preview["target_sha"],
+    repo=platform,
+  )
+
+  assert result["state"] in {
+    pu.PlatformUpdateState.UP_TO_DATE.value,
+    pu.PlatformUpdateState.RESTART_NEEDED.value,
+  }
+  assert (platform / "owner-update.txt").read_text() == (
+    "available from Settings\n"
+  )
+  assert pu._is_ancestor(platform, owner_target, "main")
+  assert pu._is_ancestor(platform, baked_sha, "main")
+  assert pu.recorded_upstream_sha(platform) == owner_target
+  assert "managed_release[ready]" in pu.managed_release_ready_sync()
 
 
 def test_release_channel_rejects_baked_sha_outside_fetched_ref_without_mutation(
