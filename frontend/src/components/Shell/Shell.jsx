@@ -3183,10 +3183,10 @@ export default function Shell() {
               bottom: 'auto',
             }
             : null
-          const chatViewStyle = paned
+          const chatViewStyle = builderRect
             ? {
               ...posStyle,
-              ...modeViewTransitionStyle('pane', paneId, surfaceKey),
+              ...(paned ? modeViewTransitionStyle('pane', paneId, surfaceKey) : {}),
             }
             : undefined
           return (
