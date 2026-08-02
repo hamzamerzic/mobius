@@ -558,16 +558,10 @@ export default function ChatView({
       handleComposerInputChange(composerRequest.draft)
     }
 
-    if (!composerRequest.focus) {
-      onComposerRequestHandled?.(token)
-      return
-    }
-
     if (!shouldApplyComposerFocusRequest({
       focusRequest: composerRequest,
       chatId,
       embedded,
-      isTouchPrimary: _isTouchPrimary,
     })) {
       onComposerRequestHandled?.(token)
       return

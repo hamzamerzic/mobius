@@ -23,6 +23,7 @@ import {
   drawerWidthFromPointerDelta,
   isGeneratedTouchClick,
   isHorizontalDrawerSwipe,
+  shouldRestoreDrawerFocus,
   shouldSuppressDrawerSwipeClick,
   shouldAutoRevealActiveChat,
   clearDrawerGestureStyles,
@@ -614,11 +615,19 @@ export default function Drawer({
       return () => cancelAnimationFrame(focusFrame)
     } else {
       // Restore focus when the drawer closes so keyboard users land
-      // back on the toggle that opened it (or whatever was focused).
-      if (previousFocusRef.current && typeof previousFocusRef.current.focus === 'function') {
+      // back on the toggle that opened it (or whatever was focused). Do not
+      // steal focus back from a destination that already accepted the handoff.
+      const shouldRestore = shouldRestoreDrawerFocus({
+        drawer: drawerRef.current,
+        activeElement: document.activeElement,
+        body: document.body,
+      })
+      if (shouldRestore
+          && previousFocusRef.current
+          && typeof previousFocusRef.current.focus === 'function') {
         previousFocusRef.current.focus()
-        previousFocusRef.current = null
       }
+      previousFocusRef.current = null
     }
   }, [open, persistent])
 
