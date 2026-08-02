@@ -5,7 +5,43 @@ import asyncio
 from app import models, questions
 from app.chat_transcript import compact_messages_for_detail
 from app.pending_questions import PendingQuestion
+from app.routes.chats import _chat_detail_window
 from sqlalchemy import event
+from app.memory_recall import EMPTY_RECALL_BINDING
+
+
+def test_anchor_window_returns_saved_row_through_authoritative_tail():
+  messages = [
+    {"role": "user" if index % 2 == 0 else "assistant", "ts": 1000 + index}
+    for index in range(45)
+  ]
+
+  page, offset, found = _chat_detail_window(
+    messages,
+    limit=20,
+    before=None,
+    anchor_key="assistant-1011",
+  )
+
+  assert found is True
+  assert offset == 11
+  assert page == messages[11:]
+  assert page[-1] is messages[-1]
+
+
+def test_missing_anchor_fails_closed_to_the_ordinary_recent_page():
+  messages = [{"role": "user", "ts": index} for index in range(45)]
+
+  page, offset, found = _chat_detail_window(
+    messages,
+    limit=20,
+    before=None,
+    anchor_key="user-missing",
+  )
+
+  assert found is False
+  assert offset == 25
+  assert page == messages[-20:]
 
 
 def test_compacts_multi_step_activity_and_preserves_render_metadata():
@@ -38,7 +74,9 @@ def test_compacts_multi_step_activity_and_preserves_render_metadata():
     ],
   }]
 
-  compact = compact_messages_for_detail(messages, message_offset=40)
+  compact = compact_messages_for_detail(
+    messages, message_offset=40, binding=EMPTY_RECALL_BINDING,
+  )
 
   assert compact is not messages
   assert compact[0] is not messages[0]
@@ -112,6 +150,7 @@ def test_repeated_activity_metadata_is_bounded_by_variety():
   compact = compact_messages_for_detail(
     [{"role": "assistant", "blocks": blocks}],
     message_offset=0,
+    binding=EMPTY_RECALL_BINDING,
   )
   summary = compact[0]["blocks"][0]
 
@@ -138,6 +177,7 @@ def test_long_activity_runs_are_split_into_fetchable_ranges():
   compact = compact_messages_for_detail(
     [{"role": "assistant", "blocks": blocks}],
     message_offset=4,
+    binding=EMPTY_RECALL_BINDING,
   )
 
   assert compact[0]["blocks"] == [
@@ -177,6 +217,7 @@ def test_single_activity_and_live_message_remain_self_contained():
     messages,
     message_offset=0,
     live_message=live,
+    binding=EMPTY_RECALL_BINDING,
   )
 
   assert compact is messages
@@ -266,7 +307,9 @@ def test_image_reads_stay_distinctive_and_question_twins_are_not_rendered():
     ],
   }]
 
-  compact = compact_messages_for_detail(messages, message_offset=7)
+  compact = compact_messages_for_detail(
+    messages, message_offset=7, binding=EMPTY_RECALL_BINDING,
+  )
   blocks = compact[0]["blocks"]
 
   assert blocks[0]["type"] == "thinking"

@@ -4389,6 +4389,15 @@ async def _run_chat_impl_with_db(
     db.close()
     return disposition
 
+  # Bind the recall recognizer while `db` is still live. This MUST happen
+  # before the db.close() below: resolving it lazily at a sink site would check
+  # out a fresh connection during the turn, which is precisely the pool
+  # exhaustion that close is there to prevent. It is also the semantically
+  # right moment — the recognizer is bound at the instant the agent is told
+  # the provider's path.
+  from app.memory_provider import resolve_recall_binding
+  recall_binding = resolve_recall_binding(db)
+
   # This is deliberately request-scoped rather than part of the immutable
   # snapshot persisted above. On resumed turns `startup_context` is empty.
   if startup_context:
@@ -4450,7 +4459,9 @@ async def _run_chat_impl_with_db(
         _log_superseded_run(chat_id, "no-agent-metrics")
         db.close()
         return chat_queue.TerminalDisposition.STALE_NO_ACTION
-      sink = _ChatEventSink(bc, chat_id, run_token=run_token)
+      sink = _ChatEventSink(
+        bc, chat_id, run_token=run_token, recall_binding=recall_binding,
+      )
       register_active_sink(chat_id, sink)
       sink.publish({"type": "text", "content": NO_AGENT_CONNECTED_MESSAGE})
       return await _complete_turn(
@@ -4507,7 +4518,9 @@ async def _run_chat_impl_with_db(
       data_dir=settings.data_dir,
       chat_id=chat_id,
     )
-    sink = _ChatEventSink(bc, chat_id, run_token=run_token)
+    sink = _ChatEventSink(
+      bc, chat_id, run_token=run_token, recall_binding=recall_binding,
+    )
     register_active_sink(chat_id, sink)
     runner_result: dict = {}
     # The provider can run for hours.  Everything needed to launch it is now
@@ -4642,7 +4655,9 @@ async def _run_chat_impl_with_db(
     ):
       if run_policy is not None and not run_policy.allow_session_reseed:
         from app.delegations import REVIEW_REQUIRED_MARKER
-        sink = _ChatEventSink(bc, chat_id, run_token=run_token)
+        sink = _ChatEventSink(
+          bc, chat_id, run_token=run_token, recall_binding=recall_binding,
+        )
         register_active_sink(chat_id, sink)
         sink.publish({
           "type": "error",
@@ -4673,7 +4688,9 @@ async def _run_chat_impl_with_db(
       # frontend stream consumer renders no "notice" type anyway. The
       # warning log is the operator-facing signal.
       claude_session_id = None
-    sink = _ChatEventSink(bc, chat_id, run_token=run_token)
+    sink = _ChatEventSink(
+      bc, chat_id, run_token=run_token, recall_binding=recall_binding,
+    )
     register_active_sink(chat_id, sink)
     # As in the Codex path, do not pin a pooled connection while the provider
     # is thinking or waiting for user input.  Resume fallback has already

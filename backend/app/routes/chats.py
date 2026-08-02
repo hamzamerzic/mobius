@@ -92,10 +92,17 @@ def _project_legacy_memory_recall_sidecars(
     legacy_memory_recall_output_ids,
     project_legacy_memory_recalls,
   )
+  from app.memory_provider import resolve_recall_binding
   from app.memory_recall import MAX_RECALL_RESULT_SCAN_CHARS
 
+  # Recognizing HISTORY only requires that the path once belonged to a
+  # grant holder. Uninstalling Memory must not retroactively strip citations
+  # from transcripts the owner already read, so the read path deliberately
+  # accepts soft-deleted providers where the mint path would not.
+  binding = resolve_recall_binding(db, include_uninstalled=True)
   tool_ids = legacy_memory_recall_output_ids(
     messages,
+    binding=binding,
     live_message=live_message,
   )
   if not tool_ids:
@@ -135,6 +142,7 @@ def _project_legacy_memory_recall_sidecars(
   ).all()
   return project_legacy_memory_recalls(
     messages,
+    binding=binding,
     output_tails={
       tool_use_id: decode_tool_output(stored)[-MAX_RECALL_RESULT_SCAN_CHARS:]
       for tool_use_id, stored in rows
@@ -354,12 +362,53 @@ def _reclaim_expired_tombstones_after_chat_write(db: Session) -> None:
     log.exception("Expired chat tombstone cleanup failed after chat write")
 
 
+def _chat_message_key(message: object, index: int) -> str | None:
+  """Match the frontend's durable transcript-row address."""
+  if not isinstance(message, dict):
+    return None
+  message_id = message.get("id")
+  if message_id is not None:
+    return str(message_id)
+  role = message.get("role")
+  timestamp = message.get("ts")
+  return f"{role}-{timestamp if timestamp is not None else index}"
+
+
+def _chat_detail_window(
+  messages: list,
+  *,
+  limit: int,
+  before: int | None,
+  anchor_key: str | None,
+) -> tuple[list, int, bool | None]:
+  """Select one authoritative detail window and report anchor coverage."""
+  total = len(messages)
+  if anchor_key is not None:
+    anchor_index = next((
+      index for index, message in enumerate(messages)
+      if _chat_message_key(message, index) == anchor_key
+    ), None)
+    if anchor_index is not None:
+      # Exact restoration is one atomic snapshot: the saved row through the
+      # current tail. A page ceiling here silently discards the very address
+      # the caller asked us to preserve.
+      return messages[anchor_index:], anchor_index, True
+    start = max(0, total - limit)
+    return messages[start:], start, False
+  if before is not None:
+    start = max(0, before - limit)
+    return messages[start:before], start, None
+  start = max(0, total - limit)
+  return messages[start:], start, None
+
+
 def _chat_detail_response(
   chat: models.Chat,
   *,
   db: Session,
   limit: int = 20,
   before: int | None = None,
+  anchor_key: str | None = None,
   expose_session: bool = True,
   compact: bool = False,
 ) -> dict:
@@ -396,12 +445,12 @@ def _chat_detail_response(
     else None
   )
   total = len(all_msgs)
-  if before is not None:
-    start = max(0, before - limit)
-    page = all_msgs[start:before]
-  else:
-    start = max(0, total - limit)
-    page = all_msgs[start:]
+  page, start, requested_anchor_found = _chat_detail_window(
+    all_msgs,
+    limit=limit,
+    before=before,
+    anchor_key=anchor_key,
+  )
   page = _project_legacy_memory_recall_sidecars(
     page,
     chat_id=chat.id,
@@ -429,9 +478,12 @@ def _chat_detail_response(
     live_message=live_message,
   )
   if compact:
+    from app.memory_provider import resolve_recall_binding
     page = compact_messages_for_detail(
       page,
       message_offset=start,
+      # Read path: an uninstalled provider's past citations stay readable.
+      binding=resolve_recall_binding(db, include_uninstalled=True),
       live_message=compact_exempt_live_message,
     )
   from app.chat_media_dimensions import project_message_image_dimensions
@@ -446,7 +498,7 @@ def _chat_detail_response(
   active_goal_objective = (
     running_goal_objective(db, chat.id) if running else None
   )
-  return {
+  response = {
     "id": chat.id,
     "title": chat.title,
     "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
@@ -477,6 +529,9 @@ def _chat_detail_response(
       message.get("role") == "assistant" for message in all_msgs
     ),
   }
+  if requested_anchor_found is not None:
+    response["requested_anchor_found"] = requested_anchor_found
+  return response
 
 
 @router.get("")
@@ -1177,8 +1232,9 @@ async def patch_chat(
 @router.get("/{chat_id}")
 def get_chat(
   chat_id: str,
-  limit: int = 20,
+  limit: int = Query(20, ge=1),
   before: int | None = None,
+  anchor: str | None = Query(None, max_length=512),
   compact: bool = False,
   principal: Principal = Depends(get_owner_or_chat_embed_principal),
   db: Session = Depends(get_db),
@@ -1193,6 +1249,12 @@ def get_chat(
   Messages are returned in the order they appear in the list, so newer
   messages have higher indices. The response includes `offset` (the index
   of the first message in this page) and `total` (total message count).
+
+  `anchor` is a durable rendered-row key used when restoring an older reading
+  position. If found, the response contains that row through the current tail
+  from one authoritative snapshot and reports `requested_anchor_found=true`;
+  `limit` is intentionally ignored. If it is absent, the ordinary latest page
+  is returned with `requested_anchor_found=false`.
   """
   if principal.scope == "app":
     raise HTTPException(status_code=403, detail="App token is not valid here.")
@@ -1209,6 +1271,7 @@ def get_chat(
     db=db,
     limit=limit,
     before=before,
+    anchor_key=anchor,
     compact=compact,
     # Provider thread ids are backend continuity state, not part of the
     # embedded participant surface.

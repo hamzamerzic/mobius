@@ -7,7 +7,13 @@
 // path, but this value builds a URL that navigates the shell, so re-check here
 // rather than trusting an upstream call site to stay correct forever.
 const SAFE_NOTE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
-const SAFE_MEMORY_APP_SLUG = /^memory(?:-[0-9]+)?$/
+// The general platform slug shape (manifest_contract._SLUG_OK), NOT the memory
+// family. The backend no longer scrapes this value out of the agent's command
+// string — it now comes from the App.slug column via the resolved recall
+// binding, so it is strictly more trustworthy than before. Pinning the browser
+// to /^memory/ would mean a correctly-cited renamed provider silently lost its
+// deep link: the same hardcoding class, reintroduced one layer up.
+const SAFE_APP_SLUG = /^[a-z0-9][a-z0-9_-]{0,127}$/
 
 export function safeNoteId(value) {
   if (typeof value !== 'string') return ''
@@ -16,10 +22,10 @@ export function safeNoteId(value) {
   return SAFE_NOTE_ID.test(candidate) ? candidate : ''
 }
 
-export function safeMemoryAppSlug(value) {
+export function safeAppSlug(value) {
   if (typeof value !== 'string') return ''
   const candidate = value.trim()
-  return SAFE_MEMORY_APP_SLUG.test(candidate) ? candidate : ''
+  return SAFE_APP_SLUG.test(candidate) ? candidate : ''
 }
 
 // Where a pill points: the Memory app, asked to open this note. `?app=<slug>&
@@ -32,7 +38,7 @@ export function noteHref(note) {
   // original unsuffixed install. New citations carry the slug validated from
   // the command path; a present-but-invalid value fails closed.
   const hasAppSlug = typeof note?.app_slug === 'string'
-  const appSlug = hasAppSlug ? safeMemoryAppSlug(note.app_slug) : 'memory'
+  const appSlug = hasAppSlug ? safeAppSlug(note.app_slug) : 'memory'
   return appSlug
     ? `/shell/?app=${appSlug}&intent=${encodeURIComponent(`note:${id}`)}`
     : ''

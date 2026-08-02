@@ -22,6 +22,7 @@ from app.events import (
     process_event,
 )
 from app.routes.chats import TOOL_OUTPUT_PREVIEW_CHARS
+from app.memory_recall import EMPTY_RECALL_BINDING
 from app.tool_output_storage import (
     TOOL_OUTPUT_STORAGE_PREFIX,
     compress_legacy_tool_output_batch,
@@ -286,6 +287,18 @@ def test_chat_detail_recovers_a_legacy_memory_receipt_from_its_sidecar(
         "output_full_len": 50000,
         "output_exit_code": 0,
     }
+    # The legacy receipt is only citable because an installed app actually
+    # holds shared-memory authority at that path. Recall used to be granted by
+    # a slug-shaped regex, so this row was not needed and the platform would
+    # happily cite a provider that was never installed.
+    db.add(models.App(
+        name="Memory",
+        description="graph",
+        jsx_source="export default function App() { return <div/> }",
+        slug="memory",
+        source_dir="/data/apps/memory",
+        capability_contract={"data": {"shared_memory": "write"}},
+    ))
     db.add(models.Chat(
         id=chat_id,
         title="t",
@@ -505,7 +518,10 @@ class _FakeBC:
 
 def _sink(chat_id="c-sink"):
     from app.chat import _ChatEventSink
-    return _ChatEventSink(_FakeBC(), chat_id, run_token="rt")
+    return _ChatEventSink(
+      _FakeBC(), chat_id, run_token="rt",
+      recall_binding=EMPTY_RECALL_BINDING,
+    )
 
 
 def test_sink_reduces_large_tagged_output_and_stashes_full(db):

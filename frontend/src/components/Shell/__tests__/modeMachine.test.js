@@ -15,24 +15,18 @@ test('stable modes present their committed world', () => {
   assert.equal(builderModeActive(panes()), true)
 })
 
-test('a toggle is an immediate durable state change with no visual descriptor', () => {
-  const entered = modeReducer(single(), { type: 'toggle', cause: 'hold' })
+test('the actual durable workspace transition synchronizes the presented world', () => {
+  const entered = modeReducer(single(), { type: 'sync-committed', committedMode: 'panes' })
   assert.equal(entered.committedMode, 'panes')
   assert.equal(entered.transition, null)
-  const exited = modeReducer(entered, { type: 'toggle', cause: 'keyboard' })
+  const exited = modeReducer(entered, { type: 'sync-committed', committedMode: 'single' })
   assert.equal(exited.committedMode, 'single')
   assert.equal(exited.transition, null)
 })
 
-test('an explicit toggle to the resting mode is a no-op reference', () => {
+test('synchronizing the resting durable mode is a no-op reference', () => {
   const state = panes()
-  assert.equal(modeReducer(state, { type: 'toggle', to: 'panes' }), state)
-})
-
-test('undo restores mode directly; browser scene motion stays outside the reducer', () => {
-  const restored = modeReducer(single(), { type: 'undo', restoredMode: 'panes' })
-  assert.equal(restored.committedMode, 'panes')
-  assert.equal(restored.transition, null)
+  assert.equal(modeReducer(state, { type: 'sync-committed', committedMode: 'panes' }), state)
 })
 
 test('drag arm is the only transient projection and exposes Builder from Standard', () => {
@@ -52,11 +46,13 @@ test('only the matching drag epoch can cancel a preview', () => {
   assert.equal(cancelled.committedMode, 'single')
 })
 
-test('a matching drag commit enters Builder and clears preview state', () => {
+test('ending a drag cannot predict or commit the durable workspace mode', () => {
   const preview = modeReducer(single(), { type: 'drag-arm' })
-  const committed = modeReducer(preview, { type: 'drag-commit', id: 1 })
-  assert.equal(committed.committedMode, 'panes')
-  assert.equal(committed.transition, null)
+  const attempted = modeReducer(preview, { type: 'drag-commit', id: 1 })
+  assert.equal(attempted, preview, 'only sync-committed may change durable mode')
+  const ended = modeReducer(preview, { type: 'drag-cancel', id: 1 })
+  assert.equal(ended.committedMode, 'single')
+  assert.equal(ended.transition, null)
 })
 
 test('drag arm is inert from Builder and clears impossible stale preview state', () => {

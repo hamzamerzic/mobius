@@ -448,8 +448,8 @@ test('ShellBrand isolates gesture state and wires the brand ref + Shift+Enter', 
   // transition callback; there is no Settings conversion call.
   assert.doesNotMatch(handler, /convertSettingsForModeTransition/)
   assert.match(handler, /return modeView\.run\(\{/)
-  assert.match(handler, /mode\.toggle\(\{ cause, to \}\)/)
   assert.match(handler, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: to \}\)/)
+  assert.doesNotMatch(handler, /mode\.toggle/)
   assert.doesNotMatch(handler, /openDrawer|closeDrawer/)
   // The gesture hook receives the toggle + the brand ref (for the ring var). The
   // ref is UNIFIED with the desktop-sidebar focus ref (one ref, both jobs) after
@@ -615,7 +615,8 @@ test('the mode handler commits one final world inside the scene transaction', ()
   assert.match(handler, /deriveModeSnapshotPlan\(\{ workspace: ws, projection, contentRect \}\)/)
   assert.match(handler, /return modeView\.run\(\{/)
   assert.match(handler, /direction: leavingBuilder \? 'exit' : 'enter'/)
-  assert.match(handler, /update: \(\) => \{[\s\S]*?dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: to \}\)[\s\S]*?mode\.toggle\(\{ cause, to \}\)/)
+  assert.match(handler, /update: \(\) => \{[\s\S]*?dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: to \}\)/)
+  assert.match(shell, /onWorkspaceTransitionRef\.current = \(prevWs, nextWs\) => \{[\s\S]*?mode\.syncCommitted\(nextWs\.viewMode\)/)
   assert.match(modeViewTransitionSrc, /!prefersReducedMotion\(\)/)
   assert.match(modeViewTransitionSrc, /if \(!supported\) \{[\s\S]*?flushSync\(update\)/)
 })
@@ -796,8 +797,8 @@ test('chat drawer dots distinguish active work from unseen completion', () => {
   )
   assert.match(
     shell,
-    /ev\.type === 'chat_run_finished'[\s\S]*?!visibleChatIdsRef\.current\.has\(String\(chatId\)\)[\s\S]*?setAttentionChatIds/,
-    'a finished run must raise attention only while the chat is not visible',
+    /ev\.type === 'chat_run_finished'[\s\S]*?!visibleChatIdsRef\.current\.has\(String\(chatId\)\)[\s\S]*?chatQueries\.messages\.refresh\(queryClient, chatId\)[\s\S]*?setAttentionChatIds/,
+    'a hidden finished chat must refresh before a later return and then raise attention',
   )
   assert.match(
     shell,
@@ -815,7 +816,10 @@ test('chat drawer dots distinguish active work from unseen completion', () => {
 
 test('live preview reveal keeps the workspace controller distinct from device mode', () => {
   assert.match(shell, /const deviceMode = paneModel\.modeForRect\(contentRect\)/)
-  assert.match(shell, /mode\.toggle\(\{ cause: 'auto', to: 'panes' \}\)/)
+  assert.doesNotMatch(shell, /opensLivePreview|mode\.toggle\(\{ cause: 'auto'/,
+    'preview intent must not predict a mode change the placement resolver may reject')
+  assert.match(shell, /prevWs\.viewMode !== nextWs\.viewMode[\s\S]*?mode\.syncCommitted\(nextWs\.viewMode\)/,
+    'presentation follows only the resolver actual workspace transition')
   assert.match(shell, /resolveWorkspaceRequests\(ws, requests, \{[\s\S]*?mode: deviceMode,/)
   assert.doesNotMatch(shell, /const mode = paneModel\.modeForRect\(contentRect\)/)
 })

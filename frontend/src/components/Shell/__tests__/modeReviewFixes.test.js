@@ -143,26 +143,25 @@ test('finding 6: exit enables capture names before collecting departing panes', 
   assert.ok(enableAt < collectAt, 'capture names must exist before exit reads them')
 })
 
-// -- Finding 7: mode-restoring Undo routes through the controller --------------
-test('finding 7: undo routes the mode restoration through mode.undo before UNDO_LAST', () => {
+// -- Finding 7: every actual reducer mode change synchronizes presentation -----
+test('finding 7: undo relies on the shared actual-transition synchronizer', () => {
   assert.match(shell, /modeView\.run\(\{[\s\S]*?cause: 'undo'/)
-  assert.match(shell, /update: \(\) => \{\s*\n\s*mode\.undo\(\{ restoredMode \}\)\s*\n\s*dispatchWorkspace\(\{ type: 'UNDO_LAST' \}\)/)
+  assert.match(shell, /onWorkspaceTransitionRef\.current = \(prevWs, nextWs\) => \{[\s\S]*?mode\.syncCommitted\(nextWs\.viewMode\)/)
+  assert.match(shell, /update: \(\) => \{\s*\n\s*dispatchWorkspace\(\{ type: 'UNDO_LAST' \}\)/)
+  assert.doesNotMatch(shell, /mode\.undo/)
   assert.match(shell, /const restoredMode = undoSlot\.restoreViewMode\s*\n\s*\? undoSlot\.ws\.viewMode : wsState\.ws\.viewMode/)
   assert.match(shell, /const plan = deriveModeSnapshotPlan\(\{/)
 })
 
 // -- Finding R3: the last-tab-close auto-return arms the descriptor same-batch ---
-test('finding R3: an emptying close arms the auto-return flip in the SAME batch, no autoFlip API', () => {
-  // The auto-return no longer lags a frame: closeTab detects the close will empty
-  // the builder tree and dispatches an INSTANT mode flip (cause 'auto') alongside
-  // CLOSE_TAB, so committedMode flips to single WITH the tree — not a render later
-  // via the passive sync-committed reconcile. It is a normal mode change, not a
-  // separate autoFlip event (that orphaned API was deleted).
-  assert.match(shell, /paneModel\.isEmptyTree\(paneModel\.closeTab\(ws, key\)\)\) \{\s*\n\s*mode\.toggle\(\{ cause: 'auto', to: 'single' \}\)/)
+test('finding R3: an emptying close presents the reducer actual auto-return in the same batch', () => {
+  assert.match(shell, /const closeTab = useCallback\(\(tab, \{ reason \} = \{\}\) => \{[\s\S]*?dispatchWorkspace\(\{ type: 'CLOSE_TAB', tabKey: key, reason \}\)/)
+  assert.match(shell, /prevWs\.viewMode !== nextWs\.viewMode[\s\S]*?mode\.syncCommitted\(nextWs\.viewMode\)/)
+  assert.doesNotMatch(shell, /mode\.toggle/)
   assert.doesNotMatch(controller, /autoFlip/)
-  // An emptied-tree flip is ordinary state with no visual scene to capture.
+  // The reducer's actual result, not the close request, owns presentation.
   const flipped = modeReducer({ committedMode: 'panes', transition: null, nextId: 1 },
-    { type: 'toggle', cause: 'auto', to: 'single' })
+    { type: 'sync-committed', committedMode: 'single' })
   assert.equal(flipped.committedMode, 'single')
   assert.equal(flipped.transition, null)
 })
@@ -252,12 +251,10 @@ test('finding 12: Shift+Enter ignores auto-repeat and clears its click-suppressi
 
 // -- Finding F13 (expanding review): the beat carries an HONEST cause -----------
 test('finding F13: cause threads from the gesture/keyboard, never a hardcoded hold', () => {
-  // The controller forwards the caller's cause instead of hardcoding 'hold'.
-  assert.match(controller, /const toggle = useCallback\(\(\{ cause, to \} = \{\}\)/)
-  assert.match(controller, /dispatch\(\{ type: 'toggle', cause, to: dest \}\)/)
-  assert.doesNotMatch(controller, /type: 'toggle', cause: 'hold'/)
+  // Cause belongs to the browser scene only; committed mode comes from workspace.
+  assert.doesNotMatch(controller, /cause|type: 'toggle'/)
   assert.match(shell, /cause,\s*\n\s*plan,\s*\n\s*update:/)
-  assert.match(shell, /mode\.toggle\(\{ cause, to \}\)/)
+  assert.match(shell, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: to \}\)/)
   // Each source layer names its own beat honestly.
   assert.match(gesture, /onToggleMode\?\.\('hold'\)/)
   assert.match(gesture, /onToggleMode\?\.\('swipe'\)/)

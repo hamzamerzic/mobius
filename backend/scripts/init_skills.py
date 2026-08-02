@@ -58,6 +58,13 @@ _UNMODIFIED_MIGRATIONS = {
     "ef62abb0d03d740f99add1b6f3938f780b34439cb0025616cb9dc5f74f779633",
     "6e6e82e02287e8bb38195fb021ea25cee2dc4e27da1a6ce1e2a0143fb1d82d87",
   },
+  "workflows-app.md": {
+    # Resolved the app by slug=="workflows". An install whose preferred slug
+    # is taken gets a fallback (this instance's row is 'workflows-2'), so the
+    # lookup silently found nothing and the skill's own "skip silently" branch
+    # hid the failure. Now keyed on the manifest id, as bootstrap already is.
+    "895dfa031e1a633ceac9a1f16895d43e5084d052c0616bd79a7a4005d06ba324",
+  },
   "images.md": {
     "248ea31e13d2d2d84a5acfca13526aa8ebfa3d90e9ee4bf55cfb72d47937f7d1",
     # v20 baked copy: publish the exact generated image, never newest-by-time.
