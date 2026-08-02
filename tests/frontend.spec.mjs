@@ -1048,8 +1048,16 @@ test.describe('Scroll position', () => {
       const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       const img = document.querySelector('[data-chat-surface="painted"] .md-image')
       return !!el && getComputedStyle(el).visibility !== 'hidden'
-        && !!img?.complete && !!document.querySelector('[data-key="entry-anchor"]')
-    }, { timeout: 10000 })
+        && !!img && !!document.querySelector('[data-key="entry-anchor"]')
+    }, undefined, { timeout: 10000 })
+    // This fixture image sits after a deliberately tall prefix and therefore
+    // remains outside Chromium's native lazy-load range at the initial tail.
+    // Bring it into range before recording the settled reading coordinate.
+    await page.locator('[data-chat-surface="painted"] .md-image').scrollIntoViewIfNeeded()
+    await page.waitForFunction(() => {
+      const img = document.querySelector('[data-chat-surface="painted"] .md-image')
+      return !!img?.complete && img.naturalWidth > 0
+    }, undefined, { timeout: 10000 })
     await page.evaluate(() => {
       const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       const target = document.querySelector('[data-key="entry-anchor"]')

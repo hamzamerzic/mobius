@@ -21,6 +21,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { mockAcceptedMessages } from './_mockAcceptedMessages.mjs'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
@@ -60,7 +61,7 @@ async function replaceStreamRoute(page, events) {
  *  seeds the workspace and re-navigates. */
 async function boot(page, viewport = WIDE) {
   await page.setViewportSize(viewport)
-  await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, r => r.fulfill({ status: 202, body: '{}' }))
+  await mockAcceptedMessages(page)
   await page.route('**/api/chat/stop', r => r.fulfill({ status: 200, body: '{}' }))
   await replaceStreamRoute(page, EMPTY_STREAM)
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
