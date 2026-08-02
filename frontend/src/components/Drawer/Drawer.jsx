@@ -657,20 +657,9 @@ export default function Drawer({
   // compatibility click; native vertical scrolling never does.
   const drawerGestureRef = useRef(null)
   const suppressGeneratedClickRef = useRef(false)
-  const clickSuppressTimerRef = useRef(null)
 
   function clearClickSuppression() {
     suppressGeneratedClickRef.current = false
-    if (clickSuppressTimerRef.current !== null) {
-      clearTimeout(clickSuppressTimerRef.current)
-      clickSuppressTimerRef.current = null
-    }
-  }
-
-  function armGeneratedClickSuppression() {
-    clearClickSuppression()
-    suppressGeneratedClickRef.current = true
-    clickSuppressTimerRef.current = setTimeout(clearClickSuppression, 400)
   }
 
   function onDrawerClickCapture(e) {
@@ -795,14 +784,10 @@ export default function Drawer({
     if (el) {
       el.classList.remove('drawer--dragging')
       if (shouldClose) {
-        // Animate from drag position to closed target. Clear the
-        // inline transform after the transition completes so the
-        // next open doesn't start from translateX(-100%) inline
-        // (which would conflict with the .drawer--open class).
+        // Animate from the drag position to the closed target. The open-state
+        // layout effect clears this inline value as soon as the parent commits
+        // the closed class, whose transform has the same target.
         el.style.transform = 'translateX(-100%)'
-        el.addEventListener('transitionend', () => {
-          el.style.transform = ''
-        }, { once: true })
       } else {
         // Snap-back to open: clearing the inline transform lets
         // the .drawer--open class's translateX(0) take over with
@@ -820,7 +805,7 @@ export default function Drawer({
     // click on the row the finger lifted over. Eat it so the swipe
     // doesn't double as a row selection. A genuine tap never set
     // wasSwiping, so its click passes through untouched.
-    if (suppressGeneratedClick) armGeneratedClickSuppression()
+    if (suppressGeneratedClick) suppressGeneratedClickRef.current = true
     if (shouldClose) onClose?.()
   }
   // pointercancel positions are unreliable across browsers (clientX

@@ -1152,7 +1152,7 @@ test.describe('Drawer close paths converge through handleBack', () => {
 
     // Closing the drawer traverses history and arms the Android bare-click
     // guard. A fresh owner tap has its own pointerdown, so it must clear that
-    // guard and reopen the drawer without waiting for the 400ms timeout.
+    // guard and reopen the drawer immediately.
     await page.evaluate(() => history.back())
     await expect(page.getByRole('button', { name: 'Toggle navigation' }))
       .toHaveAttribute('aria-expanded', 'false')
@@ -1191,10 +1191,10 @@ test.describe('Drawer close paths converge through handleBack', () => {
     await setup(page, { width: 426, height: 860 })
     await openDrawer(page)
 
-    // Reproduce the Android sequence without waiting out the old suppressor's
-    // 400ms fallback: a noisy diagonal sample briefly looks horizontal, then
-    // native pan-y takes over and emits pointercancel. The immediately-following
-    // destination tap must pass; cancellation is not a custom swipe completion.
+    // Reproduce the Android sequence: a noisy diagonal sample briefly looks
+    // horizontal, then native pan-y takes over and emits pointercancel. The
+    // immediately-following destination tap must pass; cancellation is not a
+    // custom swipe completion.
     await dispatchDrawerPointerGesture(page, {
       pointerId: 37,
       points: [[180, 520], [165, 512], [165, 390]],
@@ -1242,6 +1242,23 @@ test.describe('Drawer close paths converge through handleBack', () => {
 
     expect((await getNavState(page)).drawerOpen).toBe(true)
     expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(false)
+  })
+
+  test('22cc. Swipe-to-close returns transform ownership to the closed state', async ({ page }) => {
+    await setup(page, { width: 426, height: 860 })
+    await openDrawer(page)
+
+    await dispatchDrawerPointerGesture(page, {
+      pointerId: 40,
+      points: [[260, 420], [110, 420]],
+    })
+
+    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
+      .toHaveAttribute('aria-expanded', 'false')
+    expect(await page.locator('.drawer').evaluate((drawer) => ({
+      inlineTransform: drawer.style.transform,
+      inert: drawer.inert,
+    }))).toEqual({ inlineTransform: '', inert: true })
   })
 
   test('22d. Interrupted drawer swipe cannot strand an inert panel onscreen', async ({ page }) => {
