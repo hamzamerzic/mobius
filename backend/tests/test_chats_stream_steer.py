@@ -40,6 +40,7 @@ from app.chat_writer import cid_of
 from app.database import SessionLocal
 from app.pending_questions import PendingQuestion
 from app.runner_registry import RunnerKind, registry
+from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 def _make_active_codex_turn(chat_id: str):
@@ -467,7 +468,7 @@ def _register_sink_with_partial(chat_id: str, run_token: str, text: str):
   from app.events import process_event
 
   bc = create_broadcast(chat_id)
-  sink = _ChatEventSink(bc, chat_id, run_token=run_token)
+  sink = _ChatEventSink(bc, chat_id, run_token=run_token, recall_binding=EMPTY_RECALL_BINDING)
   process_event({"type": "text", "content": text}, sink.assistant_blocks)
   register_active_sink(chat_id, sink)
   return sink
@@ -860,7 +861,10 @@ def test_sink_commit_publish_failure_does_not_reclassify_committed_cut():
 
   async def _run():
     row = {"role": "user", "content": "Q2", "ts": 10, "cid": "c-q2"}
-    sink = _ChatEventSink(_ExplodingBroadcast(), "commit-publish-fail")
+    sink = _ChatEventSink(
+      _ExplodingBroadcast(), "commit-publish-fail",
+      recall_binding=EMPTY_RECALL_BINDING,
+    )
 
     async def _committed_split(rows, consume):
       assert rows == [row]
@@ -957,7 +961,7 @@ def test_claude_force_steer_defers_to_runner_and_reorders(client, auth):
   handle = _make_active_claude_client(chat_id)
   registry.register(handle)
   bc = create_broadcast(chat_id)
-  sink = _ChatEventSink(bc, chat_id, run_token="rt")
+  sink = _ChatEventSink(bc, chat_id, run_token="rt", recall_binding=EMPTY_RECALL_BINDING)
   register_active_sink(chat_id, sink)
 
   res = client.post(
@@ -1026,7 +1030,9 @@ def test_split_gates_snapshots_so_continuation_cannot_clobber_a1(
     def publish(self, event):
       submitted.append(("broadcast", event))
 
-  sink = _ChatEventSink(_Bus(), "gate", run_token="rt")
+  sink = _ChatEventSink(
+    _Bus(), "gate", run_token="rt", recall_binding=EMPTY_RECALL_BINDING,
+  )
   monkeypatch.setattr(
     sink, "_submit_fire_and_forget",
     lambda cmd: submitted.append(("writer", cmd)),
@@ -1391,7 +1397,7 @@ def test_claude_runner_splits_steer_at_boundary_not_http_arrival(
   handle = _make_active_claude_client(chat_id)
   registry.register(handle)
   bc = create_broadcast(chat_id)
-  sink = _ChatEventSink(bc, chat_id, run_token="run-boundary")
+  sink = _ChatEventSink(bc, chat_id, run_token="run-boundary", recall_binding=EMPTY_RECALL_BINDING)
   register_active_sink(chat_id, sink)
 
   # The steer arrives BEFORE A1 has streamed — the exact prod race.
@@ -1464,7 +1470,7 @@ def test_claude_steer_cut_event_is_published_at_the_seal_not_at_http_arrival(
   handle = _make_active_claude_client(chat_id)
   registry.register(handle)
   bc = create_broadcast(chat_id)
-  sink = _ChatEventSink(bc, chat_id, run_token="run-cut-order")
+  sink = _ChatEventSink(bc, chat_id, run_token="run-cut-order", recall_binding=EMPTY_RECALL_BINDING)
   register_active_sink(chat_id, sink)
 
   # A1's first block is already on the wire when the steer POST arrives.

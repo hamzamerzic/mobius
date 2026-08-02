@@ -25,6 +25,7 @@ function propBag(overrides = {}) {
     markVoiceListening: () => {},
     refreshApps: () => {},
     acknowledgeAppPreview: () => {},
+    refreshChats: () => {},
     markChatOwnerActivity: () => {},
     loadTheme: () => {},
     navTo: () => {},

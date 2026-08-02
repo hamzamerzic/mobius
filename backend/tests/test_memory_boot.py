@@ -112,6 +112,11 @@ def test_controlled_skills_have_fix_forward_migrations():
     "e4539739815b80b4c52ca2c56f2a4055e7a4a12cd1843c0cb5077a149547acd1",
     "16055ea6ba6e4663636f87fde9868aa98d49ab39c5037ff90fa673d96c259cd9",
   }
+  # The slug-keyed app lookup that silently found nothing whenever the install
+  # took a fallback slug. Untouched copies must migrate to the manifest-id form.
+  assert module._UNMODIFIED_MIGRATIONS["workflows-app.md"] == {
+    "895dfa031e1a633ceac9a1f16895d43e5084d052c0616bd79a7a4005d06ba324",
+  }
   assert module._UNMODIFIED_MIGRATIONS["images.md"] == {
     "248ea31e13d2d2d84a5acfca13526aa8ebfa3d90e9ee4bf55cfb72d47937f7d1",
     "29039a6fc5c9281794247eda5d0bbf66e969a1a260e9ed56c69ee6e1cd175f7c",

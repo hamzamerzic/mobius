@@ -103,8 +103,8 @@ test('a retained chat crosses the old unmount lifecycle while hidden', () => {
   )
   assert.match(
     chatView,
-    /useLayoutEffect\(\(\) => \{\s*if \(hidden\) freezeChatExit\(\)/,
-    'hiding a retained chat must freeze its reader position before Settings paints',
+    /useLayoutEffect\(\(\) => \{\s*if \(!hidden\) return\s*freezeChatExit\(\)[\s\S]*setInitialEntryPhase\('history'\)[\s\S]*setLoading\(true\)/,
+    'hiding a retained chat must freeze its position and arm freshness before it can paint again',
   )
   assert.match(
     chatView,

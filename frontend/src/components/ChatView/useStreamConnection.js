@@ -21,9 +21,8 @@ import {
 } from './streamReducers.js'
 import {
   readStoredStreamSnapshot,
-  bufferStreamSnapshot,
+  writeStoredStreamSnapshot,
   clearStoredStreamSnapshot,
-  flushStoredStreamSnapshot,
 } from './streamSnapshotCache.js'
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 import { ChatTransportError, chatHttpError } from './sendErrors.js'
@@ -223,9 +222,12 @@ export default function useStreamConnection(chatId, {
   onSteerDeliveryFailed,
   onLiveQuestion,
 }) {
-  const initialStoredStreamItems = readStoredStreamSnapshot(chatId)
-  const [streamItems, _setStreamItems] = useState(initialStoredStreamItems)
-  const latestItemsRef = useRef(initialStoredStreamItems)
+  // sessionStorage reads and JSON parsing are synchronous. Lazy initialization
+  // keeps them off every frame-paced render while a reply is revealing.
+  const [streamItems, _setStreamItems] = useState(
+    () => readStoredStreamSnapshot(chatId),
+  )
+  const latestItemsRef = useRef(streamItems)
   // Snapshot of the last non-empty latestItemsRef value. Written every
   // time items become non-empty; never cleared by a reconnect reset.
   // On retry exhaustion we promote from this ref so the user sees the
@@ -234,7 +236,7 @@ export default function useStreamConnection(chatId, {
   // CONTRACT: updated before any reconnect changes latestItemsRef.
   // Reconnect no longer wipes the visible stream while catch-up is in flight;
   // the snapshot is still the fallback if replay fails before catch_up_done.
-  const lastGoodItemsRef = useRef(initialStoredStreamItems)
+  const lastGoodItemsRef = useRef(streamItems)
   // Set to true from the first event of a catch-up burst on a new
   // connection. The previous visible snapshot remains intact until the
   // catch-up commits; if replay stalls on a tool-only pause or drops before
@@ -256,12 +258,6 @@ export default function useStreamConnection(chatId, {
     const next = typeof updater === 'function' ? updater(latestItemsRef.current) : updater
     if (next.length > 0) lastGoodItemsRef.current = next
     latestItemsRef.current = next
-    // Keep the latest reconnect snapshot in the cache's write-behind buffer.
-    // sessionStorage serialization happens only at lifecycle/terminal flush
-    // boundaries, never on this frame-paced reveal path.
-    if (next.length > 0) {
-      bufferStreamSnapshot(activeStreamChatIdRef.current, next)
-    }
     _setStreamItems(next)
   }
 
@@ -318,6 +314,12 @@ export default function useStreamConnection(chatId, {
   // would otherwise persist the old stream snapshot under the new chat's key.
   const activeStreamChatIdRef = useRef(chatId)
   chatIdRef.current = chatId
+  const persistLatestStreamSnapshot = useCallback(() => {
+    writeStoredStreamSnapshot(
+      activeStreamChatIdRef.current,
+      latestItemsRef.current,
+    )
+  }, [])
 
   // Tracks setTimeout handles for reconnect attempts so unmount can
   // cancel them. Without this, a timer scheduled by the SSE loop can
@@ -543,10 +545,9 @@ export default function useStreamConnection(chatId, {
     // captures its ts from the initial DB fetch, not from streamItems;
     // clearing streamItems here does not interact with that gate.
     disconnect()
-    // disconnect() flushes any final text reveal into setStreamItems. The
-    // recovery snapshot is write-behind, so land that completed old-chat frame
-    // before activeStreamChatIdRef moves to the next chat below.
-    flushStoredStreamSnapshot(activeStreamChatIdRef.current)
+    // disconnect() moves any final text reveal into latestItemsRef. Persist that
+    // completed old-chat frame before the next effect changes the active id.
+    persistLatestStreamSnapshot()
     setStreamItems([])
     textBufferRef.current = ''
     textBufferItemIdRef.current = null
@@ -559,7 +560,7 @@ export default function useStreamConnection(chatId, {
     // Answers belong to the chat we're leaving; carrying them into the next
     // chat could re-arm a same-keyed question with a foreign answer.
     answersByQuestionKeyRef.current.clear()
-  }, [chatId, disconnect])
+  }, [chatId, disconnect, persistLatestStreamSnapshot])
 
   useEffect(() => {
     activeStreamChatIdRef.current = chatId
@@ -569,19 +570,17 @@ export default function useStreamConnection(chatId, {
     _setStreamItems(stored)
   }, [chatId])
 
-  // Lifecycle exits synchronously flush the latest buffered recovery snapshot.
-  // Chat switches, terminal promotion, and pane visibility own their equivalent
-  // boundaries at the call sites where those transitions happen.
+  // Persist only at lifecycle boundaries. Chat switches and unmounts use the
+  // cleanup above; document hiding is handled by the existing visibility
+  // listener below.
   useEffect(() => {
-    const flushSelf = () => flushStoredStreamSnapshot(activeStreamChatIdRef.current)
-    window.addEventListener('pagehide', flushSelf)
-    window.addEventListener(BEFORE_SHELL_RELOAD_EVENT, flushSelf)
+    window.addEventListener('pagehide', persistLatestStreamSnapshot)
+    window.addEventListener(BEFORE_SHELL_RELOAD_EVENT, persistLatestStreamSnapshot)
     return () => {
-      window.removeEventListener('pagehide', flushSelf)
-      window.removeEventListener(BEFORE_SHELL_RELOAD_EVENT, flushSelf)
-      flushSelf()
+      window.removeEventListener('pagehide', persistLatestStreamSnapshot)
+      window.removeEventListener(BEFORE_SHELL_RELOAD_EVENT, persistLatestStreamSnapshot)
     }
-  }, [])
+  }, [persistLatestStreamSnapshot])
 
   useEffect(() => {
     function trackMaxHeight() {
@@ -1162,11 +1161,6 @@ export default function useStreamConnection(chatId, {
             // next turn (a queued continuation streams on the same hook and
             // must not inherit a stale answer for a re-used question key).
             answersByQuestionKeyRef.current.clear()
-            // Terminal promotion (design §2 flush contract): land the final
-            // streamed frame synchronously before the promote, so a reload
-            // landing between `done` and ChatView's clearStreamItems restores
-            // the terminal content, not an earlier stored frame.
-            flushStoredStreamSnapshot(activeStreamChatIdRef.current)
             // Promote before flipping `isStreaming` false. `flushBuffer()`,
             // `commitCatchUp()`, and setStreamItems keep latestItemsRef
             // synchronous, so the old rAF delay was unnecessary and created a
@@ -1196,9 +1190,7 @@ export default function useStreamConnection(chatId, {
       if (!wantsReconnectRef.current) {
         // EOF without an explicit done is still terminal here. Promote and
         // clear running state in the same batch so the final live row does not
-        // briefly collapse into the generic thinking dots. Flush the pending
-        // buffered snapshot first (terminal-promotion flush, design §2).
-        flushStoredStreamSnapshot(activeStreamChatIdRef.current)
+        // briefly collapse into the generic thinking dots.
         clearReconnectingNote()
         onStreamEndRef.current?.()
         setIsStreaming(false)
@@ -1565,6 +1557,9 @@ export default function useStreamConnection(chatId, {
     function onVisible() {
       const now = Date.now()
       if (document.visibilityState === 'hidden') {
+        // visibilitychange is the last reliable lifecycle signal before a
+        // mobile browser freezes or discards the page.
+        persistLatestStreamSnapshot()
         hiddenAtRef.current = now
         lastHiddenDurationRef.current = null
         lastWakeAtRef.current = 0
@@ -1624,7 +1619,7 @@ export default function useStreamConnection(chatId, {
       document.removeEventListener('visibilitychange', onVisible)
       window.removeEventListener('online', onOnline)
     }
-  }, [])
+  }, [persistLatestStreamSnapshot])
 
   // Exposed so ChatView's promoteStreamToMessages can wipe the live
   // streamItems right after copying them into `messages`. Without this,
@@ -1674,13 +1669,6 @@ export default function useStreamConnection(chatId, {
     })
   }
 
-  // Flush the pending buffered stream snapshot on demand. ChatView calls this
-  // on the visibility-swap boundary (a pane hidden) — the one flush trigger the
-  // hook can't observe on its own — completing the design §2 flush contract.
-  const flushStreamSnapshot = useCallback(() => {
-    flushStoredStreamSnapshot(activeStreamChatIdRef.current)
-  }, [])
-
   return {
     streamItems,
     latestItemsRef,
@@ -1695,6 +1683,5 @@ export default function useStreamConnection(chatId, {
     disconnect,
     clearStreamItems,
     patchQuestionAnswers,
-    flushStreamSnapshot,
   }
 }

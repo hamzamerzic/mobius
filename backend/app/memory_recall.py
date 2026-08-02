@@ -1,17 +1,17 @@
 """Recognize Memory-app recall lookups so a turn can cite what it remembered.
 
-The Memory app is an ordinary installed app: the agent consults it by running
-``memory_search.py`` through Bash, and the notes it read come back as ordinary
-tool output. Without this module that lookup is indistinguishable from any
+The memory app is an ordinary installed app: the agent consults it by running
+its recall entry point through Bash, and the notes it read come back as
+ordinary tool output. Without this module that lookup is indistinguishable from any
 other shell command, so the owner cannot tell "it remembered something" from
 "it ran housekeeping" — nor, more importantly, "it looked and found nothing"
 from "it never looked".
 
 Detection is deliberately two-phase and keyed off the tool's own lifecycle:
 
-* ``recall_from_command`` accepts only the simple absolute invocation documented
-  by the Memory skill. It deliberately rejects shell composition rather than
-  trying to partially parse Bash.
+* ``recall_from_command`` accepts only the simple absolute invocation of a
+  BOUND provider path (see ``app.memory_provider``). It deliberately rejects
+  shell composition rather than trying to partially parse Bash.
 * ``recall_from_result`` reads the Memory app's bounded structured result line
   and is only called for a tool already identified by the first phase.
 
@@ -26,6 +26,9 @@ from __future__ import annotations
 import json
 import re
 import shlex
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from pathlib import PurePosixPath
 
 # Recall metadata rides inline on the SSE event, the persisted tool block, and
 # the compacted activity summary — the same budget the web-source citations
@@ -58,11 +61,58 @@ _MAX_COMMAND_SCAN_CHARS = 8192
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _INTERPRETER_RE = re.compile(r"^(?:.*/)?python[0-9.]*$")
 _LOGIN_SHELL_RE = re.compile(r"^(?:.*/)?bash$")
-_SCRIPT_RE = re.compile(
-  r"^/data/apps/(?P<app_slug>memory(?:-[0-9]+)?)/memory_search\.py$"
-)
 _CONTROL_TOKEN_RE = re.compile(r"^[;&|()<>]+$")
 
+
+@dataclass(frozen=True, slots=True)
+class RecallBinding:
+  """The script paths whose recall receipts this platform will honor.
+
+  Immutable, and passed explicitly rather than read from a module global: a
+  caller that cannot say where its binding came from has no business minting a
+  citation. ``app.memory_provider`` builds it from installed-app state, so this
+  module never learns any app's location.
+  """
+
+  by_path: Mapping[str, str]
+  tool_names: tuple[str, ...]
+
+  @property
+  def is_empty(self) -> bool:
+    return not self.by_path
+
+  def app_slug_for(self, token: str) -> str | None:
+    return self.by_path.get(token)
+
+  @classmethod
+  def of(cls, pairs: Iterable[tuple[str, str]]) -> "RecallBinding":
+    """Build from (absolute script path, app slug) pairs; first entry wins.
+
+    Pure: ``tool_names`` is derived with ``PurePosixPath`` and never stats the
+    filesystem, so the protocol module stays stdlib-only and independently
+    testable. Path construction lives in ``memory_provider``.
+    """
+    by_path: dict[str, str] = {}
+    names: list[str] = []
+    for path, slug in pairs:
+      if not isinstance(path, str) or not path or not isinstance(slug, str):
+        continue
+      if path in by_path:
+        continue
+      by_path[path] = slug
+      name = PurePosixPath(path).name
+      if name and name not in names:
+        names.append(name)
+    return cls(by_path=by_path, tool_names=tuple(names))
+
+
+EMPTY_RECALL_BINDING = RecallBinding(by_path={}, tool_names=())
+
+# `MOBIUS_MEMORY_RESULT_V1:` is embedded in durable ToolOutput bytes that the
+# read path re-parses on every chat load. Renaming it would retroactively break
+# history — that is partner DATA, and exactly the compatibility exception the
+# design principles carve out, not laziness. An app-neutral prefix is what a
+# protocol v2 is for; shipping one now would be machinery no problem has earned.
 _RESULT_PREFIX = "MOBIUS_MEMORY_RESULT_V1:"
 _RESULT_RE = re.compile(
   rf"^{re.escape(_RESULT_PREFIX)}(?P<payload>\{{.*\}})[ \t]*$",
@@ -160,7 +210,9 @@ def _unwrap_login_shell(tokens: list[str]) -> list[str] | None:
   return _simple_command_tokens(tokens[2])
 
 
-def _memory_search_invocation(tokens: list[str]) -> tuple[str, str] | None:
+def _recall_invocation(
+  tokens: list[str], binding: RecallBinding,
+) -> tuple[str, str] | None:
   """Return the app slug and question for the documented Memory command.
 
   Exact arity is a security boundary, not mere tidiness: ``shlex`` treats a
@@ -175,43 +227,46 @@ def _memory_search_invocation(tokens: list[str]) -> tuple[str, str] | None:
   if index >= len(tokens):
     return None
   head = tokens[index]
-  direct = _SCRIPT_RE.fullmatch(head)
-  if direct:
+  direct = binding.app_slug_for(head)
+  if direct is not None:
     return (
-      (direct.group("app_slug"), tokens[index + 1])
-      if len(tokens) == index + 3 else None
+      (direct, tokens[index + 1]) if len(tokens) == index + 3 else None
     )
   if not _INTERPRETER_RE.match(head):
     return None
   for script_index, token in enumerate(tokens[index + 1:], start=index + 1):
     if token.startswith("-"):
       continue
-    script = _SCRIPT_RE.fullmatch(token)
-    if script and len(tokens) == script_index + 3:
-      return script.group("app_slug"), tokens[script_index + 1]
+    slug = binding.app_slug_for(token)
+    if slug is not None and len(tokens) == script_index + 3:
+      return slug, tokens[script_index + 1]
     return None
   return None
 
 
-def recall_from_command(command: object) -> dict | None:
+def recall_from_command(command: object, binding: RecallBinding) -> dict | None:
   """Return a pending recall marker when this command RUNS a memory lookup.
 
   Called at tool-input time so the live turn can name what it is doing while
   the lookup is still in flight. Returning ``None`` means "not a memory
   lookup", which is also the safe answer for a missing or oversized command
-  summary — and, deliberately, for any command that merely names the script.
+  summary, an empty binding — and, deliberately, for any command that merely
+  names the script.
   """
   if not isinstance(command, str) or not command:
     return None
   if len(command) > _MAX_COMMAND_SCAN_CHARS:
     return None
+  if binding.is_empty:
+    return None
   # Cheap reject before tokenizing: the overwhelming majority of commands are
-  # not memory lookups and should cost one substring scan.
-  if "memory_search.py" not in command:
+  # not memory lookups and should cost one substring scan. The names come from
+  # the binding, so this stays a prefilter and never a second source of truth.
+  if not any(name in command for name in binding.tool_names):
     return None
   tokens = _simple_command_tokens(command)
   tokens = _unwrap_login_shell(tokens) if tokens else None
-  invocation = _memory_search_invocation(tokens) if tokens else None
+  invocation = _recall_invocation(tokens, binding) if tokens else None
   if not invocation:
     return None
   app_slug, raw_query = invocation
@@ -300,7 +355,9 @@ def settle_recall(
   return settled
 
 
-def recall_from_tool_block(block: object) -> dict | None:
+def recall_from_tool_block(
+  block: object, binding: RecallBinding,
+) -> dict | None:
   """Return explicit or recoverable recall metadata for a stored tool block.
 
   Early Codex transcripts contain the exact Memory command and structured
@@ -313,7 +370,7 @@ def recall_from_tool_block(block: object) -> dict | None:
   recall = block.get("recall")
   if isinstance(recall, dict):
     return recall
-  pending = recall_from_command(block.get("input"))
+  pending = recall_from_command(block.get("input"), binding)
   if pending is None or block.get("status") == "running":
     return None
 

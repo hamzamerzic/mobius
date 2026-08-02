@@ -72,7 +72,7 @@ def test_sweep_never_deletes_scratch_of_a_run_still_in_flight(
   chat_id = getattr(chat, "id", chat)
   db.add(
     models.ChatRun(
-      id="run-live", chat_id=chat_id, status="running"
+      id="run-live", root_run_id="run-live", chat_id=chat_id, status="running"
     )
   )
   db.commit()

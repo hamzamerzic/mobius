@@ -102,6 +102,7 @@ async def test_programmatic_start_owns_writer_fence_broadcast_and_spawn(
     title="Resolve conflict",
     content="Fix the files",
     provider="claude",
+    initiated_by_app_id=42,
   )
 
   assert started is True
@@ -112,6 +113,7 @@ async def test_programmatic_start_owns_writer_fence_broadcast_and_spawn(
   assert command.run_token == "run-1"
   assert command.title_source == "Resolve conflict"
   assert command.default_provider == "claude"
+  assert command.initiated_by_app_id == 42
   assert command.user_msg == {
     "role": "user", "content": "Fix the files", "ts": 123456,
   }

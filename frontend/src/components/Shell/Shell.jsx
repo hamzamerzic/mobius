@@ -41,7 +41,6 @@ import {
   workspaceRequestFromSystemEvent,
   workspaceRequestsForBuiltApps,
   ACTIVATE_FOREGROUND,
-  ACTIVATE_LIVE_PREVIEW,
 } from './workspacePlacement.js'
 import {
   appUpdateStaleMessage,
@@ -382,6 +381,9 @@ export default function Shell() {
   // be removed while focus is elsewhere. Physical history hints self-correct at
   // restore time (OPEN_TAB dedups an open item to its true pane).
   onWorkspaceTransitionRef.current = (prevWs, nextWs) => {
+    if (prevWs.viewMode !== nextWs.viewMode) {
+      mode.syncCommitted(nextWs.viewMode)
+    }
     navStackRef.current = paneModel.reconcileRoutePanes(navStackRef.current, prevWs, nextWs)
   }
 
@@ -753,24 +755,8 @@ export default function Shell() {
   requestEmptySingleNewChatRef.current = requestEmptySingleNewChat
   const closeTab = useCallback((tab, { reason } = {}) => {
     const key = tabModel.tabKey(tab)
-    const ws = workspaceStateRef.current.ws
-    // R3 (auto-return through the descriptor): a user close that EMPTIES the builder
-    // tree auto-returns to single (the reducer's autoReturnIfEmptied). Arm the SAME
-    // mirror the durable flip in the small mode controller in the SAME batch so
-    // flips to single NOW — not a frame later via the passive sync-committed
-    // reconcile, which left the logo twisted for one intermediate frame. An emptied
-    // tree has no pane to animate, so the exit is instant; the
-    // tree's coupled undo re-enters builder as one gesture. A sole Settings tab is
-    // no exception — closing it empties the tree the same way. reason:'deleted' does
-    // not auto-return (the reducer skips it), so it is excluded here too.
-    if (SPLITS && reason !== 'deleted' && ws.viewMode === 'panes'
-        && !paneModel.isEmptyTree(ws) && paneModel.isEmptyTree(paneModel.closeTab(ws, key))) {
-      mode.toggle({ cause: 'auto', to: 'single' })
-    }
     dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: key, reason })
-    // If this auto-returned into a never-seeded single slot, dispatchWorkspace owns
-    // the New Chat request. The coupled undo still restores tab + builder together.
-  }, [dispatchWorkspace, mode, workspaceStateRef])
+  }, [dispatchWorkspace])
   const placeInWorkspace = useCallback((requestOrRequests) => {
     const requests = Array.isArray(requestOrRequests)
       ? requestOrRequests
@@ -796,17 +782,6 @@ export default function Shell() {
     // takeover is open.
     const currentWs = workspaceStateRef.current.ws
     const world = paneModel.WORKSPACE_SPLITS_ENABLED ? currentWs.viewMode : 'single'
-    const opensLivePreview = requests.some(
-      request => request?.activation === ACTIVATE_LIVE_PREVIEW,
-    )
-    // The placement resolver folds the durable Standard → Builder flip into the
-    // live-preview request. Mirror that same intent into the transition
-    // descriptor in this React batch so render mode and workspace mode never
-    // disagree for an intermediate frame. No presentation plan: the preview
-    // should appear immediately, not wait behind decorative entry motion.
-    if (SPLITS && world === 'single' && opensLivePreview) {
-      mode.toggle({ cause: 'auto', to: 'panes' })
-    }
     if (world === 'single'
         && requests.some(r => r && r.item && r.activation === ACTIVATE_FOREGROUND)) {
       dismissSettings()
@@ -825,7 +800,7 @@ export default function Shell() {
         liveApps,
       }),
     })
-  }, [dispatchWorkspace, dismissSettings, mode])
+  }, [dispatchWorkspace, dismissSettings])
   // The tab strip is the BUILDER SURFACE: with splits ON it follows the
   // EFFECTIVE builder world exactly — always present in builder (even at a
   // single leaf, where this single-pane .shell__tabstrip stands in for the
@@ -1171,19 +1146,17 @@ export default function Shell() {
   labelForTabRef.current = labelForTab
   // A single-mode drag previews the builder world through the ONE descriptor
   // (INV 5): arm is phase 'drag-preview', and the id it mints is carried to the
-  // matching commit/cancel so a stale end-event from a superseded drag is
-  // ignored. A COMMITTED drop dispatches drag-commit in the SAME pointerup
-  // batch as the drop's OPEN_TAB_AT (which flips viewMode to 'panes'), so the
-  // descriptor and the tree flip as ONE transaction (INV 7) — the passive
-  // sync-committed reconcile stays a pure hydration net, never the beat path.
-  // A rejected/no-op drop cancels and mutates nothing.
+  // matching end so a stale event from a superseded drag is ignored.
+  // OPEN_TAB_AT owns any committed mode flip. Ending the drag can only clear
+  // its transient preview; the shared workspace transition boundary above
+  // synchronizes presentation from the reducer's actual result in that same
+  // pointerup batch. A rejected/no-op drop cancels and mutates nothing.
   const dragPreviewIdRef = useRef(null)
-  const onModeDragPreview = useCallback((active, { committed = false } = {}) => {
+  const onModeDragPreview = useCallback((active) => {
     if (active) {
       dragPreviewIdRef.current = mode.dragArm()
     } else {
-      if (committed) mode.dragCommit(dragPreviewIdRef.current)
-      else mode.dragCancel(dragPreviewIdRef.current)
+      mode.dragCancel(dragPreviewIdRef.current)
       dragPreviewIdRef.current = null
     }
   }, [mode, workspaceStateRef])
@@ -1217,10 +1190,9 @@ export default function Shell() {
       plan,
       update: () => {
         dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: to })
-        mode.toggle({ cause, to })
       },
     })
-  }, [dispatchWorkspace, mode, modeView, projection, contentRect])
+  }, [dispatchWorkspace, modeView, projection, contentRect])
   // The single-tap navigation toggle passed to ShellBrand (which owns the logo
   // gesture and static Builder cue). The HOLD / swipe / Shift+Enter mode toggle is
   // handleToggleViewMode above, passed to ShellBrand as onToggleMode.
@@ -1275,7 +1247,7 @@ export default function Shell() {
       // through the controller FIRST (INV 2/3) so its re-entry/exit deal fires as one
       // gesture, not a passive sync a render later. undo.restoreViewMode reverts the
       // snapshot's mode; every other undo carries the current mode forward
-      // (restoredMode === current), so mode.undo is a no-op there. The presentation
+      // (restoredMode === current), so no mode presentation change is needed there. The presentation
       // plan is built from the tree the beat animates: re-entering builder deals in
       // the RESTORED tree; exiting to single deals the CURRENT tiled tree out.
       const wsState = workspaceStateRef.current
@@ -1300,7 +1272,6 @@ export default function Shell() {
             cause: 'undo',
             plan,
             update: () => {
-              mode.undo({ restoredMode })
               dispatchWorkspace({ type: 'UNDO_LAST' })
             },
           })
@@ -1311,7 +1282,7 @@ export default function Shell() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [dispatchWorkspace, mode, modeView])
+  }, [dispatchWorkspace, modeView])
 
   // No per-mutation undo toast: the reducer still mints a fresh undo slot on
   // every workspace mutation (its `toast` label included, for the reducer's own
@@ -2210,6 +2181,10 @@ export default function Shell() {
         // in the visible set, not equality with one global id, so a chat visible
         // in a background split gets no false dot (finding D-iii).
         if (!visibleChatIdsRef.current.has(String(chatId))) {
+          // Finish means the complete answer is durable now. Refresh the hidden
+          // chat immediately rather than making the owner's later return show
+          // an old snapshot and then wait for the final response to arrive.
+          void chatQueries.messages.refresh(queryClient, chatId).catch(() => {})
           setAttentionChatIds(prev => {
             if (prev.has(chatId)) return prev
             const next = new Set(prev)
@@ -2265,7 +2240,8 @@ export default function Shell() {
     confirmChatDeleted, confirmChatIdentityIsLive, confirmChatRecovered,
     loadTheme, markChatRunActivity, markChatRunFinished,
     markChatRunState, markStreamingEnd, markStreamingStart,
-    onNotificationCreated, placeInWorkspace, refreshApps, refreshChats, warmAppCode,
+    onNotificationCreated, placeInWorkspace, queryClient,
+    refreshApps, refreshChats, warmAppCode,
   ])
 
   // Shell-level SSE subscription for system events. Stays open for
@@ -3278,6 +3254,7 @@ export default function Shell() {
                 markVoiceListening={markVoiceListening}
                 refreshApps={refreshApps}
                 acknowledgeAppPreview={handleAppPreviewSeen}
+                refreshChats={refreshChats}
                 markChatOwnerActivity={markChatOwnerActivity}
                 loadTheme={loadTheme}
                 navTo={stablePaneNavTo}

@@ -39,7 +39,9 @@ from app.events import (
   tool_output_exit_code,
   undo_question_scrub,
 )
-from app.memory_recall import recall_from_command, settle_recall
+from app.memory_recall import (
+  RecallBinding, recall_from_command, settle_recall,
+)
 from app.runtime_types import ChatEvent
 
 
@@ -226,9 +228,21 @@ class ChatEventSink:
     {"tool_start", "tool_end", "task_start", "task_done", "error"}
   )
 
-  def __init__(self, bc, chat_id: str, run_token: str | None = None):
+  def __init__(
+    self,
+    bc,
+    chat_id: str,
+    run_token: str | None = None,
+    *,
+    recall_binding: RecallBinding,
+  ):
     self.bc = bc
     self.chat_id = chat_id
+    # Which app's recall receipts this turn will honor, resolved ONCE by the
+    # caller while its session is live. Required rather than defaulted: a sink
+    # that silently fell back to "no provider" would drop every citation for
+    # the turn and look identical to "the agent never looked".
+    self._recall_binding = recall_binding
     # Per-turn run identity, allocated by the scheduler and threaded in
     # via `_run_chat_impl`. The sink stamps it on every writer-actor
     # command so the actor coalesces/fences this turn's snapshots under
@@ -381,7 +395,7 @@ class ChatEventSink:
       # future runner that populates both from double-stamping.)
       if self._tool_was_memory_recall(event.get("tool_use_id")):
         return
-      recall = recall_from_command(event.get("input"))
+      recall = recall_from_command(event.get("input"), self._recall_binding)
       if recall is not None:
         event["recall"] = recall
       return

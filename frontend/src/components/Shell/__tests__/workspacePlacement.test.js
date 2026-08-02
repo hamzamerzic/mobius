@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 
 import { makeTab, tabKey } from '../tabModel.js'
 import * as paneModel from '../paneModel.js'
+import { effectiveViewMode, initialModeState, modeReducer } from '../modeMachine.js'
 import {
   ACTIVATE_FOREGROUND,
   ACTIVATE_IN_BACKGROUND,
@@ -279,6 +280,17 @@ test('live preview · Standard elsewhere: parks without changing the visible sur
   assert.deepEqual(out.singleScreen, { kind: 'chat', id: 'elsewhere' },
     'the owner keeps the surface they were using')
   assert.ok(paneModel.paneOf(out, 'app:9'), 'the preview is parked in Builder')
+
+  const presented = modeReducer(initialModeState('single'), {
+    type: 'sync-committed',
+    committedMode: out.viewMode,
+  })
+  assert.equal(effectiveViewMode(presented), 'single',
+    'presentation follows the resolver actual result, never preview intent')
+  const afterDrawerSelection = paneModel.setSingleScreen(out, { kind: 'chat', id: 'next' })
+  assert.deepEqual(paneModel.activeContentRoute(afterDrawerSelection), {
+    view: 'chat', chatId: 'next', appId: null, paneId: afterDrawerSelection.focusedPaneId,
+  }, 'a later drawer selection paints the new Standard chat while Builder stays parked')
 })
 
 test('beside-source + background · tile single pane: split, item active in the NEW pane, focus stays', () => {

@@ -12,9 +12,12 @@ import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
-import { retainChatDetailQuery } from '../../queryClient.js'
 import useStreamConnection from './useStreamConnection.js'
-import useScrollMode from './useScrollMode.js'
+import useScrollMode, {
+  remapSavedReadingAnchor,
+  retireSavedReadingPosition,
+  savedReadingAnchorKey,
+} from './useScrollMode.js'
 import useVoiceInput from './useVoiceInput.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { getOnlineSnapshot } from '../../lib/connectivityStore.js'
@@ -60,8 +63,10 @@ import { shouldDismissComposerKeyboardOnSubmit } from './composerKeyboardPolicy.
 import { updateChatRuntimeCache } from './chatRuntimeCache.js'
 import {
   chatDetailCacheValue,
-  chatEntryPhase,
   chatSnapshotMatchesRuntime,
+  mergeRecentMessagesIntoLoadedWindow,
+  messageKey,
+  messageMatchesKey,
 } from '../../lib/chatDetailCache.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
 import { sendFailureMessage } from './sendFailure.js'
@@ -79,7 +84,6 @@ import {
   continuationRowsFromPromotedMessage,
   isContinuationMessage,
   isOwnerUserMessage,
-  mergeRecentMessagesIntoLoadedWindow,
   openAppCtaViewModel,
   shouldAttachRunningStream,
   shouldRetryStopAfterConfirm,
@@ -273,12 +277,12 @@ export default function ChatView({
   // the composer disables send and says so, rather than failing into a
   // dead stream.
   const online = useOnlineStatus()
-  // Read the query cache synchronously on mount. If we've viewed this
-  // chat before, messages render immediately on remount — no empty
-  // placeholder, no fetch wait, no flash. The query is then refreshed
-  // in the background by the initial useEffect below.
-  // Synchronous cache read on mount. If we've viewed this chat before
-  // and the persister hydrated, useState starts populated → no flash.
+  // Read the query cache synchronously on mount. If we've viewed this chat
+  // before, its complete transcript window builds the hidden restoration DOM
+  // immediately. It becomes paintable only after the version handshake below,
+  // so cache supplies geometry without ever becoming freshness authority.
+  // If the persister hydrated, useState starts populated; if it races with a
+  // cold mount, the authoritative activation read self-heals the miss.
   // The persister itself races with mount on cold load; PersistQuery-
   // ClientProvider's `onSuccess` flushes mid-flight render trees, so
   // for already-warm in-memory caches (same session) this is exact;
@@ -287,7 +291,6 @@ export default function ChatView({
   // back through the versioned activation handoff, so any miss self-heals on
   // the first authoritative detail read.
   const cached = queryClient.getQueryData(chatMessagesQueryKey(chatId))
-  useEffect(() => retainChatDetailQuery(queryClient, chatId), [chatId, queryClient])
   const transcriptCacheKey = useMemo(() => chatMessagesQueryKey(chatId), [chatId])
   const {
     messages,
@@ -301,12 +304,11 @@ export default function ChatView({
     () => composerHistoryFromMessages(messages),
     [messages],
   )
-  const [loading, setLoading] = useState(!cached)
-  // Cached content is a real first paint even for a running chat. The initial
-  // refresh remains authoritative and the stream catches up any active tail,
-  // but neither needs to keep an already-useful transcript hidden.
-  const cachedEntryPhase = chatEntryPhase(cached)
-  const [initialEntryPhase, setInitialEntryPhase] = useState(cachedEntryPhase)
+  // Cache supplies the DOM needed for exact restoration, not freshness proof.
+  // The outgoing chat remains painted until validation or authoritative detail
+  // settles, so stale content can never become the destination's first frame.
+  const [loading, setLoading] = useState(true)
+  const [initialEntryPhase, setInitialEntryPhase] = useState('history')
   // On a failed initial /chats/{id} fetch, loadError flips in the catch so
   // the UI can render a retry message. Setting loading false alone would
   // render the empty-state UI ("What's on your mind?") as if the chat had no
@@ -720,7 +722,13 @@ export default function ChatView({
   // leave/return lifecycle: freeze its reader position while geometry is live,
   // then let the load effect below disconnect while hidden and refresh on show.
   useLayoutEffect(() => {
-    if (hidden) freezeChatExit()
+    if (!hidden) return
+    freezeChatExit()
+    // Arm the freshness + restoration gate while this surface is still
+    // physically hidden. A retained ChatView must not reappear with the
+    // transcript from its previous visible lifetime for even one frame.
+    setInitialEntryPhase('history')
+    setLoading(true)
   }, [hidden, freezeChatExit])
 
   function rememberSendIntent(cid, intent) {
@@ -993,7 +1001,6 @@ export default function ChatView({
     disconnect,
     clearStreamItems,
     patchQuestionAnswers,
-    flushStreamSnapshot,
   } = useStreamConnection(chatId, {
     onConnectionLost: () => {
       // Browser transport ownership is uncertain here: the backend turn may
@@ -1321,40 +1328,13 @@ export default function ChatView({
     const becameVisible = wasHiddenRef.current && !hidden
     wasHiddenRef.current = hidden
     if (!becameVisible) return
-
-    // The visible world keeps the shared query cache current while this owner is
-    // retained off-screen. Reconcile that recent page into this owner's loaded
-    // window before it paints, preserving any older rows it paged in earlier.
-    const latest = queryClient.getQueryData(chatMessagesQueryKey(chatId))
-    if (latest?.messages) {
-      const refreshed = mergeRecentMessagesIntoLoadedWindow({
-        loadedMessages: messagesRef.current,
-        loadedOffset: offsetRef.current,
-        recentMessages: latest.messages,
-        recentOffset: latest.offset || 0,
-      })
-      commitMessages(refreshed.messages, refreshed.offset)
-      setServerRunningState(!!latest.running)
-      setSending(!!latest.running)
-      setLiveQuestionId(latest.pending_question_id || null)
-      pendingQueue.hydrate(latest.pending_messages || [])
-      // Match the upstream entry gate without depending on the separate warm-
-      // running-cache optimization: settled cache may reveal immediately;
-      // running history still waits for its authoritative catch-up.
-      setInitialEntryPhase(latest.running ? 'history' : 'cached')
-      setLoading(false)
-    }
-
     // Composer drafts are chat-scoped across workspace worlds. A hidden retained
     // owner does not receive input events, so reconcile from the durable draft at
     // the visibility boundary before its first painted frame.
     restoreDurableDraft()
   }, [
     chatId,
-    commitMessages,
     hidden,
-    pendingQueue.hydrate,
-    queryClient,
     restoreDurableDraft,
   ])
 
@@ -1389,23 +1369,6 @@ export default function ChatView({
   useEffect(() => {
     if (hidden && listeningRef.current) stopVoiceRef.current?.()
   }, [hidden, listeningRef])
-
-  // Visibility-swap flush (design §2 flush contract). When this pane is hidden
-  // — projected out of the visible pair, or covered by full-workspace Settings —
-  // land the pending trailing stream snapshot synchronously. A hidden pane may
-  // soon unmount (phone projection) or the shell may reload while it's off-
-  // screen; without this flush the multi-pane throttle could strand its last
-  // streamed frame and the reconnect fallback would roll back.
-  //
-  // Adjacent to the `freezeChatExit` hidden-boundary effect above but NOT a
-  // duplicate: that freezes the reader's SCROLL MODE (sessionStorage 'chat-mode'
-  // / _scrollModes); this flushes the STREAM SNAPSHOT ('chat-stream-items:*').
-  // Different stores, different concerns — both correctly fire on the same
-  // hide, since the sibling's retain-behind-Settings keeps this ChatView mounted
-  // (so this effect runs rather than the unmount-flush).
-  useEffect(() => {
-    if (hidden) flushStreamSnapshot?.()
-  }, [hidden, flushStreamSnapshot])
 
   // Snapshot stream into a permanent message. Idempotent — both
   // handleStop and onStreamEnd may call this.
@@ -1623,9 +1586,32 @@ export default function ChatView({
     const initialLoadController = new AbortController()
     const queryKey = chatMessagesQueryKey(chatId)
     const activationCache = queryClient.getQueryData(queryKey)
+    const savedAnchorKey = savedReadingAnchorKey(chatId)
+    const anchorMatchIn = (snapshot) => {
+      if (!savedAnchorKey || !Array.isArray(snapshot?.messages)) return null
+      const baseOffset = Number.isInteger(snapshot.offset) ? snapshot.offset : 0
+      const localIndex = snapshot.messages.findIndex((message, index) => (
+        messageMatchesKey(message, baseOffset + index, savedAnchorKey)
+      ))
+      if (localIndex < 0) return null
+      const messageIndex = baseOffset + localIndex
+      return {
+        canonicalKey: messageKey(snapshot.messages[localIndex], messageIndex),
+        localIndex,
+      }
+    }
+    const remapAnchorMatch = (match) => {
+      if (match?.canonicalKey && match.canonicalKey !== savedAnchorKey) {
+        remapSavedReadingAnchor(chatId, savedAnchorKey, match.canonicalKey)
+      }
+    }
+    const activationAnchorMatch = anchorMatchIn(activationCache)
+    const cacheCoversSavedAnchor = !savedAnchorKey || !!activationAnchorMatch
+    remapAnchorMatch(activationAnchorMatch)
     chatIdStaleRef.current = false
     setLoadError(false)
-    setInitialEntryPhase(chatEntryPhase(activationCache))
+    setLoading(true)
+    setInitialEntryPhase('history')
 
     const gen = fetchGenRef.current
     const requestJson = async (path, label) => {
@@ -1673,22 +1659,53 @@ export default function ChatView({
       let runtime = null
       let detailCache = null
       let reused = false
+      let anchorRetired = false
 
-      if (typeof activationCache?.updated_at === 'string') {
+      if (cacheCoversSavedAnchor && typeof activationCache?.updated_at === 'string') {
         runtime = await requestJson(
           `/chats/${chatId}/runtime`,
           'CHAT_RUNTIME_FAILED',
         )
-        if (chatSnapshotMatchesRuntime(activationCache, runtime)) {
-          detailCache = activationCache
+        // A terminal background refresh can win while this tiny runtime read is
+        // in flight. Re-read the cache before accepting reuse so an older
+        // captured object can never overwrite the fresher publication.
+        const latestCache = queryClient.getQueryData(queryKey)
+        const latestAnchorMatch = anchorMatchIn(latestCache)
+        const latestCoversSavedAnchor = !savedAnchorKey || !!latestAnchorMatch
+        remapAnchorMatch(latestAnchorMatch)
+        if (latestCoversSavedAnchor && chatSnapshotMatchesRuntime(latestCache, runtime)) {
+          detailCache = latestCache
           reused = true
         }
       }
       if (!reused) {
+        const anchorParam = savedAnchorKey
+          ? `&anchor=${encodeURIComponent(savedAnchorKey)}`
+          : ''
         runtime = await requestJson(
-          `/chats/${chatId}?limit=20&compact=1`,
+          `/chats/${chatId}?limit=20&compact=1${anchorParam}`,
           'CHAT_LOAD_FAILED',
         )
+        const runtimeAnchorMatch = anchorMatchIn(runtime)
+        if (savedAnchorKey && runtime.requested_anchor_found === true) {
+          if (!runtimeAnchorMatch) {
+            throw new Error('CHAT_READING_ANCHOR_NOT_FOUND')
+          }
+          remapAnchorMatch(runtimeAnchorMatch)
+        } else if (savedAnchorKey && runtime.requested_anchor_found === false) {
+          // Only the authoritative false + absent-row combination proves that
+          // the durable coordinate is gone. A contradictory response is a
+          // protocol error; retiring on it would destroy a valid location.
+          if (runtimeAnchorMatch) {
+            throw new Error('CHAT_READING_ANCHOR_NOT_FOUND')
+          }
+          retireSavedReadingPosition(chatId)
+          anchorRetired = true
+        } else {
+          // Rolling servers may omit the coverage bit. A row that is present
+          // can still be canonicalized safely; absence without the bit cannot.
+          remapAnchorMatch(runtimeAnchorMatch)
+        }
         detailCache = chatDetailCacheValue(runtime)
       }
 
@@ -1713,14 +1730,16 @@ export default function ChatView({
       }
 
       if (reused) {
-        // One narrow publication updates queue/liveness only when those fields
-        // changed. The retained messages and their DOM remain untouched.
+        // One narrow cache publication updates queue/liveness only. Reconcile
+        // the mounted hidden owner from the newest version-matched cache object
+        // before readiness so a concurrent terminal refresh wins this race.
         updateChatRuntimeCache(queryClient, queryKey, {
           running: !!runtime.running,
           activeGoalObjective: runtime.active_goal_objective || '',
           pending_messages: runtime.pending_messages || [],
           pending_question_id: runtime.pending_question_id || null,
         })
+        applyMessagesToView(msgs, detailCache.offset)
         settleRuntime(runtime, msgs)
         return
       }
@@ -1729,7 +1748,7 @@ export default function ChatView({
       // rows. Runtime config belongs to this server response even when the
       // mounted transcript is temporarily ahead of it.
       setChatInfo(detailCache.chatInfo)
-      if (serverSnapshotBehindLocal(msgs, messagesRef.current)) {
+      if (!anchorRetired && serverSnapshotBehindLocal(msgs, messagesRef.current)) {
         queryClient.setQueryData(queryKey, existing => ({
           ...detailCache,
           // The local suffix is not proven by this server version. Preserve it
@@ -1746,17 +1765,33 @@ export default function ChatView({
       // Keep an already-loaded older prefix while replacing its overlapping
       // recent page. Publish the complete detail snapshot once, then update the
       // mounted view without a second query-cache notification.
-      const refreshed = mergeRecentMessagesIntoLoadedWindow({
-        loadedMessages: messagesRef.current,
-        loadedOffset: offsetRef.current,
-        recentMessages: msgs,
-        recentOffset: runtime.offset || 0,
-      })
+      const refreshed = anchorRetired
+        ? {
+            messages: msgs,
+            offset: detailCache.offset,
+          }
+        : mergeRecentMessagesIntoLoadedWindow({
+            loadedMessages: messagesRef.current,
+            loadedOffset: offsetRef.current,
+            recentMessages: msgs,
+            recentOffset: runtime.offset || 0,
+          })
       queryClient.setQueryData(queryKey, {
         ...detailCache,
         messages: refreshed.messages,
         offset: refreshed.offset,
       })
+
+      // A return with a complete local window is a warm restoration even when
+      // the version changed while away. Apply the authoritative replacement
+      // and readiness in the same React batch; the cold prefix scheduler must
+      // never turn a warm return into a delayed all-at-once burst.
+      if (activationCache && cacheCoversSavedAnchor && !anchorRetired) {
+        applyMessagesToView(refreshed.messages, refreshed.offset)
+        settleRuntime(runtime, refreshed.messages)
+        return
+      }
+
       const renderFrames = coldTranscriptRenderFrames(refreshed.messages)
       if (renderFrames.length === 1) {
         // An ordinary cold transcript stays one interruptible commit. Readiness
@@ -1801,8 +1836,21 @@ export default function ChatView({
     loadActivation()
       .catch((err) => {
         if (cancelled) return
+        // Offline degradation may use a complete cached restoration window,
+        // but never a truncated one that cannot resolve the saved address.
+        const cacheIsSafeFallback = activationCache
+          && cacheCoversSavedAnchor
+          && err?.message !== 'CHAT_READING_ANCHOR_NOT_FOUND'
+        if (cacheIsSafeFallback) {
+          applyMessagesToView(activationCache.messages, activationCache.offset)
+        } else {
+          // The mounted state was seeded from cache before validation. Clear an
+          // incomplete or server-rejected window before making the error state
+          // paintable; otherwise those old rows would leak through this branch.
+          applyMessagesToView([], 0)
+        }
         setInitialEntryPhase('ready')
-        setLoadError(true)
+        setLoadError(!cacheIsSafeFallback)
         setLoading(false)
         // A confirmed 404 means this chat is gone (deleted out-of-band, or an
         // off-list chat the restore probe had memoized as existing). Tell the
@@ -3398,11 +3446,11 @@ export default function ChatView({
     : null
   const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
 
-  // The scroll safety cap may reveal an otherwise empty DOM while the initial
-  // request is still in flight. That protects a standalone ChatView from being
-  // hidden forever, but it is not a valid shell handoff: keep the outgoing chat
-  // painted until this chat has authoritative content, emptiness, or an error.
-  const displayReady = !loading && (revealed || showEmpty || showLoadError)
+  // A retained ChatView can keep `revealed=true` across a hidden lifetime. Data
+  // readiness is a separate gate: old DOM must stay unpainted until this
+  // activation validates or replaces it and restores the saved address.
+  const transcriptPaintable = initialEntryPhase === 'ready' && revealed
+  const displayReady = !loading && (transcriptPaintable || showEmpty || showLoadError)
   useLayoutEffect(() => {
     if (displayReady) onDisplayReady?.(chatId)
   }, [chatId, displayReady, onDisplayReady])
@@ -3776,7 +3824,7 @@ export default function ChatView({
         className="chat__scroll"
         ref={scrollRef}
         onScroll={handleScroll}
-        style={revealed ? undefined : { visibility: 'hidden' }}
+        style={transcriptPaintable ? undefined : { visibility: 'hidden' }}
       >
         {/* The reservation is a permanent geometry invariant for every
             non-empty chat, including after unmount/remount. Keep the list's
@@ -3832,7 +3880,7 @@ export default function ChatView({
             // data-key is queried by applyMode when restoring an
             // ANCHOR_AT mode. msg.id (server-assigned UUID) is ideal;
             // fall back to role+ts which is also stable across renders.
-            const dataKey = msg.id || `${msg.role}-${msg.ts ?? i}`
+            const dataKey = messageKey(msg, offset + i)
             // User rows key + pin on the stable cid so the optimistic→confirm
             // display-ts update never remounts the row (which would drop the
             // pin target mid-swap). data-ts stays for the revealed metadata row.

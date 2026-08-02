@@ -13,16 +13,6 @@ export function initialModeState(committedMode = 'panes') {
 
 export function modeReducer(state, event) {
   switch (event.type) {
-    case 'toggle': {
-      const to = event.to || (state.committedMode === 'single' ? 'panes' : 'single')
-      if (to === state.committedMode && !state.transition) return state
-      return { ...state, committedMode: to, transition: null }
-    }
-    case 'undo': {
-      const to = event.restoredMode === 'single' ? 'single' : 'panes'
-      if (to === state.committedMode && !state.transition) return state
-      return { ...state, committedMode: to, transition: null }
-    }
     case 'drag-arm': {
       if (state.committedMode !== 'single') {
         return state.transition ? { ...state, transition: null } : state
@@ -44,11 +34,6 @@ export function modeReducer(state, event) {
       const live = state.transition
       if (!live || live.phase !== 'drag-preview' || live.id !== event.id) return state
       return { ...state, transition: null }
-    }
-    case 'drag-commit': {
-      const live = state.transition
-      if (!live || live.phase !== 'drag-preview' || live.id !== event.id) return state
-      return { ...state, committedMode: 'panes', transition: null }
     }
     case 'sync-committed': {
       const to = event.committedMode === 'single' ? 'single' : 'panes'

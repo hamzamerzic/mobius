@@ -13,6 +13,7 @@ from app.chat_transcript import materialized_messages
 from app.database import SessionLocal
 from app.pending_questions import PendingQuestion
 from app.runner_registry import RunnerKind, registry
+from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 class _Handle:
@@ -83,7 +84,7 @@ def _live_stale(chat_id: str, *, pending=None):
   bc = create_broadcast(chat_id)
   bc.publish({"type": "text", "content": "partial"})
   bc.last_event_at = time.monotonic() - chat_mod.PROGRESS_TIMEOUT - 5
-  sink = chat_mod._ChatEventSink(bc, chat_id, run_token=f"rt-{chat_id}")
+  sink = chat_mod._ChatEventSink(bc, chat_id, run_token=f"rt-{chat_id}", recall_binding=EMPTY_RECALL_BINDING)
   chat_mod.register_active_sink(chat_id, sink)
   handle = _Handle(chat_id)
   registry.register(handle)

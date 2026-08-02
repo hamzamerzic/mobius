@@ -13,11 +13,15 @@
  *                                  — user msg at top (post-send), keyed on
  *                                    the stable client `cid` (data-cid)
  *   { kind: 'FOLLOW_BOTTOM' }     — sticky-bottom for streaming
- *   { kind: 'ANCHOR_AT', key, offset, questionSubmitViewportH?,
+ *   { kind: 'ANCHOR_AT', key, offset, part?, questionSubmitViewportH?,
  *     questionSubmitBaseMode? }
- *                                  — anchored at a specific msg; an in-message
- *                                    question may temporarily preserve its
- *                                    submit-time position at one viewport size
+ *                                  — anchored at a message and, when that row
+ *                                    is taller than the viewport, an ordered
+ *                                    child-index path within it; `offset` is
+ *                                    measured from the addressed element's
+ *                                    top. An in-message question may
+ *                                    temporarily preserve its submit-time
+ *                                    position at one viewport size
  *
  * Send pinning has one rule for direct, queued, and steered messages: the
  * first visible user message always pins; every later message pins when the
@@ -126,22 +130,91 @@ function _appendScrollTrace(bucket, entry) {
   window.__mobiusChatScrollTrace = trace
 }
 
-// Per-chat ScrollMode persistence in sessionStorage. Schema 3 retires modes
-// written by the old missing-location fallback, which manufactured an
-// ANCHOR_AT from the browser's initial scrollTop=0 and then persisted that
-// accidental top-of-chat position as if the reader had chosen it.
-const SCROLL_MODE_SCHEMA = '3'
+// Durable per-chat reading positions.
+//
+// These lived in sessionStorage, which dies with the browsing session. The
+// messages they address survive in IndexedDB for a day, so on every PWA
+// relaunch a chat re-opened instantly with its history intact and NO reading
+// position — every conversation landed at the bottom and had to be scrolled
+// back by hand. A reading position must outlive the tab that created it, so it
+// is stored with the same durability as the transcript it points into.
+// The rename from the sessionStorage `chat-mode` map IS the migration: those
+// entries carry no part path, so they cannot be migrated into a coordinate
+// they never recorded, and this key has never held any other shape.
+export const READING_POSITION_KEY = 'chat-reading-position'
+// This instance has 800+ chats. Positions are tiny, but the map is bounded so
+// it cannot grow without limit; least-recently-written entries drop first.
+const READING_POSITION_LIMIT = 300
+
 const _scrollModes = (() => {
   try {
-    if (sessionStorage.getItem('chat-mode-schema') !== SCROLL_MODE_SCHEMA) {
-      sessionStorage.removeItem('chat-mode')
-      sessionStorage.setItem('chat-mode-schema', SCROLL_MODE_SCHEMA)
-      return {}
-    }
-    return JSON.parse(sessionStorage.getItem('chat-mode') || '{}')
+    const parsed = JSON.parse(localStorage.getItem(READING_POSITION_KEY) || '{}')
+    return (parsed && typeof parsed === 'object') ? parsed : {}
   }
   catch { return {} }
 })()
+
+/** The durable message row an activation must contain before reveal.
+ * ChatView uses only the row identity; this module keeps ownership of the
+ * nested part and exact pixel offset.
+ */
+export function savedReadingAnchorKey(chatId) {
+  const mode = _scrollModes[String(chatId || '')]
+  return mode?.kind === 'ANCHOR_AT' && typeof mode.key === 'string'
+    ? mode.key
+    : null
+}
+
+/** Replace one saved alias with the server's canonical row key before the
+ * ready-phase restore consumes it. */
+export function remapSavedReadingAnchor(chatId, fromKey, toKey) {
+  const id = String(chatId || '')
+  const mode = _scrollModes[id]
+  if (mode?.kind !== 'ANCHOR_AT'
+      || mode.key !== fromKey
+      || typeof toKey !== 'string'
+      || !toKey) return false
+  _scrollModes[id] = { ...mode, key: toKey, at: Date.now() }
+  _persistScrollModes()
+  return true
+}
+
+/** A server-confirmed missing row makes its old coordinate impossible. Retire
+ * that address once so the authoritative recent snapshot can settle normally
+ * instead of retrying the same unresolvable key forever. */
+export function retireSavedReadingPosition(chatId) {
+  const id = String(chatId || '')
+  if (!(id in _scrollModes)) return false
+  delete _scrollModes[id]
+  _persistScrollModes()
+  return true
+}
+
+/** Reading positions are owner-scoped: they leave with the owner's session.
+ *  Clearing storage alone is not enough — logout reloads the shell, and a
+ *  still-mounted ChatView's pagehide write would put the in-memory map
+ *  straight back over the cleared key. */
+export function clearReadingPositions() {
+  for (const key of Object.keys(_scrollModes)) delete _scrollModes[key]
+  try { localStorage.removeItem(READING_POSITION_KEY) } catch {}
+}
+
+function _persistScrollModes() {
+  try {
+    const entries = Object.entries(_scrollModes)
+    if (entries.length > READING_POSITION_LIMIT) {
+      // Descending by write time, so the TAIL past the limit is what gets
+      // evicted. `.slice(0, LIMIT)` here would delete the newest 300 instead.
+      const drop = entries
+        .sort((a, b) => (b[1]?.at || 0) - (a[1]?.at || 0))
+        .slice(READING_POSITION_LIMIT)
+      for (const [key] of drop) delete _scrollModes[key]
+    }
+    localStorage.setItem(READING_POSITION_KEY, JSON.stringify(_scrollModes))
+  }
+  // Private mode or a full quota must never break scrolling.
+  catch { /* position is best-effort, never load-bearing */ }
+}
 
 
 /** Returns the topmost intersecting message, or the last real row while the
@@ -164,6 +237,110 @@ function _topmostVisibleMsg(scrollEl) {
 }
 
 
+/** Position of `el` in the scroll container's coordinate space. */
+function _scrollTopOf(scrollEl, el) {
+  // Rects are the only measurement that is correct for BOTH a message row and
+  // an arbitrarily nested part of one: a part's offsetParent is whatever
+  // happens to be positioned around it, which is not reliably the row or the
+  // scroll container, so an offsetTop walk silently produces a wrong (often
+  // zero) part position. Both call sites already force layout.
+  //
+  // Every real element has a rect, so this is the only path that runs in a
+  // browser. The `offsetTop` branch exists purely so plain object fixtures
+  // (which have no rect) still measure row-level anchors the old way.
+  if (typeof el?.getBoundingClientRect === 'function'
+      && typeof scrollEl?.getBoundingClientRect === 'function') {
+    return el.getBoundingClientRect().top
+      - scrollEl.getBoundingClientRect().top
+      + scrollEl.scrollTop
+  }
+  return el?.offsetTop || 0
+}
+
+
+/** Index of the row's topmost child intersecting the viewport, or null.
+ *
+ * WHY a message needs sub-message resolution at all: one settled Möbius
+ * assistant turn is routinely tens of thousands of pixels tall — a measured
+ * turn in the owner's "Fixing urgent Möbius tech debt" chat renders 73,721px,
+ * 77 viewport heights, 82% of that entire conversation — because agentic turns
+ * interleave a few hundred text/tool worklog parts into ONE message row.
+ *
+ * A whole-message anchor therefore has no resolution inside the message the
+ * reader is actually reading: `offset` becomes a five-digit negative number
+ * that only restores correctly if the row re-renders to a byte-identical
+ * height. It does not. Collapsed-then-expanded tool blocks, asynchronous
+ * syntax highlighting, KaTeX, swapped webfonts and the sliced cold render each
+ * move it, and every pixel of that drift lands the reader somewhere else
+ * entirely — the reported "random super high up position" that then takes tens
+ * of screens of scrolling to escape.
+ *
+ * The parts are already discrete, ordered DOM children, so addressing the Nth
+ * one needs no extra markup and bounds the restore error by that part's own
+ * height (tens of pixels for a worklog line) instead of the whole turn's. */
+function _partPathAt(scrollEl, row, scrollTop) {
+  const viewportH = scrollEl.clientHeight || 0
+  const bottom = scrollTop + viewportH
+  const path = []
+  let node = row
+  // Descend while the addressed element is still taller than the viewport:
+  // a top-level worklog part can itself be thousands of pixels, so one level
+  // of resolution is not enough to say where the reader was. Stop as soon as
+  // the target fits, which is when its own height bounds the restore error.
+  while (node?.children?.length && node.offsetHeight > viewportH) {
+    let next = null
+    for (let index = 0; index < node.children.length; index += 1) {
+      const kid = node.children[index]
+      const kidTop = _scrollTopOf(scrollEl, kid)
+      if (kidTop + (kid.offsetHeight || 0) > scrollTop && kidTop < bottom) {
+        path.push(index)
+        next = kid
+        break
+      }
+    }
+    if (!next) break
+    node = next
+  }
+  return path.length ? path : null
+}
+
+
+/** The element a mode's `part` addresses within a row already in hand. */
+function _rowPartTarget(row, mode) {
+  if (!row) return null
+  const path = Array.isArray(mode?.part) ? mode.part : null
+  if (!path?.length) return row
+  let node = row
+  for (const index of path) {
+    const next = node.children?.[index]
+    // A path that only partially resolves is an UNRESOLVED location, not a
+    // clamp: the caller's `offset` is measured from the addressed part, so
+    // returning a shallower origin (at the top level, the row itself) would
+    // teleport the reader to the top of a turn that can be tens of thousands
+    // of pixels tall. Failing here lets the retention flag keep the stored
+    // position instead of overwriting it with a bogus one.
+    if (!next) return null
+    node = next
+  }
+  return node
+}
+
+
+/** Build an ANCHOR_AT for `row` describing the viewport at `scrollTop`. */
+function _anchorModeForRow(scrollEl, row, scrollTop, extra = null) {
+  if (!row?.dataset?.key) return null
+  const part = _partPathAt(scrollEl, row, scrollTop)
+  const target = _rowPartTarget(row, { part })
+  return {
+    kind: 'ANCHOR_AT',
+    key: row.dataset.key,
+    offset: _scrollTopOf(scrollEl, target) - scrollTop,
+    ...(part == null ? {} : { part }),
+    ...(extra || {}),
+  }
+}
+
+
 /** Snapshot the reader's current scroll position as an ANCHOR_AT mode
  *  (the same {key, offset} the gesture-gated scroll handler stamps when
  *  the user scrolls up). Returns null when there's no scroll element or
@@ -175,13 +352,11 @@ function _topmostVisibleMsg(scrollEl) {
  *  shows the latest user row; mode alone neither grants nor retires it. */
 export function anchorModeFromScroll(scrollEl) {
   if (!scrollEl) return null
-  const anchorEl = _topmostVisibleMsg(scrollEl)
-  if (!anchorEl?.dataset?.key) return null
-  return {
-    kind: 'ANCHOR_AT',
-    key: anchorEl.dataset.key,
-    offset: anchorEl.offsetTop - scrollEl.scrollTop,
-  }
+  return _anchorModeForRow(
+    scrollEl,
+    _topmostVisibleMsg(scrollEl),
+    scrollEl.scrollTop,
+  )
 }
 
 
@@ -191,15 +366,13 @@ export function anchorModeFromScroll(scrollEl) {
 function _contentAnchorModeFromScroll(scrollEl) {
   if (!scrollEl) return null
   const row = _topmostVisibleMsg(scrollEl)
-  if (!row?.dataset?.key) return null
-  const mode = {
-    kind: 'ANCHOR_AT',
-    key: row.dataset.key,
-    offset: row.offsetTop - scrollEl.scrollTop,
-  }
-  return _anchorModeIntersectsContent(row, mode, scrollEl?.clientHeight)
-    ? mode
-    : null
+  const mode = _anchorModeForRow(scrollEl, row, scrollEl.scrollTop)
+  if (!mode) return null
+  // The row is already in hand — validate against it directly rather than
+  // re-resolving through the scroll container.
+  return _anchorModeIntersectsContent(
+    _rowPartTarget(row, mode), mode, scrollEl?.clientHeight,
+  ) ? mode : null
 }
 
 
@@ -217,12 +390,9 @@ export function bottomAnchorModeFromScroll(scrollEl) {
   const spacerH = scrollEl.querySelector('.spacer-dynamic')?.offsetHeight || 0
   const realContentH = scrollEl.scrollHeight - spacerH
   const targetScrollTop = Math.max(0, realContentH - scrollEl.clientHeight)
-  return {
-    kind: 'ANCHOR_AT',
-    key,
-    offset: last.offsetTop - targetScrollTop,
+  return _anchorModeForRow(scrollEl, last, targetScrollTop, {
     defaultTail: true,
-  }
+  })
 }
 
 
@@ -248,11 +418,7 @@ export function physicalBottomAnchorModeFromScroll(scrollEl) {
     0,
     scrollEl.scrollHeight - scrollEl.clientHeight,
   )
-  return {
-    kind: 'ANCHOR_AT',
-    key,
-    offset: last.offsetTop - targetScrollTop,
-  }
+  return _anchorModeForRow(scrollEl, last, targetScrollTop)
 }
 
 
@@ -331,10 +497,12 @@ export function applyMode(scrollEl, mode) {
       }
       return
     case 'ANCHOR_AT': {
-      const sel = `[data-key="${(typeof CSS !== 'undefined' && CSS.escape)
-        ? CSS.escape(mode.key) : mode.key}"]`
-      const el = scrollEl.querySelector(sel)
-      if (el) scrollEl.scrollTop = Math.max(0, el.offsetTop - mode.offset)
+      const el = _anchorEl(scrollEl, mode)
+      if (el) {
+        scrollEl.scrollTop = Math.max(
+          0, _scrollTopOf(scrollEl, el) - mode.offset,
+        )
+      }
       return
     }
   }
@@ -359,38 +527,46 @@ export function _pinReapplyNeeded(scrollEl, mode, lastPinTop) {
 
 /** Resolve the row an ANCHOR_AT mode targets: the element whose `data-key`
  *  equals the mode's key. */
-function _anchorEl(scrollEl, key) {
+function _anchorRow(scrollEl, key) {
   if (!scrollEl || key == null) return null
   const esc = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(key) : key
   return scrollEl.querySelector(`[data-key="${esc}"]`)
+    || scrollEl.querySelector(`[data-cid="${esc}"]`)
+}
+
+
+/** Resolve the exact element an ANCHOR_AT addresses: the message row, or the
+ *  `part`-th child of that row when the anchor carries sub-message resolution.
+ *  Null when the row is gone OR its part path no longer resolves; both are
+ *  unresolved locations and neither may be applied. */
+function _anchorEl(scrollEl, mode) {
+  return _rowPartTarget(_anchorRow(scrollEl, mode?.key), mode)
 }
 
 /** The defining ANCHOR_AT invariant: its row intersects the viewport encoded
  * by `offset`. Negative offsets are valid while the row remains partially
  * visible; an offset beyond either edge describes layout reservation, not a
  * readable conversation location. */
-export function _anchorModeIntersectsContent(row, mode, viewportHeight) {
+export function _anchorModeIntersectsContent(target, mode, viewportHeight) {
   const offset = Number(mode?.offset)
-  return !!row
+  return !!target
     && Number.isFinite(offset)
     && Number.isFinite(viewportHeight)
     && viewportHeight > 0
     && offset < viewportHeight
-    && offset > -row.offsetHeight
+    && offset > -target.offsetHeight
 }
 
 
 function _durableQuestionSubmissionMode(mode) {
   if (mode?.kind !== 'ANCHOR_AT') return mode
   if (!Object.hasOwn(mode, 'questionSubmitViewportH')
-      && !Object.hasOwn(mode, 'questionSubmitBaseMode')
-      && !Object.hasOwn(mode, 'reserveTail')) {
+      && !Object.hasOwn(mode, 'questionSubmitBaseMode')) {
     return mode
   }
   const {
     questionSubmitViewportH: _transientViewport,
     questionSubmitBaseMode: _transientBaseMode,
-    reserveTail: _legacyTransientReservation,
     ...durable
   } = mode
   return durable
@@ -423,16 +599,30 @@ export function releaseQuestionSubmissionForViewport(mode, viewportHeight) {
  *  clamp-repair PIN already had (design §2 prerequisite). */
 export function _anchorReapplyNeeded(scrollEl, mode, lastAnchorTop) {
   if (!scrollEl || mode?.kind !== 'ANCHOR_AT') return false
-  const el = _anchorEl(scrollEl, mode.key)
+  const el = _anchorEl(scrollEl, mode)
   if (!el) return false
-  const target = Math.max(0, el.offsetTop - mode.offset)
+  const anchorTop = _scrollTopOf(scrollEl, el)
+  const target = Math.max(0, anchorTop - mode.offset)
   const maxScrollTop = scrollEl.scrollHeight - scrollEl.clientHeight
   const targetReachable = maxScrollTop >= target - 1
   const clampedShort = scrollEl.scrollTop < target - 1 && targetReachable
   // As with a send pin, overshooting an unchanged anchor belongs to the
   // reader. Browser clamps only shorten scrollTop; target movement is already
-  // represented by offsetTop changing.
-  return el.offsetTop !== lastAnchorTop || clampedShort
+  // represented by the anchor's container-space top changing.
+  //
+  // That top is rect-derived, so it is a float: compare with the same 0.5px
+  // tolerance `writeMode` uses, or sub-pixel font-swap drift reads as a shift
+  // and fires a repair write.
+  // Deliberately only two cases: the anchor MOVED, or the browser clamped us
+  // short of a target that is reachable again. An element merely changing its
+  // own height is NOT a repair case — the reader's distance from that
+  // element's top is what holds them, and re-deriving it on a height change
+  // moves them off the content they were reading, which is the "it lands on
+  // the right position and then scrolls to the wrong one" failure.
+  // A null baseline means no recorded position to compare against, which is
+  // itself a repair case (as it was under the previous strict !==).
+  if (!Number.isFinite(lastAnchorTop)) return true
+  return Math.abs(anchorTop - lastAnchorTop) >= 0.5 || clampedShort
 }
 
 
@@ -459,15 +649,13 @@ export function _validateSavedMode(saved, messages, scrollEl) {
       : holdBottom()
   }
   if (saved.kind === 'ANCHOR_AT') {
-    const sel = `[data-key="${(typeof CSS !== 'undefined' && CSS.escape)
-      ? CSS.escape(saved.key) : saved.key}"]`
-    const row = scrollEl?.querySelector(sel)
     // A resolvable row is not enough: an old build could persist that row with
     // a huge negative offset while the viewport sat wholly in spacer below it.
     // Enforce the same content-intersection invariant used by spacer sizing,
     // self-healing every off-content restore to the real tail.
     const durable = _durableQuestionSubmissionMode(saved)
-    return _anchorModeIntersectsContent(row, durable, scrollEl?.clientHeight)
+    const target = _anchorEl(scrollEl, durable)
+    return _anchorModeIntersectsContent(target, durable, scrollEl?.clientHeight)
       ? durable
       : holdBottom()
   }
@@ -530,9 +718,11 @@ export function _computeSpacerH(
   const viewH = fullViewH || scrollEl.clientHeight
   if (mode?.kind === 'ANCHOR_AT'
       && Number.isFinite(mode.questionSubmitViewportH)) {
-    const anchorEl = _anchorEl(scrollEl, mode.key)
+    const anchorEl = _anchorEl(scrollEl, mode)
     if (!anchorEl) return 0
-    const anchorTarget = Math.max(0, anchorEl.offsetTop - mode.offset)
+    const anchorTarget = Math.max(
+      0, _scrollTopOf(scrollEl, anchorEl) - mode.offset,
+    )
     return Math.max(0, viewH + anchorTarget - listEl.offsetHeight)
   }
   if (!lastUserMsgEl) return 0
@@ -978,36 +1168,7 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
 /**
  * Hook that owns the chat scroll subsystem.
  *
- * The `modeRef.current` value is a tagged union — every possible
- * shape:
- *
- *   {kind: 'INITIAL'}
- *     Pre-restore default. applyMode is a no-op in this state.
- *     Set once on mount before the saved mode is read from
- *     sessionStorage. Also re-entered when the layout effect sees
- *     a new chatId (defensive — key={chatId} normally remounts).
- *
- *   {kind: 'PIN_USER_MSG', cid: string, followWhenFilled?: boolean}
- *     Pin the user message with the given stable `cid` (matched via
- *     `data-cid`) to the top of the viewport (PIN_OFFSET=4 px of
- *     breathing room). Set only for the first visible user row or a
- *     later send submitted at the real-content tail; applyMode scrolls to
- *     `userMsgEl.offsetTop - PIN_OFFSET`. Pinning enters hold while the reply
- *     consumes the reservation; an armed live pin hands off to FOLLOW_BOTTOM
- *     only when that reservation reaches zero.
- *
- *   {kind: 'FOLLOW_BOTTOM'}
- *     Sticky-bottom for streaming. applyMode sets scrollTop =
- *     scrollHeight (only if content actually overflows). Engaged
- *     when the reader reaches the physical bottom, or when an armed live
- *     pin consumes its reservation; lost when the reader scrolls up.
- *
- *   {kind: 'ANCHOR_AT', key: string, offset: number}
- *     Anchored at a specific message (`data-key="<key>"`) with
- *     `offset` pixels above the viewport top. Set when the user
- *     scrolls to a non-bottom position and when lifecycle restoration
- *     freezes the current position. A missing saved anchor degrades to
- *     the current visible hold anchor, never FOLLOW_BOTTOM.
+ * See the module docblock for the `modeRef.current` tagged union.
  *
  * The caller is expected to:
  *   - Treat `modeRef` as read-only snapshot state. Route send, queue,
@@ -1015,8 +1176,8 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  *     controller methods returned by this hook.
  *   - Read `gestureWindowUntilRef.current` in any custom scroll
  *     handlers (e.g., pagination triggers) to gate on user intent
- *   - Apply `revealed` as `style={revealed ? undefined : {visibility:
- *     'hidden'}}` on the scroll container.
+ *   - Combine `revealed` with the caller's authoritative-data gate before
+ *     painting the scroll container.
  *
  * @param {object} args
  * @param {string} args.chatId
@@ -1039,26 +1200,9 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  *   shows/hides because the tray's margin shrinks the spacer math).
  * @param {React.MutableRefObject<boolean>} args.loadingOlderRef
  *   When true, scroll events from pagination shouldn't mutate mode.
- * @param {'history'|'cached'|'preparing'|'ready'} args.initialEntryPhase
- *   One entry-readiness state: history blocks reveal, cached permits an
- *   immediate first paint while layout stabilizes, and ready means the
- *   authoritative history read has settled.
- *
- * @returns {{
- *   gestureWindowUntilRef: React.MutableRefObject<number>,
- *   revealed: boolean,
- *   anchorPagination: (key: string, offset: number) => void,
- *   captureSendIntent: (event: object) => object,
- *   commitSendIntent: (event: object) => void,
- *   freezeChatExit: () => void,
- *   freezeForegroundReturn: () => void,
- *   freezeQuestionSubmission: () => void,
- *   freezeQueuedSubmission: () => void,
- *   revealConversationTail: () => void,
- *   settleSendIntent: (event?: object) => void,
- *   settleStreamingPin: () => void,
- *   composerResized: () => void,
- * }}
+ * @param {'history'|'preparing'|'ready'} args.initialEntryPhase
+ *   History blocks reveal, preparing is a hidden progressive cold render, and
+ *   ready means authoritative history has settled.
  */
 export default function useScrollMode({
   chatId,
@@ -1089,6 +1233,13 @@ export default function useScrollMode({
   // used the automatic latest-message fallback. Passive lifecycle/viewport
   // changes must not promote that fallback into a saved reading position.
   const readerLocationExplicitRef = useRef(false)
+  // A saved location existed but this visit could not resolve it (its row or
+  // part was not in the committed window yet). That is a RETRIEVAL failure,
+  // not the reader choosing the tail — so the automatic tail fallback must not
+  // be written over the stored location. Without this, one unresolvable visit
+  // permanently destroyed the reader's position and every later return was
+  // "broken" for good rather than for one visit.
+  const savedLocationUnresolvedRef = useRef(false)
   const gestureWindowUntilRef = useRef(0)
   const pendingGestureTimerRef = useRef(0)
   const pendingGestureReleaseRafRef = useRef(0)
@@ -1172,6 +1323,7 @@ export default function useScrollMode({
       if (initialEntryPhaseRef.current === 'preparing') {
         preparationDeadline = setTimeout(() => {
           if (revealedRef.current) return
+          if (initialEntryPhaseRef.current !== 'ready') return
           if (forceRevealRef.current) forceRevealRef.current()
           else {
             revealedRef.current = true
@@ -1180,6 +1332,9 @@ export default function useScrollMode({
         }, PREPARING_REVEAL_CAP_MS - REVEAL_CAP_MS)
         return
       }
+      // A deadline may release slow layout, never unvalidated data. Shell
+      // keeps the outgoing chat painted until activation reaches `ready`.
+      if (initialEntryPhaseRef.current !== 'ready') return
       if (forceRevealRef.current) forceRevealRef.current()
       else {
         // Defensive fallback for a mount whose scroll DOM never materialized.
@@ -1271,15 +1426,22 @@ export default function useScrollMode({
   const persistMode = useCallback(({ freezeToCurrentPosition = false } = {}) => {
     try {
       if (!readerLocationExplicitRef.current) {
+        // Keep a stored location this visit merely failed to resolve. Only an
+        // absent location — never a retrieval failure — may be cleared here.
+        // Activation can fail before the ready-phase restore gets a chance to
+        // set the unresolved flag, so the still-present durable entry is also
+        // direct evidence that cleanup must leave it alone.
+        if (savedLocationUnresolvedRef.current
+            || Object.hasOwn(_scrollModes, chatId)) return
         delete _scrollModes[chatId]
-        sessionStorage.setItem('chat-mode', JSON.stringify(_scrollModes))
+        _persistScrollModes()
         return
       }
       const candidate = freezeToCurrentPosition
         ? (modeForChatExit(scrollRef.current) || modeRef.current)
         : modeRef.current
       // One persistence gate for every lifecycle path. Invalid ANCHOR_AT
-      // geometry is normalized before it reaches sessionStorage. Live
+      // geometry is normalized before it reaches storage. Live
       // FOLLOW_BOTTOM/PIN_USER_MSG remains observable while mounted; the
       // restore gate settles those modes on the next mount.
       const mode = _modeForPersistence(
@@ -1289,11 +1451,16 @@ export default function useScrollMode({
         if (freezeToCurrentPosition) {
           transitionMode(mode, 'lifecycle:chat-exit')
         }
-        _scrollModes[chatId] = mode
+        // `defaultTail` marks a manufactured fallback, never a stored
+        // location: persisting it makes the next mount misread a good entry
+        // as unresolved and freeze that chat's position until the reader
+        // scrolls.
+        const { defaultTail: _fallback, ...durable } = mode
+        _scrollModes[chatId] = { ...durable, at: Date.now() }
       } else {
         delete _scrollModes[chatId]
       }
-      sessionStorage.setItem('chat-mode', JSON.stringify(_scrollModes))
+      _persistScrollModes()
     } catch {}
   }, [chatId, messagesRef, scrollRef, transitionMode])
 
@@ -1431,6 +1598,14 @@ export default function useScrollMode({
     // currently painted location before persisting it so the later unmount
     // cleanup cannot delete the snapshot and reopen a growing turn at its new
     // tail when the reader returns.
+    //
+    // The one exception is a visit that never resolved the stored location and
+    // in which the reader never moved: promoting there would overwrite a good
+    // saved position with the fallback tail this visit happened to show, which
+    // is how a single unresolvable return turned into "coming back again
+    // fails" forever after.
+    if (savedLocationUnresolvedRef.current
+        && !readerLocationExplicitRef.current) return
     readerLocationExplicitRef.current = true
     persistMode({ freezeToCurrentPosition: true })
   }, [persistMode])
@@ -1527,21 +1702,22 @@ export default function useScrollMode({
     const listEl = scrollEl.querySelector('.chat__list')
     if (!listEl) return
 
-    // Restore mode for this chat if persisted (mount-restore path). A
-    // progressive cold render exposes only a prefix of one giant assistant
-    // row; validating a saved deep-in-row offset against that temporary short
-    // row would reject the real location as off-content and permanently fall
-    // back to the top. Wait for the authoritative frame, whose ready-phase
-    // render re-runs this effect with the complete row geometry.
+    // Restore mode for this chat only after the authoritative activation has
+    // repaired or retired its saved row address. Cached history supplies the
+    // hidden DOM, but consuming its coordinate before the server handshake
+    // would strand this mount on an obsolete alias. The same gate also keeps a
+    // progressive cold prefix from rejecting a valid deep-in-row part path.
     if (
       modeRef.current.kind === 'INITIAL'
-      && initialEntryPhaseRef.current !== 'preparing'
+      && initialEntryPhaseRef.current === 'ready'
     ) {
       const saved = _scrollModes[chatId]
       const restored = _validateSavedMode(saved, messagesRef.current, scrollEl)
-      readerLocationExplicitRef.current = !!saved
+      const resolved = !!saved
         && restored?.kind !== 'INITIAL'
         && !restored?.defaultTail
+      readerLocationExplicitRef.current = resolved
+      savedLocationUnresolvedRef.current = !!saved && !resolved
       transitionMode(
         restored,
         'lifecycle:restore',
@@ -1713,8 +1889,8 @@ export default function useScrollMode({
           lastPinTopRef.current = el ? el.offsetTop : null
           lastAnchorTopRef.current = null
         } else if (modeRef.current.kind === 'ANCHOR_AT') {
-          const el = _anchorEl(scrollEl, modeRef.current.key)
-          lastAnchorTopRef.current = el ? el.offsetTop : null
+          const el = _anchorEl(scrollEl, modeRef.current)
+          lastAnchorTopRef.current = el ? _scrollTopOf(scrollEl, el) : null
           lastPinTopRef.current = null
         } else {
           lastPinTopRef.current = null
@@ -1752,8 +1928,8 @@ export default function useScrollMode({
         'layout:repair-anchor',
         authorityVersion,
       )) return
-      const el = _anchorEl(scrollEl, modeRef.current.key)
-      lastAnchorTopRef.current = el ? el.offsetTop : null
+      const el = _anchorEl(scrollEl, modeRef.current)
+      lastAnchorTopRef.current = el ? _scrollTopOf(scrollEl, el) : null
       lastAppliedModeRef.current = modeRef.current
       nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
     }
@@ -1828,8 +2004,8 @@ export default function useScrollMode({
           lastPinTopRef.current = el ? el.offsetTop : null
           lastAnchorTopRef.current = null
         } else if (modeRef.current.kind === 'ANCHOR_AT') {
-          const el = _anchorEl(scrollEl, modeRef.current.key)
-          lastAnchorTopRef.current = el ? el.offsetTop : null
+          const el = _anchorEl(scrollEl, modeRef.current)
+          lastAnchorTopRef.current = el ? _scrollTopOf(scrollEl, el) : null
           lastPinTopRef.current = null
         } else {
           lastPinTopRef.current = null
@@ -1910,14 +2086,15 @@ export default function useScrollMode({
     }
     paneResizeRunRef.current = runPaneResize
 
-    // Reveal from trusted cache or after authoritative history once transcript
-    // layout stays quiet for 50ms. Lazy image previews
+    // Reveal after authoritative history once transcript layout stays quiet
+    // for 50ms. Lazy image previews
     // are not a reveal dependency: their frames already reserve space and the
     // same ResizeObserver keeps ANCHOR_AT stable if a measured ratio differs.
-    // REVEAL_CAP_MS remains the escape hatch for a request that stalls.
+    // REVEAL_CAP_MS is a layout escape hatch only; data readiness remains owned
+    // by the caller and cannot be bypassed by a timer.
     let revealTimer = 0
-    const entryReady = () => initialEntryPhaseRef.current === 'cached'
-      || initialEntryPhaseRef.current === 'ready'
+    let mountMutationObserver = null
+    const entryReady = () => initialEntryPhaseRef.current === 'ready'
     const requestRevealOnQuiet = () => {
       clearTimeout(revealTimer)
       if (revealedRef.current && !mountStabilizingRef.current) return
@@ -1929,15 +2106,16 @@ export default function useScrollMode({
         revealedRef.current = true
         mountStabilizingRef.current = initialEntryPhaseRef.current !== 'ready'
         setRevealed(true)
+        if (!mountStabilizingRef.current) mountMutationObserver?.disconnect()
       }, 50)
     }
     const forceReveal = () => {
       if (revealedRef.current || scrollRef.current !== scrollEl) return
+      if (!entryReady()) return
       syncLayout({ authorityVersion: currentAuthority() })
-      mountStabilizingRef.current = true
+      mountStabilizingRef.current = false
       revealedRef.current = true
       setRevealed(true)
-      requestRevealOnQuiet()
     }
     forceRevealRef.current = forceReveal
 
@@ -2044,11 +2222,25 @@ export default function useScrollMode({
     ro.observe(scrollEl)  // catches form-row growth (file chips, queue tray)
     const queuedTrayEl = scrollEl.parentElement?.querySelector('.queued')
     if (queuedTrayEl) ro.observe(queuedTrayEl)
-    // DOM activity is not itself a layout change. ResizeObserver above owns
-    // the reveal quiet window, so token-resolved images and live text can keep
-    // arriving without holding an already-stable frame behind the old chat.
-    // Reserved image frames cover byte arrival; actual geometry changes still
-    // reset the quiet window through the observer.
+    // ResizeObserver alone is not a sufficient reveal gate. It reports that a
+    // box ALREADY changed size, so it cannot hold the reveal for asynchronous
+    // renderers that have not started yet: KaTeX is loaded on demand and then
+    // REPLACES raw TeX, the first syntax-highlight pass replaces code markup,
+    // and webfonts swap in and rewrap. Each lands after the 50ms size-quiet
+    // window has elapsed, so the chat is revealed and the reader then watches
+    // the position being corrected under them — the reported "we land
+    // somewhere and then it moves while the chat is open".
+    //
+    // Mount stabilization therefore also waits for DOM activity to stop, and
+    // for in-flight media to settle (a reserved frame gains its image without
+    // its own box changing). Both were present before the tech-debt refactor
+    // and removing them is what made entry visibly unstable.
+    if (mountStabilizingRef.current && typeof MutationObserver !== 'undefined') {
+      mountMutationObserver = new MutationObserver(requestRevealOnQuiet)
+      mountMutationObserver.observe(listEl, { childList: true, subtree: true })
+    }
+    scrollEl.addEventListener('load', requestRevealOnQuiet, true)
+    scrollEl.addEventListener('error', requestRevealOnQuiet, true)
 
     // User-gesture detection. The scroll event itself stays intentionally
     // cheap: it records ownership/intent and lets native scrollend perform the
@@ -2441,6 +2633,9 @@ export default function useScrollMode({
       if (resumeLayoutAfterGestureRef.current === resumeLayoutAfterGesture) {
         resumeLayoutAfterGestureRef.current = null
       }
+      mountMutationObserver?.disconnect()
+      scrollEl.removeEventListener('load', requestRevealOnQuiet, true)
+      scrollEl.removeEventListener('error', requestRevealOnQuiet, true)
       ro.disconnect()
       if (paneResizeRunRef.current === runPaneResize) paneResizeRunRef.current = null
       if (composerResizeRunRef.current === runComposerResize) {
@@ -2479,8 +2674,8 @@ export default function useScrollMode({
   // reconnect (Path B) or a Path-A commit after the reveal cap must not shift
   // what the reader was looking at. Before reveal, hide-then-reveal already owns
   // the position, so this no-ops; a quick-wake kept socket produces no commit,
-  // so the caller never invokes it. Mirrors the RO's content-tracking re-apply
-  // (FOLLOW_BOTTOM/ANCHOR_AT only — PIN_USER_MSG settles via its own RO branch).
+  // so the caller never invokes it. FOLLOW_BOTTOM/ANCHOR_AT only —
+  // PIN_USER_MSG settles via its own RO branch.
   const reapplyActiveMode = useCallback(() => {
     if (!revealedRef.current) return
     const scrollEl = scrollRef.current

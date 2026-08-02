@@ -13,6 +13,7 @@ import unittest.mock as mock
 
 import pytest
 
+from app.memory_recall import EMPTY_RECALL_BINDING
 from app.broadcast import (
   ChatBroadcast,
   _EVENT_LOG_MAX,
@@ -56,7 +57,10 @@ def _make_sink(chat_id="chat1", run_token="tok1"):
   from app.chat_event_sink import ChatEventSink
 
   bc = _FakeBroadcast()
-  sink = ChatEventSink(bc, chat_id=chat_id, run_token=run_token)
+  sink = ChatEventSink(
+    bc, chat_id=chat_id, run_token=run_token,
+    recall_binding=EMPTY_RECALL_BINDING,
+  )
   return sink, bc
 
 
