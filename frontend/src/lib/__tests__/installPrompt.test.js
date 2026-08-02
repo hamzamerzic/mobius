@@ -88,3 +88,57 @@ test('subscribers are notified when prompt availability changes', async () => {
 
   assert.equal(changes, 2)
 })
+
+// iOS reports standalone display mode inside the in-app browser it opens from
+// an installed PWA — a page that is plainly not the installed app. That guess
+// is fine for suppressing an install offer and catastrophic for announcing
+// success: it told someone mid-install that their app was already added.
+test('a standalone-looking launch suppresses the offer but claims nothing', async () => {
+  const installPrompt = await freshModule()
+  installPrompt.startInstallPromptCapture(makeTarget({ standalone: true }))
+
+  assert.equal(installPrompt.getInstallPromptSnapshot(), 'installed')
+  assert.equal(installPrompt.getInstallObservedSnapshot(), false)
+})
+
+test('an app-specific prompt outranks the standalone window guess', async () => {
+  const installPrompt = await freshModule()
+  const target = makeTarget({ standalone: true })
+  let prevented = false
+  installPrompt.startInstallPromptCapture(target)
+
+  // The shell itself stays suppressed until Chromium offers a prompt for the
+  // mini-app document loaded into the same standalone window.
+  assert.equal(installPrompt.getInstallPromptSnapshot(), 'installed')
+  target.dispatch('beforeinstallprompt', {
+    preventDefault() { prevented = true },
+    async prompt() { return { outcome: 'accepted' } },
+  })
+
+  assert.equal(prevented, true)
+  assert.equal(installPrompt.getInstallPromptSnapshot(), 'ready')
+  assert.deepEqual(await installPrompt.requestInstall(), { outcome: 'accepted' })
+})
+
+test('only a witnessed appinstalled event may be announced', async () => {
+  const installPrompt = await freshModule()
+  const target = makeTarget()
+  installPrompt.startInstallPromptCapture(target)
+
+  assert.equal(installPrompt.getInstallObservedSnapshot(), false)
+  target.dispatch('appinstalled')
+  assert.equal(installPrompt.getInstallObservedSnapshot(), true)
+  assert.equal(installPrompt.getInstallPromptSnapshot(), 'installed')
+})
+
+test('subscribers are notified when an install is witnessed', async () => {
+  const installPrompt = await freshModule()
+  const target = makeTarget()
+  installPrompt.startInstallPromptCapture(target)
+  let notified = 0
+  installPrompt.subscribeInstallPrompt(() => { notified += 1 })
+
+  target.dispatch('appinstalled')
+  assert.equal(notified, 1)
+  assert.equal(installPrompt.getInstallObservedSnapshot(), true)
+})

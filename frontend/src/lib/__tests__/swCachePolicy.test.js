@@ -8,6 +8,8 @@ import {
   OFFLINE_APPS_CACHE,
   STANDALONE_APPS_CACHE,
   VENDOR_CACHE,
+  appCodeCacheKey,
+  appCodeRequestMayBeStored,
   appCodeStoreAction,
   entriesToTrim,
   isAppCodeRoute,
@@ -190,6 +192,16 @@ test('app-code route rejects everything else', () => {
   assert.equal(isAppCodeRoute('/api/apps/1/frame/extra'), false)
   // Standalone navigations go through the gated route, not this one.
   assert.equal(isAppCodeRoute('/apps/notes/'), false)
+})
+
+test('install handoff fields normalize to one pass-free app cache key', () => {
+  const carried = `${O}/apps/notes/?install=1&pass=opaque&token=owner&_=retry&v=4`
+  assert.equal(appCodeCacheKey(carried), `${O}/apps/notes/?v=4`)
+  assert.equal(appCodeRequestMayBeStored(carried), false)
+  assert.equal(
+    appCodeRequestMayBeStored(`${O}/apps/notes/?install=1&v=4`),
+    true,
+  )
 })
 
 test('ungated frame/module reads store every 200', () => {

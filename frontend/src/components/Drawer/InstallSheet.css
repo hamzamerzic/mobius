@@ -18,6 +18,7 @@
 @keyframes is-fade { from { opacity: 0; } to { opacity: 1; } }
 
 .is__card {
+  position: relative;
   width: 100%;
   max-width: 420px;
   background: var(--surface, #14181f);
@@ -226,8 +227,39 @@
   text-decoration: none;
 }
 
-/* The address is a fallback to read and retype by hand, so keep it
-   selectable and break it anywhere rather than overflowing the card. */
+/* Corner dismissal. Sits in the card's padding, with a touch target larger
+   than the glyph so a thumb can hit it without crowding the title. */
+.is__close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted, #9ca3af);
+  font: inherit;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+
+.is__close:hover {
+  color: var(--text, #d4d4d8);
+  background: var(--hover, rgba(255, 255, 255, 0.06));
+}
+
+.is__close:focus-visible {
+  outline: 2px solid var(--accent, #a78bfa);
+  outline-offset: 2px;
+}
+
+/* The address is a pass-free recovery path to read or retype by hand. */
 .is__url {
   color: var(--text, #d4d4d8);
   overflow-wrap: anywhere;
