@@ -234,10 +234,9 @@ RUN python /tmp/verify-legacy-jose.py && rm /tmp/verify-legacy-jose.py
 # Whole-repo platform seed. /data is a runtime volume, so bake the real clone
 # under /app and let entrypoint copy it into /data/platform on first boot. The
 # checkout is pinned to BUILD_SHA. Production/self-host builds fail closed when
-# that identity is absent: otherwise this stack-branch image would silently
-# clone the frozen public main compatibility release. The disposable test
-# compose is the sole explicit exception because it mounts and verifies its
-# checkout at runtime.
+# that identity is absent: otherwise the baked seed could silently drift from
+# the checkout being built. The disposable test compose is the sole explicit
+# exception because it mounts and verifies its checkout at runtime.
 ARG MOBIUS_PLATFORM_ORIGIN=https://github.com/mobius-os/mobius.git
 ARG BUILD_SHA=unknown
 ARG BUILD_DATE=unknown
@@ -255,7 +254,7 @@ RUN set -eux; \
     esac; \
     if ! printf '%s' "$_build_sha" | grep -Eq '^[0-9a-fA-F]{40}$' \
        && [ "${MOBIUS_ALLOW_UNKNOWN_BUILD_SHA:-0}" != "1" ]; then \
-      echo "FATAL: an exact 40-character BUILD_SHA is required; use scripts/mobiusctl update" >&2; \
+      echo "FATAL: an exact 40-character BUILD_SHA is required; set it to the checkout commit before building" >&2; \
       exit 1; \
     fi; \
     git clone --depth 1 "$MOBIUS_PLATFORM_ORIGIN" /app/platform-baked; \

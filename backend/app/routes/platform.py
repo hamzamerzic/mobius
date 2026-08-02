@@ -5,8 +5,8 @@ Small endpoints behind ``get_current_owner`` + ``reject_cross_site``:
 line), ``POST /check`` (owner-triggered ``git fetch`` + fresh status, the
 on-demand refresh for the "Check for updates" button), ``GET /update-preview``
 (an immutable exact-target plan), ``POST /apply`` (apply that reviewed target
-and rebase local edits, or record a conflict), ``GET /update-progress`` (the
-active Apply phase),
+and merge it with local edits, or record a conflict),
+``GET /update-progress`` (the active Apply phase),
 ``POST /conflict-resolver-chat`` (owner-clicked resolver chat), and
 ``POST /restart`` (owner-confirmed self-restart, same SIGTERM pattern as the
 normal Settings restart). The status/check routes are wrapped so a transient git

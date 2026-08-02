@@ -1326,7 +1326,7 @@ export default function SettingsView({
 
   const version = versionQuery.data
   // Show the upstream commit the local platform is reconciled to as the
-  // user-facing version. A reconcile/rebase can create a local served commit
+  // user-facing version. A reconcile/merge can create a local served commit
   // whose SHA does not exist on GitHub even though it fully contains
   // origin/main; keep that identity as a secondary diagnostic instead of
   // presenting it as the published Möbius version.
@@ -1338,7 +1338,7 @@ export default function SettingsView({
     : null
   // Derived state for the single "Möbius" update row (see the section below).
   const platformConflict = platform?.state === 'conflict'
-  // A text-clean update that failed the post-rebase import probe was rolled back
+  // A text-clean update that failed the post-merge import probe was rolled back
   // to the previous served version — the update is still available, but its last
   // apply needs a repair pass, so the row says so distinctly rather than reading
   // as a plain "New update available".
