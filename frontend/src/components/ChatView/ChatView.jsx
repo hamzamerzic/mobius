@@ -13,7 +13,11 @@ import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
-import useScrollMode, { savedReadingAnchorKey } from './useScrollMode.js'
+import useScrollMode, {
+  remapSavedReadingAnchor,
+  retireSavedReadingPosition,
+  savedReadingAnchorKey,
+} from './useScrollMode.js'
 import useVoiceInput from './useVoiceInput.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { getOnlineSnapshot } from '../../lib/connectivityStore.js'
@@ -62,6 +66,7 @@ import {
   chatSnapshotMatchesRuntime,
   mergeRecentMessagesIntoLoadedWindow,
   messageKey,
+  messageMatchesKey,
 } from '../../lib/chatDetailCache.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
 import { sendFailureMessage } from './sendFailure.js'
@@ -1538,11 +1543,27 @@ export default function ChatView({
     const queryKey = chatMessagesQueryKey(chatId)
     const activationCache = queryClient.getQueryData(queryKey)
     const savedAnchorKey = savedReadingAnchorKey(chatId)
-    const cacheCoversSavedAnchor = !savedAnchorKey || !!activationCache?.messages?.some(
-      (message, index) => (
-        messageKey(message, (activationCache.offset || 0) + index) === savedAnchorKey
-      ),
-    )
+    const anchorMatchIn = (snapshot) => {
+      if (!savedAnchorKey || !Array.isArray(snapshot?.messages)) return null
+      const baseOffset = Number.isInteger(snapshot.offset) ? snapshot.offset : 0
+      const localIndex = snapshot.messages.findIndex((message, index) => (
+        messageMatchesKey(message, baseOffset + index, savedAnchorKey)
+      ))
+      if (localIndex < 0) return null
+      const messageIndex = baseOffset + localIndex
+      return {
+        canonicalKey: messageKey(snapshot.messages[localIndex], messageIndex),
+        localIndex,
+      }
+    }
+    const remapAnchorMatch = (match) => {
+      if (match?.canonicalKey && match.canonicalKey !== savedAnchorKey) {
+        remapSavedReadingAnchor(chatId, savedAnchorKey, match.canonicalKey)
+      }
+    }
+    const activationAnchorMatch = anchorMatchIn(activationCache)
+    const cacheCoversSavedAnchor = !savedAnchorKey || !!activationAnchorMatch
+    remapAnchorMatch(activationAnchorMatch)
     chatIdStaleRef.current = false
     setLoadError(false)
     setLoading(true)
@@ -1594,6 +1615,7 @@ export default function ChatView({
       let runtime = null
       let detailCache = null
       let reused = false
+      let anchorRetired = false
 
       if (cacheCoversSavedAnchor && typeof activationCache?.updated_at === 'string') {
         runtime = await requestJson(
@@ -1604,11 +1626,9 @@ export default function ChatView({
         // in flight. Re-read the cache before accepting reuse so an older
         // captured object can never overwrite the fresher publication.
         const latestCache = queryClient.getQueryData(queryKey)
-        const latestCoversSavedAnchor = !savedAnchorKey || !!latestCache?.messages?.some(
-          (message, index) => (
-            messageKey(message, (latestCache.offset || 0) + index) === savedAnchorKey
-          ),
-        )
+        const latestAnchorMatch = anchorMatchIn(latestCache)
+        const latestCoversSavedAnchor = !savedAnchorKey || !!latestAnchorMatch
+        remapAnchorMatch(latestAnchorMatch)
         if (latestCoversSavedAnchor && chatSnapshotMatchesRuntime(latestCache, runtime)) {
           detailCache = latestCache
           reused = true
@@ -1622,8 +1642,25 @@ export default function ChatView({
           `/chats/${chatId}?limit=20&compact=1${anchorParam}`,
           'CHAT_LOAD_FAILED',
         )
-        if (savedAnchorKey && runtime.requested_anchor_found === false) {
-          throw new Error('CHAT_READING_ANCHOR_NOT_FOUND')
+        const runtimeAnchorMatch = anchorMatchIn(runtime)
+        if (savedAnchorKey && runtime.requested_anchor_found === true) {
+          if (!runtimeAnchorMatch) {
+            throw new Error('CHAT_READING_ANCHOR_NOT_FOUND')
+          }
+          remapAnchorMatch(runtimeAnchorMatch)
+        } else if (savedAnchorKey && runtime.requested_anchor_found === false) {
+          // Only the authoritative false + absent-row combination proves that
+          // the durable coordinate is gone. A contradictory response is a
+          // protocol error; retiring on it would destroy a valid location.
+          if (runtimeAnchorMatch) {
+            throw new Error('CHAT_READING_ANCHOR_NOT_FOUND')
+          }
+          retireSavedReadingPosition(chatId)
+          anchorRetired = true
+        } else {
+          // Rolling servers may omit the coverage bit. A row that is present
+          // can still be canonicalized safely; absence without the bit cannot.
+          remapAnchorMatch(runtimeAnchorMatch)
         }
         detailCache = chatDetailCacheValue(runtime)
       }
@@ -1667,7 +1704,7 @@ export default function ChatView({
       // rows. Runtime config belongs to this server response even when the
       // mounted transcript is temporarily ahead of it.
       setChatInfo(detailCache.chatInfo)
-      if (serverSnapshotBehindLocal(msgs, messagesRef.current)) {
+      if (!anchorRetired && serverSnapshotBehindLocal(msgs, messagesRef.current)) {
         queryClient.setQueryData(queryKey, existing => ({
           ...detailCache,
           // The local suffix is not proven by this server version. Preserve it
@@ -1684,12 +1721,17 @@ export default function ChatView({
       // Keep an already-loaded older prefix while replacing its overlapping
       // recent page. Publish the complete detail snapshot once, then update the
       // mounted view without a second query-cache notification.
-      const refreshed = mergeRecentMessagesIntoLoadedWindow({
-        loadedMessages: messagesRef.current,
-        loadedOffset: offsetRef.current,
-        recentMessages: msgs,
-        recentOffset: runtime.offset || 0,
-      })
+      const refreshed = anchorRetired
+        ? {
+            messages: msgs,
+            offset: detailCache.offset,
+          }
+        : mergeRecentMessagesIntoLoadedWindow({
+            loadedMessages: messagesRef.current,
+            loadedOffset: offsetRef.current,
+            recentMessages: msgs,
+            recentOffset: runtime.offset || 0,
+          })
       queryClient.setQueryData(queryKey, {
         ...detailCache,
         messages: refreshed.messages,
@@ -1700,7 +1742,7 @@ export default function ChatView({
       // the version changed while away. Apply the authoritative replacement
       // and readiness in the same React batch; the cold prefix scheduler must
       // never turn a warm return into a delayed all-at-once burst.
-      if (activationCache && cacheCoversSavedAnchor) {
+      if (activationCache && cacheCoversSavedAnchor && !anchorRetired) {
         applyMessagesToView(refreshed.messages, refreshed.offset)
         settleRuntime(runtime, refreshed.messages)
         return

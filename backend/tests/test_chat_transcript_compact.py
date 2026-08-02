@@ -29,6 +29,31 @@ def test_anchor_window_returns_saved_row_through_authoritative_tail():
   assert page[-1] is messages[-1]
 
 
+def test_anchor_window_accepts_every_durable_row_alias():
+  messages = [
+    {"role": "assistant", "ts": 900},
+    {
+      "id": "server-message",
+      "cid": "client-message",
+      "role": "user",
+      "ts": 1000,
+    },
+    {"role": "assistant", "ts": 1100},
+  ]
+
+  for alias in ("server-message", "client-message", "user-1000", "user-1"):
+    page, offset, found = _chat_detail_window(
+      messages,
+      limit=20,
+      before=None,
+      anchor_key=alias,
+    )
+
+    assert found is True, alias
+    assert offset == 1, alias
+    assert page == messages[1:], alias
+
+
 def test_missing_anchor_fails_closed_to_the_ordinary_recent_page():
   messages = [{"role": "user", "ts": index} for index in range(45)]
 

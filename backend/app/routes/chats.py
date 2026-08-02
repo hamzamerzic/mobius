@@ -379,16 +379,26 @@ def _reclaim_expired_tombstones_after_chat_write(db: Session) -> None:
     log.exception("Expired chat tombstone cleanup failed after chat write")
 
 
-def _chat_message_key(message: object, index: int) -> str | None:
-  """Match the frontend's durable transcript-row address."""
+def _chat_message_matches_key(
+  message: object,
+  index: int,
+  key: str,
+) -> bool:
+  """Match every durable address a frontend transcript row can carry."""
   if not isinstance(message, dict):
-    return None
+    return False
+  target = str(key)
   message_id = message.get("id")
-  if message_id is not None:
-    return str(message_id)
+  if message_id is not None and str(message_id) == target:
+    return True
+  client_id = message.get("cid")
+  if client_id is not None and str(client_id) == target:
+    return True
   role = message.get("role")
   timestamp = message.get("ts")
-  return f"{role}-{timestamp if timestamp is not None else index}"
+  if timestamp is not None and f"{role}-{timestamp}" == target:
+    return True
+  return f"{role}-{index}" == target
 
 
 def _chat_detail_window(
@@ -403,7 +413,7 @@ def _chat_detail_window(
   if anchor_key is not None:
     anchor_index = next((
       index for index, message in enumerate(messages)
-      if _chat_message_key(message, index) == anchor_key
+      if _chat_message_matches_key(message, index, anchor_key)
     ), None)
     if anchor_index is not None:
       # Exact restoration is one atomic snapshot: the saved row through the

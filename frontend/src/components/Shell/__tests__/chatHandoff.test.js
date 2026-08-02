@@ -71,15 +71,24 @@ test('activation reuses an unchanged retained transcript before stream catch-up'
   assert.match(initialLoad,
     /anchorParam = savedAnchorKey[\s\S]*&anchor=\$\{encodeURIComponent\(savedAnchorKey\)\}/,
     'every authoritative return read must contain the exact saved row')
+  assert.match(chatView,
+    /messageMatchesKey\(message, baseOffset \+ index, savedAnchorKey\)[\s\S]*remapSavedReadingAnchor/,
+    'cache and server rows must resolve every durable alias before canonicalizing it')
   assert.match(initialLoad,
-    /runtime\.requested_anchor_found === false[\s\S]*CHAT_READING_ANCHOR_NOT_FOUND/,
-    'a rejected saved address must fail closed instead of revealing the recent tail')
+    /runtime\.requested_anchor_found === false[\s\S]*if \(runtimeAnchorMatch\)[\s\S]*CHAT_READING_ANCHOR_NOT_FOUND[\s\S]*retireSavedReadingPosition\(chatId\)[\s\S]*anchorRetired = true/,
+    'only an authoritative absent row retires the saved coordinate')
   assert.match(initialLoad,
-    /if \(activationCache && cacheCoversSavedAnchor\) \{[\s\S]*applyMessagesToView\(refreshed\.messages, refreshed\.offset\)[\s\S]*settleRuntime\(runtime, refreshed\.messages\)[\s\S]*return[\s\S]*const renderFrames = coldTranscriptRenderFrames/,
+    /if \(activationCache && cacheCoversSavedAnchor && !anchorRetired\) \{[\s\S]*applyMessagesToView\(refreshed\.messages, refreshed\.offset\)[\s\S]*settleRuntime\(runtime, refreshed\.messages\)[\s\S]*return[\s\S]*const renderFrames = coldTranscriptRenderFrames/,
     'a warm version mismatch must settle atomically before the cold prefix scheduler')
   assert.match(chatView,
     /cacheIsSafeFallback[\s\S]*CHAT_READING_ANCHOR_NOT_FOUND[\s\S]*applyMessagesToView\(\[\], 0\)[\s\S]*setLoadError\(!cacheIsSafeFallback\)/,
-    'an incomplete or rejected cache must be cleared before the error surface paints')
+    'an incomplete or contradictory cache must be cleared before the error surface paints')
+  assert.match(scrollMode,
+    /modeRef\.current\.kind === 'INITIAL'[\s\S]*initialEntryPhaseRef\.current === 'ready'[\s\S]*const saved = _scrollModes\[chatId\]/,
+    'the scroll controller must consume the repaired coordinate only after activation')
+  assert.match(scrollMode,
+    /savedLocationUnresolvedRef\.current[\s\S]*Object\.hasOwn\(_scrollModes, chatId\)/,
+    'an activation error before ready must not erase the unconsumed saved coordinate')
   assert.match(
     chatView,
     /setInitialEntryPhase\('ready'\)[\s\S]*if \(running\) \{[\s\S]*connectToStream\(false\)/,

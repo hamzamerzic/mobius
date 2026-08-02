@@ -16,8 +16,12 @@ test('message row addresses remain stable across authoritative replacements', ()
   assert.equal(messageKey({ cid: 'client-1', role: 'user', ts: 10 }, 4), 'client-1')
   assert.equal(messageKey({ role: 'assistant', ts: 10 }, 4), 'assistant-10')
   assert.equal(messageKey({ role: 'assistant' }, 4), 'assistant-4')
-  assert.equal(messageMatchesKey({ id: 'server-1', cid: 'client-1', role: 'user', ts: 10 }, 4, 'client-1'), true)
-  assert.equal(messageMatchesKey({ id: 'server-1', cid: 'client-1', role: 'user', ts: 10 }, 4, 'user-10'), true)
+  const replaced = { id: 'server-1', cid: 'client-1', role: 'user', ts: 10 }
+  assert.equal(messageMatchesKey(replaced, 4, 'server-1'), true)
+  assert.equal(messageMatchesKey(replaced, 4, 'client-1'), true)
+  assert.equal(messageMatchesKey(replaced, 4, 'user-10'), true)
+  assert.equal(messageMatchesKey(replaced, 4, 'user-4'), true)
+  assert.equal(messageMatchesKey(replaced, 4, 'assistant-10'), false)
 })
 
 test('prefetched chat detail matches the synchronous ChatView cache contract', () => {

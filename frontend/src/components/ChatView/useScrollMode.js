@@ -1428,7 +1428,11 @@ export default function useScrollMode({
       if (!readerLocationExplicitRef.current) {
         // Keep a stored location this visit merely failed to resolve. Only an
         // absent location — never a retrieval failure — may be cleared here.
-        if (savedLocationUnresolvedRef.current) return
+        // Activation can fail before the ready-phase restore gets a chance to
+        // set the unresolved flag, so the still-present durable entry is also
+        // direct evidence that cleanup must leave it alone.
+        if (savedLocationUnresolvedRef.current
+            || Object.hasOwn(_scrollModes, chatId)) return
         delete _scrollModes[chatId]
         _persistScrollModes()
         return
@@ -1698,15 +1702,14 @@ export default function useScrollMode({
     const listEl = scrollEl.querySelector('.chat__list')
     if (!listEl) return
 
-    // Restore mode for this chat if persisted (mount-restore path). A
-    // progressive cold render exposes only a prefix of one giant assistant
-    // row; validating a saved deep-in-row offset against that temporary short
-    // row would reject the real location as off-content and permanently fall
-    // back to the top. Wait for the authoritative frame, whose ready-phase
-    // render re-runs this effect with the complete row geometry.
+    // Restore mode for this chat only after the authoritative activation has
+    // repaired or retired its saved row address. Cached history supplies the
+    // hidden DOM, but consuming its coordinate before the server handshake
+    // would strand this mount on an obsolete alias. The same gate also keeps a
+    // progressive cold prefix from rejecting a valid deep-in-row part path.
     if (
       modeRef.current.kind === 'INITIAL'
-      && initialEntryPhaseRef.current !== 'preparing'
+      && initialEntryPhaseRef.current === 'ready'
     ) {
       const saved = _scrollModes[chatId]
       const restored = _validateSavedMode(saved, messagesRef.current, scrollEl)
