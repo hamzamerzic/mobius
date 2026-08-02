@@ -16,6 +16,7 @@ import useStreamConnection from './useStreamConnection.js'
 import useScrollMode, {
   remapSavedReadingAnchor,
   retireSavedReadingPosition,
+  savedReadingAnchorHasNestedPart,
   savedReadingAnchorKey,
 } from './useScrollMode.js'
 import useVoiceInput from './useVoiceInput.js'
@@ -62,11 +63,13 @@ import { focusComposerElement, shouldApplyComposerFocusRequest } from './compose
 import { shouldDismissComposerKeyboardOnSubmit } from './composerKeyboardPolicy.js'
 import { updateChatRuntimeCache } from './chatRuntimeCache.js'
 import {
+  chatCacheCanPaint,
   chatDetailCacheValue,
   chatSnapshotMatchesRuntime,
   mergeRecentMessagesIntoLoadedWindow,
   messageKey,
   messageMatchesKey,
+  optimisticHandoffWindow,
 } from '../../lib/chatDetailCache.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
 import { sendFailureMessage } from './sendFailure.js'
@@ -279,8 +282,9 @@ export default function ChatView({
   const online = useOnlineStatus()
   // Read the query cache synchronously on mount. If we've viewed this chat
   // before, its complete transcript window builds the hidden restoration DOM
-  // immediately. It becomes paintable only after the version handshake below,
-  // so cache supplies geometry without ever becoming freshness authority.
+  // immediately. A complete cache that covers the saved reading coordinate may
+  // paint while the version handshake runs; every other cache supplies hidden
+  // restoration geometry without becoming freshness authority.
   // If the persister hydrated, useState starts populated; if it races with a
   // cold mount, the authoritative activation read self-heals the miss.
   // The persister itself races with mount on cold load; PersistQuery-
@@ -304,11 +308,20 @@ export default function ChatView({
     () => composerHistoryFromMessages(messages),
     [messages],
   )
-  // Cache supplies the DOM needed for exact restoration, not freshness proof.
-  // The outgoing chat remains painted until validation or authoritative detail
-  // settles, so stale content can never become the destination's first frame.
-  const [loading, setLoading] = useState(true)
-  const [initialEntryPhase, setInitialEntryPhase] = useState('history')
+  // A canonical cache is useful first paint, not freshness authority. It may
+  // paint while activation validates in the background only when it contains
+  // the reader's saved coordinate; an incomplete restoration window stays
+  // hidden until the anchor-addressed read repairs or retires that coordinate.
+  const initialSavedAnchorKey = savedReadingAnchorKey(chatId)
+  const initialCachePaintable = chatCacheCanPaint(
+    cached,
+    initialSavedAnchorKey,
+    savedReadingAnchorHasNestedPart(chatId),
+  )
+  const [loading, setLoading] = useState(!initialCachePaintable)
+  const [initialEntryPhase, setInitialEntryPhase] = useState(
+    initialCachePaintable ? 'cached' : 'history',
+  )
   // On a failed initial /chats/{id} fetch, loadError flips in the catch so
   // the UI can render a retry message. Setting loading false alone would
   // render the empty-state UI ("What's on your mind?") as if the chat had no
@@ -1607,11 +1620,16 @@ export default function ChatView({
     }
     const activationAnchorMatch = anchorMatchIn(activationCache)
     const cacheCoversSavedAnchor = !savedAnchorKey || !!activationAnchorMatch
+    const activationCachePaintable = chatCacheCanPaint(
+      activationCache,
+      savedAnchorKey,
+      savedReadingAnchorHasNestedPart(chatId),
+    )
     remapAnchorMatch(activationAnchorMatch)
     chatIdStaleRef.current = false
     setLoadError(false)
-    setLoading(true)
-    setInitialEntryPhase('history')
+    setLoading(!activationCachePaintable)
+    setInitialEntryPhase(activationCachePaintable ? 'cached' : 'history')
 
     const gen = fetchGenRef.current
     const requestJson = async (path, label) => {
@@ -1749,15 +1767,21 @@ export default function ChatView({
       // mounted transcript is temporarily ahead of it.
       setChatInfo(detailCache.chatInfo)
       if (!anchorRetired && serverSnapshotBehindLocal(msgs, messagesRef.current)) {
-        queryClient.setQueryData(queryKey, existing => ({
-          ...detailCache,
-          // The local suffix is not proven by this server version. Preserve it
-          // for the visible optimistic handoff but make the next activation
-          // take the authoritative detail path.
-          updated_at: null,
-          messages: existing?.messages || messagesRef.current,
-          offset: existing?.offset ?? offsetRef.current,
-        }))
+        queryClient.setQueryData(queryKey, existing => {
+          const handoffWindow = optimisticHandoffWindow(
+            existing,
+            messagesRef.current,
+            offsetRef.current,
+          )
+          return {
+            ...detailCache,
+            // The local suffix is not proven by this server version. Preserve
+            // the latest cache/mounted owner for the optimistic handoff but
+            // make the next activation take the authoritative detail path.
+            updated_at: null,
+            ...handoffWindow,
+          }
+        })
         settleRuntime(runtime, messagesRef.current)
         return
       }
@@ -3446,10 +3470,12 @@ export default function ChatView({
     : null
   const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
 
-  // A retained ChatView can keep `revealed=true` across a hidden lifetime. Data
-  // readiness is a separate gate: old DOM must stay unpainted until this
-  // activation validates or replaces it and restores the saved address.
-  const transcriptPaintable = initialEntryPhase === 'ready' && revealed
+  // A safe cached window can paint while its freshness check runs. History and
+  // progressive preparation remain hidden; `cached` is granted only after the
+  // saved-coordinate coverage check above.
+  const transcriptPaintable = (
+    initialEntryPhase === 'cached' || initialEntryPhase === 'ready'
+  ) && revealed
   const displayReady = !loading && (transcriptPaintable || showEmpty || showLoadError)
   useLayoutEffect(() => {
     if (displayReady) onDisplayReady?.(chatId)

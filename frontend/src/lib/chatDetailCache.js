@@ -22,6 +22,37 @@ export function messageMatchesKey(message, index, key) {
   return `${role}-${index}` === target
 }
 
+/** Whether a canonical detail cache can be painted while its background
+ * freshness check runs. A saved reading coordinate must be present in the
+ * cached window; otherwise the transcript stays hidden until the
+ * anchor-addressed authoritative read repairs or retires that coordinate. */
+export function chatCacheCanPaint(
+  cached,
+  savedAnchorKey = null,
+  savedAnchorHasNestedPart = false,
+) {
+  if (cached?.restorationWindowComplete !== true || !Array.isArray(cached.messages)) {
+    return false
+  }
+  if (savedAnchorKey == null) return true
+  // A nested row-part address needs committed DOM validation. Keep it behind
+  // the authoritative phase so a compact/stale cache cannot consume the
+  // coordinate by falling back to the tail before that validation runs.
+  if (savedAnchorHasNestedPart) return false
+  const baseOffset = Number.isInteger(cached.offset) ? cached.offset : 0
+  return cached.messages.some((message, index) => (
+    messageKey(message, baseOffset + index) === String(savedAnchorKey)
+    || (
+      message?.role === 'user'
+      && !message.hidden
+      && message.kind !== 'continuation'
+      && message.kind !== 'auto_continuation'
+      && message.cid != null
+      && String(message.cid) === String(savedAnchorKey)
+    )
+  ))
+}
+
 function settledToolBlocks(message) {
   const blocks = Array.isArray(message?.blocks) ? message.blocks : null
   if (!blocks?.some(block => block?.type === 'tool' && block.status === 'running')) {
@@ -49,12 +80,30 @@ export function chatSnapshotMatchesRuntime(cached, runtime) {
 }
 
 export function chatDetailCacheValue(data = {}) {
+  const sourceWindowValid = Array.isArray(data.messages)
+    && Number.isInteger(data.offset)
+    && data.offset >= 0
+    && Number.isInteger(data.total)
+    && data.total >= 0
+  const messages = Array.isArray(data.messages)
+    ? data.messages.map(settledToolBlocks)
+    : []
+  const offset = Number.isInteger(data.offset) && data.offset >= 0
+    ? data.offset
+    : 0
+  const total = Number.isInteger(data.total) && data.total >= 0
+    ? data.total
+    : null
   return {
+    // Reject persisted legacy/poisoned cache shapes on first paint. This marker
+    // is minted only by a canonical window that reaches the current tail and
+    // survives later local/stream updates through existing spread paths.
+    restorationWindowComplete: sourceWindowValid
+      && data.offset + messages.length === data.total,
     updated_at: typeof data.updated_at === 'string' ? data.updated_at : null,
-    messages: Array.isArray(data.messages)
-      ? data.messages.map(settledToolBlocks)
-      : [],
-    offset: data.offset || 0,
+    messages,
+    total,
+    offset,
     running: !!data.running,
     activeGoalObjective: typeof data.active_goal_objective === 'string'
       ? data.active_goal_objective
@@ -72,6 +121,24 @@ export function chatDetailCacheValue(data = {}) {
       auto_resume_on_limit: !!data.auto_resume_on_limit,
       auto_resume_on_restart: !!data.auto_resume_on_restart,
     },
+  }
+}
+
+/** Choose the query-cache window for an optimistic server-behind handoff.
+ * A concurrent non-empty publication wins; an empty cache cannot erase the
+ * mounted transcript merely because [] is truthy. */
+export function optimisticHandoffWindow(existing, mountedMessages, mountedOffset) {
+  if (Array.isArray(existing?.messages) && existing.messages.length > 0) {
+    return {
+      messages: existing.messages,
+      offset: Number.isInteger(existing.offset) ? existing.offset : mountedOffset,
+      restorationWindowComplete: existing.restorationWindowComplete === true,
+    }
+  }
+  return {
+    messages: mountedMessages,
+    offset: mountedOffset,
+    restorationWindowComplete: true,
   }
 }
 

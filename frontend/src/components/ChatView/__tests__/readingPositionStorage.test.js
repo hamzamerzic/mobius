@@ -35,6 +35,7 @@ globalThis.localStorage = storage
 const {
   remapSavedReadingAnchor,
   retireSavedReadingPosition,
+  savedReadingAnchorHasNestedPart,
   savedReadingAnchorKey,
 } = await import('../useScrollMode.js')
 
@@ -45,6 +46,7 @@ after(() => {
 
 test('saved reading aliases remap once and confirmed absence retires once', () => {
   assert.equal(savedReadingAnchorKey('chat-1'), 'client-message')
+  assert.equal(savedReadingAnchorHasNestedPart('chat-1'), true)
   assert.equal(
     remapSavedReadingAnchor('chat-1', 'client-message', 'server-message'),
     true,
@@ -59,5 +61,6 @@ test('saved reading aliases remap once and confirmed absence retires once', () =
   assert.equal(retireSavedReadingPosition('chat-1'), true)
   assert.equal(retireSavedReadingPosition('chat-1'), false)
   assert.equal(savedReadingAnchorKey('chat-1'), null)
+  assert.equal(savedReadingAnchorHasNestedPart('chat-1'), false)
   assert.deepEqual(JSON.parse(storage.getItem('chat-reading-position')), {})
 })

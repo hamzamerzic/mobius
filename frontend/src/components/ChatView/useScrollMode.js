@@ -165,6 +165,14 @@ export function savedReadingAnchorKey(chatId) {
     : null
 }
 
+/** Nested part paths need committed DOM validation before cache reveal. */
+export function savedReadingAnchorHasNestedPart(chatId) {
+  const mode = _scrollModes[String(chatId || '')]
+  return mode?.kind === 'ANCHOR_AT'
+    && Array.isArray(mode.part)
+    && mode.part.length > 0
+}
+
 /** Replace one saved alias with the server's canonical row key before the
  * ready-phase restore consumes it. */
 export function remapSavedReadingAnchor(chatId, fromKey, toKey) {
@@ -1200,9 +1208,10 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  *   shows/hides because the tray's margin shrinks the spacer math).
  * @param {React.MutableRefObject<boolean>} args.loadingOlderRef
  *   When true, scroll events from pagination shouldn't mutate mode.
- * @param {'history'|'preparing'|'ready'} args.initialEntryPhase
- *   History blocks reveal, preparing is a hidden progressive cold render, and
- *   ready means authoritative history has settled.
+ * @param {'history'|'cached'|'preparing'|'ready'} args.initialEntryPhase
+ *   History blocks reveal, cached is a caller-validated restoration window,
+ *   preparing is a hidden progressive cold render, and ready means
+ *   authoritative history has settled.
  */
 export default function useScrollMode({
   chatId,
@@ -1332,9 +1341,12 @@ export default function useScrollMode({
         }, PREPARING_REVEAL_CAP_MS - REVEAL_CAP_MS)
         return
       }
-      // A deadline may release slow layout, never unvalidated data. Shell
-      // keeps the outgoing chat painted until activation reaches `ready`.
-      if (initialEntryPhaseRef.current !== 'ready') return
+      // A deadline may release slow layout, never unvalidated data. `cached`
+      // is assigned only after the caller proves saved-coordinate coverage.
+      if (
+        initialEntryPhaseRef.current !== 'cached'
+        && initialEntryPhaseRef.current !== 'ready'
+      ) return
       if (forceRevealRef.current) forceRevealRef.current()
       else {
         // Defensive fallback for a mount whose scroll DOM never materialized.
@@ -1702,14 +1714,16 @@ export default function useScrollMode({
     const listEl = scrollEl.querySelector('.chat__list')
     if (!listEl) return
 
-    // Restore mode for this chat only after the authoritative activation has
-    // repaired or retired its saved row address. Cached history supplies the
-    // hidden DOM, but consuming its coordinate before the server handshake
-    // would strand this mount on an obsolete alias. The same gate also keeps a
-    // progressive cold prefix from rejecting a valid deep-in-row part path.
+    // Restore mode only after either the cache proves it contains the saved row
+    // address or authoritative activation repairs/retires that address. The
+    // same gate keeps a progressive cold prefix from rejecting a valid
+    // deep-in-row part path.
     if (
       modeRef.current.kind === 'INITIAL'
-      && initialEntryPhaseRef.current === 'ready'
+      && (
+        initialEntryPhaseRef.current === 'cached'
+        || initialEntryPhaseRef.current === 'ready'
+      )
     ) {
       const saved = _scrollModes[chatId]
       const restored = _validateSavedMode(saved, messagesRef.current, scrollEl)
@@ -2094,7 +2108,8 @@ export default function useScrollMode({
     // by the caller and cannot be bypassed by a timer.
     let revealTimer = 0
     let mountMutationObserver = null
-    const entryReady = () => initialEntryPhaseRef.current === 'ready'
+    const entryReady = () => initialEntryPhaseRef.current === 'cached'
+      || initialEntryPhaseRef.current === 'ready'
     const requestRevealOnQuiet = () => {
       clearTimeout(revealTimer)
       if (revealedRef.current && !mountStabilizingRef.current) return

@@ -1050,6 +1050,20 @@ test('a saved partially-visible anchor remains exact', () => {
   }
   assert.equal(_validateSavedMode(saved, [], scrollEl), saved,
     'an anchor whose row still intersects its restored viewport is preserved')
+  const aliasedRow = {
+    offsetTop: 500,
+    offsetHeight: 220,
+    dataset: { key: 'server-row', cid: 'client-row' },
+  }
+  const aliased = { kind: 'ANCHOR_AT', key: 'client-row', offset: -100 }
+  const aliasedScrollEl = {
+    clientHeight: 700,
+    querySelector(selector) {
+      return selector === '[data-cid="client-row"]' ? aliasedRow : null
+    },
+  }
+  assert.equal(_validateSavedMode(aliased, [], aliasedScrollEl), aliased,
+    'cached-phase restore resolves the cid before passive canonical remapping')
 })
 
 test('question-only viewport overlay is never restored as durable reader state', () => {
