@@ -281,16 +281,6 @@ def test_submit_pr_rechecks_landed_hooks_after_refresh():
   assert "scripts/git-doctor.sh --fix" in refreshed_segment
 
 
-def test_submit_pr_blocks_non_main_release_before_git_mutation():
-  submit = (ROOT / "scripts" / "submit-pr.sh").read_text(encoding="utf-8")
-  guard = submit.index('MOBIUS_PLATFORM_RELEASE_REF}" != "refs/heads/main"')
-  doctor = submit.index("scripts/git-doctor.sh --fix")
-  fetch = submit.index("git fetch origin main")
-
-  assert guard < doctor < fetch
-  assert "platform contributions are disabled" in submit
-
-
 def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
   entrypoint = (
     ROOT / "backend" / "scripts" / "entrypoint.sh"

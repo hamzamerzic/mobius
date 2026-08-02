@@ -30,12 +30,11 @@ import json
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 from sqlalchemy import and_, update
 from sqlalchemy.orm import Session
 
-from app import fs_locks, models, release_channel
+from app import fs_locks, models
 from app.chat_start import start_programmatic_chat_turn
 from app.config import get_settings
 from app.contribution_records import (
@@ -269,25 +268,6 @@ def claim_for_round(
     row = get_row(db, app_id, record_id)
     if row is None or not row.enabled:
       return {"status": "not_granted"}
-    if release_channel.platform_contributions_disabled():
-      target_repo = str(row.target_repo or "").casefold()
-      platform = Path(get_settings().data_dir).resolve() / "platform"
-      try:
-        target_path = (
-          Path(row.target_repo_path).resolve()
-          if row.target_repo_path else None
-        )
-      except (OSError, RuntimeError, ValueError):
-        target_path = None
-      if (
-        target_repo == "mobius-os/mobius"
-        or target_path == platform
-        or (
-          target_path is not None
-          and target_path.is_relative_to(platform)
-        )
-      ):
-        return {"status": "not_granted"}
     if row.last_handled_attention_key == attention_key:
       return {"status": "duplicate"}
     if (
