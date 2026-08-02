@@ -78,16 +78,16 @@ bundled self-hosted Caddy service instead reads `./Caddyfile` from the host
 checkout, and image/dependency changes likewise need a host rebuild/recreate.
 An incoming change to `Caddyfile`, `docker-compose.yml`, `Dockerfile`, or a
 dependency manifest therefore carries a separate host action (and may require a
-particular ordering) even when the live clone rebases cleanly. Never describe
+particular ordering) even when the live clone merges cleanly. Never describe
 Apply + server restart alone as activating those files.
 
 **lodash is pinned to 4.18.1 via `overrides`.** `@openai/apps-sdk-ui` pulls lodash transitively — only through its `Slider` component, which the shell does not import. The 4.17.x line sat unfixed against several advisories for a long stretch; 4.18.x restored maintenance and patched them, so `frontend/package.json` `overrides` forces the transitive lodash to 4.18.1 (`npm audit` is clean). As defense-in-depth, `frontend/src/lib/__tests__/appsSdkLodash.test.js` also fails if the shell ever imports `Slider`, which keeps lodash tree-shaken out of the shipped bundle regardless of the pin.
 
-## Self-update model — `upstream` / `main`, replay on update
+## Self-update model — `upstream` / `main`, preserve local changes on update
 
 Möbius is the rare app whose own agent edits its live code: the in-product agent customizes its mini-apps (`/data/apps/<slug>`) and the whole platform repo (`/data/platform`, a real clone of `mobius-os/mobius`, including the frontend) while the platform runs. A deploy then ships a *new pristine version* of that same code. One small model keeps every such surface up to date without clobbering the owner's customizations and without a deploy ever silently dropping them.
 
-**Two branches per surface, and the update is a rebase.** Each updatable surface is a git repo with:
+**Mini-app updates are rebase-shaped.** Each updatable mini-app is a git repo with:
 
 - **`upstream`** — pristine history (`A → B → …`). The exact bytes of each *released* version, committed only by the installer / image, never the agent.
 - **`main`** — the owner/agent's edits (`X`), and what the surface actually serves. It sits on top of the `upstream` version it was last updated to.
@@ -101,10 +101,12 @@ rebase the local edits onto it:                    A → B → X
 
 The owner's customizations end up *on top of* the current release, as if they'd just been made against it. Mechanically: commit any stray working-tree changes onto `main` first (`app_git.commit_local`, so the merge has a committed base), advance `upstream` to `B`, then compute the three-way verdict with `git merge-tree --write-tree` (`app_git.merge_upstream`) and, when clean, write the merged tree back and replay it as a single-parent commit on the new `upstream` tip — rebase-shaped linear history (`A → B → X`) without ever running `git rebase`.
 
-- **Clean merge** → the merged tree is replayed as a single-parent commit on the new `upstream` tip and the surface recompiles (apps) or restarts (backend) onto the new code.
+- **Clean merge** → the merged tree is replayed as a single-parent commit on the new `upstream` tip and the app recompiles onto the new code.
 - **Conflict** (the release and the local edits touched the same lines) → an **owner-clicked agent chat** resolves it. The update attempt records the new upstream plus a durable receipt bound to every fetched source/static/icon/seed byte, and leaves live files untouched. When the owner chooses "Resolve in chat", apps materialize standard conflict markers (`start_conflict_merge`, a `git merge --no-commit --no-ff upstream`) for the agent to edit; the platform updater leaves the live tree untouched and the resolver chat runs the merge itself. Saving marker-free source records a *single-parent replay* — `--no-ff` points `MERGE_HEAD` at the upstream tip and the commit takes only that one parent, so even a resolved conflict stays linear (`A → B → X`), never the 2-parent commit a plain `git merge` would leave. The canonical installer then verifies the receipt and promotes source, bundle, static files, DB metadata, icon, seeds, cron, and skills through its normal lifecycle. If fetch/materialization fails after the source commit, the previous app remains served and the receipt survives for startup/user retry. Both app and platform conflicts are click-gated: the update surfaces `mode=conflict` / conflict paths or a Settings conflict state, and the owner chooses "Resolve in chat" before an agent turn starts. The owner never hand-merges; back out with `git merge --abort`.
 
-**"Update available" is an ancestry question, not a version-string compare:** an update is available iff `upstream`'s tip is **not yet an ancestor of `main`** (a new release hasn't been rebased in). This is the content question — "does my working tree already contain this release" — that a `image_sha != recorded_sha` proxy can't answer on a customized instance, and it's what eliminates phantom "update available" rows after a deploy that changed nothing the owner hadn't already.
+The platform clone differs: it fetches the selected origin target and either fast-forwards local `main` or merges that target once, preserving both histories without rewriting local commits.
+
+**"Update available" is an ancestry question, not a version-string compare:** an update is available iff `upstream`'s tip is **not yet an ancestor of `main`** (a new release has not been incorporated). This is the content question — "does my working tree already contain this release" — that a `image_sha != recorded_sha` proxy can't answer on a customized instance, and it's what eliminates phantom "update available" rows after a deploy that changed nothing the owner hadn't already.
 
 ### Baked boot infrastructure is outside the served clone
 
@@ -124,9 +126,9 @@ worker container to update it. There is no in-process recovery updater.
 | Surface | Repo | On the model | Engine |
 |---------|------|------------------|--------|
 | **Mini-apps** (`/data/apps/<slug>`) | `.git` per app (installed apps; agent-built bespoke apps have no upstream to track) | yes — whole source tree on `upstream`, single-parent replay, so **multi-file apps update cleanly** | `backend/app/app_git.py` + `install.py` |
-| **Platform** (`/data/platform` — backend *and* frontend) | `.git` | yes — clone-native `git fetch origin` + rebase of local `main` onto `origin/main` (commit-stray-edits-first, conflict-abort, post-rebase import probe with rollback); ancestry availability (`origin/main` not yet an ancestor of local `main`) | `backend/app/platform_update.py` |
+| **Platform** (`/data/platform` — backend *and* frontend) | `.git` | yes — clone-native `git fetch origin`, then fast-forward or merge the selected target into local `main` (commit-stray-edits-first, conflict-abort, post-merge import probe with rollback); ancestry availability (`origin/main` not yet an ancestor of local `main`) | `backend/app/platform_update.py` |
 
-Mini-apps use **one** small tree-aware engine (`app_git.py`): `record_upstream` commits the *whole source tree* on `upstream`, `merge_upstream` verdicts a clean-vs-conflict via `git merge-tree`, and a clean apply replays the merged tree as a **single-parent** commit on top of `upstream` (linear `A→B→X`). Mini-apps are thin callers of that primitive — they pass their own source tree. The platform (backend + frontend, one served clone) is clone-native instead: it uses `git fetch origin` plus a rebase of local `main` onto `origin/main`, with ancestry-based availability (`origin/main` not yet an ancestor of local `main`). Mini-app update discovery is different: the store compares the catalog manifest version against the installed `App.version` (the new release lives in the remote catalog, so a local ancestry check can't see it). There is no per-surface protected-file scaffolding.
+Mini-apps use **one** small tree-aware engine (`app_git.py`): `record_upstream` commits the *whole source tree* on `upstream`, `merge_upstream` verdicts a clean-vs-conflict via `git merge-tree`, and a clean apply replays the merged tree as a **single-parent** commit on top of `upstream` (linear `A→B→X`). Mini-apps are thin callers of that primitive — they pass their own source tree. The platform (backend + frontend, one served clone) is clone-native instead: it uses `git fetch origin` plus a fast-forward or merge of the selected target into local `main`, with ancestry-based availability (`origin/main` not yet an ancestor of local `main`). Mini-app update discovery is different: the store compares the catalog manifest version against the installed `App.version` (the new release lives in the remote catalog, so a local ancestry check can't see it). There is no per-surface protected-file scaffolding.
 
 ## Backend (`backend/app/`)
 
@@ -488,11 +490,11 @@ are gitignored (db, compiled, app-secrets, cli-auth).
 
 **Updates** flow through git. `backend/app/platform_update.py` is clone-native:
 `/data/platform` is a real `git clone` of the canonical repo, so an update
-`git fetch origin`s and rebases the local `main` (the agent's edits) onto the new
-`origin/main` — committing any stray working-tree edits first so the rebase can
-only replay them, aborting back to the last-served commit on conflict, and
-running a post-rebase `import app.main` probe that rolls back rather than serve a
-broken tree. (It reuses `app_git`'s isolated git env + `commit_local` but drops
+fetches `origin/main`, commits any stray working-tree edits, and then
+fast-forwards or merges that target into local `main`. A conflict aborts back to
+the last-served commit, and a post-merge `import app.main` probe rolls back
+rather than serving a broken tree. (It reuses `app_git`'s isolated git env +
+`commit_local` but drops
 the pre-slice-B baked-floor `upstream`-record model; card refs below point at the
 maintainers' local `.pm/` backlog, gitignored and absent from a fresh clone.) The
 served bundle is `/data/platform/frontend/dist` if a complete build exists else
@@ -531,19 +533,18 @@ root repair through the authenticated target but cannot access the host control
 plane. Finishing recovery removes both recovery containers, recreates normal
 Mobius, and verifies `/api/health`.
 
-Every self-host lifecycle action takes one bounded installation lock.
-`scripts/mobiusctl update` refuses while isolated recovery state/services are
-present, recreates the normal stack, and passes health before retiring the old
-embedded `mobius-recoveryd`. Recovery start/reopen performs the same retirement
-after the external services launch. Cleanup is never a broad orphan sweep: the
-helper resolves the current app's Compose project and removes only the exact
-`mobius-recoveryd` name with matching project and `recoveryd` service labels.
-An identity mismatch leaves the old container untouched for operator review.
+Every self-host recovery action takes one bounded installation lock. Start and
+reopen pull the latest worker, keep the ordinary app stopped, and retire an old
+embedded `mobius-recoveryd` before launching the isolated services. Cleanup is
+never a broad orphan sweep: it removes only that exact name with the current
+Compose project's matching `recoveryd` service label. An identity mismatch
+leaves the old container untouched. Finish removes both isolated services,
+recreates the ordinary app, and verifies its health.
 
 Normal platform boot serves `/data/platform/backend` directly after an import
-probe. It fetches `origin/main`, commits stray local edits, and rebases them onto
-the update; a conflict or failed post-rebase import returns to the exact
-pre-reconcile commit and leaves a visible flag. An invalid existing clone serves
+probe. It fetches `origin/main`, commits stray local edits, and merges that target
+into local `main` (fast-forwarding when possible); a conflict or failed post-merge
+probe returns to the exact pre-reconcile commit and leaves a visible flag. An invalid existing clone serves
 the baked backend without overwriting the broken tree. Independently, three
 consecutive boots that never reach `/api/health` quarantine the served clone and
 reseed it on the next attempt. These mechanisms recover code; owner-data disaster
