@@ -1,12 +1,16 @@
-"""Fail-closed helpers for the protected external-recovery image channel.
+"""Fail-closed helpers for the one-time immutable core cutover.
 
 The controller contract deliberately exposes two recovery identities on every
 successful core-release response. ``recovery_*`` is the generation's frozen
 audit identity. ``current_recovery_*`` and the identical ``approved_recovery_*``
 aliases are an atomic read of the durable current release. Active cutovers
-require all three identities to agree; completed normal releases may observe a
-newer current release, which is the one the workflow verifies at public
-``mobius-recovery:stable``.
+require all three identities to agree; a completed replay may observe a newer
+current release, which the workflow verifies by its exact immutable digest.
+
+The public ``mobius:main`` and ``mobius:external-recovery`` tags are the frozen
+compatible A' floor. This module has no operation that can write or authorize a
+write to either tag. The removal image B and recovery worker R are addressed
+only as ``repository@sha256:...``.
 """
 
 from __future__ import annotations
@@ -149,6 +153,51 @@ def inspect_tag(
   return None
 
 
+def inspect_digest(
+  repository: str,
+  digest: str,
+  *,
+  attempts: int = 5,
+  runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+  sleeper: Callable[[float], None] = time.sleep,
+) -> ImageIdentity:
+  """Return an exact public digest identity, failing closed if it is absent."""
+
+  if not DIGEST_RE.fullmatch(digest):
+    raise ReleaseError("invalid immutable image digest")
+  reference = f"{repository}@{digest}"
+  command = [
+    "docker",
+    "buildx",
+    "imagetools",
+    "inspect",
+    reference,
+    "--format",
+    '{{.Manifest.Digest}}|{{index .Image.Config.Labels "org.opencontainers.image.revision"}}',
+  ]
+  for attempt in range(1, attempts + 1):
+    result = runner(
+      command,
+      capture_output=True,
+      text=True,
+      check=False,
+      env=os.environ.copy(),
+    )
+    if result.returncode == 0:
+      identity = _parse_image_identity(result.stdout)
+      if identity.digest != digest:
+        raise ReleaseError("immutable image lookup returned a different digest")
+      return identity
+    error = (result.stderr or "").strip()
+    if reference.lower() not in error.lower() or not ABSENT_RE.search(error):
+      raise ReleaseError(
+        f"ambiguous registry failure for {reference}: {error or 'no error'}"
+      )
+    if attempt < attempts:
+      sleeper(float(attempt))
+  raise ReleaseError(f"required immutable image {reference} is absent")
+
+
 def assert_frozen_legacy(
   *, main: ImageIdentity | None, daily: ImageIdentity | None, prerequisite: ImageIdentity
 ) -> None:
@@ -167,33 +216,29 @@ def inventory_channels(
   target = inspect_tag(repository, "external-recovery")
   assert_frozen_legacy(main=main, daily=daily, prerequisite=prerequisite)
   if target is None:
-    raise ReleaseError("the bootstrapped :external-recovery channel is absent")
-  return validate_image_identity(target)
-
-
-def assert_prewrite_channels(
-  repository: str, prerequisite: ImageIdentity, initial_target: ImageIdentity
-) -> None:
-  target = inventory_channels(repository, prerequisite)
-  if target != initial_target:
-    raise ReleaseError(":external-recovery changed after the initial inventory")
+    raise ReleaseError("the frozen :external-recovery compatibility tag is absent")
+  if validate_image_identity(target) != prerequisite:
+    raise ReleaseError(":external-recovery is not the configured compatibility floor")
+  return prerequisite
 
 
 def assert_final_channels(
   repository: str, prerequisite: ImageIdentity, released: ImageIdentity
 ) -> None:
-  target = inventory_channels(repository, prerequisite)
-  if target != released:
-    raise ReleaseError(":external-recovery does not hold the selected release")
+  inventory_channels(repository, prerequisite)
+  observed = inspect_digest(repository, released.digest)
+  if observed != validate_image_identity(released):
+    raise ReleaseError("immutable removal image does not match the selected release")
 
 
 def assert_worker_release(
   repository: str, expected: ImageIdentity
 ) -> None:
-  stable = inspect_tag(repository, "stable")
-  if stable != validate_image_identity(expected):
+  expected = validate_image_identity(expected)
+  observed = inspect_digest(repository, expected.digest)
+  if observed != expected:
     raise ReleaseError(
-      "public mobius-recovery:stable does not match the controller's approved release"
+      "immutable recovery worker does not match the controller's approved release"
     )
 
 
@@ -273,12 +318,12 @@ def classify_gate_response(
     )
     completed_sha = _string(body, "removal_build_sha")
     completed_digest = _string(body, "removal_image_digest")
-    decision = (
-      "completed_replay"
-      if completed_sha == expected.removal_build_sha
-      else "normal_release"
-    )
-    return GateDecision(decision, completed_digest, frozen, current)
+    if completed_sha != expected.removal_build_sha:
+      raise ReleaseError(
+        "one-time cutover is complete; later core releases require the immutable "
+        "digest release protocol"
+      )
+    return GateDecision("completed_replay", completed_digest, frozen, current)
 
   _assert_common_response(body, expected, completed=False)
   frozen, current = _response_recoveries(
@@ -425,17 +470,12 @@ def build_parser() -> argparse.ArgumentParser:
   parser = argparse.ArgumentParser()
   commands = parser.add_subparsers(dest="command", required=True)
 
-  for command in ("inventory", "prewrite", "final"):
+  for command in ("inventory", "final"):
     child = commands.add_parser(command)
     child.add_argument("--repository", required=True)
     child.add_argument("--prerequisite-digest", required=True)
     child.add_argument("--prerequisite-revision", required=True)
-    if command == "inventory":
-      child.add_argument("--output", required=True)
-    elif command == "prewrite":
-      child.add_argument("--target-digest", required=True)
-      child.add_argument("--target-revision", required=True)
-    else:
+    if command == "final":
       child.add_argument("--released-digest", required=True)
       child.add_argument("--released-revision", required=True)
 
@@ -465,22 +505,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
   args = build_parser().parse_args(argv)
-  if args.command in {"inventory", "prewrite", "final"}:
+  if args.command in {"inventory", "final"}:
     prerequisite = ImageIdentity(
       args.prerequisite_digest, args.prerequisite_revision
     )
     if args.command == "inventory":
-      target = inventory_channels(args.repository, prerequisite)
-      with Path(args.output).open("a", encoding="utf-8") as output:
-        output.write(f"target_digest={target.digest}\n")
-        output.write(f"target_revision={target.revision}\n")
-      return 0
-    if args.command == "prewrite":
-      assert_prewrite_channels(
-        args.repository,
-        prerequisite,
-        ImageIdentity(args.target_digest, args.target_revision),
-      )
+      inventory_channels(args.repository, prerequisite)
       return 0
     assert_final_channels(
       args.repository,

@@ -235,6 +235,16 @@ deadline after expiry. Normal boot deletes the retired `.recovery-secret`,
 persisted code; a legacy user-authored `recovery_chat.jsonl` is retained and
 included in ordinary backup/restore.
 
+The one-time managed core cutover is digest-native. Public `mobius:main` and
+`mobius:external-recovery` remain permanently frozen at the compatible A'
+identity. The protected workflow publishes B only under a unique
+workflow-attempt reference, verifies the manifest by `repository@sha256:...`,
+durably binds that digest in Möbius Launch, and invokes fleet finalization
+immediately. Recovery R is likewise proved through its exact digest rather than
+through a mutable `stable` tag. The retired compatibility-bootstrap publisher
+is absent from the current tree, and this cutover workflow refuses unrelated
+later SHAs until a separate durable digest-release state machine owns them.
+
 ### Misc shared helpers
 
 Agent-editable general-purpose modules — several sit on live chat paths and are

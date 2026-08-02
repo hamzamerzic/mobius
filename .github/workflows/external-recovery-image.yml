@@ -13,6 +13,8 @@ env:
   DOCKER_BUILD_RECORD_UPLOAD: 'false'
   MOBIUS_IMAGE_REPOSITORY: ghcr.io/mobius-os/mobius
   MOBIUS_RECOVERY_IMAGE_REPOSITORY: ghcr.io/mobius-os/mobius-recovery
+  # This compatibility tag is an identity in the controller contract only.
+  # It is frozen forever at A' and this workflow never writes it.
   MOBIUS_RELEASE_CHANNEL: ghcr.io/mobius-os/mobius:external-recovery
   MOBIUS_PLATFORM_RELEASE_REF: refs/heads/stack/external-recovery-v1
   # These repository variables are set to the exact compatible A′ identity
@@ -21,7 +23,7 @@ env:
   RECOVERY_CUTOVER_PREREQUISITE_SHA: ${{ vars.MOBIUS_EXTERNAL_RECOVERY_PREREQUISITE_SHA }}
   RECOVERY_CUTOVER_PREREQUISITE_DIGEST: ${{ vars.MOBIUS_EXTERNAL_RECOVERY_PREREQUISITE_DIGEST }}
 
-# A bound B/C release must be allowed to finish after its branch advances. A
+# A bound B release must be allowed to finish after its branch advances. A
 # second publisher therefore waits rather than cancelling the durable owner.
 concurrency:
   group: mobius-core-image-publication
@@ -102,8 +104,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
-      - name: Inventory frozen legacy and target channels anonymously
-        id: inventory
+      - name: Verify frozen compatibility channels anonymously
         run: |
           anonymous_config="$RUNNER_TEMP/anonymous-docker-inventory"
           install -d -m 0700 "$anonymous_config"
@@ -111,13 +112,12 @@ jobs:
             inventory \
             --repository "$MOBIUS_IMAGE_REPOSITORY" \
             --prerequisite-revision "$RECOVERY_CUTOVER_PREREQUISITE_SHA" \
-            --prerequisite-digest "$RECOVERY_CUTOVER_PREREQUISITE_DIGEST" \
-            --output "$GITHUB_OUTPUT"
+            --prerequisite-digest "$RECOVERY_CUTOVER_PREREQUISITE_DIGEST"
 
       # This gate runs before registry login, image build, or any registry
       # write. It freezes the exact fleet and the latest approved recovery R.
       # A stale workflow may continue only when the controller says its exact
-      # B/C digest was already durably bound.
+      # B digest was already durably bound.
       #
       # Contract dependency: every successful core response carries frozen
       # recovery_* plus atomically read current_recovery_* and identical
@@ -197,7 +197,7 @@ jobs:
               test "$current_digest_seen" = "$current_r_digest"
             fi
             if [ "$decision" != wait ]; then
-              if [ "$decision" = build_cutover ] || [ "$decision" = normal_release ]; then
+              if [ "$decision" = build_cutover ]; then
                 current_sha=$(git ls-remote --exit-code origin "$MOBIUS_PLATFORM_RELEASE_REF" | awk 'NR == 1 { print $1 }')
                 if [ "$current_sha" != "$GITHUB_SHA" ]; then
                   echo "Refusing an unbound release from a stale protected-branch run" >&2
@@ -222,7 +222,7 @@ jobs:
             sleep 10
           done
 
-      - name: Prove the current approved recovery worker is already public
+      - name: Prove the current approved recovery worker by exact digest
         env:
           RECOVERY_DIGEST: ${{ steps.gate.outputs.current_recovery_digest }}
           RECOVERY_SHA: ${{ steps.gate.outputs.current_recovery_sha }}
@@ -235,32 +235,20 @@ jobs:
             --digest "$RECOVERY_DIGEST" \
             --revision "$RECOVERY_SHA"
 
-      - name: Verify a completed B replay without moving any channel
+      - name: Verify a completed B replay and frozen compatibility channels
         if: steps.gate.outputs.mode == 'completed_replay'
         env:
           BOUND_DIGEST: ${{ steps.gate.outputs.bound_digest }}
-          INITIAL_TARGET_DIGEST: ${{ steps.inventory.outputs.target_digest }}
-          INITIAL_TARGET_REVISION: ${{ steps.inventory.outputs.target_revision }}
         run: |
           anonymous_config="$RUNNER_TEMP/anonymous-docker-completed-replay"
           install -d -m 0700 "$anonymous_config"
-          observed=$(DOCKER_CONFIG="$anonymous_config" \
-            docker buildx imagetools inspect \
-            "$MOBIUS_IMAGE_REPOSITORY@$BOUND_DIGEST" \
-            --format '{{.Manifest.Digest}}')
-          test "$observed" = "$BOUND_DIGEST"
-          revision=$(DOCKER_CONFIG="$anonymous_config" \
-            docker buildx imagetools inspect \
-            "$MOBIUS_IMAGE_REPOSITORY@$BOUND_DIGEST" \
-            --format '{{index .Image.Config.Labels "org.opencontainers.image.revision"}}')
-          test "$revision" = "$GITHUB_SHA"
           DOCKER_CONFIG="$anonymous_config" python3 scripts/external_recovery_release.py \
-            prewrite \
+            final \
             --repository "$MOBIUS_IMAGE_REPOSITORY" \
             --prerequisite-revision "$RECOVERY_CUTOVER_PREREQUISITE_SHA" \
             --prerequisite-digest "$RECOVERY_CUTOVER_PREREQUISITE_DIGEST" \
-            --target-revision "$INITIAL_TARGET_REVISION" \
-            --target-digest "$INITIAL_TARGET_DIGEST"
+            --released-revision "$GITHUB_SHA" \
+            --released-digest "$BOUND_DIGEST"
           git fetch --quiet --no-tags origin refs/heads/main
           main_sha=$(git rev-parse FETCH_HEAD)
           git merge-base --is-ancestor "$RECOVERY_CUTOVER_PREREQUISITE_SHA" "$main_sha"
@@ -271,7 +259,7 @@ jobs:
           fi
 
       - name: Log in to GitHub Container Registry
-        if: steps.gate.outputs.mode != 'completed_replay'
+        if: steps.gate.outputs.mode == 'build_cutover'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
@@ -280,7 +268,7 @@ jobs:
 
       - name: Build and publish immutable workflow-attempt image
         id: build
-        if: steps.gate.outputs.mode == 'build_cutover' || steps.gate.outputs.mode == 'normal_release'
+        if: steps.gate.outputs.mode == 'build_cutover'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
@@ -341,10 +329,10 @@ jobs:
             --format '{{index .Image.Config.Labels "org.opencontainers.image.revision"}}')
           test "$revision" = "$GITHUB_SHA"
 
-      # An unbound B/C or ordinary later release must still be branch HEAD at
-      # the last boundary before binding. Once bound, the controller owns the
-      # exact digest and a branch advance is deliberately harmless.
-      - name: Recheck Git ownership before binding or publication
+      # An unbound B must still be branch HEAD at the last boundary before
+      # binding. Once bound, the controller owns the exact digest and a branch
+      # advance is deliberately harmless.
+      - name: Recheck Git ownership before binding
         if: steps.gate.outputs.mode != 'completed_replay'
         env:
           RELEASE_MODE: ${{ steps.gate.outputs.mode }}
@@ -357,7 +345,7 @@ jobs:
             echo "Refusing a removal lineage already contained by main" >&2
             exit 1
           fi
-          if [ "$RELEASE_MODE" = build_cutover ] || [ "$RELEASE_MODE" = normal_release ]; then
+          if [ "$RELEASE_MODE" = build_cutover ]; then
             release_sha=$(git ls-remote --exit-code origin "$MOBIUS_PLATFORM_RELEASE_REF" | awk 'NR == 1 { print $1 }')
             if [ "$release_sha" != "$GITHUB_SHA" ]; then
               echo "Refusing to bind or publish a stale unbound release" >&2
@@ -365,7 +353,7 @@ jobs:
             fi
           fi
 
-      - name: Bind exact removal digest before moving the channel
+      - name: Bind exact removal digest
         if: steps.gate.outputs.mode == 'build_cutover'
         env:
           MOBIUS_YOU_CORE_RELEASE_URL: ${{ secrets.MOBIUS_YOU_CORE_RELEASE_URL }}
@@ -423,54 +411,9 @@ jobs:
             --current-recovery-sha "$CURRENT_RECOVERY_SHA" \
             --current-recovery-digest "$CURRENT_RECOVERY_DIGEST"
 
-      - name: Move only external-recovery to the selected digest
-        if: steps.gate.outputs.mode != 'completed_replay'
-        env:
-          IMAGE_DIGEST: ${{ steps.selected.outputs.digest }}
-          INITIAL_TARGET_DIGEST: ${{ steps.inventory.outputs.target_digest }}
-          INITIAL_TARGET_REVISION: ${{ steps.inventory.outputs.target_revision }}
-          RELEASE_MODE: ${{ steps.gate.outputs.mode }}
-        run: |
-          git fetch --quiet --no-tags origin refs/heads/main
-          main_sha=$(git rev-parse FETCH_HEAD)
-          git merge-base --is-ancestor "$RECOVERY_CUTOVER_PREREQUISITE_SHA" "$main_sha"
-          git cat-file -e "$main_sha:backend/recovery/recoveryd.py"
-          if git merge-base --is-ancestor "$REMOVAL_ROOT_SHA" "$main_sha"; then
-            echo "Refusing a removal lineage already contained by main" >&2
-            exit 1
-          fi
-          if [ "$RELEASE_MODE" = normal_release ]; then
-            release_sha=$(git ls-remote --exit-code origin "$MOBIUS_PLATFORM_RELEASE_REF" | awk 'NR == 1 { print $1 }')
-            if [ "$release_sha" != "$GITHUB_SHA" ]; then
-              echo "Refusing to move the channel from a stale normal release" >&2
-              exit 1
-            fi
-          fi
-          anonymous_config="$RUNNER_TEMP/anonymous-docker-prewrite"
-          install -d -m 0700 "$anonymous_config"
-          DOCKER_CONFIG="$anonymous_config" python3 scripts/external_recovery_release.py \
-            prewrite \
-            --repository "$MOBIUS_IMAGE_REPOSITORY" \
-            --prerequisite-revision "$RECOVERY_CUTOVER_PREREQUISITE_SHA" \
-            --prerequisite-digest "$RECOVERY_CUTOVER_PREREQUISITE_DIGEST" \
-            --target-revision "$INITIAL_TARGET_REVISION" \
-            --target-digest "$INITIAL_TARGET_DIGEST"
-          docker buildx imagetools create \
-            --prefer-index=false \
-            --tag "$MOBIUS_RELEASE_CHANNEL" \
-            "$MOBIUS_IMAGE_REPOSITORY@$IMAGE_DIGEST"
-          anonymous_config="$RUNNER_TEMP/anonymous-docker-moved"
-          install -d -m 0700 "$anonymous_config"
-          observed=""
-          for attempt in 1 2 3 4 5 6 7 8; do
-            observed=$(DOCKER_CONFIG="$anonymous_config" \
-              docker buildx imagetools inspect "$MOBIUS_RELEASE_CHANNEL" \
-              --format '{{.Manifest.Digest}}' 2>/dev/null) || true
-            [ "$observed" = "$IMAGE_DIGEST" ] && break
-            sleep "$attempt"
-          done
-          test "$observed" = "$IMAGE_DIGEST"
-
+      # The bound digest is public through its unique workflow-attempt tag. No
+      # mutable channel publication is necessary: finalization starts
+      # immediately after the controller commits that immutable identity.
       - name: Roll exact bound removal across the frozen fleet and finalize
         if: steps.gate.outputs.mode == 'build_cutover' || steps.gate.outputs.mode == 'resume_cutover'
         env:
@@ -541,7 +484,7 @@ jobs:
             sleep 10
           done
 
-      - name: Verify final external channel and frozen legacy floor
+      - name: Verify frozen compatibility channels and exact removal image
         if: steps.gate.outputs.mode != 'completed_replay'
         env:
           IMAGE_DIGEST: ${{ steps.selected.outputs.digest }}

@@ -139,11 +139,16 @@ scripts/mobiusctl update
 ```
 
 Caddy configures HTTPS. Open `https://mobius.example.com` and follow the setup wizard.
-During the external-recovery cutover, public `main` remains on the compatibility
-release. `mobiusctl` fetches the protected full stack ref, proves that it contains
-the exact clean checkout, stamps that commit into the image, and only then builds.
-An unstamped `docker build` or `docker compose up --build` fails closed instead of
-silently seeding the compatibility release.
+During the external-recovery cutover, public `main` and `external-recovery`
+remain frozen on the exact compatibility release. The protected publisher
+builds the removal release under a unique workflow-attempt reference, binds its
+exact digest in Möbius Launch, and immediately rolls out that digest; it never
+retags either compatibility channel. A later core release is refused until it
+uses the separate durable digest-release protocol. `mobiusctl` fetches the
+protected full stack ref, proves that it contains the exact clean checkout,
+stamps that commit into the image, and only then builds. An unstamped `docker build`
+or `docker compose up --build` fails closed instead of silently seeding the
+compatibility release.
 
 If the instance cannot boot, start the latest isolated recovery worker without
 custom proxy configuration:
