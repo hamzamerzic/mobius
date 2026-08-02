@@ -969,7 +969,6 @@ export default function ChatView({
     disconnect,
     clearStreamItems,
     patchQuestionAnswers,
-    flushStreamSnapshot,
   } = useStreamConnection(chatId, {
     onConnectionLost: () => {
       // Browser transport ownership is uncertain here: the backend turn may
@@ -1338,23 +1337,6 @@ export default function ChatView({
   useEffect(() => {
     if (hidden && listeningRef.current) stopVoiceRef.current?.()
   }, [hidden, listeningRef])
-
-  // Visibility-swap flush (design §2 flush contract). When this pane is hidden
-  // — projected out of the visible pair, or covered by full-workspace Settings —
-  // land the pending trailing stream snapshot synchronously. A hidden pane may
-  // soon unmount (phone projection) or the shell may reload while it's off-
-  // screen; without this flush the multi-pane throttle could strand its last
-  // streamed frame and the reconnect fallback would roll back.
-  //
-  // Adjacent to the `freezeChatExit` hidden-boundary effect above but NOT a
-  // duplicate: that freezes the reader's SCROLL MODE (sessionStorage 'chat-mode'
-  // / _scrollModes); this flushes the STREAM SNAPSHOT ('chat-stream-items:*').
-  // Different stores, different concerns — both correctly fire on the same
-  // hide, since the sibling's retain-behind-Settings keeps this ChatView mounted
-  // (so this effect runs rather than the unmount-flush).
-  useEffect(() => {
-    if (hidden) flushStreamSnapshot?.()
-  }, [hidden, flushStreamSnapshot])
 
   // Snapshot stream into a permanent message. Idempotent — both
   // handleStop and onStreamEnd may call this.
