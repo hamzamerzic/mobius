@@ -448,8 +448,8 @@ test('ShellBrand isolates gesture state and wires the brand ref + Shift+Enter', 
   // transition callback; there is no Settings conversion call.
   assert.doesNotMatch(handler, /convertSettingsForModeTransition/)
   assert.match(handler, /return modeView\.run\(\{/)
-  assert.match(handler, /mode\.toggle\(\{ cause, to \}\)/)
   assert.match(handler, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: to \}\)/)
+  assert.doesNotMatch(handler, /mode\.toggle/)
   assert.doesNotMatch(handler, /openDrawer|closeDrawer/)
   // The gesture hook receives the toggle + the brand ref (for the ring var). The
   // ref is UNIFIED with the desktop-sidebar focus ref (one ref, both jobs) after
@@ -615,7 +615,8 @@ test('the mode handler commits one final world inside the scene transaction', ()
   assert.match(handler, /deriveModeSnapshotPlan\(\{ workspace: ws, projection, contentRect \}\)/)
   assert.match(handler, /return modeView\.run\(\{/)
   assert.match(handler, /direction: leavingBuilder \? 'exit' : 'enter'/)
-  assert.match(handler, /update: \(\) => \{[\s\S]*?dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: to \}\)[\s\S]*?mode\.toggle\(\{ cause, to \}\)/)
+  assert.match(handler, /update: \(\) => \{[\s\S]*?dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: to \}\)/)
+  assert.match(shell, /onWorkspaceTransitionRef\.current = \(prevWs, nextWs\) => \{[\s\S]*?mode\.syncCommitted\(nextWs\.viewMode\)/)
   assert.match(modeViewTransitionSrc, /!prefersReducedMotion\(\)/)
   assert.match(modeViewTransitionSrc, /if \(!supported\) \{[\s\S]*?flushSync\(update\)/)
 })
@@ -657,14 +658,19 @@ test('mobile tabs require a hold before dragging while the strip preserves pinch
     'touch drawer rows must not enter the workspace drag-out controller',
   )
   assert.match(drawer, /heldDrawerRowIntent\(dx, dy, true\)/)
-  assert.match(drawer, /openItemMenuAt\(\{ x: upEvent\.clientX, y: upEvent\.clientY \}\)/)
+  assert.match(drawer, /openItemMenuAt\(\{ x: point\.clientX, y: point\.clientY \}\)/)
   assert.doesNotMatch(dragBinding, /openTabMenuAtRef/)
   assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)
-  assert.match(drawer, /function beginTouchMenuHold\(event\)/)
-  assert.match(drawer, /function beginTouchMenuHold\(event\)[\s\S]*?holdTimerRef\.current = setTimeout\(\(\) => \{[\s\S]*?window\.addEventListener\('touchmove', preventClaimedTouchMove, \{ capture: true, passive: false \}\)/)
-  assert.match(drawer, /function beginPinnedReorder\(event\)[\s\S]*?holdTimerRef\.current = setTimeout\(\(\) => \{[\s\S]*?window\.addEventListener\('touchmove', preventClaimedTouchMove, \{ capture: true, passive: false \}\)/)
-  assert.equal((drawer.match(/window\.addEventListener\('touchmove', preventClaimedTouchMove, \{ capture: true, passive: false \}\)/g) || []).length, 2,
-    'only a resolved row hold may install cancelable touch ownership')
+  assert.match(drawer, /function beginTouchMenuHold\(event, \{ touchEvents = false \} = \{\}\)/)
+  assert.match(drawer, /function onRowTouchStart\(event\)[\s\S]*?beginPinnedReorder\(event, \{ touchEvents: true \}\)/)
+  assert.match(drawer, /if \(event\.pointerType === 'touch'\) return/)
+  assert.equal((drawer.match(/window\.addEventListener\('touchmove', onMove, \{ capture: true, passive: true \}\)/g) || []).length, 2,
+    'ordinary drawer-row scrolling must begin with passive touch listeners')
+  assert.equal((drawer.match(/holdTimerRef\.current = setTimeout\(\(\) => \{[\s\S]*?window\.addEventListener\('touchmove', onMove, \{ capture: true, passive: false \}\)/g) || []).length, 2,
+    'only a resolved hold may promote row gestures to cancelable ownership')
+  assert.doesNotMatch(drawer, /blockingTouchMove|function claimTouchMoves/)
+  assert.match(drawer, /window\.addEventListener\('touchend', onUp, true\)/)
+  assert.match(drawer, /onTouchStart=\{onRowTouchStart\}/)
   assert.match(drawer, /const TOUCH_CONTEXT_MENU_PROVENANCE_MS = 1500/)
   assert.match(drawer, /function suppressTouchContextMenu\(event\)[\s\S]*?event\.nativeEvent\?\.pointerType[\s\S]*?contextPointerType === 'touch'[\s\S]*?freshTouchPointer[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?stopImmediatePropagation/)
   assert.equal((drawer.match(/onContextMenuCapture=\{suppressTouchContextMenu\}/g) || []).length, 2,
@@ -672,7 +678,7 @@ test('mobile tabs require a hold before dragging while the strip preserves pinch
   assert.match(drawerCss, /\.drawer__row \.drawer__item\s*\{[\s\S]*?-webkit-touch-callout:\s*none/)
   assert.match(drawer, /sourceBtn\.setAttribute\('data-hold-ready', 'true'\)/)
   assert.match(drawer, /const openMenu = held && !dragging && !cancelledAfterHold/)
-  assert.match(drawer, /if \(openMenu\) openItemMenuAt\(\{ x: upEvent\.clientX, y: upEvent\.clientY \}\)/)
+  assert.match(drawer, /if \(openMenu\) openItemMenuAt\(\{ x: point\.clientX, y: point\.clientY \}\)/)
   assert.match(drawer, /if \(intent === 'cancel'\)[\s\S]*?cancelledAfterHold = true/)
   assert.match(drawerCss, /\.drawer__item\[data-hold-ready="true"\]/)
 })
@@ -791,8 +797,8 @@ test('chat drawer dots distinguish active work from unseen completion', () => {
   )
   assert.match(
     shell,
-    /ev\.type === 'chat_run_finished'[\s\S]*?!visibleChatIdsRef\.current\.has\(String\(chatId\)\)[\s\S]*?setAttentionChatIds/,
-    'a finished run must raise attention only while the chat is not visible',
+    /ev\.type === 'chat_run_finished'[\s\S]*?!visibleChatIdsRef\.current\.has\(String\(chatId\)\)[\s\S]*?chatQueries\.messages\.refresh\(queryClient, chatId\)[\s\S]*?setAttentionChatIds/,
+    'a hidden finished chat must refresh before a later return and then raise attention',
   )
   assert.match(
     shell,
@@ -810,7 +816,10 @@ test('chat drawer dots distinguish active work from unseen completion', () => {
 
 test('live preview reveal keeps the workspace controller distinct from device mode', () => {
   assert.match(shell, /const deviceMode = paneModel\.modeForRect\(contentRect\)/)
-  assert.match(shell, /mode\.toggle\(\{ cause: 'auto', to: 'panes' \}\)/)
+  assert.doesNotMatch(shell, /opensLivePreview|mode\.toggle\(\{ cause: 'auto'/,
+    'preview intent must not predict a mode change the placement resolver may reject')
+  assert.match(shell, /prevWs\.viewMode !== nextWs\.viewMode[\s\S]*?mode\.syncCommitted\(nextWs\.viewMode\)/,
+    'presentation follows only the resolver actual workspace transition')
   assert.match(shell, /resolveWorkspaceRequests\(ws, requests, \{[\s\S]*?mode: deviceMode,/)
   assert.doesNotMatch(shell, /const mode = paneModel\.modeForRect\(contentRect\)/)
 })
@@ -908,12 +917,17 @@ test('drawer row menus use one semantic context-menu path across pointer types',
   assert.match(drawer, /function openItemMenuAt\(point\)[\s\S]*?actions\.toggleMenu\(kind, id, true, surface,/)
   assert.equal((drawer.match(/onContextMenu=\{openItemMenu\}/g) || []).length, 2,
     'app cards, app rows, and chat rows must share one opening function')
-  assert.match(drawer, /if \(openMenu\) openItemMenuAt\(\{ x: upEvent\.clientX, y: upEvent\.clientY \}\)/)
+  assert.match(drawer, /if \(openMenu\) openItemMenuAt\(\{ x: point\.clientX, y: point\.clientY \}\)/)
   assert.doesNotMatch(
     dragBinding,
     /srcEl\.closest\('\.drawer__row'\)\?\.querySelector\('\.drawer__more'\)\?\.click\(\)/,
     'touch hold must not depend on a synthetic trigger click',
   )
+  assert.match(drawerItemActionMenu, /function consumeOutsidePointer\(event\)[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?stopImmediatePropagation/)
+  assert.match(drawerItemActionMenu, /onPointerDown=\{event => \{[\s\S]*?consumeOutsidePointer\(event\)[\s\S]*?\}\}/)
+  assert.match(drawerItemActionMenu, /onClick=\{event => \{[\s\S]*?if \(consumeOutsidePointer\(event\)\) close\(\)/)
+  assert.doesNotMatch(drawer, /navigator\.vibrate/,
+    'drawer rows rely on platform long-press feedback instead of adding a second vibration')
 })
 
 test('a secondary-button release cannot immediately select a flipped drawer menu item', () => {

@@ -824,10 +824,15 @@ def test_shell_capture_waits_for_visual_ownership_to_settle(tmp_path: Path):
     i for i, command in enumerate(commands)
     if command.startswith("eval ") and "requestAnimationFrame" in command
   )
+  fonts_index = next(
+    i for i, command in enumerate(commands)
+    if command.startswith("wait --fn ")
+    and "document.fonts.status === 'loaded'" in command
+  )
   screenshot_index = next(
     i for i, command in enumerate(commands) if command.startswith("screenshot ")
   )
-  assert settle_index < frame_index < screenshot_index
+  assert settle_index < frame_index < fonts_index < screenshot_index
 
 
 def test_content_only_mode_is_set_before_target_navigation(tmp_path: Path):

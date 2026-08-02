@@ -183,6 +183,7 @@ test('a canonical create response becomes an authoritative empty detail cache', 
   })
 
   assert.deepEqual(cache, {
+    restorationWindowComplete: true,
     updated_at: '2026-07-30T12:00:00Z',
     messages: [],
     pending_messages: [],

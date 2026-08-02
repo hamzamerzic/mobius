@@ -754,6 +754,7 @@ async def run_claude_sdk_turn(
   db,
   agent_settings: dict | None = None,
   skills_enabled: bool = False,
+  run_policy=None,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
@@ -800,6 +801,28 @@ async def run_claude_sdk_turn(
     context,
   ) -> PermissionResultAllow | PermissionResultDeny:
     del context
+    if run_policy is not None:
+      nested_tools = {
+        "Task", "TaskOutput", "TaskStop", "Workflow", "Workflows", "Agent",
+      }
+      if tool_name in nested_tools:
+        return PermissionResultDeny(
+          message="Delegated child tasks cannot launch or manage other agents."
+        )
+      if tool_name == "AskUserQuestion":
+        return PermissionResultDeny(
+          message=(
+            "Delegated child tasks cannot park on an owner question; return the "
+            "blocker to the parent instead."
+          )
+        )
+      if run_policy.scope == "read" and tool_name in {
+        "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
+      }:
+        return PermissionResultDeny(
+          message="This delegated task is read-only."
+        )
+      return PermissionResultAllow(updated_input=input_data)
     # Auto-approve every tool except AskUserQuestion — this preserves
     # the "trust the agent" posture (no tool gating) while still
     # intercepting AskUserQuestion for the partner UX. The callback is
@@ -898,8 +921,8 @@ async def run_claude_sdk_turn(
   # The "ultracode" tier maps to xhigh effort for the SDK flag (which only
   # accepts low/medium/high/xhigh/max) and arms the Workflow-tool
   # orchestration via the keyword trigger appended to this turn's prompt.
-  _ultracode = _effort == "ultracode"
-  if _ultracode:
+  _ultracode = _effort == "ultracode" and run_policy is None
+  if _effort == "ultracode":
     _effort = "xhigh"
   turn_message = user_message + _ULTRACODE_REMINDER if _ultracode else user_message
   # Cross-provider mismatch defense (mirrors codex_sdk_runner).
@@ -968,6 +991,18 @@ async def run_claude_sdk_turn(
         ],
       },
     }
+    if run_policy is not None:
+      options_kwargs.update({
+        "permission_mode": (
+          "plan" if run_policy.scope == "read" else "acceptEdits"
+        ),
+        "max_budget_usd": run_policy.max_budget_usd,
+        "disallowed_tools": [
+          "AskUserQuestion", "Task", "TaskOutput", "TaskStop",
+          "Workflow", "Workflows", "Agent",
+        ],
+        "agents": {},
+      })
     if skills_enabled:
       options_kwargs["skills"] = "all"
     if model_override:

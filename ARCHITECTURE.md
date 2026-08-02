@@ -184,7 +184,6 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 |------|------|
 | `memory.py` | `build_memory_block()` — assembles only bounded recent-chat Digests; graph/app data is never injected here |
 | `skills.py` | Skill enumeration (flat `<name>.md` + external-convention `<name>/SKILL.md` dirs), dependency-free frontmatter parsing, provenance labels (`seed`/`agent`/`app:<slug>`/`installed:<source>`), and `write_index()` — the generated `shared/skills/skills-index.md` both providers Read (regenerated on boot, app-skill sync, and skill install/uninstall) |
-| `reflection_checkpoint.py` | Reflection's last-run marker (what to review tonight) |
 | `activity.py` | Append-only JSONL platform-activity log (app_open, app_install, storage_write, …) |
 | `self_reminders.py` | Agent self-scheduling: append-only store of relational check-ins |
 | `theme.py` | Theme CSS management and HTML injection |

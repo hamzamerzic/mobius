@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from app.memory_recall import (
+  RecallBinding,
   recall_from_command,
   recall_from_tool_block,
   settle_recall,
@@ -151,6 +152,7 @@ def message_sources_for_detail(message: dict) -> list[dict[str, str]]:
 def legacy_memory_recall_output_ids(
   messages: list[dict],
   *,
+  binding: RecallBinding,
   live_message: dict | None = None,
 ) -> set[str]:
   """Return old Memory tools whose result receipt lives in a sidecar.
@@ -177,7 +179,7 @@ def legacy_memory_recall_output_ids(
         and block.get("output_truncated") is True
         and isinstance(block.get("tool_use_id"), str)
         and block["tool_use_id"]
-        and recall_from_command(block.get("input")) is not None
+        and recall_from_command(block.get("input"), binding) is not None
       ):
         continue
       ids.add(block["tool_use_id"])
@@ -188,6 +190,7 @@ def project_legacy_memory_recalls(
   messages: list[dict],
   *,
   output_tails: dict[str, str],
+  binding: RecallBinding,
   live_message: dict | None = None,
 ) -> list[dict]:
   """Enrich old Memory blocks from bounded sidecar tails, without mutation."""
@@ -213,7 +216,7 @@ def project_legacy_memory_recalls(
         and block["tool_use_id"] in output_tails
       ):
         continue
-      pending = recall_from_command(block.get("input"))
+      pending = recall_from_command(block.get("input"), binding)
       if pending is None:
         continue
       if next_blocks is None:
@@ -237,7 +240,7 @@ def project_legacy_memory_recalls(
   return projected if projected is not None else messages
 
 
-def _distinctive_activity(block: dict) -> bool:
+def _distinctive_activity(block: dict, binding: RecallBinding) -> bool:
   """Keep notable one-line activity beats out of a folded metadata run."""
   if block.get("type") != "tool":
     return False
@@ -245,7 +248,7 @@ def _distinctive_activity(block: dict) -> bool:
   # folded into "ran commands". New blocks carry a marker from the event
   # funnel; older Codex blocks recover the same bounded marker from their exact
   # command + structured receipt.
-  if recall_from_tool_block(block) is not None:
+  if recall_from_tool_block(block, binding) is not None:
     return True
   if block.get("tool") != "Read":
     return False
@@ -255,7 +258,7 @@ def _distinctive_activity(block: dict) -> bool:
   return isinstance(raw, str) and bool(_IMAGE_PATH_RE.search(raw))
 
 
-def _compact_activity_item(block: dict) -> dict:
+def _compact_activity_item(block: dict, binding: RecallBinding) -> dict:
   """Return only the metadata needed to paint a collapsed activity line."""
   if block.get("type") == "thinking":
     return {
@@ -295,7 +298,7 @@ def _compact_activity_item(block: dict) -> dict:
   # A Memory recall is already a bounded citation set, and it is what the
   # collapsed line says ("Recalled 4 notes from Memory"). Dropping it here
   # would make the beat visible live and gone on the next chat load.
-  recall = recall_from_tool_block(block)
+  recall = recall_from_tool_block(block, binding)
   if recall is not None:
     tool["recall"] = recall
   return tool
@@ -303,6 +306,8 @@ def _compact_activity_item(block: dict) -> dict:
 
 def _compact_activity_entries(
   blocks: list[tuple[int, dict]],
+  *,
+  binding: RecallBinding,
 ) -> list[dict]:
   """Bound header metadata by activity variety, not raw step count.
 
@@ -327,7 +332,7 @@ def _compact_activity_entries(
         has_thinking_duration = True
       if first_thinking_entry is None:
         first_thinking_entry = {
-          "item": _compact_activity_item(block),
+          "item": _compact_activity_item(block, binding),
           "idx": raw_index,
         }
         entries.append(first_thinking_entry)
@@ -345,7 +350,7 @@ def _compact_activity_entries(
     )
     if occurrence <= 2 or has_helpers or failed:
       entries.append({
-        "item": _compact_activity_item(block),
+        "item": _compact_activity_item(block, binding),
         "idx": raw_index,
       })
 
@@ -362,6 +367,7 @@ def _compact_activity_run(
   blocks: list[tuple[int, dict]],
   *,
   message_index: int,
+  binding: RecallBinding,
 ) -> dict:
   start = blocks[0][0]
   end = blocks[-1][0] + 1
@@ -371,7 +377,7 @@ def _compact_activity_run(
     "message_index": message_index,
     "start": start,
     "end": end,
-    "entries": _compact_activity_entries(blocks),
+    "entries": _compact_activity_entries(blocks, binding=binding),
     "tool_count": sum(
       block.get("type") == "tool" for _, block in blocks
     ),
@@ -382,6 +388,7 @@ def compact_messages_for_detail(
   messages: list[dict],
   *,
   message_offset: int,
+  binding: RecallBinding,
   live_message: dict | None = None,
 ) -> list[dict]:
   """Project settled activity runs into small, lazily expandable summaries.
@@ -423,6 +430,7 @@ def compact_messages_for_detail(
           next_blocks.append(_compact_activity_run(
             chunk,
             message_index=message_offset + page_index,
+            binding=binding,
           ))
           changed = True
         else:
@@ -445,12 +453,12 @@ def compact_messages_for_detail(
         changed = True
         continue
       recovered_recall = (
-        recall_from_tool_block(block)
+        recall_from_tool_block(block, binding)
         if activity and block.get("type") == "tool"
         else None
       )
       distinctive = activity and (
-        bool(recovered_recall) or _distinctive_activity(block)
+        bool(recovered_recall) or _distinctive_activity(block, binding)
       )
       if activity and not distinctive:
         run.append((raw_index, block))

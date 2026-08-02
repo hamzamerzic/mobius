@@ -38,6 +38,7 @@ function PaneChatView({
   markVoiceListening,
   refreshApps,
   acknowledgeAppPreview,
+  refreshChats,
   markChatOwnerActivity,
   loadTheme,
   navTo,
@@ -71,7 +72,11 @@ function PaneChatView({
   const handleFirstMessage = useCallback(() => {
     onFirstMessage?.(chatId)
     markChatOwnerActivity(chatId)
-  }, [chatId, markChatOwnerActivity, onFirstMessage])
+    // The server commits the fallback title with the first message. This one
+    // fresh read restores that exact row (New chat -> message preview) without
+    // bringing back the per-run start/finish refetches removed for performance.
+    refreshChats()
+  }, [chatId, markChatOwnerActivity, onFirstMessage, refreshChats])
 
   const handleOwnerActivity = useCallback(() => {
     markChatOwnerActivity(chatId)

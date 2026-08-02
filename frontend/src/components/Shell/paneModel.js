@@ -487,18 +487,23 @@ function singleScreenTab(ws) {
   return tabModel.makeTab(item.kind, item.id)
 }
 
+// Seed only the hidden Builder tree. Keeping this separate from the mode flip
+// lets compound gestures prepare a candidate tree, then commit the mode only
+// after the rest of the gesture succeeds.
+function seedEmptyBuilder(ws) {
+  if (!isEmptyTree(ws)) return ws
+  const tab = singleScreenTab(ws)
+  return tab ? doOpenTab(ws, tab) : ws
+}
+
 // Set the view-mode. Pure; returns the SAME reference on a true no-op. Builder
 // has no empty state: entering it from an empty tree seeds the current Standard
 // screen as its first tab. If Standard is itself the empty New Chat landing,
 // there is no content to seed and the workspace honestly remains Standard.
 export function setViewMode(ws, mode) {
   const requested = coerceViewMode(mode)
-  let nextWs = ws
-  if (requested === 'panes' && isEmptyTree(ws)) {
-    const tab = singleScreenTab(ws)
-    if (!tab) return ws
-    nextWs = doOpenTab(ws, tab)
-  }
+  const nextWs = requested === 'panes' ? seedEmptyBuilder(ws) : ws
+  if (requested === 'panes' && isEmptyTree(nextWs)) return ws
   if (nextWs.viewMode === requested) return nextWs
   return { ...nextWs, viewMode: requested }
 }
@@ -585,28 +590,23 @@ export function seedSingleScreenIfAbsent(ws) {
   return { ...ws, singleScreen: focusedSlotSeed(ws) }
 }
 
-// True when the whole workspace holds no tabs — every pane is empty. After a close
-// this is the "last tab in builder just closed" signal (owner semantic: an empty
-// builder auto-returns to single).
+// True when the whole workspace holds no tabs.
 export function isEmptyTree(ws) {
   return panesAreEmpty(ws.panes)
 }
 
-// Auto-return an EMPTIED builder to single (owner semantic: closing the last tab
-// with no panes left in builder returns to single). Applied by the close reducer
-// cases when a close in 'panes' mode empties the tree. Flips viewMode to single
-// and, for a legacy workspace whose slot was never initialized, carries the
-// departing visible item into Standard before the emptied tree loses it. The
-// caller marks the undo `restoreViewMode` so undo restores the closed tab AND
-// builder mode as ONE gesture. Returns { ws, autoReturned } so the caller knows
-// whether to flag the undo.
-function autoReturnIfEmptied(prevWs, nextWs) {
-  if (prevWs.viewMode !== 'panes') return { ws: nextWs, autoReturned: false }
-  if (isEmptyTree(prevWs) || !isEmptyTree(nextWs)) return { ws: nextWs, autoReturned: false }
-  const withSlot = ('singleScreen' in nextWs)
-    ? nextWs
-    : setSingleScreen(nextWs, focusedSlotSeed(prevWs))
-  return { ws: setViewMode(withSlot, 'single'), autoReturned: true }
+// normalize() owns the no-empty-Builder invariant, so a close that empties the
+// tree already arrives here in Standard. Preserve an existing Standard item; if
+// Standard was empty or uninitialized, carry the departing visible item instead.
+// The caller uses autoReturned to make Undo restore tab + Builder in one gesture.
+function completeCloseTransition(prevWs, nextWs) {
+  const autoReturned = prevWs.viewMode === 'panes' && nextWs.viewMode === 'single'
+  if (!autoReturned) return { ws: nextWs, autoReturned: false }
+  if (nextWs.singleScreen) return { ws: nextWs, autoReturned: true }
+  return {
+    ws: setSingleScreen(nextWs, focusedSlotSeed(prevWs)),
+    autoReturned: true,
+  }
 }
 
 // Every live leaf pane id in in-order (left-to-right) sequence. The resolver
@@ -1711,7 +1711,7 @@ export function workspaceReducer(state, action) {
       // undo restores the closed tab AND builder mode as ONE gesture.
       if (next === ws) return state
       const closeLabel = action.label || 'Closed tab'
-      const { ws: closed, autoReturned } = autoReturnIfEmptied(ws, next)
+      const { ws: closed, autoReturned } = completeCloseTransition(ws, next)
       return { ws: closed, undo: { ws, label: closeLabel, toast: closeLabel, restoreViewMode: autoReturned } }
     }
     case 'CLOSE_PANE': {
@@ -1721,7 +1721,7 @@ export function workspaceReducer(state, action) {
       const next = closePane(ws, action.paneId)
       if (next === ws) return state
       const paneLabel = action.label || 'Closed pane'
-      const { ws: closed, autoReturned } = autoReturnIfEmptied(ws, next)
+      const { ws: closed, autoReturned } = completeCloseTransition(ws, next)
       return { ws: closed, undo: { ws, label: paneLabel, toast: paneLabel, restoreViewMode: autoReturned } }
     }
     case 'CLOSE_OTHER_TABS': {
@@ -1749,13 +1749,13 @@ export function workspaceReducer(state, action) {
       // A drag drop from a drawer row (open the item AT the zone) or a strip tab
       // (degrades to a move). One commit, one undo slot — the drop is one tap
       // from repaired (design §3.5).
-      const cleanTab = sanitizeTab(action.tab)
-      if (!cleanTab) return state
-      // When a drawer drag enters Builder from an empty hidden tree, resolve the
-      // mode first: setViewMode seeds Standard's current screen as tab one. The
-      // dragged item then joins/splits that seeded pane instead of replacing it.
-      const working = action.flipViewMode ? setViewMode(ws, action.flipViewMode) : ws
-      const next = openTabAt(working, cleanTab, action.target)
+      // Prepare Standard's current screen as tab one before placing a drawer
+      // drop into an empty hidden tree. Neither seed nor mode commits unless the
+      // placement succeeds, so a rejected drop remains a true no-op.
+      const working = action.flipViewMode === 'panes' ? seedEmptyBuilder(ws) : ws
+      const placed = openTabAt(working, action.tab, action.target)
+      // A rejected drop must not commit the prepared seed or its mode change.
+      if (placed === working) return state
       // A single-leaf splitting drop made in single view-mode flips to 'panes' as
       // part of the SAME gesture (the drop's intent is a second visible surface).
       // Folding the flip into THIS action — rather than a following SET_VIEW_MODE —
@@ -1763,11 +1763,11 @@ export function workspaceReducer(state, action) {
       // reverts the mode along with the tree, never leaving the toggle reading the
       // flipped mode over a reverted tree. action.flipViewMode is null for every
       // ordinary drop, so this is a no-op there.
-      const flipped = action.flipViewMode ? setViewMode(next, action.flipViewMode) : next
-      if (flipped === ws) return state
+      const next = action.flipViewMode ? setViewMode(placed, action.flipViewMode) : placed
+      if (next === ws) return state
       const dropLabel = action.label || 'Moved tab'
       return {
-        ws: flipped,
+        ws: next,
         undo: { ws, label: dropLabel, toast: dropLabel, restoreViewMode: !!action.flipViewMode },
       }
     }
@@ -1810,12 +1810,9 @@ export function workspaceReducer(state, action) {
       }
     }
     case 'SET_VIEW_MODE': {
-      // A pure view flip (design: view-mode toggle). It never mutates the tree,
-      // so it is ORTHOGONAL to the undo slot: it neither creates nor clears it
-      // (a pending tab-move stays undoable) and it is itself reversible by
-      // toggling again, so it takes no slot of its own. mode 'toggle' flips;
-      // 'single'/'panes' set explicitly (the single-leaf split-drop passes
-      // 'panes' so the new pane actually shows).
+      // A view transition is orthogonal to the undo slot. Entering Builder may
+      // seed its empty hidden tree from Standard, but that seed is part of the
+      // destination representation rather than a separate editable gesture.
       const flipped = action.mode === 'toggle' ? toggleViewMode(ws) : setViewMode(ws, action.mode)
       // On the FIRST-ever builder→single switch the slot is seeded from the focused
       // concrete item (two-worlds design: seed once, using property absence as the
@@ -1871,8 +1868,9 @@ export function workspaceReducer(state, action) {
       // RESET_FLAT reseeds the BUILDER tree only (two-worlds design): preserve the
       // current world and single-screen slot unless the reset removed every tab,
       // in which case the shared no-empty-Builder invariant resolves to Standard.
-      const next = setViewMode(seeded, ws.viewMode)
-      if ('singleScreen' in ws) next.singleScreen = ws.singleScreen
+      const candidate = { ...seeded, viewMode: ws.viewMode }
+      if ('singleScreen' in ws) candidate.singleScreen = ws.singleScreen
+      const next = normalize(candidate)
       if (deepEqual(next, ws) && undo == null) return state
       return { ws: next, undo: null }
     }

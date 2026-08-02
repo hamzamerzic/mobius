@@ -113,11 +113,13 @@ export function createdChatDetailCache(created) {
   const detail = created?.detail
   if (!detailIsUntouchedEmptyChat(detail)) return null
   if (typeof detail.provider !== 'string') return null
+  if (!Number.isInteger(detail.offset) || detail.offset !== 0) return null
   if (!detail.effective_agent_settings
       || typeof detail.effective_agent_settings !== 'object') return null
   if (typeof detail.has_assistant_turns !== 'boolean') return null
 
   return {
+    restorationWindowComplete: true,
     updated_at: typeof detail.updated_at === 'string'
       ? detail.updated_at
       : null,

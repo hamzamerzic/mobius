@@ -178,7 +178,7 @@ for (const scenario of SCENARIOS) {
       const composer = document.querySelector('[data-chat-surface="painted"] .chat__pill')
       let mode = null
       try {
-        mode = JSON.parse(sessionStorage.getItem('chat-mode') || '{}')[chatId]
+        mode = JSON.parse(localStorage.getItem('chat-reading-position') || '{}')[chatId]
       } catch { /* assertion below reports null */ }
       const actionRect = action?.getBoundingClientRect()
       const composerRect = composer?.getBoundingClientRect()

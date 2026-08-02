@@ -1643,6 +1643,12 @@ CONTINUATION_SWEEP_BATCH_SIZE = 100
 # not delay an opted-in chat after its reset, but a bad/early reset timestamp
 # also must not launch a whole parked batch in one burst.
 LIMIT_AUTO_RESUME_STAGGER_SECS = 30.0
+# Planned restarts may recover many exact turns at once. Restoring all of them
+# in one lifespan sweep can consume the host before ordinary shell requests get
+# a chance to run. Automatic recovery therefore uses a small process-wide
+# admission ceiling; owner sends remain uncapped and take the available slots
+# first, while durable restart parks stay due for the next sweep.
+RESTART_AUTO_RESUME_MAX_ACTIVE = 2
 _next_limit_auto_resume_at = 0.0
 _RESTART_AUTHORIZATION_UNSET = object()
 
@@ -1669,6 +1675,14 @@ def _claim_limit_auto_resume_slot(now: float | None = None) -> bool:
     return False
   _next_limit_auto_resume_at = now + LIMIT_AUTO_RESUME_STAGGER_SECS
   return True
+
+
+def _restart_auto_resume_capacity_available() -> bool:
+  """Whether automatic restart recovery may add another live turn."""
+  return (
+    len(registry.all_alive_chat_ids())
+    < RESTART_AUTO_RESUME_MAX_ACTIVE
+  )
 
 
 def _has_unanswered_question(chat: models.Chat | None) -> bool:
@@ -1759,9 +1773,8 @@ async def _auto_resume_chat(
         # attribution, the exact latest park, and provider ownership at the
         # actual claim point. Provider-limit retries are staggered by the
         # reset sweep, rather than blocked on unrelated live chats. Planned-
-        # restart continuations are different: they are the exact, owner-opted
-        # set that was already live together before the restart, so each chat
-        # may reclaim its own slot independently.
+        # restart continuations are admitted against the process-wide recovery
+        # ceiling so a restart cannot crowd ordinary shell work off the host.
         async with chat_queue.get_lock(chat_id):
           with SessionLocal() as check_db:
             chat = check_db.query(models.Chat).filter(
@@ -1836,6 +1849,11 @@ async def _auto_resume_chat(
             resume_app_id = (
               park.initiated_by_app_id if restart_park else None
             )
+          if (
+            restart_park
+            and not _restart_auto_resume_capacity_available()
+          ):
+            return False
           if not mark_starting(chat_id):
             return False
           claimed = True
@@ -1941,9 +1959,11 @@ async def sweep_reset_parks(
       at most one starts per sweep and launches are spaced even when unrelated
       chats are live. App-attributed provider-limit runs never auto-resume.
       Planned-restart continuations reclaim the exact set that was already live
-      before the restart, preserve each run's attribution, and may resume
-      independently. A staggered enabled chat stays pending for a later tick,
-      while notify-only chats in the same due batch still resolve normally.
+      before the restart and preserve each run's attribution, but only up to a
+      small process-wide recovery ceiling. Additional exact parks remain due
+      for a later tick, leaving capacity for owner-triggered work. A deferred
+      enabled chat stays pending while notify-only chats in the same due batch
+      still resolve normally.
       App-attributed messages newly queued behind either kind of park still
       require an ordinary app-owned handoff rather than being swept into the
       synthetic continuation.
@@ -2058,6 +2078,13 @@ async def sweep_reset_parks(
       # but keep walking so a later notify-only chat is not held hostage by
       # another chat's auto-resume preference.
       continue
+    if (
+      restart_auto_resume
+      and not _restart_auto_resume_capacity_available()
+    ):
+      # Keep the exact park untouched. A later sweep admits it after another
+      # turn settles; an owner send can still start immediately in the meantime.
+      continue
     if auto_resume:
       try:
         prepared = await _await_ack(get_writer().submit(
@@ -2105,6 +2132,15 @@ async def sweep_reset_parks(
         resolved.append(chat_id)
         if prepared.get("notify") and not chat_gone:
           queue_due_notification(chat_id, run)
+        continue
+
+      if (
+        restart_auto_resume
+        and not _restart_auto_resume_capacity_available()
+      ):
+        # Capacity can disappear while the actor prepares the durable park.
+        # Leaving resume_pending intact is intentional: the next sweep retries
+        # without duplicating the continuation or its notification.
         continue
 
       if prepared.get("notify"):
@@ -3978,9 +4014,8 @@ async def _run_chat_impl_with_db(
   if run_token is None:
     run_token = alloc_run_token()
 
-  app_context_block, app_context_env = _build_app_context(
-    db, chat_id, settings.data_dir,
-  )
+  app_context_block = ""
+  app_context_env: dict[str, str] = {}
   chat_row = None
   chat_overrides: dict | None = None
   if chat_id:
@@ -3993,6 +4028,20 @@ async def _run_chat_impl_with_db(
       log.exception(
         "failed to load per-chat agent_settings chat_id=%s", chat_id,
       )
+  from app.delegations import policy_for_chat
+  run_policy = policy_for_chat(db, chat_id) if chat_row is not None else None
+  if run_policy is None:
+    app_context_block, app_context_env = _build_app_context(
+      db, chat_id, settings.data_dir,
+    )
+  else:
+    # Delegation prompts are plain bounded tasks even if their text happens to
+    # begin with an owner-only slash command.
+    goal_objective = None
+    goal_clear = False
+    goal_mode = False
+    goal_continue = False
+    is_slash_command = False
 
   # Chats created before native Codex goal handling have the /goal objective in
   # their durable transcript but no provider-side ThreadGoal yet.  Either the
@@ -4035,7 +4084,7 @@ async def _run_chat_impl_with_db(
   # the command's length limit. Keep it out of the persisted prompt snapshot as
   # well, so later turns reuse the stable constitution bytes.
   startup_context = ""
-  if not session_id:
+  if not session_id and run_policy is None:
     # `build_memory_block` is pure; the activity emit + envelope live here.
     eligible_chat_ids = {
       row[0]
@@ -4094,7 +4143,7 @@ async def _run_chat_impl_with_db(
       if skills_block:
         startup_context = f"{startup_context}\n\n{skills_block}"
 
-  if app_context_block:
+  if app_context_block and run_policy is None:
     # The report BODY goes right after the </app_context> line, but only on
     # the FIRST turn (`not session_id`): the small app-context id/path lines
     # are cheap and stay per-turn, while the report body is large and
@@ -4111,7 +4160,7 @@ async def _run_chat_impl_with_db(
     else:
       user_message = f"{block}\n\n{user_message}"
 
-  if not session_id:
+  if not session_id and run_policy is None:
     compaction_brief = _latest_compaction_brief(chat_row)
     if compaction_brief:
       block = (
@@ -4125,6 +4174,20 @@ async def _run_chat_impl_with_db(
         user_message = f"{user_message}\n\n{block}"
       else:
         user_message = f"{block}\n\n{user_message}"
+
+  # A planned restart can replace the parent provider process while durable
+  # child tasks keep running. Re-attach their immutable ids/statuses to every
+  # ordinary parent turn so a resumed agent waits on the existing child rather
+  # than launching a duplicate. Delegated children never receive this block,
+  # which also enforces the depth-one boundary.
+  if run_policy is None and chat_id and run_token:
+    from app.delegations import active_parent_context
+    delegation_context = active_parent_context(db, chat_id, run_token)
+    if delegation_context:
+      if is_slash_command:
+        user_message = f"{user_message}\n\n{delegation_context}"
+      else:
+        user_message = f"{delegation_context}\n\n{user_message}"
 
   # Per-turn time context (EVERY turn, not just the first) so the agent has a
   # clock + a sense of recency (how long since the user last wrote). Prepended
@@ -4169,11 +4232,15 @@ async def _run_chat_impl_with_db(
     db.close()
     return disposition
 
-  agent_token = auth.create_access_token(
-    {"sub": owner.username},
-    expires_delta=timedelta(hours=2),
-    token_epoch=owner.token_epoch,
-  )
+  if run_policy is not None:
+    from app.delegations import mint_app_token
+    agent_token = mint_app_token(db, run_policy)
+  else:
+    agent_token = auth.create_access_token(
+      {"sub": owner.username},
+      expires_delta=timedelta(hours=2),
+      token_epoch=owner.token_epoch,
+    )
 
   # Build the base environment shared by all providers.
   scripts_dir = Path(__file__).parent.parent / "scripts"
@@ -4191,6 +4258,12 @@ async def _run_chat_impl_with_db(
     "CHAT_ID": chat_id,
   })
   base_env.update(app_context_env)
+  if run_policy is not None:
+    base_env.update({
+      "MOBIUS_SUBAGENT_DEPTH": "1",
+      "MOBIUS_DELEGATION_ID": run_policy.delegation_id,
+      "MOBIUS_SUBAGENT_PROVIDER": run_policy.provider,
+    })
   # Overrides any inherited TMPDIR from _safe_keys: agent scratch belongs on
   # the bounded data volume, never the container's unbounded overlay. TMP and
   # TEMP travel with it so a tool reading either does not escape back to /tmp.
@@ -4239,8 +4312,12 @@ async def _run_chat_impl_with_db(
   # PATCH /api/chats/{id}; the file remains the fallback every chat
   # starts from. Computed once here and threaded into the SDK runner
   # for each provider.
-  agent_settings = effective_agent_settings(
-    settings.data_dir, chat_overrides, provider=provider_id,
+  agent_settings = (
+    {"model": run_policy.model, "effort": run_policy.effort}
+    if run_policy is not None
+    else effective_agent_settings(
+      settings.data_dir, chat_overrides, provider=provider_id,
+    )
   )
 
   # Snapshot-on-first-send: if the chat has no overrides yet (created
@@ -4256,7 +4333,7 @@ async def _run_chat_impl_with_db(
   # picker PATCH from another coroutine can only interleave at await
   # points; if one is added here, a concurrent PATCH could clobber the
   # user's pick.
-  if chat_row is not None and chat_overrides is None:
+  if run_policy is None and chat_row is not None and chat_overrides is None:
     snapshot = {}
     for k in ("model", "effort", "effort_by_provider"):
       if k not in agent_settings:
@@ -4285,13 +4362,19 @@ async def _run_chat_impl_with_db(
   # request; live app state is never recomposed for an established chat.
   runner_agent_settings = agent_settings
   custom_prompt = _custom_system_prompt(chat_overrides)
-  from app.system_prompts import prompt_for_chat
+  from app.system_prompts import exact_prompt_for_chat, prompt_for_chat
   try:
-    system_prompt = prompt_for_chat(
-      chat_row,
-      custom_prompt if custom_prompt else _read_skill_text(),
-      db,
-      persist=True,
+    system_prompt = (
+      exact_prompt_for_chat(
+        chat_row, run_policy.system_prompt, db, persist=True,
+      )
+      if run_policy is not None
+      else prompt_for_chat(
+        chat_row,
+        custom_prompt if custom_prompt else _read_skill_text(),
+        db,
+        persist=True,
+      )
     )
     db.commit()
   except Exception:
@@ -4310,6 +4393,15 @@ async def _run_chat_impl_with_db(
     db.close()
     return disposition
 
+  # Bind the recall recognizer while `db` is still live. This MUST happen
+  # before the db.close() below: resolving it lazily at a sink site would check
+  # out a fresh connection during the turn, which is precisely the pool
+  # exhaustion that close is there to prevent. It is also the semantically
+  # right moment — the recognizer is bound at the instant the agent is told
+  # the provider's path.
+  from app.memory_provider import resolve_recall_binding
+  recall_binding = resolve_recall_binding(db)
+
   # This is deliberately request-scoped rather than part of the immutable
   # snapshot persisted above. On resumed turns `startup_context` is empty.
   if startup_context:
@@ -4321,7 +4413,11 @@ async def _run_chat_impl_with_db(
   # prompt/settings snapshot commits.
   resumed_context_fallback = (
     _build_resumed_context(chat_row)
-    if session_id and provider.name in ("Claude Code", "Codex")
+    if (
+      session_id
+      and provider.name in ("Claude Code", "Codex")
+      and (run_policy is None or run_policy.allow_session_reseed)
+    )
     else None
   )
 
@@ -4367,7 +4463,9 @@ async def _run_chat_impl_with_db(
         _log_superseded_run(chat_id, "no-agent-metrics")
         db.close()
         return chat_queue.TerminalDisposition.STALE_NO_ACTION
-      sink = _ChatEventSink(bc, chat_id, run_token=run_token)
+      sink = _ChatEventSink(
+        bc, chat_id, run_token=run_token, recall_binding=recall_binding,
+      )
       register_active_sink(chat_id, sink)
       sink.publish({"type": "text", "content": NO_AGENT_CONNECTED_MESSAGE})
       return await _complete_turn(
@@ -4393,7 +4491,11 @@ async def _run_chat_impl_with_db(
     db.close()
     return disposition
   data_dir = Path(settings.data_dir)
-  cwd = str(data_dir) if data_dir.exists() else str(Path.cwd())
+  cwd = (
+    run_policy.cwd
+    if run_policy is not None
+    else str(data_dir) if data_dir.exists() else str(Path.cwd())
+  )
 
   # SDK dispatch: route both Claude and Codex through their official
   # Agent SDK runners.
@@ -4410,18 +4512,21 @@ async def _run_chat_impl_with_db(
     # skills="all". Gated on the same skills_enabled flag; when off it prunes its
     # own shims. Best-effort: skill discovery is advisory, so a sync failure must
     # never block the turn from starting.
-    try:
-      from app.codex_skills import sync_codex_skills
-      from app.providers import skills_enabled as _skills_enabled
-      sync_codex_skills(settings.data_dir, _skills_enabled(settings.data_dir))
-    except Exception:
-      log.exception("codex skills sync failed chat_id=%s", chat_id)
+    if run_policy is None:
+      try:
+        from app.codex_skills import sync_codex_skills
+        from app.providers import skills_enabled as _skills_enabled
+        sync_codex_skills(settings.data_dir, _skills_enabled(settings.data_dir))
+      except Exception:
+        log.exception("codex skills sync failed chat_id=%s", chat_id)
     sdk_env = provider.build_env(
       base_env=base_env,
       data_dir=settings.data_dir,
       chat_id=chat_id,
     )
-    sink = _ChatEventSink(bc, chat_id, run_token=run_token)
+    sink = _ChatEventSink(
+      bc, chat_id, run_token=run_token, recall_binding=recall_binding,
+    )
     register_active_sink(chat_id, sink)
     runner_result: dict = {}
     # The provider can run for hours.  Everything needed to launch it is now
@@ -4450,6 +4555,7 @@ async def _run_chat_impl_with_db(
         goal_mode=goal_mode,
         goal_continue=goal_continue,
         fallback_goal_objective=fallback_goal_objective,
+        run_policy=run_policy,
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
@@ -4553,6 +4659,25 @@ async def _run_chat_impl_with_db(
     if session_id and not _resumable(
       session_id, cwd, sdk_env.get("CLAUDE_CONFIG_DIR")
     ):
+      if run_policy is not None and not run_policy.allow_session_reseed:
+        from app.delegations import REVIEW_REQUIRED_MARKER
+        sink = _ChatEventSink(
+          bc, chat_id, run_token=run_token, recall_binding=recall_binding,
+        )
+        register_active_sink(chat_id, sink)
+        sink.publish({
+          "type": "error",
+          "message": (
+            f"{REVIEW_REQUIRED_MARKER}: The delegated write session could "
+            "not be resumed after restart. Its durable history is intact, but "
+            "Möbius will not replay write work automatically. Review the child "
+            "history and start a new task if another pass is needed."
+          ),
+        })
+        return await _complete_turn(
+          bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
+          provider_id=provider_id, cost_usd=0, close_browser=False,
+        )
       log.warning(
         "claude session %s for chat %s has no resumable transcript; "
         "starting fresh and reseeding from DB transcript",
@@ -4569,7 +4694,9 @@ async def _run_chat_impl_with_db(
       # frontend stream consumer renders no "notice" type anyway. The
       # warning log is the operator-facing signal.
       claude_session_id = None
-    sink = _ChatEventSink(bc, chat_id, run_token=run_token)
+    sink = _ChatEventSink(
+      bc, chat_id, run_token=run_token, recall_binding=recall_binding,
+    )
     register_active_sink(chat_id, sink)
     # As in the Codex path, do not pin a pooled connection while the provider
     # is thinking or waiting for user input.  Resume fallback has already
@@ -4588,7 +4715,11 @@ async def _run_chat_impl_with_db(
         pending_questions=questions._pending,
         db=db,
         agent_settings=runner_agent_settings,
-        skills_enabled=_skills_enabled(settings.data_dir),
+        skills_enabled=(
+          False if run_policy is not None
+          else _skills_enabled(settings.data_dir)
+        ),
+        run_policy=run_policy,
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")

@@ -528,8 +528,43 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
   assert [row["version"] for row in first] == [
     "0001_legacy_schema_convergence",
     "0002_chat_run_goal_objective",
+    "0003_chat_run_root_identity",
   ]
   assert second == first
+
+
+def test_chat_run_root_migration_backfills_existing_physical_runs(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'run-root.db'}")
+  applied_at = datetime(2026, 8, 1)
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(128))"
+    ))
+    conn.execute(text(
+      "CREATE TABLE chat_runs ("
+      "id VARCHAR(64) PRIMARY KEY, chat_id VARCHAR(64) NOT NULL, "
+      "status VARCHAR(16) NOT NULL)"
+    ))
+    conn.execute(text(
+      "INSERT INTO chat_runs (id, chat_id, status) "
+      "VALUES ('physical-old', 'chat-old', 'completed')"
+    ))
+    conn.execute(text(
+      "CREATE TABLE schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    conn.execute(text(
+      "INSERT INTO schema_migrations (version, applied_at) VALUES "
+      "('0001_legacy_schema_convergence', :at), "
+      "('0002_chat_run_goal_objective', :at)"
+    ), {"at": applied_at})
+
+  run_migrations(eng)
+
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT root_run_id FROM chat_runs WHERE id = 'physical-old'"
+    )).scalar_one() == "physical-old"
 
 
 def test_goal_migration_backfills_only_the_running_turns_initiating_goal(

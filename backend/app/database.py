@@ -974,9 +974,38 @@ def _add_chat_run_goal_objective(eng) -> None:
       ), {"objective": objective, "run_id": run_id})
 
 
+def _add_chat_run_root_identity(eng) -> None:
+  """Give every physical run a stable logical identity across continuations."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chat_runs" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chat_runs")}
+  with eng.begin() as conn:
+    if "root_run_id" not in columns:
+      conn.execute(text(
+        "ALTER TABLE chat_runs ADD COLUMN root_run_id VARCHAR(64) NULL"
+      ))
+    # Idempotent backfill: pre-feature physical runs are each their own logical
+    # root. New continuation writes inherit explicitly in chat_writer.
+    conn.execute(text(
+      "UPDATE chat_runs SET root_run_id = id WHERE root_run_id IS NULL"
+    ))
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_chat_runs_root_run_id "
+      "ON chat_runs (root_run_id)"
+    ))
+    if eng.dialect.name == "postgresql":
+      conn.execute(text(
+        "ALTER TABLE chat_runs ALTER COLUMN root_run_id SET NOT NULL"
+      ))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
+  ("0003_chat_run_root_identity", _add_chat_run_root_identity),
 )
 
 

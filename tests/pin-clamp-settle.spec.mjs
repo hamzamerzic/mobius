@@ -147,7 +147,7 @@ async function gestureToBottom(page) {
   })
   await page.waitForFunction(() => {
     const id = localStorage.getItem('moebius_active_chat')
-    const modes = JSON.parse(sessionStorage.getItem('chat-mode') || '{}')
+    const modes = JSON.parse(localStorage.getItem('chat-reading-position') || '{}')
     return !!id && modes[id]?.kind === 'FOLLOW_BOTTOM'
   }, undefined, { timeout: 3000 })
   // Let the 250ms gesture window close before the next send. Otherwise the

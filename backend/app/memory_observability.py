@@ -290,24 +290,54 @@ def estimate_payload_bytes(value: Any, _seen: set[int] | None = None) -> int:
   return sum(estimate_payload_bytes(item, seen) for item in value)
 
 
+def _local_service_slugs() -> tuple[str, ...]:
+  """The owner's configured service slugs, or none if unavailable.
+
+  Deferred import: this module is loaded from ``app/__init__`` long before the
+  route layer, so the registry is reached only when an inventory actually runs.
+  """
+  try:
+    from app.routes.local_services import configured_service_slugs
+    return configured_service_slugs()
+  except Exception:
+    log.debug("local service registry unavailable for process labelling")
+    return ()
+
+
+def _configured_service_slug(value: str, service_slugs: tuple[str, ...]) -> str | None:
+  """Attribute a process to an owner-configured local service, if any.
+
+  Anchored to a path segment or a whole token so a short slug cannot claim an
+  unrelated process that merely contains those letters.
+  """
+  for slug in service_slugs:
+    if re.search(rf"(?:^|[/\s]){re.escape(slug.lower())}(?:[/\s]|$)", value):
+      return slug
+  return None
+
+
 def _process_identity(
   pid: int,
   comm: str,
   cmdline: str,
+  service_slugs: tuple[str, ...] = (),
 ) -> tuple[str, str | None]:
   """Return a stable category and a safe, useful owner label.
 
   Executable names alone are not ownership: installed services commonly run
   behind generic hosts such as gunicorn, and browser workers are only useful
   when tied back to their profile. Keep the label deliberately derived from
-  known local paths rather than exposing arbitrary command lines, which can
-  contain credentials.
+  known local paths and the owner's own service registry rather than exposing
+  arbitrary command lines, which can contain credentials.
+
+  `service_slugs` is resolved once per inventory sweep by the caller, so this
+  stays a pure string classification and never reads the registry per process.
   """
   if pid == os.getpid():
     return "mobius_server", "platform"
   value = f"{comm} {cmdline}".lower()
   if any(token in value for token in ("chromium", "chrome", "headless_shell")):
-    match = re.search(r"agent-browser-profiles/([^/\\s]+)", cmdline)
+    match = re.search(r"agent-browser-profiles/([^/\s]+)", cmdline)
     return "browser", match.group(1) if match else None
   if "codex" in value:
     return "codex", None
@@ -317,9 +347,10 @@ def _process_identity(
     return "frontend_tools", None
   if "caddy" in value:
     return "proxy", "platform"
-  if "tandoor" in value:
-    return "app_service", "tandoor"
-  match = re.search(r"/data/apps/([^/\\s]+)", cmdline)
+  slug = _configured_service_slug(value, service_slugs)
+  if slug:
+    return "app_service", slug
+  match = re.search(r"/data/apps/([^/\s]+)", cmdline)
   if match:
     return "app_service", match.group(1)
   if "recover" in value:
@@ -338,6 +369,7 @@ def process_inventory(
   raw_pids = _read_text(root / "cgroup.procs")
   if raw_pids is None:
     return {"available": False, "groups": [], "top_processes": []}
+  service_slugs = _local_service_slugs()
   rows: list[dict[str, Any]] = []
   groups: dict[str, dict[str, int]] = defaultdict(
     lambda: {"process_count": 0, "rss_bytes": 0, "pss_bytes": 0,
@@ -355,7 +387,7 @@ def process_inventory(
     cmdline = (
       _read_text(proc_root / str(pid) / "cmdline") or ""
     ).replace("\x00", " ")
-    category, owner = _process_identity(pid, comm, cmdline)
+    category, owner = _process_identity(pid, comm, cmdline, service_slugs)
     row = {
       "pid": pid,
       "name": comm[:80],
