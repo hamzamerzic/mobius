@@ -92,7 +92,7 @@ Möbius is an open-source AGI app platform that grows with the needs of its user
 
 Build for a real need, make it yours, improve what gets in the way, then share what generalizes. Community review can turn that work into a building block that makes the whole ecosystem more capable.
 
-Möbius deliberately supports coding agents that can work across a real repository. Today, that means OpenAI Codex and Claude Code. The owner chat agent can edit the frontend and backend, while git history and `/recover` keep those changes reversible.
+Möbius deliberately supports coding agents that can work across a real repository. Today, that means OpenAI Codex and Claude Code. The owner chat agent can edit the frontend and backend, while git history and an isolated deployment-level recovery service keep those changes reversible.
 
 No autonomous rewrite ships without a person in the loop. Agents can prepare changes, run tests, and explain their reasoning. People still decide what becomes part of the shared platform.
 
@@ -130,23 +130,71 @@ Your chats, files, apps, credentials, and agent activity stay inside that deploy
 Use a Linux server with Docker, a domain name, and Codex or Claude Code access:
 
 ```bash
-git clone https://github.com/mobius-os/mobius.git
+git clone --branch stack/external-recovery-v1 --single-branch \
+  https://github.com/mobius-os/mobius.git
 cd mobius
 cp .env.example .env
 sed -i 's/^DOMAIN=.*/DOMAIN=mobius.example.com/' .env
-docker compose up -d
+scripts/mobiusctl update
 ```
 
-Caddy configures HTTPS. Open `https://mobius.example.com` and follow the setup wizard. Bookmark `/recover` before asking the agent to change the platform.
+Caddy configures HTTPS. Open `https://mobius.example.com` and follow the setup wizard.
+During the external-recovery cutover, public `main` and `external-recovery`
+remain frozen on the exact compatibility release. The protected publisher
+builds the removal release under a unique workflow-attempt reference, binds its
+exact digest in Möbius Launch, and immediately rolls out that digest; it never
+retags either compatibility channel. A later core release is refused until it
+uses the separate durable digest-release protocol. `mobiusctl` fetches the
+protected full stack ref, proves that it contains the exact clean checkout,
+stamps that commit into the image, and only then builds. An unstamped `docker build`
+or `docker compose up --build` fails closed instead of silently seeding the
+compatibility release.
+
+If the instance cannot boot, start the latest isolated recovery worker without
+custom proxy configuration:
+
+```bash
+scripts/mobiusctl recovery start
+# if the worker/browser restarts, rotate both credentials and print a new code:
+scripts/mobiusctl recovery reopen
+scripts/mobiusctl recovery finish
+```
+
+When the server is remote, run this on the owner's computer while recovery is
+active, then open the printed loopback URL locally:
+
+```bash
+ssh -N -L 18003:127.0.0.1:18003 user@server
+```
+
+The command stops the ordinary app, mounts its data into a clean root target,
+and starts a read-only, unprivileged recovery worker on loopback. The worker has
+no Docker socket and cannot modify its own code.
+`reopen` never boots the ordinary app: it revokes both old credentials, pulls
+the latest approved worker, recreates the isolated services, and prints a new
+one-time code. The root target also enforces its own one-hour absolute deadline
+and closes its private listener when it expires; run `reopen` to mint a fresh
+deadline. Operators who need a different bounded window can prefix `start` or
+`reopen` with `MOBIUS_RECOVERY_TTL_SECONDS=<seconds>` (300–86400).
 
 Update a self-hosted instance with:
 
 ```bash
-git pull
-docker compose up -d --build
+git pull --ff-only origin stack/external-recovery-v1
+scripts/mobiusctl update
 ```
 
-Data under `/data` survives rebuilds.
+The lifecycle command serializes against recovery, rebuilds and recreates the
+normal stack, verifies Mobius health, then removes an old `mobius-recoveryd`
+container only when its exact name and Compose project/service labels match the
+current installation. Data under `/data` survives rebuilds.
+
+The in-product agent has passwordless full root inside its Mobius container by
+default. Set `MOBIUS_AGENT_SUDO=0` in `.env` and run `scripts/mobiusctl update`
+to use the operator kill switch. Either change recreates the app from the exact
+clean release image, so a process in the old writable container overlay cannot
+survive the replacement. The external recovery worker remains non-root and
+read-only, and recovery boot never installs the agent sudo rule.
 
 To connect a full web service such as Tandoor, point a sibling DNS name at the same server. For example, use `services.mobius.example.com`, then set it as `MOBIUS_SERVICE_GATEWAY_ORIGIN` in `.env`. Caddy serves integrations below `/services/<slug>`, so you do not need wildcard DNS or a new record for each service. See [.env.example](.env.example) for setup and [ARCHITECTURE.md](ARCHITECTURE.md#app-execution-tiers) for the trust boundaries.
 

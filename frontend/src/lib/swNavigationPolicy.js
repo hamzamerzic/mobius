@@ -7,7 +7,6 @@ const SHELL_NAVIGATION_DENYLIST = [
   /^\/app-assets\//,
   /^\/app-embeds\//,
   /^\/apps\//,
-  /^\/recover(\/|$)/,
   /^\/shell\/embed(\/|$)/,
   // The push worker's scope (public/sw-push.js). It names a URL prefix inside
   // the shell's PWA scope and must never resolve to a document: a page there
@@ -17,7 +16,7 @@ const SHELL_NAVIGATION_DENYLIST = [
   /^\/sites(\/|$)/,
   /^\/services(\/|$)/,
   ...PROXIED_APP_SUBTREES,
-  /^\/(?!(?:shell|apps|recover)(?:\/|$))[A-Za-z0-9_-]+(?:\/(?:index\.html)?)?$/,
+  /^\/(?!(?:shell|apps)(?:\/|$))[A-Za-z0-9_-]+(?:\/(?:index\.html)?)?$/,
 ]
 
 export function isShellNavigationDenied(pathname) {

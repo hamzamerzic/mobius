@@ -302,9 +302,13 @@ def test_backup_skips_secrets_without_recipient(tmp_path):
   assert "db/ultimate.db" in members
   assert any(m.endswith("apps/notes/data/n.json") for m in members)
   assert any(m.endswith("shared/skills/s.md") for m in members)
+  assert any(m.endswith("recovery_chat.jsonl") for m in members)
   assert not any("logs" in m for m in members)
   assert not any(m.startswith("platform") for m in members)
   assert not any(".secret-key" in m for m in members)
+  assert not any(".recovery-secret" in m for m in members)
+  assert not any(".recovery-owner.json" in m for m in members)
+  assert not any(".recover-pending" in m for m in members)
 
 
 def test_backup_plaintext_secrets_perms_and_hashes(tmp_path):
@@ -322,16 +326,17 @@ def test_backup_plaintext_secrets_perms_and_hashes(tmp_path):
   assert (os.stat(bdir / "secrets.tar.gz").st_mode & 0o777) == 0o600
   with tarfile.open(bdir / "secrets.tar.gz") as t:
     secret_members = t.getnames()
-  for expected in (".secret-key", "service-token.txt", ".recovery-secret",
-                   ".recovery-owner.json"):
+  for expected in (".secret-key", "service-token.txt"):
     assert any(m == expected or m.endswith("/" + expected)
                for m in secret_members), f"{expected} missing from secrets"
   assert any("cli-auth" in m for m in secret_members)
   with tarfile.open(bdir / "data.tar.gz") as t:
     data_members = t.getnames()
   allm = secret_members + data_members
+  assert not any(m.endswith(".recovery-secret") for m in allm)
+  assert not any(m.endswith(".recovery-owner.json") for m in allm)
   assert not any(m.endswith(".recover-pending") for m in allm)
-  assert not any(m.endswith("recovery_chat.jsonl") for m in allm)
+  assert any(m.endswith("recovery_chat.jsonl") for m in data_members)
   assert not any(m.endswith(".boot-attempt") for m in allm)
 
 
@@ -500,6 +505,10 @@ def test_restore_round_trip_and_gates(tmp_path):
     '{"k":"v"}'
   assert (dest / ".secret-key").read_text() == "SIGNING-KEY"
   assert (os.stat(dest / ".secret-key").st_mode & 0o777) == 0o600
+  assert (dest / "recovery_chat.jsonl").read_text() == "{}"
+  assert not (dest / ".recovery-secret").exists()
+  assert not (dest / ".recovery-owner.json").exists()
+  assert not (dest / ".recover-pending").exists()
   conn = sqlite3.connect(str(dest / "db" / "ultimate.db"))
   assert conn.execute("SELECT count(*) FROM t").fetchone()[0] == 3
   conn.close()

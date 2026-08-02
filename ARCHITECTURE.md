@@ -8,7 +8,7 @@ Möbius is a self-hosted PWA where one owner chats with an in-product AI agent t
 
 The design has one line behind it: **low floor, high ceiling, no walls.** The agent is the product; everything else is substrate it operates on. Möbius bets on rising AI capability and inverts the usual defaults: **make the good path easy** — design, examples, prompts, and a clean script for any step that's identical every time — and **make the bad path harder but never impossible.** The owner can tell the agent to delete everything and it can; the net under it is the recovery floor, not a wall. **Code empowers the agent, it does not police it**: prevention lives in the instruction layer and learned memory, never in code-level validators or in removing a capability.
 
-**Intelligence over scripts.** A script, validator, or fixed procedure earns its place only for the unambiguous and identical-every-time — clone/pull to install or update recovery, rebuild the served frontend, a deterministic migration. Everything ambiguous — why something broke, how to reach the last good state, fixing what another agent did — is the agent reasoning in context. Branching logic to cover cases, or bespoke machinery to detect-and-auto-handle a situation, is the tell that you're building the wrong thing: script the certain step, **instruct** the agent to run it (sharpen the prompt if it forgets), and trust intelligence for the rest. The only automation worth keeping is one a tool already ships (a real watcher, HMR) — never flimsy glue invented to avoid instructing the agent. **Recovery** is this made concrete: a small, separate, always-up agent that can't break its own code (updated only by that one unambiguous script) but reaches and fixes everything else by *reasoning* about what broke, not from a menu of canned reversions.
+**Intelligence over scripts.** A script, validator, or fixed procedure earns its place only for the unambiguous and identical-every-time — pull a promoted recovery image, rebuild the served frontend, a deterministic migration. Everything ambiguous — why something broke, how to reach the last good state, fixing what another agent did — is the agent reasoning in context. Branching logic to cover cases, or bespoke machinery to detect-and-auto-handle a situation, is the tell that you're building the wrong thing: script the certain step, **instruct** the agent to run it (sharpen the prompt if it forgets), and trust intelligence for the rest. The only automation worth keeping is one a tool already ships (a real watcher, HMR) — never flimsy glue invented to avoid instructing the agent. **Recovery** is this made concrete: an on-demand external agent that cannot rewrite its own image but reaches and fixes the stopped target by reasoning about what broke, not from a menu of canned reversions.
 
 ### Design for the next change
 
@@ -43,10 +43,10 @@ This split is why a section can read either "this is intentionally hackable, don
 
 ```
 Dockerfile (root)     Single-container image: frontend build + backend + CLI tools
-docker-compose.yml    Self-hosted: Caddy (TLS) + app + recoveryd
+docker-compose.yml    Self-hosted: Caddy (TLS) + app; on-demand recovery profile
 ├── caddy             HTTPS reverse proxy — forwards everything to app:8000
 ├── app               FastAPI serves the API + the frontend static files
-└── recoveryd         frozen recovery floor — same image, own container, serves :8001 (the bundled Caddyfile routes /recover* to it ahead of the app catch-all; see the self-heal section)
+└── recovery profile  stopped-app root target + read-only worker on loopback
 ```
 
 The image bundles everything the agent needs at runtime (the Claude and Codex CLIs, esbuild, Node) so the platform works out of the box. To join an existing Caddy setup instead of the bundled one, use `docker-compose.override.example.yml`.
@@ -66,7 +66,7 @@ The `/data` volume persists across `docker compose build && up -d`, so a new ima
 
 Möbius is meant to be self-hosted on a user-provisioned host — a managed platform (Railway/Render/Fly/PikaPods) or a raw VPS — so "apply a security update" splits into three tiers by who can even act:
 
-- **Image userspace** — the Python wheels, npm globals, apt packages, and vendored mini-app libs baked into the image. The agent owns these end-to-end: change the declared constraint (`Dockerfile` / `backend/requirements.txt` / `frontend/package.json`), regenerate the hashed Python lock, rebuild, recreate. Never `apt upgrade` / `pip install -U` a *running* container — that mutation is ephemeral and drifts the live container away from the reproducible image. `deploy-prod.sh` is the apply path. One deliberate runtime exception: the `mobius` user (the in-product agent) has scoped NOPASSWD sudo for `apt-get`/`apt`/`dpkg` only (`/etc/sudoers.d/mobius-apt`, baked and visudo-validated in the `Dockerfile`), so it can install a genuinely needed OS package at runtime without full root — such installs stay ephemeral until pinned into the image, and the recovery floor deliberately depends on zero apt-installed packages, so a bad package can never take recovery down.
+- **Image userspace** — the Python wheels, npm globals, apt packages, and vendored mini-app libs baked into the image. The agent owns these end-to-end: change the declared constraint (`Dockerfile` / `backend/requirements.txt` / `frontend/package.json`), regenerate the hashed Python lock, rebuild, recreate. Never `apt upgrade` / `pip install -U` a *running* container — that mutation is ephemeral and drifts the live container away from the reproducible image. `deploy-prod.sh` is the apply path. Full root is an honest default instance capability: the root entrypoint creates `mobius ALL=(root) NOPASSWD: ALL` before dropping privileges. `MOBIUS_AGENT_SUDO=0` is the coarse operator kill switch and ships with no sudoers rule. Changing either direction requires a clean recreation because an already-root agent could have installed persistent-in-container privilege paths.
 - **Host OS userspace + the Docker engine** — outside every container; patched on the host (`unattended-upgrades` covers the OS packages; the engine is a separate host upgrade).
 - **Host kernel** — *not in the container*; it shares the host's and cannot be patched from inside. On a managed platform the operator patches+reboots the kernel underneath you (the safe default for non-devops owners); on a raw VPS it's the owner's job, via `unattended-upgrades` + livepatch + a scheduled reboot window.
 
@@ -106,24 +106,31 @@ The owner's customizations end up *on top of* the current release, as if they'd 
 
 **"Update available" is an ancestry question, not a version-string compare:** an update is available iff `upstream`'s tip is **not yet an ancestor of `main`** (a new release hasn't been rebased in). This is the content question — "does my working tree already contain this release" — that a `image_sha != recorded_sha` proxy can't answer on a customized instance, and it's what eliminates phantom "update available" rows after a deploy that changed nothing the owner hadn't already.
 
-### The recovery/auth files are NOT in the model — they're gitignored
+### Baked boot infrastructure is outside the served clone
 
-The one thing that makes a self-editing platform tricky is the recovery/core island (`protected-files.txt`: currently the baked `entrypoint.sh` and `recovery_restore.sh`; recoveryd is the separate HTTP recovery floor). These are root-owned `chmod 444/555`; the `mobius` user that runs the updater genuinely cannot write them.
+`protected-files.txt` names the root entrypoint, sudo configurator, boot-attempt
+counter, and restart-ledger supervisor. The image also owns
+`backend/recovery_target/targetd.py`. These files are copied to `/app`, remain
+root-owned/non-writable, and are never imported from the mutable `/data/platform`
+clone. `MOBIUS_BOOT_MODE=recovery` execs the target with `python -I` before the
+entrypoint touches `/data`; normal mode never starts that listener.
 
-The simple answer is that **they are not part of the git model at all** — each surface's `.gitignore` excludes them. They live on disk, managed wholly by the image (the root entrypoint re-enforces root-owned 444/555 on them every boot; their contents refresh from the baked floor only on first boot, a crash-loop restore, or a `recovery_restore.sh` run — the deploy/recovery path, not every reboot). Because they're untracked, neither `record upstream` nor the merge/replay ever touches them, so there is no special "protected-file" machinery in the update engine — the replay only ever moves agent-editable files, and the recovery island updates the one way it should: via an image deploy. (Recovery therefore stays agent-proof, and becomes current with the image once the deploy's restore/reconcile step runs.)
+The external worker is not present in this repository or image. CI publishes a
+tested worker image, and the control plane or `mobiusctl` replaces the whole
+worker container to update it. There is no in-process recovery updater.
 
 ### Where each surface stands
 
 | Surface | Repo | On the model | Engine |
 |---------|------|------------------|--------|
 | **Mini-apps** (`/data/apps/<slug>`) | `.git` per app (installed apps; agent-built bespoke apps have no upstream to track) | yes — whole source tree on `upstream`, single-parent replay, so **multi-file apps update cleanly** | `backend/app/app_git.py` + `install.py` |
-| **Platform** (`/data/platform` — backend *and* frontend) | `.git`, recovery files gitignored | yes — clone-native `git fetch origin` + rebase of local `main` onto `origin/main` (commit-stray-edits-first, conflict-abort, post-rebase import probe with rollback); ancestry availability (`origin/main` not yet an ancestor of local `main`) | `backend/app/platform_update.py` |
+| **Platform** (`/data/platform` — backend *and* frontend) | `.git` | yes — clone-native `git fetch origin` + rebase of local `main` onto `origin/main` (commit-stray-edits-first, conflict-abort, post-rebase import probe with rollback); ancestry availability (`origin/main` not yet an ancestor of local `main`) | `backend/app/platform_update.py` |
 
 Mini-apps use **one** small tree-aware engine (`app_git.py`): `record_upstream` commits the *whole source tree* on `upstream`, `merge_upstream` verdicts a clean-vs-conflict via `git merge-tree`, and a clean apply replays the merged tree as a **single-parent** commit on top of `upstream` (linear `A→B→X`). Mini-apps are thin callers of that primitive — they pass their own source tree. The platform (backend + frontend, one served clone) is clone-native instead: it uses `git fetch origin` plus a rebase of local `main` onto `origin/main`, with ancestry-based availability (`origin/main` not yet an ancestor of local `main`). Mini-app update discovery is different: the store compares the catalog manifest version against the installed `App.version` (the new release lives in the remote catalog, so a local ancestry check can't see it). There is no per-surface protected-file scaffolding.
 
 ## Backend (`backend/app/`)
 
-FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serving). `routes/__init__.py` is a crash-tolerant import scaffold: every router is loaded through `_load(name)`, and an import failure returns a 503 stub instead of killing uvicorn, so `/recover/chat` stays reachable. To add a route, write the module under `routes/`, expose a `router`, and register it in `routes/__init__.py` (both the `_load(...)` line and `__all__`), then mount it in `main.py`. (One documented exception: `routes/chats.py` exposes a *second* router, `app_chat_router` (`/api/app-chats`), which `main.py` imports and mounts directly because `_load` returns only each module's primary `router`.)
+FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serving). `routes/__init__.py` is a crash-tolerant import scaffold: every router is loaded through `_load(name)`, and an import failure returns a 503 stub instead of killing uvicorn. To add a route, write the module under `routes/`, expose a `router`, and register it in `routes/__init__.py` (both the `_load(...)` line and `__all__`), then mount it in `main.py`. (One documented exception: `routes/chats.py` exposes a *second* router, `app_chat_router` (`/api/app-chats`), which `main.py` imports and mounts directly because `_load` returns only each module's primary `router`.)
 
 ### Core app + chat runtime
 
@@ -183,28 +190,18 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `theme.py` | Theme CSS management and HTML injection |
 | `push.py` | VAPID key management and Web Push delivery |
 
-### Recovery boundaries during external cutover
+### External recovery target
 
-The legacy `recoveryd` container remains available only during the staged
-external-recovery cutover. Its code is a distinct package,
-`backend/recovery/` (baked root-owned to `/app/recovery/`, outside
-`backend/app/`) and deliberately isolated from the SDK/chat stack. The only
-recovery-adjacent module in `backend/app/` is `recovery_seed.py`.
-
-| File | Role |
-|------|------|
-| `recoveryd.py` | The recovery daemon: stdlib `http.server`, zero `app.*` imports; serves `/recover*` on :8001 and owns the Sec-Fetch-Site/Origin cross-site reject |
-| `recovery_pages.py` | Dependency-free HTML for the recovery pages |
-| `recovery_chat_pages.py` | HTML + page surface for the recovery chat |
-| `recovery_chat_runner.py` | Minimal CLI runner for the recovery chat; shares no code with `chat`/`providers`/SDK (runs the standalone `claude` binary as its own subprocess) and appends to its own per-chat jsonl under `/data`, never the `Chat.messages` column |
-| `recovery_restore.sh` | Baked git-reset restore tool (`backend/scripts/recovery_restore.sh` → `/app/scripts/`) — what the "Restore platform" button drives |
-
-The replacement boundary is `backend/recovery_target/targetd.py`. In
-`MOBIUS_BOOT_MODE=recovery`, the baked entrypoint starts this stdlib daemon as
-root before initializing or importing anything from `/data`. It listens only
-on the private target port, authenticates every request with a high-entropy
-one-time bearer, and exposes bounded execution and filesystem operations to a
-separate non-root recovery worker. Normal mode never starts the listener.
+The Mobius image contains one recovery component:
+`backend/recovery_target/targetd.py`. In `MOBIUS_BOOT_MODE=recovery`, the baked
+entrypoint execs this stdlib daemon as root before initializing or importing
+anything from `/data`. It listens privately on port 18002, authenticates every
+`/v1/*` request (including health) with a high-entropy one-time bearer token,
+requires a base-10 Unix-epoch deadline no more than 24 hours in the future, and
+offers bounded argv execution plus bounded read/write/list operations. At the
+deadline it revokes the verifier, retires every active repair process, closes
+the listener, and parks PID 1 so an `unless-stopped` policy cannot hot-loop.
+Normal mode never starts the listener.
 
 The entrypoint removes the target bearer from the exec environment and passes
 it once through an unlinked descriptor; targetd must be container PID 1,
@@ -216,13 +213,42 @@ operations are kernel-confined with `openat2` to `/data`, `/app`, and `/tmp`
 (writes omit `/app`) without symlink, magic-link, `..`, or nested-mount
 escapes. Thus a root repair child can neither inspect target memory or file
 descriptors nor enlist target PID1 to read its own `/proc` memory. Target health
-reports the immutable image-baked Git revision, never a runtime identity env.
+reports the immutable image-baked Git revision and non-secret absolute expiry,
+never a runtime identity env. Each argv execution has its own child-subreaper
+supervisor: session changes and double forks cannot outlive the response, and
+expiry/timeout/output-limit cleanup freezes, kills, and reaps the whole tree.
 
-`recovery_auth.py` (HMAC-cookie auth) and `recovery_db.py` (raw-`sqlite3` owner-row read, no ORM, with a DB-independent `/data/.recovery-owner.json` fallback for a wiped DB) round out the package. See the self-heal section below for the container itself.
+The reasoning worker is a separate non-root, read-only image. It has no sudo,
+Docker socket, Railway credential, persistent code volume, or update endpoint;
+only its fixed target URL and one-time token. Managed deployments create or
+wake it inside the instance's Railway project. Self-hosted deployments use the
+Compose `recovery` profile through `scripts/mobiusctl`, which stops `app`, pulls
+the newest approved worker image, starts the target against `app_data`, and
+publishes the worker only on `127.0.0.1:18003`.
+If the worker or browser session is lost, `scripts/mobiusctl recovery reopen`
+keeps the app stopped, removes both isolated containers, rotates the target and
+browser credentials atomically, pulls the latest worker, and prints a new
+one-time code. Self-hosted target authority lasts one hour by default (the
+launcher accepts an explicit 300–86400 second TTL); `reopen` mints a fresh
+deadline after expiry. Normal boot deletes the retired `.recovery-secret`,
+`.recovery-owner.json`, and `.recover-pending` authority before importing
+persisted code; a legacy user-authored `recovery_chat.jsonl` is retained and
+included in ordinary backup/restore.
+
+The one-time managed core cutover is digest-native. Public `mobius:main` and
+`mobius:external-recovery` remain permanently frozen at the compatible A'
+identity. The protected workflow publishes B only under a unique
+workflow-attempt reference, verifies the manifest by `repository@sha256:...`,
+durably binds that digest in Möbius Launch, and invokes fleet finalization
+immediately. Recovery R is likewise proved through its exact digest rather than
+through a mutable `stable` tag. The retired compatibility-bootstrap publisher
+is absent from the current tree, and this cutover workflow refuses unrelated
+later SHAs until a separate durable digest-release state machine owns them.
 
 ### Misc shared helpers
 
-Agent-editable general-purpose modules — several sit on live chat paths, so despite living near `recovery_seed.py` they are NOT part of the frozen island.
+Agent-editable general-purpose modules — several sit on live chat paths and are
+not part of the baked boot infrastructure.
 
 | File | Role |
 |------|------|
@@ -267,9 +293,6 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `admin.py` | Admin / introspection endpoints (service-token gated) |
 | `debug.py` | Observability: active SDK clients/sessions, broadcasts, chat logs, and resource facts/pressure |
 | `client_error.py` | `POST /api/client-error` — record an uncaught client/app JS error |
-| `recover.py` | Recovery page at `/recover` (reset/backup/rebuild) — frozen island |
-| `recover_html.py` | HTML templates for the recovery page (no `router`; used by `recover.py`) |
-
 Note: there is no `routes/ai.py` and no `POST /api/ai`. An older mini-app AI proxy lived there and was removed; mini-apps reach the agent via `window.mobius.chat`, `POST /api/apps/{id}/run-job`, or cron — not a synchronous AI endpoint.
 
 ## Resource facts and pressure
@@ -460,8 +483,9 @@ The in-product agent is a first-class reader of this code, and its behavior has 
 
 **Layers + where they live:** core platform = `/data/platform`, a git repo whose
 backend is served from `backend/` and frontend from `frontend/dist`; mini-apps
-(`/data/apps/<slug>`, each a git repo); recovery (the frozen island, below).
-Runtime trees are gitignored (db, compiled, app-secrets, cli-auth).
+(`/data/apps/<slug>`, each a git repo); baked boot infrastructure in the image;
+and the external recovery target/worker boundary described above. Runtime trees
+are gitignored (db, compiled, app-secrets, cli-auth).
 
 **Updates** flow through git. `backend/app/platform_update.py` is clone-native:
 `/data/platform` is a real `git clone` of the canonical repo, so an update
@@ -494,39 +518,28 @@ update and divergence rules as any other catalog app. The bootstrap path also
 migrates rows left by old images whose source still points at the retired
 platform-core tree; no app snapshot is baked into the platform image.
 
-**Recovery and self-heal.** Recovery is deliberately outside the editable
-platform. `recoveryd` is a separate `restart: unless-stopped` container with its
-own cgroup, read-only root filesystem, and root-owned frozen code under
-`/app/recovery`. The edge proxy routes `/recover*` to it before the platform
-catch-all, so a broken or OOM-killed app container does not take the recovery UI
-down with it. The recovery container mounts `/data` to repair the instance, but
-the platform container does not mount recoveryd's private `/recovery-live`
-volume.
+**Recovery and self-heal.** Recovery is deliberately outside both the editable
+platform and the normal app process. The managed control plane launches the
+latest promoted worker image on demand; the self-hosted lifecycle pulls that
+same image every time. Updating means replacing the container from outside,
+never letting the recovery agent modify itself.
 
-The dashboard exposes two complementary paths:
+The normal app and recovery target are mutually exclusive boot modes. Managed
+recovery clean-redeploys the target service with a one-time token and reaches it
+over the project's private network. Self-hosted recovery stops the app before
+mounting `app_data` into `recovery-target`. The worker can perform arbitrary
+root repair through the authenticated target but cannot access the host control
+plane. Finishing recovery removes both recovery containers, recreates normal
+Mobius, and verifies `/api/health`.
 
-- **Reasoned repair:** `/recover/chat` runs a fresh Claude or Codex recovery
-  agent as root. Its runner, auth, pages, and per-chat JSONL history are frozen
-  recovery modules with zero `app.*` imports, so broken production chat code is
-  not in the recovery dependency chain. The root filesystem remains read-only;
-  the agent can repair `/data/platform` and owner data but cannot rewrite its
-  own lifeboat.
-- **Deterministic floor:** `Restore platform` resets uncommitted changes in the
-  served clone; `Reset to baked floor` quarantines the clone and atomically
-  reseeds it from `/app/platform-baked`. recoveryd writes
-  `.recover-pending` before `.platform-restart-requested`; the platform
-  entrypoint consumes those files as root and its poller cycles pid 1 without a
-  Docker socket.
-
-Recovery auth normally reads the owner bcrypt hash through raw SQLite and falls
-back to `/data/.recovery-owner.json` only when the DB is unreadable. The
-platform writes that seed after owner setup, refreshes it idempotently at boot,
-and deletes it on factory reset. Recovery session HMAC state and an optional
-self-updated recovery bundle live on the recoveryd-only `/recovery-live`
-volume. An update is cloned only from the pinned recovery repository, hardened
-root-owned, syntax-checked, and atomically swapped; a persisted three-attempt
-guard quarantines a trusted live bundle that crash-loops back to the baked
-floor.
+Every self-host lifecycle action takes one bounded installation lock.
+`scripts/mobiusctl update` refuses while isolated recovery state/services are
+present, recreates the normal stack, and passes health before retiring the old
+embedded `mobius-recoveryd`. Recovery start/reopen performs the same retirement
+after the external services launch. Cleanup is never a broad orphan sweep: the
+helper resolves the current app's Compose project and removes only the exact
+`mobius-recoveryd` name with matching project and `recoveryd` service labels.
+An identity mismatch leaves the old container untouched for operator review.
 
 Normal platform boot serves `/data/platform/backend` directly after an import
 probe. It fetches `origin/main`, commits stray local edits, and rebases them onto
@@ -1006,7 +1019,7 @@ export, and writer commands continue to use the full transcript.
 - **Questions commit-before-broadcast:** a question row is durable before its SSE push fires, so a reconnect's catch-up burst always finds it.
 - **Concurrency invariant:** ack `Future`s are NEVER resolved while a producer lock is held — collect `(ack, value)` under the lock, resolve after release — so even a synchronous done-callback that re-enters `submit()`/`stop()` can't deadlock. Do not move an ack resolution back inside a `with` block.
 
-**GUARDRAIL — never write `Chat.messages` / `Chat.live_assistant` / `Chat.pending_messages` directly** from a request handler or SDK runner. SQLite WAL serializes commits but NOT the app-level JSON snapshot READ: two readers both see the pre-write snapshot and one silently overwrites the other (the lost-update race the actor closes). The only justified direct writer is `reconcile_interrupted_chats` (`chat.py`, runs at boot before the actor starts); `recovery_chat_runner.py` is actor-independent by design and appends to its own `/data/recovery/chats/<chat_id>.jsonl`, not the `Chat.messages` column.
+**GUARDRAIL — never write `Chat.messages` / `Chat.live_assistant` / `Chat.pending_messages` directly** from a request handler or SDK runner. SQLite WAL serializes commits but NOT the app-level JSON snapshot READ: two readers both see the pre-write snapshot and one silently overwrites the other (the lost-update race the actor closes). The only justified direct writer is `reconcile_interrupted_chats` (`chat.py`, runs at boot before the actor starts); all runtime writes otherwise pass through the actor.
 
 ## Multi-pane workspace
 
@@ -1105,7 +1118,7 @@ they race the shell's indexed cursor and break Safari's source-state fallback.
 
 ## Service worker + offline
 
-Möbius uses one root-scoped service worker, `frontend/src/sw.js`, to keep shell and mini-app navigations same-origin when offline. The shell route is the Workbox app-shell path: `NavigationRoute(createHandlerBoundToURL('/index.html'))` serves the precached shell, with `/apps/`, `/app-assets/`, `/app-embeds/`, `/recover`, `/shell/embed`, `/sites`, and selected published-style paths denied so backend-owned documents don't become the SPA by accident. Mini-app code is split from that shell path: `/api/apps/{id}/frame` and `/api/apps/{id}/module` match `isAppCodeRoute()` and go through `appCodeHandler(OFFLINE_APPS_CACHE, { gated: false })` — frame/module caching is deliberately NOT gated by `offline_capable`. Standalone `/apps/<slug>/` navigations use the same handler with `gated: true`: only a `200` carrying `X-Mobius-Offline: 1` is stored; a headerless `200` purges the standalone entry. The server sets that header for `offline_capable` apps in `routes/app_runtime.py:get_frame`/`get_module` and `routes/standalone.py:standalone_shell`.
+Möbius uses one root-scoped service worker, `frontend/src/sw.js`, to keep shell and mini-app navigations same-origin when offline. The shell route is the Workbox app-shell path: `NavigationRoute(createHandlerBoundToURL('/index.html'))` serves the precached shell, with `/apps/`, `/app-assets/`, `/app-embeds/`, `/shell/embed`, `/sites`, and selected published-style paths denied so backend-owned documents don't become the SPA by accident. Mini-app code is split from that shell path: `/api/apps/{id}/frame` and `/api/apps/{id}/module` match `isAppCodeRoute()` and go through `appCodeHandler(OFFLINE_APPS_CACHE, { gated: false })` — frame/module caching is deliberately NOT gated by `offline_capable`. Standalone `/apps/<slug>/` navigations use the same handler with `gated: true`: only a `200` carrying `X-Mobius-Offline: 1` is stored; a headerless `200` purges the standalone entry. The server sets that header for `offline_capable` apps in `routes/app_runtime.py:get_frame`/`get_module` and `routes/standalone.py:standalone_shell`.
 
 `appCodeHandler()` normalizes the cache key by stripping `token`/`_`/`install` but KEEPING `v`; freshness rides `?v=<app.updated_at>` becoming a new key, not a connectivity probe. Once a versioned entry exists, `shouldServeCacheFirst()` serves it immediately while `event.waitUntil()` refreshes in the background. Cold paths and refreshes use `cache: 'reload'` through `boundedFetch()` so browser HTTP-cache revalidation can't hand the SW a bodyless `304` (`NET_TIMEOUT_MS` is a 3000ms hang guard, not a latency knob). `appCodeStoreAction()` is the storage policy: ungated frame/module stores every `200`, gated standalone stores only `X-Mobius-Offline: 1`, all non-`200` ignored; `applyAppCodeStore()` tolerates quota failures and deletes superseded same-route entries with a different `v`.
 

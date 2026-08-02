@@ -29,8 +29,6 @@ services:
       args:
         BUILD_SHA: ${BUILD_SHA:-unknown}
         BUILD_DATE: ${BUILD_DATE:-unknown}
-    # Tag the built image so the recoveryd service can reuse the SAME image
-    # (no second build, shared layers) rather than rebuilding the context.
     image: ${MOBIUS_IMAGE:-mobius}
     container_name: mobius
     init: true
@@ -51,9 +49,13 @@ services:
       - GITHUB_OAUTH_CLIENT_ID=${GITHUB_OAUTH_CLIENT_ID:-Ov23liMpOLS6qp5YV8Vk}
       - DATABASE_URL=sqlite:////data/db/ultimate.db
       - DATA_DIR=/data
-      # Full root is opt-in because it persists for the lifetime of this
-      # container. Set MOBIUS_AGENT_SUDO=1 only after the owner confirms.
-      - MOBIUS_AGENT_SUDO=${MOBIUS_AGENT_SUDO:-0}
+      # The normal in-product agent has full root by default. Set this to 0 as
+      # an operator kill switch; recovery mode never installs the sudo rule.
+      - MOBIUS_AGENT_SUDO=${MOBIUS_AGENT_SUDO:-1}
+      # This cutover is released from a protected stack branch while public
+      # main remains on the compatibility image. The image-owned updater
+      # fetches this full ref but reconciles only to its exact baked SHA.
+      - MOBIUS_PLATFORM_RELEASE_REF=${MOBIUS_PLATFORM_RELEASE_REF:-refs/heads/stack/external-recovery-v1}
     volumes:
       - app_data:/data
     expose:
@@ -64,9 +66,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 20s
-    # Cap the platform's memory so a leak can't starve the host into OOM-killing
-    # the recovery floor; pairs with recoveryd's kill-last oom_score_adj below
-    # (Codex HIGH; plan _148 1.6). Env-overridable for bigger/smaller hosts.
+    # Env-overridable cap for larger or smaller self-hosted machines.
     mem_limit: ${MOBIUS_APP_MEM_LIMIT:-6g}
     oom_score_adj: 200
 
@@ -100,6 +100,8 @@ services:
       - DATA_DIR=/data
     volumes:
       - app_data:/data
+    networks:
+      - recovery_private
     expose:
       - "18002"
     # The image's ordinary unauthenticated /api/health probe must not run in
@@ -134,113 +136,19 @@ services:
       - MOBIUS_RECOVERY_SECURE_COOKIE=0
     ports:
       - "127.0.0.1:${MOBIUS_RECOVERY_PORT:-18003}:8000"
+    networks:
+      - recovery_private
     depends_on:
       recovery-target:
         condition: service_started
-
-  # Frozen recovery floor (recoveryd) — its OWN container so a broken or
-  # crash-looping platform cannot take recovery down (different cgroup,
-  # different pid1). Same image as `app`, different command + its own
-  # `restart: unless-stopped`. Mounts the SAME app_data volume so it can write
-  # /data/.recover-pending + /data/.platform-restart-requested, which the
-  # platform container's entrypoint poller (O1) acts on to git-restore and
-  # restart. Imports zero app.* code; self-checks its frozen bundle at startup.
-  #
-  # recoveryd is the SOLE recovery surface — the in-process `/recover`
-  # implementation has been retired. Both fronts route `/recover*` here:
-  # in prod the external edge proxy proxies `/recover*` ->
-  # recoveryd:8001 (recoveryd joins the deploy network so Caddy can reach
-  # it), and the bundled Caddy (`Caddyfile`) routes it with a
-  # `handle /recover* { reverse_proxy recoveryd:8001 }` block ahead of its
-  # catch-all `reverse_proxy app:8000`. `expose` withholds a host port; it
-  # is NOT an access-control boundary (recoveryd enforces auth + cross-site
-  # checks on every request).
-  recoveryd:
-    build:
-      context: .
-      args:
-        BUILD_SHA: ${BUILD_SHA:-unknown}
-        BUILD_DATE: ${BUILD_DATE:-unknown}
-    image: ${MOBIUS_IMAGE:-mobius}
-    container_name: mobius-recoveryd
-    init: true
-    restart: unless-stopped
-    # GUARDRAIL: the recovery agent runs as full root, but recoveryd's root
-    # filesystem is READ-ONLY, so even root gets EROFS trying to write
-    # recovery's OWN code (/app, /app/recovery) — sudo overrides permissions
-    # but not a read-only mount. The agent keeps unlimited power over the
-    # WRITABLE surfaces (the /data + /recovery-live volumes = the platform it
-    # must fix) plus tmpfs scratch, and physically cannot corrupt its own
-    # lifeboat. Kernel-enforced, not by trust.
-    read_only: true
-    # Drop CAP_SYS_ADMIN so a full-root agent can't remount the
-    # read-only recovery floor back to writable — makes the lockdown airtight.
-    cap_drop:
-      - SYS_ADMIN
-    tmpfs:
-      - /tmp
-      - /run
-    command: ["python3", "-P", "/app/recovery/recoveryd.py"]
-    # recoveryd serves on 8001, not the app's 8000. Without this override it
-    # inherits the image HEALTHCHECK (curl :8000/api/health), can never reach it,
-    # and reports `unhealthy` forever even though /recover answers fine. Nothing
-    # depends on this status, but a recovery floor showing "unhealthy" is alarming.
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8001/recover/health || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    environment:
-      - DATA_DIR=/data
-      # Writable HOME on tmpfs: under read_only:true the default root HOME is
-      # read-only, and the agent's Claude/Codex CLI needs a writable home for
-      # its cache. Config still lives under /data (CLAUDE_CONFIG_DIR/CODEX_HOME).
-      - HOME=/tmp
-      - DATABASE_URL=sqlite:////data/db/ultimate.db
-      - RECOVERY_PORT=8001
-      - RECOVERY_PLATFORM_HEALTH_URL=http://app:8000/api/health
-      # Root of recoveryd's PRIVATE live-copy store (the recovery_live volume
-      # below). Kept OFF /data deliberately — see the volume comment.
-      - RECOVERY_LIVE_ROOT=/recovery-live
-      # Set RECOVERY_ALLOWED_HOSTS to the public DOMAIN at cutover so the
-      # Origin fallback check is active for clients without Sec-Fetch-Site.
-      - RECOVERY_ALLOWED_HOSTS=${DOMAIN:-}
-    volumes:
-      # nocopy is load-bearing — see the same option on recoveryd in
-      # docker-compose.test.yml for the full rationale. recoveryd shares the
-      # fresh app_data volume with `app`; the image bakes /data/db etc., so on
-      # a FRESH volume both containers race on the image->volume copy-up
-      # (`mkdir _data/db` -> "file exists") and one fails to start. This is
-      # latent on an existing prod deploy (populated volume = no copy-up) but
-      # bites exactly when it must not: first boot, and after a recovery
-      # factory-reset WIPES the volume — the container would fail to come back
-      # up. nocopy makes `app` the sole populator; recoveryd needs no /data at
-      # boot, and stays independent of app startup (the recovery floor's whole
-      # point), so no depends_on.
-      - app_data:/data:nocopy
-      # recoveryd's PRIVATE live-copy store, mounted into THIS service ONLY —
-      # the `app` (agent) container never mounts it. The self-updating floor
-      # pulls the latest recovery here, root-owned, and execs it. Because the
-      # agent (a non-root user with write access to /data) has NO filesystem
-      # path to this volume, it cannot rename, unlink, or swap the live copy
-      # between recoveryd's trust check and its exec — which is what closes the
-      # root-escalation rename race that an agent-writable parent (/data) would
-      # otherwise allow. Do NOT add this mount to the `app` service.
-      - recovery_live:/recovery-live
-    expose:
-      - "8001"
-    # Protect the recovery floor from the host OOM-killer (earlyoom is active):
-    # kill-last, so a platform leak / heavy swap sacrifices the app + the rescue
-    # child before recoveryd is ever selected (Codex HIGH; plan _148 1.6).
-    oom_score_adj: -900
 
 volumes:
   caddy_data:
   caddy_config:
   app_data:
-  # recoveryd's private live-copy store — mounted into the recoveryd service
-  # ONLY (never `app`). Keeping the pulled live recovery off the agent-writable
-  # /data volume is what makes it un-swappable by the agent (root-escalation
-  # TOCTOU close).
-  recovery_live:
+
+networks:
+  # Separate L2 segment for the bearer-authenticated target protocol. It still
+  # has ordinary outbound NAT so the reasoning worker can call its provider,
+  # but Caddy and the normal app never join it.
+  recovery_private:

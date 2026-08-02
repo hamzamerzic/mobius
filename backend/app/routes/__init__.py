@@ -1,19 +1,19 @@
 """Route registry — crash-tolerant import scaffold.
 
 `main.py` does a single `from app.routes import (...)` for its router names.
-A `SyntaxError` (or any other ImportError) in any one of those
-unprotected route modules would otherwise kill uvicorn at boot and
-take the always-reachable `/recover/chat` endpoint down with it.
+A `SyntaxError` (or any other ImportError) in any one of those unprotected route
+modules would otherwise kill uvicorn at boot instead of leaving the remaining
+owner API available.
 
 The defense lives here, in the one place that decides what gets
 exposed. Each router is loaded through `_load(name)`: on success
 we return the module's real `router`; on any import failure we log
-loudly and return a stub `APIRouter` that 503s every path with a
-message pointing at `/recover/chat`. The frozen `main.py` keeps
-importing cleanly because every expected name still exists.
+loudly and return a stub `APIRouter` that 503s every path with an actionable
+message. `main.py` keeps importing cleanly because every expected
+name still exists.
 
-This file is itself frozen (see `protected-files.txt`) — it must
-be unbreakable for the scaffold to be meaningful.
+Keep this registry deliberately small. If the editable copy itself breaks, the
+root-owned entrypoint's import probe selects the baked platform fallback.
 """
 
 import logging
@@ -37,7 +37,7 @@ def _load(name: str) -> APIRouter:
     stub = APIRouter()
     detail = (
       f"Router '{name}' failed to load at boot. "
-      f"Use /recover/chat to repair."
+      "Use the deployment's external Recovery action to repair it."
     )
 
     @stub.api_route(

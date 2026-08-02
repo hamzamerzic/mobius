@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { api, setToken, BASE } from '../../api/client.js'
+import { api, setToken } from '../../api/client.js'
 import './LoginForm.css'
 
 export default function LoginForm({ onLogin }) {
@@ -91,10 +91,8 @@ export default function LoginForm({ onLogin }) {
           </button>
         </form>
         <p className="login__hint">
-          The{' '}
-          <a href={`${BASE}/recover`} target="_blank" rel="noopener noreferrer">recovery page</a>
-          {' '}lets you restore a backup or reset the app — but it requires the same password.
-          If you've forgotten your password, you'll need to access the server directly to reset the database.
+          If you've forgotten your password, use your deployment's Recovery
+          action or ask the self-hosted server operator to start recovery.
         </p>
       </div>
     </div>

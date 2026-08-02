@@ -100,19 +100,7 @@ jobs:
         working-directory: backend
         run: >-
           pytest -q --durations=25
-          --ignore=tests/test_recoveryd.py
-          --ignore=tests/test_recovery_launcher.py
-          --ignore=tests/test_recovery_throttle.py
-          --ignore=tests/test_recovery_update.py
           --cov=app --cov-report=term:skip-covered --cov-fail-under=83
-      - name: Test the independent recovery service
-        working-directory: backend/recovery
-        run: >-
-          python -m pytest --noconftest -q
-          ../tests/test_recoveryd.py
-          ../tests/test_recovery_launcher.py
-          ../tests/test_recovery_throttle.py
-          ../tests/test_recovery_update.py
 
   frontend-unit:
     # Wires up the node:test unit suite that lives under

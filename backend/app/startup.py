@@ -1,9 +1,9 @@
 """Named, ordered startup tasks for the owner-facing service.
 
-The recovery surface requires most reconciliation work to fail open, while
-database initialization remains boot-critical. This module makes that ordering
-and criticality explicit without turning startup into a plugin system: the task
-list is fixed application code and every task is an ordinary function.
+Most reconciliation work fails open while database initialization remains
+boot-critical. This module makes that ordering and criticality explicit without
+turning startup into a plugin system: the task list is fixed application code
+and every task is an ordinary function.
 """
 
 from __future__ import annotations
@@ -268,13 +268,6 @@ async def _install_bootstrap_apps(context: StartupContext) -> None:
     await ensure_bootstrap_apps_installed(db)
 
 
-def _sync_recovery_owner_seed(_context: StartupContext) -> None:
-  from app import recovery_seed
-
-  with SessionLocal() as db:
-    recovery_seed.sync_owner_seed(db)
-
-
 def _backfill_app_source_dirs(context: StartupContext) -> None:
   from app import models
 
@@ -376,7 +369,6 @@ STARTUP_TASKS = (
     _install_bootstrap_apps,
     checkpoint="startup_apps_bootstrapped",
   ),
-  StartupTask("sync recovery owner seed", _sync_recovery_owner_seed),
   StartupTask("backfill app source directories", _backfill_app_source_dirs),
   StartupTask(
     "reconcile app cron supervision",

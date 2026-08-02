@@ -40,13 +40,12 @@ test('shell app navigation does not intercept top-level app-like routes', () => 
   assert.equal(denied('/shell/'), false)
   assert.equal(denied('/shell/chat/abc'), false)
   assert.equal(denied('/apps/cuberun/'), true)
-  assert.equal(denied('/recover/chat'), true)
 })
 
 test('shell embed navigation reaches the server, not the non-injected precache', () => {
   // The embed renders OUTSIDE Shell and needs the server-injected theme
   // block on its FIRST paint; the precached index.html omits that block,
-  // so /shell/embed/* must be denylisted (mirrors how /recover is handled).
+  // so /shell/embed/* must be denylisted.
   const denied = isShellNavigationDenied
 
   assert.equal(denied('/shell/embed/chat'), true)
@@ -86,9 +85,6 @@ test('server-owned and standalone navigations never catch-fallback to shell', ()
     '/api/health',
     '/api/chats/demo',
     '/api?source=browser',
-    '/recover',
-    '/recover/chat',
-    '/recover?source=notification',
     '/shell/embed',
     '/shell/embed/chat',
     '/shell/embed?chat=demo',

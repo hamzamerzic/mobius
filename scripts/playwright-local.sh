@@ -143,13 +143,11 @@ if [[ "$keep_cache" == "0" ]]; then
 fi
 app_container="${project}-app"
 caddy_container="${project}-caddy"
-recovery_container="${project}-recoveryd"
 free_port() {
   python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
 }
 test_publish_port="${TEST_PORT:-$(free_port)}"
 internal_publish_port="${INTERNAL_TEST_PORT:-$(free_port)}"
-recovery_publish_port="${RECOVERY_TEST_PORT:-$(free_port)}"
 run_dir="$(mktemp -d "${TMPDIR:-/tmp}/mobius-local-e2e.XXXXXX")"
 snapshot_dir="$run_dir/source"
 auth_file="$run_dir/auth-state.json"
@@ -161,11 +159,9 @@ compose() {
   # standalone snapshot, so keep the baked fallback unstamped for local runs.
   MOBIUS_CONTAINER="$app_container" \
   MOBIUS_CADDY_CONTAINER="$caddy_container" \
-  MOBIUS_RECOVERYD_CONTAINER="$recovery_container" \
   MOBIUS_IMAGE="$image_name" \
   TEST_PORT="$test_publish_port" \
   INTERNAL_TEST_PORT="$internal_publish_port" \
-  RECOVERY_TEST_PORT="$recovery_publish_port" \
   BUILD_SHA=unknown \
   GITHUB_SHA="$head_sha" \
     docker compose -p "$project" -f "$snapshot_dir/docker-compose.test.yml" \
@@ -214,15 +210,14 @@ else
   echo "Build cache retention disabled for this run."
 fi
 if ! compose up -d; then
-  compose logs --tail 200 app caddy recoveryd || true
+  compose logs --tail 200 app caddy || true
   echo "error: isolated test stack failed to start" >&2
   exit 1
 fi
 test_port="$(docker port "$caddy_container" "$test_publish_port/tcp" | tail -1 | awk -F: '{print $NF}')"
 internal_test_port="$(docker port "$app_container" 8000/tcp | tail -1 | awk -F: '{print $NF}')"
-recovery_test_port="$(docker port "$recovery_container" 8001/tcp | tail -1 | awk -F: '{print $NF}')"
-if [[ -z "$test_port" || -z "$internal_test_port" || -z "$recovery_test_port" ]]; then
-  echo "error: Docker did not publish the isolated proxy, backend, and recovery ports" >&2
+if [[ -z "$test_port" || -z "$internal_test_port" ]]; then
+  echo "error: Docker did not publish the isolated proxy and backend ports" >&2
   exit 1
 fi
 
@@ -288,7 +283,6 @@ if CI= \
    MOBIUS_AUTH_FILE="$auth_file" \
    MOBIUS_CONTAINER="$app_container" \
    MOBIUS_URL="http://localhost:${test_port}" \
-   MOBIUS_RECOVER_URL="http://localhost:${recovery_test_port}" \
    MOBIUS_TEST_INTERNAL_API="http://127.0.0.1:${internal_test_port}" \
    MOBIUS_USER=admin \
    MOBIUS_PASS=admin \
@@ -308,7 +302,7 @@ for result_dir in test-results playwright-report; do
     cp -a "$snapshot_dir/$result_dir" "$artifact_dir/"
   fi
 done
-compose logs --no-color app caddy recoveryd fake-tandoor \
+compose logs --no-color app caddy fake-tandoor \
   >"$artifact_dir/stack.log" 2>&1 || true
 echo "Local E2E artifacts retained at: $artifact_dir" >&2
 exit "$test_rc"

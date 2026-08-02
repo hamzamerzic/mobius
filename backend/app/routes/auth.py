@@ -199,13 +199,6 @@ def setup(
     _write_service_token(owner.username, owner.token_epoch)
   except OSError as exc:
     log.warning("Could not write service token: %s", exc)
-  # Mirror the owner credential to the DB-independent recovery seed so the
-  # recovery floor can still authenticate the owner if the database is later
-  # wiped or corrupted. Written only now — after the owner row is committed —
-  # so the seed can never authenticate before an owner exists. Best-effort:
-  # recovery_seed swallows its own errors.
-  from app import recovery_seed
-  recovery_seed.write_owner_seed(owner.username, owner.hashed_password)
   token = auth.create_access_token(
     {"sub": owner.username}, token_epoch=owner.token_epoch
   )
@@ -345,7 +338,7 @@ async def complete_managed_sso(
       username=username,
       # Managed accounts have no default local password. A random unreachable
       # hash keeps the legacy non-null schema and password endpoint inert until
-      # an explicit recovery credential is added in Settings.
+      # an explicit local-login credential is added in Settings.
       hashed_password=auth.hash_password(secrets.token_urlsafe(64)),
       sso_subject=subject,
       sso_email=email,
@@ -467,9 +460,6 @@ def login(
     except SQLAlchemyError as exc:
       db.rollback()
       log.warning("Could not upgrade legacy owner password hash: %s", exc)
-    else:
-      from app import recovery_seed
-      recovery_seed.write_owner_seed(owner_username, owner.hashed_password)
   _reset_login_failures(form.username)
   token = auth.create_access_token(
     {"sub": owner_username}, token_epoch=owner_token_epoch
@@ -795,7 +785,7 @@ async def providers_models(
   preferences are still honored so app pickers match the chat picker.
 
   Accepts owner OR app-scoped tokens — mini-app Settings tabs (news
-  picker, Reflection Settings, recovery chat picker) need this list to
+  picker and Reflection Settings) need this list to
   render real choices. Rejecting app tokens here was the silent reason
   those pickers fell back to FALLBACK_GROUPS (one model per provider).
   This is a read; no state changes and no cross-app concerns — the

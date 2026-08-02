@@ -50,8 +50,9 @@ export default class ErrorBoundary extends Component {
   }
 
   componentDidCatch(error, info) {
-    // Record through the shared client-error log (console + ring buffer the
-    // recovery surface can read), same sink the global window handlers use.
+    clearTimeout(this.stableTimer)
+    // Record through the shared client-error log (console + owner-readable ring
+    // buffer), same sink the global window handlers use.
     recordClientError({
       where: this.props.label || 'app',
       message: error?.message || error,
