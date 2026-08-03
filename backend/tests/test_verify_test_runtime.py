@@ -139,19 +139,24 @@ def test_node_runtime_satisfies_the_pinned_agent_browser_engine():
   dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
   preship = (ROOT / "scripts" / "preship-gate.sh").read_text(encoding="utf-8")
   assert "FROM node:24-trixie-slim AS node-runtime" in dockerfile
-  assert re.search(
-    r"^ARG AGENT_BROWSER_VERSION=\d+\.\d+\.\d+$", dockerfile, re.MULTILINE,
-  )
-  assert dockerfile.count("agent-browser@${AGENT_BROWSER_VERSION}") == 2
-  assert (
-    '--allow-scripts="esbuild@0.28.1,@anthropic-ai/claude-code@2.1.220,'
-    'agent-browser@${AGENT_BROWSER_VERSION}"'
-  ) in dockerfile
-  assert dockerfile.count("--engine-strict --strict-allow-scripts") == 3
+  pinned_script_packages = {
+    "esbuild": "ESBUILD_VERSION",
+    "@anthropic-ai/claude-code": "CLAUDE_CODE_VERSION",
+    "agent-browser": "AGENT_BROWSER_VERSION",
+  }
+  for version_argument in pinned_script_packages.values():
+    assert re.search(
+      rf"^ARG {version_argument}=\d+\.\d+\.\d+$",
+      dockerfile,
+      re.MULTILINE,
+    )
   apt_layer = dockerfile[
     dockerfile.index("# System deps and global npm packages"):
     dockerfile.index("# tectonic is a server-side subprocess")
   ]
+  for package, version_argument in pinned_script_packages.items():
+    assert apt_layer.count(f"{package}@${{{version_argument}}}") == 2
+  assert "--engine-strict --strict-allow-scripts" in apt_layer
   for package in ("jq", "ripgrep", "sqlite3", "unzip"):
     assert re.search(rf"\b{package}\b", apt_layer)
   assert "node:24-trixie-slim sh -c" in preship
