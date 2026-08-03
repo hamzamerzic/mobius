@@ -403,6 +403,47 @@ def test_update_dropping_skill_retires_and_releases_record(
   assert retired.read_text() == SKILL_V1
 
 
+def test_dropped_skill_record_stays_released_when_remaining_skill_is_skipped(
+  client, auth, bypass_url_validation,
+):
+  first = _install(
+    client,
+    auth,
+    _skill_manifest(
+      skills=["contributing.md", "remaining.md"],
+      source_files=["contributing.md", "remaining.md"],
+    ),
+    {
+      "index.jsx": JSX,
+      "contributing.md": SKILL_V1,
+      "remaining.md": "# remaining v1\n",
+    },
+  )
+  assert first.status_code == 201, first.text
+
+  big = "x" * (256 * 1024 + 1)
+  update = _install(
+    client,
+    auth,
+    _skill_manifest(
+      version="2.0.0",
+      skills=["remaining.md"],
+      source_files=["remaining.md"],
+    ),
+    {"index.jsx": JSX, "remaining.md": big},
+  )
+
+  assert update.status_code == 201, update.text
+  assert any("remaining.md: exceeds" in w for w in update.json()["warnings"])
+  assert "contributing.md" not in _sidecar()
+  assert "remaining.md" in _sidecar()
+  retired = (
+    _skills_dir() / ".inactive" / str(first.json()["id"])
+    / "retired" / "contributing.md"
+  )
+  assert retired.read_text() == SKILL_V1
+
+
 def test_oversized_skill_is_skipped_with_warning(
   client, auth, bypass_url_validation,
 ):
@@ -415,7 +456,7 @@ def test_oversized_skill_is_skipped_with_warning(
     "contributing.md: exceeds" in w for w in r.json()["warnings"]
   ), r.json()["warnings"]
   assert not (_skills_dir() / "contributing.md").exists()
-  assert not (_skills_dir() / ".app-skills.json").exists()
+  assert _sidecar() == {}
 
 
 # --- clone path: skills read from the FINAL on-disk tree --------------------

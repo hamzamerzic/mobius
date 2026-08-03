@@ -1301,14 +1301,14 @@ async def _sync_app_skills(
         sidecar_path,
         json.dumps(records, indent=2, sort_keys=True) + "\n",
       )
-    # Persist a drop-only reconciliation too (the per-file writes above cover
-    # every non-empty desired set).
-    if not skills:
-      skills_dir.mkdir(parents=True, exist_ok=True)
-      atomic_write(
-        sidecar_path,
-        json.dumps(records, indent=2, sort_keys=True) + "\n",
-      )
+    # Persist the final reconciliation too: a non-empty desired set can still
+    # skip every file, and removals above must not be retried forever. Keep the
+    # per-file writes for crash safety between successful materializations.
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write(
+      sidecar_path,
+      json.dumps(records, indent=2, sort_keys=True) + "\n",
+    )
     # The skill set changed (or may have) — refresh the generated tier-1 index
     # INSIDE the lock. Regenerating after release let a concurrent direct
     # install/uninstall's newer index be overwritten by this writer's stale
