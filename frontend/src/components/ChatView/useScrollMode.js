@@ -1935,6 +1935,7 @@ export default function useScrollMode({
         )
         if (released !== modeRef.current) {
           transitionMode(released, 'layout:question-viewport-release')
+          persistMode()
         }
       }
       // Releasing the submitted-question overlay is a semantic state change,
@@ -1950,11 +1951,6 @@ export default function useScrollMode({
         // A viewport resize is geometry, not reading intent. Reapply the mode
         // that already owns the chat instead of deriving a different mode from
         // the browser's intermediate clamp.
-        transitionMode(
-          modeRef.current,
-          'layout:viewport-change',
-        )
-        persistMode()
         applyLayoutMode('layout:viewport-change', authorityVersion)
       } else if (forceApply) {
         writeMode(

@@ -727,8 +727,13 @@ test('anchor reapply is inert for non-anchor modes and unresolved keys', () => {
 test('viewport resize reapplies the current mode without reclassifying it', () => {
   assert.match(
     scrollModeSource,
-    /transitionMode\(\s*modeRef\.current,\s*'layout:viewport-change'/,
+    /applyLayoutMode\('layout:viewport-change', authorityVersion\)/,
     'keyboard geometry keeps the existing pin, follow, or exact anchor',
+  )
+  assert.doesNotMatch(
+    scrollModeSource,
+    /transitionMode\(\s*modeRef\.current,\s*'layout:viewport-change'/,
+    'geometry must not manufacture a semantic no-op transition',
   )
   assert.doesNotMatch(
     scrollModeSource,
