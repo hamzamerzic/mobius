@@ -25,6 +25,7 @@ import urllib.request
 DB_PATH = "/data/db/ultimate.db"
 MEM_STATE = "/data/shared/memory/app-state"
 MEM_RUN_STATUS = os.path.join(MEM_STATE, "run-status.json")
+MEM_RUN_LOG = os.path.join(MEM_STATE, "run-log")
 MEM_UPDATE_LOG = os.path.join(MEM_STATE, "update-log")
 MEM_READ_TRACE = os.path.join(MEM_STATE, "read-trace")
 MEM_RECALL_STATS = os.path.join(MEM_STATE, "recall-stats.json")
@@ -114,13 +115,6 @@ def parse_ts(value):
         return None
 
 
-def nonzero_exit(value):
-    try:
-        return int(value) != 0
-    except (TypeError, ValueError):
-        return True
-
-
 def short(text, width=64):
     text = " ".join(str(text or "").split())
     return text if len(text) <= width else text[: width - 1] + "…"
@@ -188,8 +182,9 @@ def section_memory(limit):
         dur = f"{(finished - started).total_seconds():.0f}s" if started and finished else "?"
         topo = (status.get("topology") or {})
         before, after = topo.get("before") or {}, topo.get("after") or {}
-        print(f"  status={status.get('status','?')}  model={status.get('model','?')}  "
-              f"provider={status.get('provider','?')}  new_commit={status.get('new_commit')}")
+        print(f"  run_id={status.get('run_id','?')}  status={status.get('status','?')}  "
+              f"model={status.get('model','?')}  provider={status.get('provider','?')}  "
+              f"new_commit={status.get('new_commit')}")
         print(f"  last run: started {status.get('started_at','?')}  ({dur})")
         if after:
             dn = _delta(after.get("nodes"), before.get("nodes"))
@@ -198,24 +193,13 @@ def section_memory(limit):
                   f"{after.get('edges','?')} edges ({de}) / {after.get('problems','?')} problems")
     if supervisor:
         print(
-            f"  supervisor: exit={supervisor.get('exit_code','?')}  "
+            "  outer scheduler receipt (not run-id linked): "
+            f"exit={supervisor.get('exit_code','?')}  "
             f"at={supervisor.get('ts','?')}  job={supervisor.get('job','?')}"
         )
-        status_at = parse_ts(
-            (status or {}).get("finished_at") or (status or {}).get("started_at")
-        )
-        supervisor_at = parse_ts(supervisor.get("ts"))
-        if (
-            supervisor_at
-            and (status_at is None or supervisor_at > status_at)
-            and nonzero_exit(supervisor.get("exit_code"))
-        ):
-            print(
-                "  WARNING: the latest scheduled attempt failed after the "
-                "current run-status; do not report Memory healthy."
-            )
     elif app:
-        print("  supervisor: (no canonical outcome recorded in the last 7 days)")
+        print("  outer scheduler receipt: (none recorded in the last 7 days)")
+    if status:
         queued = status.get("queued_chat_count")
         sourced = status.get("source_chat_count")
         starved = status.get("chat_input_starved")
@@ -239,7 +223,8 @@ def section_memory(limit):
     for e in entries:
         counts = e.get("counts") or {}
         ts = (e.get("timestamp") or "")[:16]
-        print(f"    {ts or '?':16}  changed={len(e.get('changed_paths') or [])}  "
+        print(f"    {ts or '?':16}  run={short(e.get('run_id'), 8):8}  "
+              f"changed={len(e.get('changed_paths') or [])}  "
               f"deleted={len(e.get('deleted_paths') or [])}  "
               f"problems={counts.get('problems','?')}  "
               f"followups={len(e.get('followups') or [])}  status={e.get('status','?')}")
@@ -303,6 +288,35 @@ def _read_json(path):
         return value if isinstance(value, dict) else None
     except (OSError, ValueError):
         return None
+
+
+def _memory_run_for_id(run_id):
+    """Return the terminal Memory receipt for one exact run identity."""
+    if not run_id or not os.path.isdir(MEM_RUN_LOG):
+        return None
+    for name in sorted(os.listdir(MEM_RUN_LOG), reverse=True):
+        if not name.endswith(".jsonl"):
+            continue
+        try:
+            with open(os.path.join(MEM_RUN_LOG, name)) as fh:
+                terminal = None
+                for line in fh:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if (
+                        isinstance(row, dict)
+                        and row.get("run_id") == run_id
+                        and row.get("status")
+                        in {"published", "failed", "degraded", "abandoned"}
+                    ):
+                        terminal = row
+        except OSError:
+            continue
+        if terminal is not None:
+            return terminal
+    return None
 
 
 def _read_text(path, limit=80_000):
@@ -394,11 +408,14 @@ def section_memory_writer_packet():
     outcome = outcomes[-1]
     run_id = outcome.get("run_id")
     audits = _recall_audits_for_run(run_id)
-    status = _read_json(MEM_RUN_STATUS)
-    app = installed_app("memory")
-    supervisor = (
-        latest_cron_outcome(app.get("id")) if isinstance(app, dict) else None
-    )
+    current_status = _read_json(MEM_RUN_STATUS)
+    status = _memory_run_for_id(run_id)
+    if (
+        status is None
+        and isinstance(current_status, dict)
+        and current_status.get("run_id") == run_id
+    ):
+        status = current_status
     skill = _read_text(MEMORY_SKILL)
     prompt_builder = _function_source(MEMORY_RUNNER, "_proposal_prompt")
 
@@ -410,13 +427,11 @@ def section_memory_writer_packet():
         print("  testimony=native writer self-review captured during the run")
     else:
         print("  testimony=unavailable; any later interview is a stateless reconstruction")
-    if status and status.get("run_id") != run_id:
+    if current_status and current_status.get("run_id") != run_id:
         print("  WARNING: current run-status belongs to a different run; "
               "the outcome below is the latest published writer outcome.")
-    print("\nLATEST RUN STATUS (operational input):")
+    print("\nMATCHED TERMINAL RUN RECEIPT:")
     print(json.dumps(status or {}, ensure_ascii=False, indent=2, sort_keys=True))
-    print("\nLATEST SUPERVISOR OUTCOME:")
-    print(json.dumps(supervisor or {}, ensure_ascii=False, indent=2, sort_keys=True))
     print("\nNATIVE WRITER SELF-REVIEWS:")
     print(json.dumps(native, ensure_ascii=False, indent=2, sort_keys=True))
     print("\nLATEST WRITER OUTCOME:")

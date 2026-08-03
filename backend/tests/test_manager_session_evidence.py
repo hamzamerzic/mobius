@@ -36,7 +36,7 @@ class ManagerSessionEvidenceTests(unittest.TestCase):
     self.assertIn("complete=0", output.getvalue())
     self.assertIn("legacy=7", output.getvalue())
 
-  def test_memory_section_never_calls_stale_status_healthy_after_newer_failure(self):
+  def test_memory_section_keeps_unmatched_scheduler_receipt_separate(self):
     with tempfile.TemporaryDirectory() as raw:
       root = Path(raw)
       status = root / "run-status.json"
@@ -69,8 +69,27 @@ class ManagerSessionEvidenceTests(unittest.TestCase):
       ):
         manager_evidence.section_memory(3)
 
-    self.assertIn("supervisor: exit=4", output.getvalue())
-    self.assertIn("do not report Memory healthy", output.getvalue())
+    rendered = output.getvalue()
+    self.assertIn("outer scheduler receipt (not run-id linked): exit=4", rendered)
+    self.assertNotIn("do not report Memory healthy", rendered)
+
+  def test_memory_run_lookup_returns_last_terminal_receipt_for_exact_run(self):
+    with tempfile.TemporaryDirectory() as raw:
+      run_log = Path(raw)
+      (run_log / "2026-07-20.jsonl").write_text("\n".join([
+        "not-json",
+        json.dumps({"run_id": "target", "status": "running"}),
+        json.dumps({"run_id": "other", "status": "failed"}),
+        json.dumps({"run_id": "target", "status": "published", "seq": 1}),
+        json.dumps({"run_id": "target", "status": "abandoned", "seq": 2}),
+      ]) + "\n")
+      with mock.patch.object(manager_evidence, "MEM_RUN_LOG", str(run_log)):
+        receipt = manager_evidence._memory_run_for_id("target")
+        missing = manager_evidence._memory_run_for_id("missing")
+
+    self.assertEqual(receipt["status"], "abandoned")
+    self.assertEqual(receipt["seq"], 2)
+    self.assertIsNone(missing)
 
   def test_reflection_section_marks_metric_backed_run_without_interview(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -167,7 +186,6 @@ class ManagerSessionEvidenceTests(unittest.TestCase):
       mock.patch.object(manager_evidence, "_read_update_log", return_value=[outcome]),
       mock.patch.object(manager_evidence, "_recall_audits_for_run", return_value=[]),
       mock.patch.object(manager_evidence, "_read_json", return_value={"run_id": "run-1"}),
-      mock.patch.object(manager_evidence, "installed_app", return_value=None),
       mock.patch.object(manager_evidence, "_read_text", return_value="skill"),
       mock.patch.object(manager_evidence, "_function_source", return_value="prompt"),
       mock.patch.object(manager_evidence, "_applied_memory_diff", return_value="diff"),
@@ -177,6 +195,47 @@ class ManagerSessionEvidenceTests(unittest.TestCase):
 
     self.assertIn("testimony=native writer self-review", output.getvalue())
     self.assertIn("Which route to shorten", output.getvalue())
+
+  def test_writer_packet_never_mixes_current_status_into_prior_outcome(self):
+    output = io.StringIO()
+    outcome = {"run_id": "published-run", "status": "published"}
+    historical = {
+      "run_id": "published-run",
+      "provider_summary": [{
+        "provider": "codex", "model": "historical",
+        "accepted": 5, "considered": 5, "failures": {},
+      }],
+      "pending_chat_count": 12,
+      "queued_chat_count": 40,
+      "deferred_chat_count": 2,
+    }
+    current = {
+      "run_id": "current-run",
+      "provider_summary": [{
+        "provider": "claude", "model": "current",
+        "accepted": 1, "considered": 9, "failures": {"invalid": 8},
+      }],
+      "pending_chat_count": 999,
+      "queued_chat_count": 100,
+      "deferred_chat_count": 90,
+    }
+    with (
+      mock.patch.object(manager_evidence, "_read_update_log", return_value=[outcome]),
+      mock.patch.object(manager_evidence, "_recall_audits_for_run", return_value=[]),
+      mock.patch.object(manager_evidence, "_read_json", return_value=current),
+      mock.patch.object(manager_evidence, "_memory_run_for_id", return_value=historical),
+      mock.patch.object(manager_evidence, "_read_text", return_value="skill"),
+      mock.patch.object(manager_evidence, "_function_source", return_value="prompt"),
+      contextlib.redirect_stdout(output),
+    ):
+      manager_evidence.section_memory_writer_packet()
+
+    rendered = output.getvalue()
+    self.assertIn('"provider": "codex"', rendered)
+    self.assertIn('"model": "historical"', rendered)
+    self.assertIn('"pending_chat_count": 12', rendered)
+    self.assertNotIn('"provider": "claude"', rendered)
+    self.assertNotIn('"pending_chat_count": 999', rendered)
 
 
 if __name__ == "__main__":
