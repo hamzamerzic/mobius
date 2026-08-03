@@ -69,9 +69,6 @@ async function main() {
       format: 'es',
       codeSplitting: false,
       minify: true,
-      // Function/Class.name is part of the existing mini-app contract: apps
-      // use component and loader names for labels, keys, and diagnostics.
-      keepNames: true,
       sourcemap: false,
       comments: { legal: true },
       // Ordinary banner comments are removed by Oxc minification. postBanner
