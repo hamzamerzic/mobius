@@ -136,10 +136,28 @@ def test_node_runtime_satisfies_the_pinned_agent_browser_engine():
   dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
   preship = (ROOT / "scripts" / "preship-gate.sh").read_text(encoding="utf-8")
   assert "FROM node:24-trixie-slim AS node-runtime" in dockerfile
-  assert "agent-browser@0.31.1" in dockerfile
+  assert (
+    "npm install -g --allow-scripts=agent-browser@0.33.2 "
+    "agent-browser@0.33.2"
+  ) in dockerfile
+  assert "git jq ripgrep sqlite3 sudo unzip" in dockerfile
   assert "node:24-trixie-slim sh -c" in preship
   assert "node:22" not in dockerfile
   assert "node:22" not in preship
+
+
+def test_tectonic_release_is_verified_for_supported_image_architectures():
+  dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+  tectonic_layer = dockerfile[
+    dockerfile.index("ARG TECTONIC_VERSION=0.17.0"):
+    dockerfile.index("# GitHub CLI:")
+  ]
+
+  assert "TECTONIC_SHA256_AMD64=" in tectonic_layer
+  assert "TECTONIC_SHA256_ARM64=" in tectonic_layer
+  assert "amd64) target=x86_64" in tectonic_layer
+  assert "arm64) target=aarch64" in tectonic_layer
+  assert 'echo "${sha256}  /tmp/${tarball}" | sha256sum -c -' in tectonic_layer
 
 
 def test_image_deduplicates_agent_cli_payloads_without_breaking_sdk_contracts():

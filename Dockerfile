@@ -37,7 +37,7 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 # agent-browser looks by default).
 #
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    cron curl ca-certificates git sudo procps util-linux age \
+    cron curl ca-certificates git jq ripgrep sqlite3 sudo unzip procps util-linux age \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
     libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
@@ -45,7 +45,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && npm install -g esbuild@0.28.1 \
     && npm install -g @anthropic-ai/claude-code@2.1.220 \
     && npm install -g @openai/codex@0.146.0 \
-    && npm install -g agent-browser@0.31.1 \
+    && npm install -g --allow-scripts=agent-browser@0.33.2 agent-browser@0.33.2 \
     && agent-browser install \
     && mv /root/.agent-browser /opt/agent-browser \
     && git_version="$(git --version | awk '{print $3}')" \
@@ -57,9 +57,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # browser fetches from the mini-app iframe, not OS-level subprocesses — tectonic's
 # package fetches (from Tectonic's bundle server) are unrestricted at the OS level.
 # Placed after the apt-get layer so a tectonic version bump doesn't bust the apt cache.
-ARG TECTONIC_VERSION=0.16.9
-RUN curl -fsSL "https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%40${TECTONIC_VERSION}/tectonic-${TECTONIC_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
-    | tar xz -C /usr/local/bin/ tectonic && chmod +x /usr/local/bin/tectonic && tectonic --version
+ARG TECTONIC_VERSION=0.17.0
+ARG TECTONIC_SHA256_AMD64=8533d07f9ccbd7a65824b9e0459041bca34af1eb33daba48f59215593753a3b7
+ARG TECTONIC_SHA256_ARM64=b10954a95404f3ab2328d2fa59a5ebab8e657f893fab096f98be8db7c0c979b8
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) target=x86_64; sha256="$TECTONIC_SHA256_AMD64" ;; \
+      arm64) target=aarch64; sha256="$TECTONIC_SHA256_ARM64" ;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    tarball="tectonic-${TECTONIC_VERSION}-${target}-unknown-linux-musl.tar.gz"; \
+    base="https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%40${TECTONIC_VERSION}"; \
+    curl -fsSL "${base}/${tarball}" -o "/tmp/${tarball}"; \
+    echo "${sha256}  /tmp/${tarball}" | sha256sum -c -; \
+    tar xzf "/tmp/${tarball}" -C /usr/local/bin/ tectonic; \
+    rm "/tmp/${tarball}"; \
+    chmod +x /usr/local/bin/tectonic; \
+    tectonic --version
 
 # GitHub CLI: the agent's Contribute flow opens PRs/issues upstream through
 # `gh` (a server-side subprocess, so CSP connect-src 'self' — which governs
@@ -68,7 +83,7 @@ RUN curl -fsSL "https://github.com/tectonic-typesetting/tectonic/releases/downlo
 # fails the build. Built for the image arch (amd64|arm64); only the single
 # `gh` binary is installed, docs/man pages are dropped. Placed after the apt
 # layer so a gh bump doesn't bust the apt cache.
-ARG GH_CLI_VERSION=2.96.0
+ARG GH_CLI_VERSION=2.97.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in amd64|arm64) ;; *) echo "unsupported arch: $arch" >&2; exit 1 ;; esac; \
