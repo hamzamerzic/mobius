@@ -186,6 +186,7 @@ export default function Shell() {
     activeAppId,
     activeChatId,
     drawerOpen, settingsOverlayOpen, settingsOpenRaw, openDrawer, closeDrawer,
+    drawerNavigationCover, finishDrawerNavigationPresentation,
     navTo, tabRevealRevision, applyModeDestination, dismissSettings,
     backFiredRef, drawerPushedRef, navStackRef, navigationEpochRef,
     activeViewRef, activeChatIdRef, activeAppIdRef,
@@ -971,7 +972,8 @@ export default function Shell() {
       next.set(paneKey, id)
       return next
     })
-  }, [workspaceStateRef])
+    finishDrawerNavigationPresentation()
+  }, [finishDrawerNavigationPresentation, workspaceStateRef])
 
   // At most two ChatViews per transitioning owner: the last painted chat and the
   // current active chat. Handoff dedupe is world-local: Standard's retained copy
@@ -2602,8 +2604,20 @@ export default function Shell() {
       workspace.viewMode, workspace.singleScreen, workspaceStateRef])
 
   function selectChat(id) {
+    const chatId = String(id)
+    const paintedWorld = effectiveViewMode === 'single'
+      ? STANDARD_CHAT_WORLD
+      : BUILDER_CHAT_WORLD
+    const destinationAlreadyPainted = visibleChatPanes.some(owner => (
+      owner.world === paintedWorld
+      && String(owner.chatId) === chatId
+      && String(presentedChatByPane.get(String(owner.paneId)) ?? '') === chatId
+    ))
+    const preserveDrawerPresentation = modalDrawerOpen
+      && !(activeView === 'chat' && String(activeChatId) === chatId)
+      && !destinationAlreadyPainted
     clearChatAttention(id)
-    navTo('chat', { chatId: id })
+    navTo('chat', { chatId: id, preserveDrawerPresentation })
     focusDesktopChatPaneComposer(id)
   }
 
@@ -2952,8 +2966,10 @@ export default function Shell() {
         persistent={persistentDrawer}
         width={desktopSidebarWidth}
         onWidthChange={setDesktopSidebarWidth}
-        interactionLocked={drawerModeTransitioning}
-        onClose={drawerModeTransitioning ? undefined : closeDrawer}
+        interactionLocked={drawerModeTransitioning || drawerNavigationCover}
+        onClose={drawerModeTransitioning || drawerNavigationCover
+          ? undefined
+          : closeDrawer}
         apps={apps}
         appsStatus={appsStatus}
         onRetryApps={() => appsQuery.refetch()}

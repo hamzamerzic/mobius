@@ -223,7 +223,8 @@ test('ordinary chat selection does not launch a competing drawer refresh', () =>
   const selectChat = shellSource.match(
     /function selectChat\(id\) \{([\s\S]*?)\n  \}/,
   )?.[1] || ''
-  assert.match(selectChat, /navTo\('chat', \{ chatId: id \}\)/)
+  assert.match(selectChat,
+    /navTo\('chat', \{ chatId: id, preserveDrawerPresentation \}\)/)
   assert.doesNotMatch(selectChat, /refreshChats/)
 })
 
