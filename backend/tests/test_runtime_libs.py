@@ -113,6 +113,13 @@ export default function NamedFixture() {
   const [value] = useState('ready')
   return <div>{value}</div>
 }
+
+class MeaningfulClass {}
+function MeaningfulFunction() {}
+export const preservedNames = {
+  className: MeaningfulClass.name,
+  functionName: MeaningfulFunction.name,
+}
 """
   )
 
@@ -135,7 +142,25 @@ export default function NamedFixture() {
   assert output.stat().st_size < 400_000
   compiled = output.read_text()
   assert compiled.startswith(COMPILED_RUNTIME_BANNER)
-  assert "NamedFixture" not in compiled
+  assert "NamedFixture" in compiled
+  evaluated = subprocess.run(
+    [
+      "node",
+      "--input-type=module",
+      "--eval",
+      (
+        f"const module = await import({json.dumps(output.as_uri())});"
+        "console.log(JSON.stringify(module.preservedNames));"
+      ),
+    ],
+    check=True,
+    capture_output=True,
+    text=True,
+  )
+  assert json.loads(evaluated.stdout) == {
+    "className": "MeaningfulClass",
+    "functionName": "MeaningfulFunction",
+  }
 
 
 def test_app_local_or_transitive_react_cannot_shadow_platform_runtime(tmp_path):

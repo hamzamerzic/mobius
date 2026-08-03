@@ -751,7 +751,7 @@ export default function MyApp({ appId, token }) {
 
 ## Libraries
 
-The canonical supported-import list lives in `backend/app/app_compile_contract.py`, with exact production versions pinned in `frontend/package.json`. Rolldown embeds React, `mobius-runtime`, and every package the app actually imports into one module. Production minification does not preserve `Function.name` or `Class.name`; use explicit labels and stable keys. This is load-bearing: the in-shell frame has an opaque origin and cannot make service-worker-controlled dependency requests.
+The canonical supported-import list lives in `backend/app/app_compile_contract.py`, with exact production versions pinned in `frontend/package.json`. Rolldown embeds React, `mobius-runtime`, and every package the app actually imports into one module. Production minification preserves `Function.name` and `Class.name` for compatibility, though explicit labels and stable keys remain clearer app design. This is load-bearing: the in-shell frame has an opaque origin and cannot make service-worker-controlled dependency requests.
 
 **Use bare package specifiers:**
 
