@@ -129,7 +129,8 @@ On nights with user activity, this is the first phase and the one you may not sk
 **Find every active chat and subagent run with activity in the last 24h, plus
 every recoverable deleted chat from the last 7 days.**
 
-User chats — query the DB directly (no auth needed; the container has no `sqlite3` CLI, use `python3`):
+User chats — query the DB directly with Python (no auth needed) so the timestamp
+and output handling stay explicit:
 
 ```bash
 python3 - <<'PY'

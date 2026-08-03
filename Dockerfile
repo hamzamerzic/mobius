@@ -15,9 +15,9 @@ FROM node-runtime AS frontend
 
 WORKDIR /build
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci --ignore-scripts
+RUN npm ci --ignore-scripts && rm -rf /root/.npm
 COPY frontend/ .
-RUN npm run build
+RUN npm run build && rm -rf /root/.npm
 
 # -- Stage 2: backend + everything ------------------------------------
 FROM python:3.12-slim-trixie
@@ -30,28 +30,39 @@ COPY --from=node-runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_mod
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
+# Create the runtime user before installing the shared browser payload. Setting
+# its ownership in the payload's own layer avoids copying Chromium into a second
+# image layer solely to change metadata later.
+RUN useradd -m -s /bin/bash mobius
+
 # System deps and global npm packages in a single layer.
 # agent-browser downloads its own Chromium during `install`; we move it
 # to /opt/agent-browser so both root and the mobius user share a single
 # Chromium copy via the symlinks below (~/.agent-browser is where
 # agent-browser looks by default).
-#
+# Discard npm's download cache in each layer: installed packages are the
+# runtime artifact; registry tarballs only make the production image larger.
+ARG ESBUILD_VERSION=0.28.1
+ARG CLAUDE_CODE_VERSION=2.1.220
+ARG AGENT_BROWSER_VERSION=0.33.2
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    cron curl ca-certificates git jq ripgrep sqlite3 sudo unzip procps util-linux age \
+    age ca-certificates cron curl git jq procps ripgrep sqlite3 sudo unzip util-linux \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
     libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
     fonts-liberation fonts-noto-color-emoji \
-    && npm install -g esbuild@0.28.1 \
-    && npm install -g @anthropic-ai/claude-code@2.1.220 \
-    && npm install -g @openai/codex@0.146.0 \
-    && npm install -g --allow-scripts=agent-browser@0.33.2 agent-browser@0.33.2 \
+    && npm install -g --engine-strict --strict-allow-scripts \
+      --allow-scripts="esbuild@${ESBUILD_VERSION},@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION},agent-browser@${AGENT_BROWSER_VERSION}" \
+      "esbuild@${ESBUILD_VERSION}" \
+      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+      @openai/codex@0.146.0 \
+      "agent-browser@${AGENT_BROWSER_VERSION}" \
     && agent-browser install \
     && mv /root/.agent-browser /opt/agent-browser \
+    && chown -R mobius:mobius /opt/agent-browser \
     && git_version="$(git --version | awk '{print $3}')" \
     && [ "$(printf '%s\n' "2.38" "$git_version" | sort -V | head -n1)" = "2.38" ] \
-    && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /root/.npm /var/lib/apt/lists/*
 
 # tectonic is a server-side subprocess; CSP connect-src 'self' applies only to
 # browser fetches from the mini-app iframe, not OS-level subprocesses — tectonic's
@@ -98,12 +109,9 @@ RUN set -eux; \
       "/tmp/gh_${GH_CLI_VERSION}_linux_${arch}"; \
     gh --version
 
-# Share the agent-browser install between root and mobius via symlinks.
-# The mobius user is created further down; we chown the shared dir to
-# mobius:mobius after that, so mobius can write session sockets/locks
-# as the owner without needing world-write on the Chromium binaries.
-# (root still has access because root always does.)
-RUN ln -s /opt/agent-browser /root/.agent-browser
+# Share the mobius-owned agent-browser install without a second Chromium copy.
+RUN ln -s /opt/agent-browser /root/.agent-browser \
+    && ln -s /opt/agent-browser /home/mobius/.agent-browser
 
 # openai/codex-plugin-cc — Claude Code plugin that exposes Codex as a
 # delegation/review subagent inside the agent's session. Cloned at
@@ -165,7 +173,7 @@ RUN pip install --no-cache-dir --no-deps \
 # refreshes the date automatically — no hand-maintained map, no test to
 # satisfy. Best effort: if the npm registry is unreachable the file is left
 # empty and the Settings row simply shows the bare version, never an error.
-RUN node -e "const cp=require('child_process'),fs=require('fs');\
+RUN if ! node -e "const cp=require('child_process'),fs=require('fs');\
 const want=['@anthropic-ai/claude-code','@openai/codex'];\
 let installed={};\
 try{installed=(JSON.parse(cp.execSync('npm ls -g --depth=0 --json',{stdio:['ignore','pipe','ignore']}).toString()).dependencies)||{};}catch(e){}\
@@ -173,15 +181,19 @@ const out={};\
 for(const name of want){const v=installed[name]&&installed[name].version;if(!v)continue;\
 try{const t=JSON.parse(cp.execSync('npm view '+name+'@'+v+' time --json',{stdio:['ignore','pipe','ignore']}).toString());if(t&&t[v])out[v]=String(t[v]).slice(0,10);}catch(e){}}\
 fs.writeFileSync('/app/cli-release-dates.json',JSON.stringify(out));\
-console.log('cli-release-dates.json:',JSON.stringify(out));" \
-    || echo '{}' > /app/cli-release-dates.json
+console.log('cli-release-dates.json:',JSON.stringify(out));"; then \
+      echo '{}' > /app/cli-release-dates.json; \
+    fi; \
+    rm -rf /root/.npm
 
 # Install the shell and mini-app compiler dependency tree from manifests alone.
 # Application source is copied later, so ordinary frontend edits reuse this
 # pinned npm layer. The production compiler resolves app bare imports only from
 # this directory and embeds the complete graph into each app module.
 COPY frontend/package.json frontend/package-lock.json* ./shell-src/
-RUN cd ./shell-src && npm ci --ignore-scripts 2>/dev/null && rm -rf .vite
+RUN cd ./shell-src \
+    && npm ci --ignore-scripts 2>/dev/null \
+    && rm -rf .vite /root/.npm
 
 # pdf.js (Mozilla's engine — what Firefox's built-in PDF viewer uses),
 # vendored same-origin so the LaTeX app renders a compiled PDF as a real
@@ -193,12 +205,13 @@ RUN cd ./shell-src && npm ci --ignore-scripts 2>/dev/null && rm -rf .vite
 # app sets GlobalWorkerOptions.workerSrc to the /vendor worker URL.
 RUN mkdir -p /tmp/pdfjs-install && cd /tmp/pdfjs-install \
     && npm init -y >/dev/null \
-    && npm install --no-audit --no-fund --silent pdfjs-dist@4.10.38 \
+    && npm install --no-audit --no-fund --silent \
+      --engine-strict --strict-allow-scripts pdfjs-dist@4.10.38 \
     && mkdir -p /app/static/vendor/pdfjs@4.10.38 \
     && cp node_modules/pdfjs-dist/build/pdf.mjs /app/static/vendor/pdfjs@4.10.38/pdf.mjs \
     && cp node_modules/pdfjs-dist/build/pdf.worker.mjs /app/static/vendor/pdfjs@4.10.38/pdf.worker.mjs \
     && ln -s pdfjs@4.10.38 /app/static/vendor/pdfjs \
-    && cd / && rm -rf /tmp/pdfjs-install
+    && cd / && rm -rf /tmp/pdfjs-install /root/.npm
 
 # KaTeX browser assets — the package's JavaScript is bundled when an app imports
 # it, while the shell and app-authored stylesheets still use these public files.
@@ -211,14 +224,15 @@ RUN mkdir -p /tmp/pdfjs-install && cd /tmp/pdfjs-install \
 # The stable /vendor/katex/ alias is used by installed app stylesheets.
 RUN mkdir -p /tmp/katex-install && cd /tmp/katex-install \
     && npm init -y >/dev/null \
-    && npm install --no-audit --no-fund --silent katex@0.18.1 \
+    && npm install --no-audit --no-fund --silent \
+      --engine-strict --strict-allow-scripts katex@0.18.1 \
     && mkdir -p /app/static/vendor/katex@0.18.1/fonts \
     && cp node_modules/katex/dist/katex.min.js /app/static/vendor/katex@0.18.1/ \
     && cp node_modules/katex/dist/katex.mjs    /app/static/vendor/katex@0.18.1/ \
     && cp node_modules/katex/dist/katex.min.css /app/static/vendor/katex@0.18.1/ \
     && cp node_modules/katex/dist/fonts/*.woff2 /app/static/vendor/katex@0.18.1/fonts/ \
     && ln -s katex@0.18.1 /app/static/vendor/katex \
-    && cd / && rm -rf /tmp/katex-install
+    && cd / && rm -rf /tmp/katex-install /root/.npm
 
 # Frontend static files + app-frame served by FastAPI, plus the full source
 # tree retained for /data/platform/frontend/node_modules to link at runtime.
@@ -310,12 +324,9 @@ RUN set -eux; \
     chown -R root:root /app/platform-baked; \
     chmod -R a+rX,go-w /app/platform-baked
 
-# Create a non-root user so the agent can use --dangerously-skip-permissions.
-RUN useradd -m -s /bin/bash mobius \
-    && mkdir -p /data/db /data/apps /data/compiled /data/shared \
-    && chown -R mobius:mobius /data \
-    && ln -s /opt/agent-browser /home/mobius/.agent-browser \
-    && chown -R mobius:mobius /opt/agent-browser
+# Initialize the runtime volume paths for the non-root agent user.
+RUN mkdir -p /data/db /data/apps /data/compiled /data/shared \
+    && chown -R mobius:mobius /data
 
 # Runtime source belongs at the tail of the image so normal code changes reuse
 # the browser, CLI, Python, vendor, and platform-seed layers above.

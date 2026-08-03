@@ -17,6 +17,10 @@ from app.run_state import running_chat_ids
 
 
 _CHAT_PROFILE = re.compile(r"^chat-([0-9a-fA-F-]{36})$")
+_AGENT_BROWSER_SERVER_EXECUTABLES = frozenset({
+  "agent-browser-linux-arm64",
+  "agent-browser-linux-x64",
+})
 _CACHE_PATHS = (
   "Default/Cache",
   "Default/Code Cache",
@@ -197,7 +201,7 @@ def browser_session_targets_for_chat(
     try:
       argv = (process / "cmdline").read_bytes().split(b"\0")
       executable = Path(argv[0].decode("utf-8", errors="replace")).name
-      if executable != "agent-browser-linux-x64":
+      if executable not in _AGENT_BROWSER_SERVER_EXECUTABLES:
         continue
       values: dict[bytes, str] = {}
       for raw in (process / "environ").read_bytes().split(b"\0"):
