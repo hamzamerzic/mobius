@@ -330,16 +330,19 @@ export default function ChatView({
       ? 'cached'
       : initialCacheEntryState === 'validating'
         ? 'cache-validating'
-        : 'history',
+        : initialCacheEntryState,
   )
   const acceptCachedReadingCoordinate = useCallback(() => {
-    // The scroll owner has proved the exact nested part against the committed
-    // cached DOM. Admit the same quiet-layout reveal path as an ordinary safe
-    // cache without waiting for the independent freshness handshake.
+    // The scroll owner has proved the exact nested part against committed DOM.
     setInitialEntryPhase(current => (
       current === 'cache-validating' ? 'cached' : current
     ))
     setLoading(false)
+  }, [])
+  const acceptInitialStreamCatchUp = useCallback(() => {
+    setInitialEntryPhase(current => (
+      current === 'stream-catchup' ? 'ready' : current
+    ))
   }, [])
   // On a failed initial /chats/{id} fetch, loadError flips in the catch so
   // the UI can render a retry message. Setting loading false alone would
@@ -1038,6 +1041,7 @@ export default function ChatView({
     clearStreamItems,
     patchQuestionAnswers,
   } = useStreamConnection(chatId, {
+    onCatchUpSettled: acceptInitialStreamCatchUp,
     onConnectionLost: () => {
       // Browser transport ownership is uncertain here: the backend turn may
       // still be parked on a question or producing output. Preserve the
@@ -1698,7 +1702,7 @@ export default function ChatView({
       ? 'cached'
       : activationCacheEntryState === 'validating'
         ? 'cache-validating'
-        : 'history'
+        : activationCacheEntryState
     setInitialEntryPhase(current => (
       // Mount-time layout validation can finish before this passive activation
       // effect runs. Do not re-close a cache gate the scroll owner just proved.
@@ -1720,6 +1724,10 @@ export default function ChatView({
 
     const settleRuntime = (runtime, visibleMessages) => {
       const running = !!runtime.running
+      const attachesToStream = shouldAttachRunningStream({
+        running,
+        pendingQuestionId: runtime.pending_question_id,
+      })
       setServerRunningLocalState(running)
       setActiveGoalObjective(goalObjectiveFromRuntime(
         runtime, latestGoalObjective(visibleMessages),
@@ -1732,15 +1740,14 @@ export default function ChatView({
           ? visibleMessages[visibleMessages.length - 1]
           : null,
       })
-      setInitialEntryPhase('ready')
+      // Persisted rows are not the complete surface of a running turn. Keep
+      // the outgoing chat visible until the subscribe-time replay commits.
+      setInitialEntryPhase(attachesToStream ? 'stream-catchup' : 'ready')
       setLoading(false)
       pendingQueue.hydrate(runtime.pending_messages || [])
       if (running) {
         setSending(true)
-        if (shouldAttachRunningStream({
-          running,
-          pendingQuestionId: runtime.pending_question_id,
-        })) {
+        if (attachesToStream) {
           connectToStream(false)
         }
       } else {

@@ -46,6 +46,11 @@ import {
 // deployments / slower external DBs on the safe side of the same contract.
 export const SEND_POST_TIMEOUT_MS = 45000
 
+export function streamCatchUpOwnerMatches(owner, current) {
+  return owner?.generation === current?.generation
+    && String(owner?.chatId ?? '') === String(current?.chatId ?? '')
+}
+
 // Delay before the wake/online reattach surfaces as a visible
 // "Reconnecting…" note. Real mobile reattach can spend time waking the
 // radio, negotiating TLS, and replaying a long event log; quick
@@ -167,9 +172,12 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  *   but must not treat this as a terminal run boundary.
  * @param {(event: object) => void} [callbacks.onSystemEvent]
  *   Fired for non-chat SSE events (theme/app/shell). Not buffered.
- * @param {(opts?: {force?: boolean}) => void} [callbacks.onNeedsRefresh]
+ * @param {(opts?: {force?: boolean}) => void|Promise<void>} [callbacks.onNeedsRefresh]
  *   Fired when the stream returns 204 outside the post-send race
  *   window — caller should refetch persisted DB state.
+ * @param {() => void} [callbacks.onCatchUpSettled]
+ *   Fired after subscribe-time replay commits, or after its terminal /
+ *   disconnected fallback refresh settles.
  * @param {(info: {ts: number|null, message: object|null}) => void} [callbacks.onQueuedTurnStarting]
  *   Fired when the backend is about to promote queued follow-ups; `ts`
  *   identifies the first pending entry in the promoted group and `message`
@@ -221,6 +229,7 @@ export default function useStreamConnection(chatId, {
   onConnectionLost,
   onSystemEvent,
   onNeedsRefresh,
+  onCatchUpSettled,
   onQueuedTurnStarting,
   onSteeredIntoTurn,
   onSteerDeliveryFailed,
@@ -309,6 +318,7 @@ export default function useStreamConnection(chatId, {
   }
 
   const abortRef = useRef(null)
+  const connectionGenerationRef = useRef(0)
   const keptSocketDeadmanTimerRef = useRef(null)
   const retryCount = useRef(0)
   const chatIdRef = useRef(chatId)
@@ -510,6 +520,7 @@ export default function useStreamConnection(chatId, {
   }, [])
 
   const disconnect = useCallback(({ clearStreaming = false } = {}) => {
+    connectionGenerationRef.current += 1
     clearKeptSocketDeadman()
     // Salvage any text that's in the typewriter buffer but hasn't
     // been drained into streamItems yet. Without this, Stop loses
@@ -608,6 +619,8 @@ export default function useStreamConnection(chatId, {
   onSystemEventRef.current = onSystemEvent
   const onNeedsRefreshRef = useRef(onNeedsRefresh)
   onNeedsRefreshRef.current = onNeedsRefresh
+  const onCatchUpSettledRef = useRef(onCatchUpSettled)
+  onCatchUpSettledRef.current = onCatchUpSettled
   const onQueuedTurnStartingRef = useRef(onQueuedTurnStarting)
   onQueuedTurnStartingRef.current = onQueuedTurnStarting
   const onSteeredIntoTurnRef = useRef(onSteeredIntoTurn)
@@ -638,6 +651,10 @@ export default function useStreamConnection(chatId, {
   const connectToStream = useCallback(async (resetState = false) => {
     activeStreamChatIdRef.current = chatIdRef.current
     disconnect()
+    const catchUpOwner = {
+      generation: ++connectionGenerationRef.current,
+      chatId: chatIdRef.current,
+    }
 
     if (resetState) {
       // Keep the currently visible stream while a reconnect catch-up is in
@@ -655,6 +672,21 @@ export default function useStreamConnection(chatId, {
     const controller = new AbortController()
     abortRef.current = controller
     lastReadAtRef.current = 0
+
+    const settleOwnedCatchUp = () => {
+      if (!streamCatchUpOwnerMatches(catchUpOwner, {
+        generation: connectionGenerationRef.current,
+        chatId: chatIdRef.current,
+      })) return
+      onCatchUpSettledRef.current?.()
+    }
+
+    const refreshThenSettleCatchUp = (options) => {
+      const refresh = onNeedsRefreshRef.current?.(options)
+      // Refresh failures already render their own error. Either outcome must
+      // release the outgoing chat rather than leave the handoff stranded.
+      Promise.resolve(refresh).then(settleOwnedCatchUp, settleOwnedCatchUp)
+    }
 
     try {
       const res = await fetch(
@@ -727,7 +759,7 @@ export default function useStreamConnection(chatId, {
         // and ChatView clearing its running state.
         onStreamEndRef.current?.()
         setIsStreaming(false)
-        onNeedsRefreshRef.current?.({ force: true, terminal204: true })
+        refreshThenSettleCatchUp({ force: true, terminal204: true })
         return
       }
 
@@ -794,6 +826,7 @@ export default function useStreamConnection(chatId, {
         // commit after the reveal cap); a pre-reveal mount commit is covered by
         // hide-then-reveal and a kept socket produces no commit at all.
         setCatchUpCommitSeq(s => s + 1)
+        settleOwnedCatchUp()
       }
 
       const patchCatchUpQuestionAnswers = (questionId, answers) => {
@@ -1282,7 +1315,7 @@ export default function useStreamConnection(chatId, {
         // before the refresh restored `running` from the server.
         requestAnimationFrame(() => {
           onConnectionLostRef.current?.()
-          onNeedsRefreshRef.current?.({ force: true })
+          refreshThenSettleCatchUp({ force: true })
         })
       } else {
         setConnectionError('retrying')

@@ -967,7 +967,7 @@ test.describe('Scroll position', () => {
     expect(restored.scrollTop).toBeGreaterThan(0)
   })
 
-  test('10d. Previous-chat entry reveals authoritative history before catch-up and stays visually fixed', async ({ page }) => {
+  test('10d. Previous-chat entry stays held until catch-up, then settles without movement', async ({ page }) => {
     await setup(page, { width: 900, height: 760 })
     await newChat(page)
 
@@ -977,6 +977,8 @@ test.describe('Scroll position', () => {
     let returning = false
     let streamCount = 0
     let catchUpServed = false
+    let releaseCatchUp
+    const catchUpGate = new Promise(resolve => { releaseCatchUp = resolve })
     let returnImageServed = false
     const squarePng = Buffer.from(
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nWQAAAAASUVORK5CYII=',
@@ -1030,7 +1032,7 @@ test.describe('Scroll position', () => {
     await page.route(new RegExp(`/api/chats/${chatId}/stream$`), async route => {
       streamCount += 1
       if (streamCount > 1) return route.fulfill({ status: 204, body: '' })
-      await new Promise(resolve => setTimeout(resolve, 1200))
+      await catchUpGate
       catchUpServed = true
       return route.fulfill({
         status: 200,
@@ -1122,18 +1124,23 @@ test.describe('Scroll position', () => {
       history.back()
     })
 
+    await page.waitForFunction(
+      id => localStorage.getItem('moebius_active_chat') === id,
+      chatId,
+      { timeout: 3000 },
+    )
+    await expect(page.locator('.shell__chat-view--held')).toHaveCount(1)
+    expect(catchUpServed).toBe(false)
+    releaseCatchUp()
+    await expect.poll(() => catchUpServed, { timeout: 3000 }).toBe(true)
+
     await page.waitForFunction(() => {
       const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       const img = document.querySelector('[data-chat-surface="painted"] .md-image')
       return !!el && getComputedStyle(el).visibility !== 'hidden'
-        // The retained ChatView deliberately reveals its already-settled DOM
-        // immediately. Do not mistake the still-complete initial image for the
-        // delayed authoritative return image we are exercising here.
         && !!img?.src.includes('entry-image-return.png') && !!img.complete
         && !!document.querySelector('[data-key="entry-anchor"]')
     }, { timeout: 10000 })
-    expect(catchUpServed).toBe(false)
-    await expect.poll(() => catchUpServed, { timeout: 3000 }).toBe(true)
 
     const trajectory = await page.evaluate(() => window.__entryTrajectory || [])
     const visibleRows = trajectory.filter(row => row.visible)
