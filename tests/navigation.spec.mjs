@@ -388,9 +388,11 @@ test.describe('Touch navigation', () => {
       matchMedia('(hover: none) and (pointer: coarse)').matches
     ))).toBe(true)
 
+    let releaseCreation
+    const creationGate = new Promise(resolve => { releaseCreation = resolve })
     await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
       if (route.request().method() !== 'POST') return route.fallback()
-      await new Promise(resolve => setTimeout(resolve, 300))
+      await creationGate
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -424,17 +426,41 @@ test.describe('Touch navigation', () => {
     ))
 
     await openDrawer(page)
-    await page.getByRole('navigation', { name: 'Primary navigation' })
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    // Let the drawer's opening focus frame settle before the New-chat tap.
+    // Otherwise that intentionally deferred focus can race the tap and steal
+    // the keyboard lease after the test has already closed the drawer.
+    await expect(navigation).toBeFocused()
+    await navigation
       .getByRole('button', { name: 'New chat', exact: true })
       .click()
 
     const focusLease = page.getByRole('textbox', { name: 'New chat message' })
-    await expect(focusLease).toBeFocused()
+    const presentation = page.locator('[data-new-chat-presentation]')
+    await expect(presentation).toBeVisible()
+    await expect(presentation.getByText("What's on your mind?", { exact: true })).toBeVisible()
+    // Keep the failure actionable: a generic toBeFocused mismatch hides the
+    // element that actually reclaimed ownership during the handoff.
+    await expect.poll(() => page.evaluate(() => {
+      const lease = document.querySelector('.shell__composer-focus-lease')
+      const active = document.activeElement
+      if (active === lease) return 'lease'
+      if (!active) return 'none'
+      const name = active.getAttribute?.('aria-label')
+        || active.getAttribute?.('role')
+        || active.tagName.toLowerCase()
+      const classes = typeof active.className === 'string'
+        ? active.className.trim().split(/\s+/).filter(Boolean).join('.')
+        : ''
+      return classes ? `${name}.${classes}` : name
+    })).toBe('lease')
     await page.keyboard.type('Typed while opening')
+    releaseCreation()
 
     const composer = page.locator('[data-chat-surface="painted"] textarea')
     await expect(composer).toBeFocused()
     await expect(composer).toHaveValue('Typed while opening')
+    await expect(presentation).toHaveCount(0)
   })
 })
 
