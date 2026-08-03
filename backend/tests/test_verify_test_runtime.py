@@ -1,6 +1,7 @@
 import fcntl
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -114,10 +115,12 @@ def test_test_wrapper_isolates_compose_and_rejects_stale_images():
   assert "the test runner never rebuilds" in wrapper
   dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
   assert "COPY Dockerfile ./test-image-inputs/Dockerfile" not in dockerfile
-  shell_deps = "RUN cd ./shell-src && npm ci --ignore-scripts"
+  shell_deps = (
+    "COPY frontend/package.json frontend/package-lock.json* ./shell-src/"
+  )
   retained_assets = (
-    "RUN mkdir -p /tmp/pdfjs-install",
-    "RUN mkdir -p /tmp/katex-install",
+    "mkdir -p /tmp/pdfjs-install",
+    "mkdir -p /tmp/katex-install",
   )
   backend_source = "COPY backend/app ./app/"
   backend_scripts = "COPY backend/scripts ./scripts/"
@@ -136,11 +139,21 @@ def test_node_runtime_satisfies_the_pinned_agent_browser_engine():
   dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
   preship = (ROOT / "scripts" / "preship-gate.sh").read_text(encoding="utf-8")
   assert "FROM node:24-trixie-slim AS node-runtime" in dockerfile
+  assert re.search(
+    r"^ARG AGENT_BROWSER_VERSION=\d+\.\d+\.\d+$", dockerfile, re.MULTILINE,
+  )
+  assert dockerfile.count("agent-browser@${AGENT_BROWSER_VERSION}") == 2
   assert (
-    "npm install -g --allow-scripts=agent-browser@0.33.2 "
-    "agent-browser@0.33.2"
+    '--allow-scripts="esbuild@0.28.1,@anthropic-ai/claude-code@2.1.220,'
+    'agent-browser@${AGENT_BROWSER_VERSION}"'
   ) in dockerfile
-  assert "git jq ripgrep sqlite3 sudo unzip" in dockerfile
+  assert dockerfile.count("--engine-strict --strict-allow-scripts") == 3
+  apt_layer = dockerfile[
+    dockerfile.index("# System deps and global npm packages"):
+    dockerfile.index("# tectonic is a server-side subprocess")
+  ]
+  for package in ("jq", "ripgrep", "sqlite3", "unzip"):
+    assert re.search(rf"\b{package}\b", apt_layer)
   assert "node:24-trixie-slim sh -c" in preship
   assert "node:22" not in dockerfile
   assert "node:22" not in preship
@@ -149,12 +162,16 @@ def test_node_runtime_satisfies_the_pinned_agent_browser_engine():
 def test_tectonic_release_is_verified_for_supported_image_architectures():
   dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
   tectonic_layer = dockerfile[
-    dockerfile.index("ARG TECTONIC_VERSION=0.17.0"):
+    dockerfile.index("ARG TECTONIC_VERSION="):
     dockerfile.index("# GitHub CLI:")
   ]
 
-  assert "TECTONIC_SHA256_AMD64=" in tectonic_layer
-  assert "TECTONIC_SHA256_ARM64=" in tectonic_layer
+  for architecture in ("AMD64", "ARM64"):
+    assert re.search(
+      rf"^ARG TECTONIC_SHA256_{architecture}=[0-9a-f]{{64}}$",
+      tectonic_layer,
+      re.MULTILINE,
+    )
   assert "amd64) target=x86_64" in tectonic_layer
   assert "arm64) target=aarch64" in tectonic_layer
   assert 'echo "${sha256}  /tmp/${tarball}" | sha256sum -c -' in tectonic_layer

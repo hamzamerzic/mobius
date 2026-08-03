@@ -56,11 +56,12 @@ def test_profile_sweep_interval_is_hourly_and_bounded(monkeypatch):
 
 def _fake_browser_process(
   proc, pid, *, chat_id, session, namespace=None, socket_dir=None,
+  executable="agent-browser-linux-x64",
 ):
   process = proc / str(pid)
   process.mkdir(parents=True)
   (process / "cmdline").write_bytes(
-    b"/usr/local/lib/agent-browser-linux-x64\0"
+    f"/usr/local/lib/{executable}\0".encode()
   )
   values = {
     "CHAT_ID": chat_id,
@@ -90,6 +91,14 @@ def test_browser_sessions_for_chat_preserves_opaque_session_values(tmp_path):
     namespace="custom/ns", socket_dir="/tmp/ab-sockets",
   )
   _fake_browser_process(proc, 107, chat_id="chat-a", session="-x")
+  _fake_browser_process(
+    proc, 108, chat_id="chat-a", session="arm-preview",
+    executable="agent-browser-linux-arm64",
+  )
+  _fake_browser_process(
+    proc, 109, chat_id="chat-a", session="lookalike",
+    executable="agent-browser-linux-x64-wrapper",
+  )
 
   foreign = proc / "104"
   foreign.mkdir()
@@ -119,6 +128,7 @@ def test_browser_sessions_for_chat_preserves_opaque_session_values(tmp_path):
       socket_dir="/tmp/ab-sockets",
     ),
     browser_profiles.BrowserSessionTarget(session="-x"),
+    browser_profiles.BrowserSessionTarget(session="arm-preview"),
   })
 
 
