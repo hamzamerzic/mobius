@@ -102,6 +102,8 @@ def test_test_compose_pins_runtime_to_mounted_checkout():
   assert "BUILD_SHA=${GITHUB_SHA:-unknown}" in compose
   assert "./:/workspace:ro" in compose
   assert 'python3", "/app/scripts/verify_test_runtime.py"' in compose
+  pytest_service = compose.split("\n  pytest:\n", 1)[1].split("\nvolumes:\n", 1)[0]
+  assert "\n    init: true\n" in pytest_service
 
 
 def test_test_wrapper_isolates_compose_and_rejects_stale_images():
@@ -562,6 +564,9 @@ def test_pull_requests_run_required_suites_and_cutover_publishes_immutable_image
   image_workflow = (
     ROOT / ".github" / "workflows" / "external-recovery-image.yml"
   ).read_text(encoding="utf-8")
+  digest_workflow = (
+    ROOT / ".github" / "workflows" / "core-digest-image.yml"
+  ).read_text(encoding="utf-8")
   assert not (ROOT / ".github" / "workflows" / "main-image.yml").exists()
   assert not (
     ROOT / ".github" / "workflows" / "compatibility-bootstrap.yml"
@@ -675,11 +680,86 @@ def test_pull_requests_run_required_suites_and_cutover_publishes_immutable_image
   assert "cache-to: type=gha,mode=max,ignore-error=true" in image_workflow
   assert "load: true" not in image_workflow
 
-  workflows = test_workflow + image_workflow
-  assert workflows.count("DOCKER_BUILD_RECORD_UPLOAD: 'false'") == 2
+  workflows = test_workflow + image_workflow + digest_workflow
+  assert workflows.count("DOCKER_BUILD_RECORD_UPLOAD: 'false'") == 3
   assert "actions/checkout@v5" not in workflows
   assert "actions/setup-node@v5" not in workflows
   assert "actions/setup-python@v5" not in workflows
+
+
+def test_recurring_core_digest_workflow_keeps_dynamic_and_frozen_identity_separate():
+  workflow = (
+    ROOT / ".github" / "workflows" / "core-digest-image.yml"
+  ).read_text(encoding="utf-8")
+  triggers = workflow.split("\npermissions:\n", 1)[0]
+  assert "push:\n" in triggers
+  assert "workflow_dispatch:\n" in triggers
+  assert "    branches: [stack/external-recovery-v1]\n" in triggers
+  assert "pull_request:\n" not in triggers
+
+  current = workflow.index("/internal/core-releases/current")
+  prepublish = workflow.index("/internal/core-releases/prepublish")
+  registry_login = workflow.index("docker/login-action@")
+  build = workflow.index("docker/build-push-action@")
+  ownership_recheck = workflow.index(
+    "Recheck protected-branch ownership before binding"
+  )
+  bind = workflow.index("/internal/core-releases/bind")
+  postpublish = workflow.index("/internal/core-releases/postpublish")
+  final_current = workflow.rindex("/internal/core-releases/current")
+  assert (
+    current < prepublish < registry_login < build < ownership_recheck
+    < bind < postpublish
+  )
+  assert postpublish < final_current
+
+  assert "permissions:\n  contents: read\n  packages: write\n" in workflow
+  assert "environment: external-recovery-release" in workflow
+  assert "group: mobius-core-image-publication" in workflow
+  assert "cancel-in-progress: false" in workflow
+  assert "MOBIUS_MANAGED_CORE_RELEASE_ENABLED == 'true'" in workflow
+  assert "MOBIUS_MANAGED_CORE_PREREQUISITE_SHA" in workflow
+  assert "MOBIUS_MANAGED_CORE_PREREQUISITE_DIGEST" in workflow
+  assert "FROZEN_COMPATIBILITY_SHA" in workflow
+  assert "FROZEN_COMPATIBILITY_DIGEST" in workflow
+  assert "CORE_PREREQUISITE_SHA" in workflow
+  assert "CORE_PREREQUISITE_DIGEST" in workflow
+  assert "scripts/core_digest_release.py current" in workflow
+  assert "scripts/external_recovery_release.py" in workflow
+  assert "inventory" in workflow
+  assert "exact-current replay" in workflow
+  assert "steps.current.outputs.mode == 'replay'" in workflow
+  assert "steps.current.outputs.active_digest" in workflow
+  assert "The active controller digest changed before prepublish" in workflow
+  assert "steps.gate.outputs.mode == 'resume_cutover'" in workflow
+  assert "steps.gate.outputs.mode == 'completed_replay'" not in workflow
+  assert "candidate_sha:" in triggers
+  assert "ref: ${{ env.CANDIDATE_SHA }}" in workflow
+  assert 'test "$release_head" = "$CANDIDATE_SHA"' in workflow
+  assert 'git merge-base --is-ancestor "$CANDIDATE_SHA" "$release_head"' in workflow
+  assert workflow.count(
+    'if [ "$release_head" != "$CANDIDATE_SHA" ]; then'
+  ) == 1
+  assert "Refusing to bind a candidate that no longer owns" in workflow
+  assert "persist-credentials: false" in workflow
+  assert "cache-to: type=gha,mode=max,ignore-error=true" in workflow
+
+  immutable_tag = (
+    "tags: ${{ env.MOBIUS_IMAGE_REPOSITORY }}:sha-${{ env.CANDIDATE_SHA }}-"
+    "run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
+  )
+  assert immutable_tag in workflow
+  assert '--tag "$MOBIUS_RELEASE_CHANNEL"' not in workflow
+  assert 'tags: ${{ env.MOBIUS_RELEASE_CHANNEL }}' not in workflow
+  assert '--tag "$MOBIUS_IMAGE_REPOSITORY:main"' not in workflow
+  assert '--tag "$MOBIUS_IMAGE_REPOSITORY:daily"' not in workflow
+  assert "docker buildx imagetools create" not in workflow
+
+  assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" in workflow
+  assert "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c" in workflow
+  assert "docker/login-action@dbcb813823bdd20940b903addbd779551569679f" in workflow
+  assert "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a" in workflow
+
 
 def test_hosted_concurrency_is_scoped_to_the_pull_request():
   workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
