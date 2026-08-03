@@ -58,8 +58,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # package fetches (from Tectonic's bundle server) are unrestricted at the OS level.
 # Placed after the apt-get layer so a tectonic version bump doesn't bust the apt cache.
 ARG TECTONIC_VERSION=0.17.0
-RUN curl -fsSL "https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%40${TECTONIC_VERSION}/tectonic-${TECTONIC_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
-    | tar xz -C /usr/local/bin/ tectonic && chmod +x /usr/local/bin/tectonic && tectonic --version
+ARG TECTONIC_SHA256_AMD64=8533d07f9ccbd7a65824b9e0459041bca34af1eb33daba48f59215593753a3b7
+ARG TECTONIC_SHA256_ARM64=b10954a95404f3ab2328d2fa59a5ebab8e657f893fab096f98be8db7c0c979b8
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) target=x86_64; sha256="$TECTONIC_SHA256_AMD64" ;; \
+      arm64) target=aarch64; sha256="$TECTONIC_SHA256_ARM64" ;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    tarball="tectonic-${TECTONIC_VERSION}-${target}-unknown-linux-musl.tar.gz"; \
+    base="https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%40${TECTONIC_VERSION}"; \
+    curl -fsSL "${base}/${tarball}" -o "/tmp/${tarball}"; \
+    echo "${sha256}  /tmp/${tarball}" | sha256sum -c -; \
+    tar xzf "/tmp/${tarball}" -C /usr/local/bin/ tectonic; \
+    rm "/tmp/${tarball}"; \
+    chmod +x /usr/local/bin/tectonic; \
+    tectonic --version
 
 # GitHub CLI: the agent's Contribute flow opens PRs/issues upstream through
 # `gh` (a server-side subprocess, so CSP connect-src 'self' — which governs
