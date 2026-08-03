@@ -197,7 +197,10 @@ def test_live_session_scope_serves_health_exec_and_filesystem(
   with _server(target) as url:
     assert _request(url, "/v1/health", token=token)[1]["boot_id"] == _BOOT_ID
     status, result = _request(
-      url, "/v1/exec", token=token, body={"argv": ["/bin/true"]},
+      url,
+      "/v1/exec",
+      token=token,
+      body={"argv": ["/bin/true"], "cwd": str(tmp_path)},
     )
     assert status == 200 and result["exit_code"] == 0
     status, result = _request(
