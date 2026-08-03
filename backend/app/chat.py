@@ -2093,6 +2093,15 @@ def _publish_chat_run_finished(chat_id: str) -> None:
     })
 
 
+def _publish_chat_scratch_releasable(chat_id: str) -> None:
+  """Hint that physical turn cleanup finished; consumers recheck ownership."""
+  if chat_id:
+    get_system_broadcast().publish({
+      "type": "chat_scratch_releasable",
+      "chatId": chat_id,
+    })
+
+
 def is_chat_running(chat_id: str) -> bool:
   """Returns True if an agent subprocess is running or starting for this chat."""
   if registry.is_alive(chat_id):
@@ -2452,9 +2461,12 @@ async def _close_browser_session(chat_id: str) -> None:
   targets = {BrowserSessionTarget(session=f"chat-{chat_id}")}
   try:
     from app.browser_profiles import browser_session_targets_for_chat
-    targets.update(
-      await asyncio.to_thread(browser_session_targets_for_chat, chat_id)
-    )
+    scan = await asyncio.to_thread(browser_session_targets_for_chat, chat_id)
+    targets.update(scan.targets)
+    if not scan.complete:
+      log.warning(
+        "agent-browser session discovery incomplete for chat %s", chat_id,
+      )
   except Exception as exc:
     log.warning(
       "agent-browser session discovery failed for chat %s: %s",
@@ -3352,6 +3364,7 @@ async def run_chat(
   # (which `_run_chat_impl` doesn't catch) leaves the marker set for
   # reconciliation rather than silently wiping it — the safe default.
   disposition = chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
+  runtime_settled = False
   try:
     disposition = await _run_chat_impl(
       messages, chat_id=chat_id, session_id=session_id,
@@ -3359,6 +3372,7 @@ async def run_chat(
       attachments=attachments, timezone=timezone, viewport=viewport,
       run_token=run_token,
     )
+    runtime_settled = True
   finally:
     stopped_gen = _clear_after_terminal_generation.get(chat_id)
     clear_stopped_run = run_gen is not None and stopped_gen == run_gen
@@ -3451,6 +3465,24 @@ async def run_chat(
       _get_logger().debug(
         "terminal disposition chat_id=%s %s", chat_id, disposition.value,
       )
+    if runtime_settled and chat_id:
+      # chat_run_finished is intentionally earlier for responsive shell UI.
+      # Scratch needs a stricter physical boundary: _run_chat_impl has returned
+      # after browser cleanup, and a complete empty process inventory proves no
+      # detached Chromium session still inherits this turn's TMPDIR. The
+      # scratch owner rechecks both runtime and durable run identity again.
+      try:
+        from app.browser_profiles import browser_session_targets_for_chat
+        browser_scan = await asyncio.to_thread(
+          browser_session_targets_for_chat, chat_id,
+        )
+        if browser_scan.complete and not browser_scan.targets:
+          _publish_chat_scratch_releasable(chat_id)
+      except Exception:
+        _get_logger().debug(
+          "agent scratch release hint skipped chat_id=%s",
+          chat_id, exc_info=True,
+        )
     # Turn-end chat-note guarantee: when the chat SETTLED (no pending
     # follow-up), the platform's sole publisher updates its three summary
     # granularities. Runs AFTER the reply is sent → no user-facing latency;

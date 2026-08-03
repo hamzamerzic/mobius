@@ -105,9 +105,11 @@ def test_browser_sessions_for_chat_preserves_opaque_session_values(tmp_path):
     b"CHAT_ID=chat-a\0AGENT_BROWSER_SESSION=not-a-browser\0"
   )
 
-  assert browser_profiles.browser_session_targets_for_chat(
+  scan = browser_profiles.browser_session_targets_for_chat(
     "chat-a", proc_root=proc,
-  ) == {
+  )
+  assert scan.complete is True
+  assert scan.targets == frozenset({
     browser_profiles.BrowserSessionTarget(session="custom:colon"),
     browser_profiles.BrowserSessionTarget(session="unicode-ø-世界"),
     browser_profiles.BrowserSessionTarget(session=long_name),
@@ -117,7 +119,7 @@ def test_browser_sessions_for_chat_preserves_opaque_session_values(tmp_path):
       socket_dir="/tmp/ab-sockets",
     ),
     browser_profiles.BrowserSessionTarget(session="-x"),
-  }
+  })
 
 
 def test_terminal_browser_cleanup_closes_inherited_and_custom_sessions(
@@ -129,7 +131,7 @@ def test_terminal_browser_cleanup_closes_inherited_and_custom_sessions(
   monkeypatch.setattr(
     browser_profiles,
     "browser_session_targets_for_chat",
-    lambda _chat_id: {
+    lambda _chat_id: browser_profiles.BrowserSessionScan(frozenset({
       browser_profiles.BrowserSessionTarget(session="custom:colon"),
       browser_profiles.BrowserSessionTarget(session="unicode-ø-世界"),
       browser_profiles.BrowserSessionTarget(session=long_name),
@@ -139,7 +141,7 @@ def test_terminal_browser_cleanup_closes_inherited_and_custom_sessions(
         socket_dir="/tmp/ab-sockets",
       ),
       browser_profiles.BrowserSessionTarget(session="-x"),
-    },
+    }), True),
   )
   calls = []
 
@@ -176,7 +178,8 @@ def test_terminal_browser_cleanup_closes_inherited_and_custom_sessions(
 
 def test_terminal_browser_cleanup_kills_timed_out_close_process(monkeypatch):
   monkeypatch.setattr(
-    browser_profiles, "browser_session_targets_for_chat", lambda _chat_id: set(),
+    browser_profiles, "browser_session_targets_for_chat",
+    lambda _chat_id: browser_profiles.BrowserSessionScan(frozenset(), True),
   )
   monkeypatch.setattr(chat, "_BROWSER_CLOSE_WAIT_TIMEOUT", 0.01)
   monkeypatch.setattr(chat, "_BROWSER_CLOSE_KILL_GRACE", 0.01)
@@ -221,7 +224,8 @@ def test_terminal_browser_cleanup_kills_timed_out_close_process(monkeypatch):
 
 def test_terminal_browser_cleanup_bounds_wait_after_sigkill(monkeypatch, caplog):
   monkeypatch.setattr(
-    browser_profiles, "browser_session_targets_for_chat", lambda _chat_id: set(),
+    browser_profiles, "browser_session_targets_for_chat",
+    lambda _chat_id: browser_profiles.BrowserSessionScan(frozenset(), True),
   )
   monkeypatch.setattr(chat, "_BROWSER_CLOSE_WAIT_TIMEOUT", 0.01)
   monkeypatch.setattr(chat, "_BROWSER_CLOSE_KILL_GRACE", 0.01)
@@ -268,7 +272,8 @@ def test_terminal_browser_cleanup_bounds_wait_when_process_disappears_before_ter
   monkeypatch, caplog,
 ):
   monkeypatch.setattr(
-    browser_profiles, "browser_session_targets_for_chat", lambda _chat_id: set(),
+    browser_profiles, "browser_session_targets_for_chat",
+    lambda _chat_id: browser_profiles.BrowserSessionScan(frozenset(), True),
   )
   monkeypatch.setattr(chat, "_BROWSER_CLOSE_WAIT_TIMEOUT", 0.01)
   monkeypatch.setattr(chat, "_BROWSER_CLOSE_KILL_WAIT_TIMEOUT", 0.01)
