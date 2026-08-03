@@ -333,79 +333,113 @@ def _cleanup_terminal_staging_checkout(record: dict) -> bool:
   }:
     return False
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
-  repo = _safe_repo_path(plan.get("repo_path"))
+  raw_repo = plan.get("repo_path")
+  repo = _safe_repo_path(raw_repo)
+  recorded_repo = Path(raw_repo)
+  if not recorded_repo.is_absolute() or recorded_repo != repo:
+    return False
   data_dir = Path(get_settings().data_dir).resolve()
   roots = (data_dir / "contrib", data_dir / "contributions")
   if not any(repo.is_relative_to(root) for root in roots):
     return False
+  if not repo.exists():
+    return True
   marker = repo / ".git"
   if not marker.exists() or marker.is_symlink():
     return False
 
-  # A linked worktree has a .git *file*. Deleting its directory directly
-  # strands the registration and branch lock in the source repository. Ask Git
-  # to remove it instead, using the common directory as the stable owner even
-  # while the checkout itself disappears.
+  # Linked worktrees and separate-git-dir checkouts both use a .git file.
   if marker.is_file():
+    try:
+      marker_value = marker.read_text().strip()
+    except OSError:
+      return False
+    if not marker_value.startswith("gitdir:"):
+      return False
+    raw_git_dir = marker_value.removeprefix("gitdir:").strip()
+    if not raw_git_dir:
+      return False
+    marker_git_dir = Path(raw_git_dir)
+    if not marker_git_dir.is_absolute():
+      marker_git_dir = marker.parent / marker_git_dir
+    try:
+      marker_git_dir = marker_git_dir.resolve()
+    except (OSError, RuntimeError):
+      return False
+
+    separate_git_dir = (
+      marker_git_dir.name == "git" and marker_git_dir.parent == repo.parent
+    )
+    if separate_git_dir:
+      # Delete the Git directory first. If removing the checkout then fails,
+      # the next call sees its missing sibling and can finish idempotently.
+      if marker_git_dir.exists():
+        shutil.rmtree(marker_git_dir)
+      shutil.rmtree(repo)
+      return True
+
+    # Git can recycle a pruned worktree admin slot for a newer checkout. Every
+    # linked admin directory must still point back to this exact checkout.
+    back_reference = marker_git_dir / "gitdir"
+    owns_checkout = False
+    if back_reference.is_file() and not back_reference.is_symlink():
+      try:
+        registered_marker = Path(back_reference.read_text().strip())
+        if not registered_marker.is_absolute():
+          registered_marker = back_reference.parent / registered_marker
+        owns_checkout = registered_marker.resolve() == marker.resolve()
+      except (OSError, RuntimeError):
+        owns_checkout = False
+    if not owns_checkout:
+      shutil.rmtree(repo)
+      return True
+
+    common_pointer = marker_git_dir / "commondir"
+    if not common_pointer.is_file() or common_pointer.is_symlink():
+      return False
+    try:
+      raw_common_dir = common_pointer.read_text().strip()
+      if not raw_common_dir:
+        return False
+      common_dir = Path(raw_common_dir)
+      if not common_dir.is_absolute():
+        common_dir = common_pointer.parent / common_dir
+      common_dir = common_dir.resolve()
+    except (OSError, RuntimeError):
+      return False
+    common_roots = (
+      data_dir / "platform",
+      data_dir / "apps",
+      data_dir / "contrib",
+      data_dir / "contributions",
+    )
+    if not any(common_dir.is_relative_to(root) for root in common_roots):
+      return False
+
     env = dict(os.environ)
     for name in (
       "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
       "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE",
     ):
       env.pop(name, None)
-    probe = subprocess.run(
+    removed = subprocess.run(
       [
-        "git", "-C", str(repo), "rev-parse", "--path-format=absolute",
-        "--git-dir", "--git-common-dir",
+        "git", f"--git-dir={common_dir}",
+        "worktree", "remove", "--force", str(repo),
       ],
-      cwd=str(repo.parent),
+      cwd=str(data_dir),
       capture_output=True,
       text=True,
       check=False,
       env=env,
     )
-    paths = [Path(line).resolve() for line in probe.stdout.splitlines() if line]
-    if probe.returncode != 0 or len(paths) != 2:
-      return False
-    git_dir, common_dir = paths
-    if not common_dir.is_relative_to(data_dir):
-      return False
-
-    if git_dir != common_dir:
-      removed = subprocess.run(
-        [
-          "git", f"--git-dir={common_dir}",
-          "worktree", "remove", "--force", str(repo),
-        ],
-        cwd=str(data_dir),
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
+    if removed.returncode != 0:
+      raise ContributionSubmitError(
+        "Could not clear the old review checkout for this contribution.",
+        detail=readable_output(
+          removed.stderr or removed.stdout or "git worktree remove failed",
+        ),
       )
-      if removed.returncode != 0:
-        raise ContributionSubmitError(
-          "Could not clear the old review checkout for this contribution.",
-          detail=readable_output(
-            removed.stderr or removed.stdout or "git worktree remove failed",
-          ),
-        )
-      subprocess.run(
-        ["git", f"--git-dir={common_dir}", "worktree", "prune"],
-        cwd=str(data_dir),
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-      )
-      return True
-
-    # Manifest-installed apps use `--separate-git-dir=<record-root>/git`.
-    # That is a main checkout rather than a linked worktree, so remove both
-    # halves only when the git directory is the documented sibling.
-    shutil.rmtree(repo)
-    if common_dir.name == "git" and common_dir.parent == repo.parent:
-      shutil.rmtree(common_dir, ignore_errors=True)
     return True
 
   # Ordinary standalone clones keep a real .git directory inside the checkout.

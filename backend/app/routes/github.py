@@ -1704,11 +1704,32 @@ async def cleanup_contribution_staging(
     record = _read_record(record_path)
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
   repo = _safe_repo_path(plan.get("repo_path"))
-  equivalence_repos = _equivalence_source_repo(record)
+  try:
+    equivalence_repos = await asyncio.to_thread(
+      _equivalence_source_repo, record,
+    )
+  except Exception:
+    # Provenance is best-effort at this terminal boundary. A stale installed
+    # source must not retain a disposable checkout, but a valid linked
+    # worktree still needs its real owner lock while Git unregisters it.
+    try:
+      primary_repo = await asyncio.to_thread(
+        app_git.primary_worktree_path, repo,
+      )
+    except Exception:
+      primary_repo = None
+    lock_repo = primary_repo or repo
+  else:
+    lock_repo = equivalence_repos[0] if equivalence_repos else repo
   upstream_sha = None
   if record.get("status") == "merged":
-    upstream_sha = await asyncio.to_thread(_merged_upstream_sha, record, repo)
-  lock_repo = equivalence_repos[0] if equivalence_repos else repo
+    try:
+      upstream_sha = await asyncio.to_thread(_merged_upstream_sha, record, repo)
+    except Exception:
+      log.warning(
+        "terminal contribution upstream lookup failed %s/%s",
+        app_id, record_id, exc_info=True,
+      )
   async with fs_locks.source_dir_lock(str(lock_repo)):
     try:
       await asyncio.to_thread(_settle_equivalence, record, upstream_sha)
