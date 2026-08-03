@@ -87,6 +87,10 @@ services:
   pytest:
     image: ${MOBIUS_IMAGE:-mobius-test:ci}
     profiles: ["test"]
+    # The full suite launches many short-lived subprocesses. Keep pytest out
+    # of PID 1 so orphaned children are reaped and later /proc-based recovery
+    # target tests see a production-shaped process table.
+    init: true
     volumes:
       # Mount one coherent checkout at a non-runtime path and run exactly like
       # CI (`cd backend && pytest`). Mounting only app/tests/scripts at /app
