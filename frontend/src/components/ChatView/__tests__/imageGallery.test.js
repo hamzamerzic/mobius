@@ -167,7 +167,7 @@ test('lightbox fills its actual overlay and dismisses from every backdrop edge',
 test('zoomed touch pan keeps its gesture snapshot through a queued render', () => {
   assert.match(
     lightboxSource,
-    /const pan = panRef\.current[\s\S]{0,180}const point = toLayoutPoint[\s\S]{0,180}setTransform\(\(current\) =>[\s\S]{0,180}point\.x - pan\.x[\s\S]{0,80}point\.y - pan\.y/,
+    /const pan = panRef\.current[\s\S]{0,220}const point = \w+\([^)]*pan\.space\)[\s\S]{0,180}setTransform\(\(current\) =>[\s\S]{0,180}point\.x - pan\.x[\s\S]{0,80}point\.y - pan\.y/,
     'lifting a finger may clear panRef before React evaluates the queued state update',
   )
   assert.doesNotMatch(

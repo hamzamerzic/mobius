@@ -385,15 +385,18 @@ Author zoom creates one boundary. Painted pointer/touch coordinates, DOMRects,
 and VisualViewport measurements are in **client space**; element client/offset/
 scroll dimensions and CSS lengths are in unscaled **layout space**. Custom JavaScript
 that crosses this boundary uses `frontend/src/lib/layoutSpace.js`: capture the
-owning space once, convert the client input once, then keep comparisons,
-thresholds, models, and writes in one space.
+owning space once, convert layout geometry once, then keep models and writes in
+layout space. Gesture slop, swipe, and dismiss thresholds intentionally remain
+physical client pixels so density does not change how far a finger must travel.
 
 Do not replace the root zoom with `transform: scale(...)`: transforms do not
 relayout the viewport and reintroduce gutters, clipping, and hit-test problems.
 Do not pass shell density into mini-app frames; the browser maps a scaled host
 frame into each app's native document. `currentCSSZoom` is preferred, with
-computed and measured fallbacks for older installed browsers. The layout-space
-unit tests and desktop-density browser test protect this policy.
+the document root's computed zoom as the older-browser fallback. The document
+root uses offset geometry because its client dimensions can remain painted-size
+under author zoom. Layout-space unit tests and the desktop-density browser test
+protect this policy.
 
 ### Top-level components (`frontend/src/components/`)
 

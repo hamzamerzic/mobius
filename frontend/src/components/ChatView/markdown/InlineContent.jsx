@@ -11,7 +11,7 @@ import {
 } from './mediaImageSource.js'
 import ImageLightbox from './ImageLightbox.jsx'
 import { useHistoryDismiss } from '../../../hooks/useHistoryDismiss.jsx'
-import { captureLayoutSpace, clientDeltaToLayout } from '../../../lib/layoutSpace.js'
+import { captureLayoutSpace, clientLengthToLayout } from '../../../lib/layoutSpace.js'
 import '../lightbox.css'
 
 const SAFE_LINK_PROTOCOLS = new Set(['http:', 'https:', 'mailto:'])
@@ -238,10 +238,10 @@ export function ExpandableImage({
       && (window.visualViewport?.height || window.innerHeight)) || 800)
     : 0
   const viewportH = dims && typeof document !== 'undefined'
-    ? clientDeltaToLayout(
-      { x: 0, y: viewportClientHeight },
+    ? clientLengthToLayout(
+      viewportClientHeight,
       captureLayoutSpace(document.documentElement),
-    ).y
+    )
     : viewportClientHeight
   const imageVars = dims
     ? imageVarsFromDims(dims.width, dims.height, viewportH)

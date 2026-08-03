@@ -11,7 +11,7 @@ import {
   platformUpdateStatusLabel,
 } from '../../lib/platformUpdateState.js'
 import { settleBackgroundAgentSave } from '../../lib/backgroundAgentSave.js'
-import { captureLayoutSpace, clientDeltaToLayout } from '../../lib/layoutSpace.js'
+import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 import {
   PROVIDER_AVAILABILITY_PHASE,
   resolveProviderAvailability,
@@ -637,18 +637,7 @@ export default function SettingsView({
     })
   }, [])
 
-  const backgroundIndexFromY = useCallback((clientY, slots) => {
-    const rows = slots || backgroundRowRefs.current
-      .map((node) => {
-        if (!node) return null
-        const rect = node.getBoundingClientRect()
-        return {
-          top: rect.top,
-          height: rect.height,
-          center: rect.top + rect.height / 2,
-        }
-      })
-      .filter(Boolean)
+  const backgroundIndexFromY = useCallback((pointerY, rows) => {
     if (!rows.length) return 0
     // Partition by the MIDPOINT between adjacent slot centers, not the
     // centers themselves: the dragged row's projected center starts on its
@@ -657,7 +646,7 @@ export default function SettingsView({
     // Midpoints mean "drag past halfway to swap" — a tiny nudge eases back.
     for (let index = 0; index < rows.length - 1; index++) {
       const boundary = (rows[index].center + rows[index + 1].center) / 2
-      if (clientY < boundary) return index
+      if (pointerY < boundary) return index
     }
     return rows.length - 1
   }, [])
@@ -668,28 +657,37 @@ export default function SettingsView({
   const startBackgroundReorder = useCallback((index, pointer) => {
     const node = backgroundRowRefs.current[index] || pointer?.node
     if (!node) return
+    const layoutSpace = captureLayoutSpace(node)
+    const toLayoutY = clientY => clientLengthToLayout(
+      clientY - layoutSpace.clientTop,
+      layoutSpace,
+    )
     const rowRect = node.getBoundingClientRect()
     const rows = backgroundRowRefs.current
     const slots = rows.map((rowNode) => {
       if (!rowNode) return null
       const rect = rowNode.getBoundingClientRect()
+      const top = toLayoutY(rect.top)
+      const height = clientLengthToLayout(rect.height, layoutSpace)
       return {
-        top: rect.top,
-        height: rect.height,
-        center: rect.top + rect.height / 2,
+        top,
+        height,
+        center: top + height / 2,
       }
     }).filter(Boolean)
     const captureNode = pointer?.captureNode || node
     try { captureNode.setPointerCapture?.(pointer?.pointerId) } catch { /* best-effort */ }
-    const grabY = typeof pointer?.clientY === 'number' ? pointer.clientY : rowRect.top
+    const grabY = toLayoutY(
+      typeof pointer?.clientY === 'number' ? pointer.clientY : rowRect.top,
+    )
     backgroundPointerYRef.current = grabY
     const next = {
       fromIndex: index,
       toIndex: index,
-      grabOffsetY: grabY - rowRect.top,
-      rowHeight: rowRect.height,
+      grabOffsetY: grabY - toLayoutY(rowRect.top),
+      rowHeight: clientLengthToLayout(rowRect.height, layoutSpace),
       slots,
-      layoutSpace: captureLayoutSpace(node),
+      layoutSpace,
     }
     setBackgroundDrag(next)
   }, [])
@@ -705,29 +703,30 @@ export default function SettingsView({
     const originTop = slots[fromIndex]?.top ?? 0
     const minOffset = slots.length ? slots[0].top - originTop : 0
     const maxOffset = slots.length ? slots[slots.length - 1].top - originTop : 0
-    const followOffset = (clientY) => {
-      const raw = clientY - grabOffsetY - originTop
+    const followOffset = (pointerY) => {
+      const raw = pointerY - grabOffsetY - originTop
       return Math.max(minOffset, Math.min(maxOffset, raw))
     }
+    const toLayoutY = clientY => clientLengthToLayout(
+      clientY - layoutSpace.clientTop,
+      layoutSpace,
+    )
 
     const onPointerMove = (event) => {
       event.preventDefault()
       const current = backgroundDragRef.current
       if (!current) return
-      backgroundPointerYRef.current = event.clientY
+      const pointerY = toLayoutY(event.clientY)
+      backgroundPointerYRef.current = pointerY
       // Move the held row imperatively so it tracks the finger 1:1
       // without re-rendering the whole panel every frame.
       const node = backgroundRowRefs.current[fromIndex]
       if (node) {
-        const layoutOffset = clientDeltaToLayout({
-          x: 0,
-          y: followOffset(event.clientY),
-        }, layoutSpace).y
-        node.style.transform = `translateY(${layoutOffset}px) scale(1.02)`
+        node.style.transform = `translateY(${followOffset(pointerY)}px) scale(1.02)`
       }
       // Only re-render (to slide the other rows aside) when the target
       // slot actually changes.
-      const dragCenterY = event.clientY - grabOffsetY + rowHeight / 2
+      const dragCenterY = pointerY - grabOffsetY + rowHeight / 2
       const toIndex = backgroundIndexFromY(dragCenterY, slots)
       setBackgroundDrag((c) => (
         c && c.toIndex !== toIndex ? { ...c, toIndex } : c
@@ -738,8 +737,9 @@ export default function SettingsView({
       event.preventDefault()
       const current = backgroundDragRef.current
       if (!current) return
-      backgroundPointerYRef.current = event.clientY
-      const dragCenterY = event.clientY - grabOffsetY + rowHeight / 2
+      const pointerY = toLayoutY(event.clientY)
+      backgroundPointerYRef.current = pointerY
+      const dragCenterY = pointerY - grabOffsetY + rowHeight / 2
       const toIndex = backgroundIndexFromY(dragCenterY, slots)
       // Commit synchronously on release. If the row didn't change slots,
       // just drop the drag and let the base CSS transition ease it back
@@ -1373,10 +1373,7 @@ export default function SettingsView({
       const raw = (backgroundPointerYRef.current - backgroundDrag.grabOffsetY) - originTop
       const minOffset = slots.length ? slots[0].top - originTop : 0
       const maxOffset = slots.length ? slots[slots.length - 1].top - originTop : 0
-      const offset = clientDeltaToLayout({
-        x: 0,
-        y: Math.max(minOffset, Math.min(maxOffset, raw)),
-      }, backgroundDrag.layoutSpace).y
+      const offset = Math.max(minOffset, Math.min(maxOffset, raw))
       return {
         transform: `translateY(${offset}px) scale(1.02)`,
         zIndex: 3,
@@ -1390,10 +1387,7 @@ export default function SettingsView({
     ) {
       const originSlot = slots[index]
       const targetSlot = slots[index - 1]
-      const offset = clientDeltaToLayout({
-        x: 0,
-        y: originSlot && targetSlot ? targetSlot.top - originSlot.top : 0,
-      }, backgroundDrag.layoutSpace).y
+      const offset = originSlot && targetSlot ? targetSlot.top - originSlot.top : 0
       return { transform: `translateY(${offset}px)` }
     }
     if (
@@ -1403,10 +1397,7 @@ export default function SettingsView({
     ) {
       const originSlot = slots[index]
       const targetSlot = slots[index + 1]
-      const offset = clientDeltaToLayout({
-        x: 0,
-        y: originSlot && targetSlot ? targetSlot.top - originSlot.top : 0,
-      }, backgroundDrag.layoutSpace).y
+      const offset = originSlot && targetSlot ? targetSlot.top - originSlot.top : 0
       return { transform: `translateY(${offset}px)` }
     }
     return undefined

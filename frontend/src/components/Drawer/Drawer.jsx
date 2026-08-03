@@ -57,7 +57,7 @@ import {
   DESKTOP_SIDEBAR_MAX_WIDTH,
   DESKTOP_SIDEBAR_MIN_WIDTH,
 } from '../Shell/useDesktopSidebar.js'
-import { captureLayoutSpace, clientDeltaToLayout } from '../../lib/layoutSpace.js'
+import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 import './Drawer.css'
 
 // Module-level constant so default Set props are stable across renders.
@@ -190,10 +190,10 @@ export default function Drawer({
     if (!root || !section || !rowsStart) return
     const rootRect = root.getBoundingClientRect()
     const rowsRect = rowsStart.getBoundingClientRect()
-    const rectDelta = clientDeltaToLayout({
-      x: 0,
-      y: rowsRect.top - rootRect.top,
-    }, captureLayoutSpace(root)).y
+    const rectDelta = clientLengthToLayout(
+      rowsRect.top - rootRect.top,
+      captureLayoutSpace(root),
+    )
     recentSectionTopRef.current = rectDelta + root.scrollTop
     const next = drawerRowWindow({
       total: allRecents.length,
@@ -763,6 +763,7 @@ export default function Drawer({
       horizontal: false,
       panning: false,
       layoutSpace: captureLayoutSpace(drawerRef.current),
+      width: drawerRef.current.offsetWidth,
     }
   }
   function onDrawerPointerMove(e) {
@@ -792,13 +793,12 @@ export default function Drawer({
       if (!el.hasPointerCapture?.(e.pointerId)) el.setPointerCapture?.(e.pointerId)
     } catch { /* capture is optional; touch-action still owns arbitration */ }
     el.classList.add('drawer--dragging')
-    // Clamp to [-320, 0]: a finger that drifts back past the origin must not
-    // drag an already-open panel further right than open.
-    const clampedClientX = Math.min(0, Math.max(dx, -320))
-    const layoutX = clientDeltaToLayout(
-      { x: clampedClientX, y: 0 },
-      gesture.layoutSpace,
-    ).x
+    // Keep the panel between fully closed and fully open. The close threshold
+    // below intentionally remains a physical finger-travel distance.
+    const layoutX = Math.min(0, Math.max(
+      clientLengthToLayout(dx, gesture.layoutSpace),
+      -gesture.width,
+    ))
     el.style.transform = `translateX(${layoutX}px)`
     closeShieldRef.current?.style.setProperty('--drawer-close-start-x', `${layoutX}px`)
   }
@@ -893,14 +893,13 @@ export default function Drawer({
 
   function onResizePointerMove(e) {
     if (resizeRef.current?.pointerId !== e.pointerId) return
-    const layoutDelta = clientDeltaToLayout({
-      x: e.clientX - resizeRef.current.startX,
-      y: 0,
-    }, resizeRef.current.layoutSpace).x
+    const layoutDelta = clientLengthToLayout(
+      e.clientX - resizeRef.current.startX,
+      resizeRef.current.layoutSpace,
+    )
     applyResizeWidth(drawerWidthFromPointerDelta({
       startWidth: resizeRef.current.startWidth,
-      startX: resizeRef.current.startX,
-      currentX: resizeRef.current.startX + layoutDelta,
+      delta: layoutDelta,
       edgeDirection: resizeRef.current.edgeDirection,
     }))
   }
@@ -1733,10 +1732,15 @@ const DrawerRow = memo(function DrawerRow({
         .map((btn) => {
           const wrap = wrapOf(btn)
           const rect = wrap.getBoundingClientRect()
+          const top = clientLengthToLayout(
+            rect.top - transformSpace.clientTop,
+            transformSpace,
+          )
+          const height = clientLengthToLayout(rect.height, transformSpace)
           return {
             btn, wrap,
             key: btn.dataset.pinnedKey,
-            top: rect.top, height: rect.height, center: rect.top + rect.height / 2,
+            top, height, center: top + height / 2,
           }
         })
       fromIndex = rows.findIndex((r) => r.btn === sourceBtn)
@@ -1760,17 +1764,16 @@ const DrawerRow = memo(function DrawerRow({
 
     function onMove(moveEvent) {
       if (moveEvent.pointerId !== pointerId) return
-      const dy = moveEvent.clientY - start.y
+      const dy = clientLengthToLayout(
+        moveEvent.clientY - start.y,
+        transformSpace,
+      )
       moveEvent.preventDefault()
       last = computePinnedDrag(rows, fromIndex, dy)
-      const layoutDy = clientDeltaToLayout({ x: 0, y: dy }, transformSpace).y
-      src.wrap.style.transform = `translateY(${layoutDy}px)`
+      src.wrap.style.transform = `translateY(${dy}px)`
       for (const r of rows) {
         if (r === src) continue
-        const shift = clientDeltaToLayout({
-          x: 0,
-          y: last.shifts.get(r.key) || 0,
-        }, transformSpace).y
+        const shift = last.shifts.get(r.key) || 0
         r.wrap.style.transform = `translateY(${shift}px)`
       }
     }
@@ -1791,10 +1794,7 @@ const DrawerRow = memo(function DrawerRow({
       }
       src.wrap.addEventListener('transitionend', onEnd)
       src.wrap.style.transition = 'transform 190ms cubic-bezier(0.2, 0, 0, 1)'
-      const settleY = clientDeltaToLayout({
-        x: 0,
-        y: commit ? last.slotDelta : 0,
-      }, transformSpace).y
+      const settleY = commit ? last.slotDelta : 0
       src.wrap.style.transform = `translateY(${settleY}px)`
       // Fallback if transitionend never fires (e.g. the offset was already 0).
       setTimeout(done, 240)

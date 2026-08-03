@@ -64,6 +64,11 @@ test('reserved-bottom reader settlement enters follow without moving backward', 
     scrollHeight: 1900,
     scrollTop: 1200,
     clientHeight: 700,
+    currentCSSZoom: 1,
+    clientWidth: 1000,
+    offsetWidth: 1000,
+    offsetHeight: 700,
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 1000, height: 700 }),
     querySelector(selector) {
       if (selector === '.spacer-dynamic') return spacer
       if (selector === '[data-key="assistant-tail"]') return row

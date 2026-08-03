@@ -36,7 +36,7 @@ import { popoverMaxHeight, nearestClipTop } from './composerPopoverHeight.js'
 import { focusComposerElement } from './composerFocusPolicy.js'
 import {
   captureLayoutSpace,
-  clientDeltaToLayout,
+  clientLengthToLayout,
   clientPointToLayout,
 } from '../../lib/layoutSpace.js'
 
@@ -104,7 +104,7 @@ export default function ComposerPopover({
       const rect = trigger.getBoundingClientRect()
       const rootSpace = captureLayoutSpace(document.documentElement)
       const pointY = y => clientPointToLayout({ x: 0, y }, rootSpace).y
-      const deltaY = y => clientDeltaToLayout({ x: 0, y }, rootSpace).y
+      const deltaY = y => clientLengthToLayout(y, rootSpace)
       const triggerTop = pointY(rect.top)
       const triggerBottom = pointY(rect.bottom)
       const viewportTop = deltaY(window.visualViewport?.offsetTop || 0)

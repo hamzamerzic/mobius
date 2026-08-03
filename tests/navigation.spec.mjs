@@ -480,28 +480,21 @@ test.describe('Desktop sidebar navigation', () => {
       }
     })
 
-    const desktop = await readDensity()
-    expect(desktop.ratio).toBeCloseTo(0.9, 2)
-    expect(desktop.shell.left).toBeCloseTo(0, 1)
-    expect(desktop.shell.top).toBeCloseTo(0, 1)
-    expect(desktop.shell.right).toBeCloseTo(desktop.viewport.width, 1)
-    expect(desktop.shell.bottom).toBeCloseTo(desktop.viewport.height, 1)
-
-    await page.setViewportSize({ width: 900, height: 800 })
-    await expect.poll(async () => (await readDensity()).ratio).toBeCloseTo(1, 2)
-    const tablet = await readDensity()
-    expect(tablet.shell.left).toBeCloseTo(0, 1)
-    expect(tablet.shell.top).toBeCloseTo(0, 1)
-    expect(tablet.shell.right).toBeCloseTo(tablet.viewport.width, 1)
-    expect(tablet.shell.bottom).toBeCloseTo(tablet.viewport.height, 1)
-
-    await page.setViewportSize({ width: 390, height: 844 })
-    const phone = await readDensity()
-    expect(phone.ratio).toBeCloseTo(1, 2)
-    expect(phone.shell.left).toBeCloseTo(0, 1)
-    expect(phone.shell.top).toBeCloseTo(0, 1)
-    expect(phone.shell.right).toBeCloseTo(phone.viewport.width, 1)
-    expect(phone.shell.bottom).toBeCloseTo(phone.viewport.height, 1)
+    for (const { label, size, ratio } of [
+      { label: 'desktop boundary', size: { width: 1024, height: 800 }, ratio: 0.9 },
+      { label: 'below desktop', size: { width: 1023, height: 800 }, ratio: 1 },
+      { label: 'phone', size: { width: 390, height: 844 }, ratio: 1 },
+    ]) {
+      await test.step(label, async () => {
+        await page.setViewportSize(size)
+        await expect.poll(async () => (await readDensity()).ratio).toBeCloseTo(ratio, 2)
+        const density = await readDensity()
+        expect(density.shell.left).toBeCloseTo(0, 1)
+        expect(density.shell.top).toBeCloseTo(0, 1)
+        expect(density.shell.right).toBeCloseTo(density.viewport.width, 1)
+        expect(density.shell.bottom).toBeCloseTo(density.viewport.height, 1)
+      })
+    }
   })
 
   test('28. desktop sidebar reserves workspace width and persists its toggle', async ({ page }) => {

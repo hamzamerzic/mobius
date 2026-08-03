@@ -3,7 +3,7 @@
 import { useLayoutEffect } from 'react'
 import {
   captureLayoutSpace,
-  clientDeltaToLayout,
+  clientLengthToLayout,
 } from '../../lib/layoutSpace.js'
 
 // Ignore small browser-bar changes; a software keyboard consumes much more.
@@ -27,21 +27,14 @@ export function fitShellToVisualViewport(root, viewport) {
   const space = captureLayoutSpace(root)
   const visibleClientHeight = Number(viewport?.height)
   if (!(visibleClientHeight > 0)) return false
-  const visibleHeight = clientDeltaToLayout({
-    x: 0,
-    y: visibleClientHeight,
-  }, space).y
+  const visibleHeight = clientLengthToLayout(visibleClientHeight, space)
   const layoutHeight = space.height
   const coveredHeight = layoutHeight - visibleHeight
-  const coveredClientHeight = space.clientHeight - visibleClientHeight
-  if (coveredClientHeight < MIN_KEYBOARD_INSET) return false
+  if (coveredHeight < clientLengthToLayout(MIN_KEYBOARD_INSET, space)) return false
 
   const visibleTop = Math.min(
     coveredHeight,
-    Math.max(0, clientDeltaToLayout({
-      x: 0,
-      y: Number(viewport.offsetTop) || 0,
-    }, space).y),
+    Math.max(0, clientLengthToLayout(Number(viewport.offsetTop) || 0, space)),
   )
   root.style.setProperty('top', `${visibleTop}px`)
   root.style.setProperty('bottom', 'auto')

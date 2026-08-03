@@ -260,7 +260,7 @@ function _captureScrollMeasurement(scrollEl) {
   const space = captureLayoutSpace(scrollEl)
   return {
     space,
-    borderClientTop: space.clientTop - (Number(scrollEl?.clientTop) || 0) * space.scaleY,
+    borderClientTop: space.clientTop - (Number(scrollEl?.clientTop) || 0) * space.zoom,
   }
 }
 

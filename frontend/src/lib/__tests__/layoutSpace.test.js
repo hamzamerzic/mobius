@@ -20,6 +20,8 @@ function box({
 } = {}) {
   return {
     currentCSSZoom,
+    clientWidth: layoutWidth,
+    clientHeight: layoutHeight,
     offsetWidth: layoutWidth,
     offsetHeight: layoutHeight,
     getBoundingClientRect: () => ({
@@ -35,12 +37,9 @@ test('captureLayoutSpace records the effective 90% client-to-layout scale', () =
   assert.deepEqual(captureLayoutSpace(box({ left: 288 })), {
     clientLeft: 288,
     clientTop: 0,
-    clientWidth: 900,
-    clientHeight: 720,
     width: 1000,
     height: 800,
-    scaleX: 0.9,
-    scaleY: 0.9,
+    zoom: 0.9,
   })
 })
 
@@ -93,11 +92,19 @@ test('native scale remains an ordinary identity boundary', () => {
   assert.deepEqual(clientDeltaToLayout({ x: 48, y: 24 }, space), { x: 48, y: 24 })
 })
 
-test('measured geometry discovers zoom when currentCSSZoom is unavailable', () => {
+test('the document root computed zoom is the legacy fallback', () => {
+  const originalGetComputedStyle = globalThis.getComputedStyle
+  const root = { authoredZoom: 0.9 }
   const legacy = box({ currentCSSZoom: undefined })
-  const space = captureLayoutSpace(legacy)
-  assert.equal(space.scaleX, 0.9)
-  assert.equal(space.scaleY, 0.9)
+  legacy.ownerDocument = { documentElement: root }
+  globalThis.getComputedStyle = node => ({ zoom: String(node.authoredZoom) })
+  let space
+  try {
+    space = captureLayoutSpace(legacy)
+  } finally {
+    globalThis.getComputedStyle = originalGetComputedStyle
+  }
+  assert.equal(space.zoom, 0.9)
 })
 
 test('currentCSSZoom does not mistake transform scaling for CSS zoom', () => {
@@ -107,24 +114,7 @@ test('currentCSSZoom does not mistake transform scaling for CSS zoom', () => {
     clientHeight: 576,
   })
   const space = captureLayoutSpace(transformed)
-  assert.equal(space.scaleX, 0.9)
-  assert.equal(space.scaleY, 0.9)
-})
-
-test('legacy engines multiply authored zoom through the ancestor chain', () => {
-  const originalGetComputedStyle = globalThis.getComputedStyle
-  const root = { parentElement: null, authoredZoom: 0.9 }
-  const child = box({ currentCSSZoom: undefined, clientWidth: 720, clientHeight: 576 })
-  child.parentElement = root
-  child.authoredZoom = 1
-  globalThis.getComputedStyle = node => ({ zoom: String(node.authoredZoom) })
-  try {
-    const space = captureLayoutSpace(child)
-    assert.equal(space.scaleX, 0.9)
-    assert.equal(space.scaleY, 0.9)
-  } finally {
-    globalThis.getComputedStyle = originalGetComputedStyle
-  }
+  assert.equal(space.zoom, 0.9)
 })
 
 test('currentCSSZoom keeps zero-sized measurement fallbacks finite', () => {
@@ -138,7 +128,6 @@ test('currentCSSZoom keeps zero-sized measurement fallbacks finite', () => {
   }
   const space = captureLayoutSpace(zero)
 
-  assert.equal(space.scaleX, 0.9)
-  assert.equal(space.scaleY, 0.9)
+  assert.equal(space.zoom, 0.9)
   assert.deepEqual(clientPointToLayout({ x: 13, y: 15 }, space), { x: 10, y: 10 })
 })
