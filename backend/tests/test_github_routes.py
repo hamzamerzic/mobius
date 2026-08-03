@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 import stat
 import subprocess
 import time
@@ -2592,7 +2593,135 @@ def test_cleanup_terminal_staging_checkout_unregisters_linked_worktree():
   assert str(checkout) not in listed
 
 
-def test_cleanup_terminal_staging_checkout_removes_separate_git_dir():
+def test_cleanup_terminal_staging_checkout_removes_stale_missing_admin():
+  from app.routes.github import _cleanup_terminal_staging_checkout
+
+  data_dir = Path(get_settings().data_dir)
+  checkout = data_dir / "contrib" / "terminal-cleanup-missing-admin" / "worktree"
+  missing_admin = data_dir / "contrib" / "missing-owner" / ".git" / "worktrees" / "worktree"
+  checkout.mkdir(parents=True)
+  (checkout / ".git").write_text(f"gitdir: {missing_admin}\n")
+  (checkout / "review.txt").write_text("stale\n")
+
+  record = {
+    "status": "closed",
+    "plan": {"repo_path": str(checkout)},
+  }
+  assert _cleanup_terminal_staging_checkout(record) is True
+  assert not checkout.exists()
+
+
+def test_cleanup_terminal_staging_checkout_preserves_recycled_worktree_slot():
+  from app.routes.github import _cleanup_terminal_staging_checkout
+
+  data_dir = Path(get_settings().data_dir)
+  owner = data_dir / "contrib" / "terminal-cleanup-recycled-owner"
+  stale = data_dir / "contrib" / "terminal-cleanup-recycled-old" / "worktree"
+  current = data_dir / "contrib" / "terminal-cleanup-recycled-new" / "worktree"
+  owner.mkdir(parents=True)
+  subprocess.run(["git", "init", "-qb", "main", str(owner)], check=True)
+  subprocess.run(["git", "-C", str(owner), "config", "user.name", "Test"], check=True)
+  subprocess.run(
+    ["git", "-C", str(owner), "config", "user.email", "test@example.invalid"],
+    check=True,
+  )
+  (owner / "tracked.txt").write_text("base\n")
+  subprocess.run(["git", "-C", str(owner), "add", "tracked.txt"], check=True)
+  subprocess.run(["git", "-C", str(owner), "commit", "-qm", "base"], check=True)
+
+  stale.parent.mkdir(parents=True)
+  subprocess.run(
+    ["git", "-C", str(owner), "worktree", "add", "-qb", "fix/stale", str(stale)],
+    check=True,
+  )
+  admin_dir = Path((stale / ".git").read_text().split(":", 1)[1].strip())
+  shutil.rmtree(admin_dir)
+
+  current.parent.mkdir(parents=True)
+  subprocess.run(
+    ["git", "-C", str(owner), "worktree", "add", "-qb", "fix/current", str(current)],
+    check=True,
+  )
+  assert Path((current / ".git").read_text().split(":", 1)[1].strip()) == admin_dir
+
+  record = {
+    "status": "merged",
+    "plan": {"repo_path": str(stale)},
+  }
+  assert _cleanup_terminal_staging_checkout(record) is True
+  assert not stale.exists()
+  assert current.exists()
+  assert (admin_dir / "gitdir").read_text().strip() == str(current / ".git")
+  listed = subprocess.run(
+    ["git", "-C", str(owner), "worktree", "list", "--porcelain"],
+    check=True,
+    capture_output=True,
+    text=True,
+  ).stdout
+  assert str(current) in listed
+
+
+def test_cleanup_terminal_staging_checkout_preserves_reciprocal_outside_owner():
+  from app.routes.github import _cleanup_terminal_staging_checkout
+
+  data_dir = Path(get_settings().data_dir)
+  checkout = data_dir / "contrib" / "terminal-cleanup-outside-owner" / "worktree"
+  admin_dir = data_dir / "shared" / "outside-owner-admin"
+  outside_owner = data_dir / "shared" / "outside-owner.git"
+  checkout.mkdir(parents=True)
+  admin_dir.mkdir(parents=True)
+  outside_owner.mkdir(parents=True)
+  (checkout / ".git").write_text(f"gitdir: {admin_dir}\n")
+  (admin_dir / "gitdir").write_text(f"{checkout / '.git'}\n")
+  (admin_dir / "commondir").write_text(f"{outside_owner}\n")
+  (outside_owner / "sentinel").write_text("keep\n")
+
+  record = {
+    "status": "closed",
+    "plan": {"repo_path": str(checkout)},
+  }
+  assert _cleanup_terminal_staging_checkout(record) is False
+  assert checkout.exists()
+  assert (outside_owner / "sentinel").read_text() == "keep\n"
+
+
+def test_cleanup_terminal_staging_checkout_rejects_repo_symlink_alias():
+  from app.routes.github import _cleanup_terminal_staging_checkout
+
+  data_dir = Path(get_settings().data_dir)
+  target = data_dir / "contrib" / "terminal-cleanup-alias-target" / "repo"
+  alias = data_dir / "contrib" / "terminal-cleanup-alias"
+  (target / ".git").mkdir(parents=True)
+  (target / "sentinel").write_text("keep\n")
+  alias.symlink_to(target)
+
+  record = {
+    "status": "closed",
+    "plan": {"repo_path": str(alias)},
+  }
+  assert _cleanup_terminal_staging_checkout(record) is False
+  assert alias.is_symlink()
+  assert (target / "sentinel").read_text() == "keep\n"
+
+
+def test_cleanup_terminal_staging_checkout_is_idempotent_after_removal():
+  from app.routes.github import _cleanup_terminal_staging_checkout
+
+  data_dir = Path(get_settings().data_dir)
+  checkout = data_dir / "contrib" / "terminal-cleanup-idempotent" / "repo"
+  (checkout / ".git").mkdir(parents=True)
+  record = {
+    "status": "abandoned",
+    "plan": {"repo_path": str(checkout)},
+  }
+
+  assert _cleanup_terminal_staging_checkout(record) is True
+  assert _cleanup_terminal_staging_checkout(record) is True
+
+
+def test_cleanup_terminal_staging_checkout_retries_separate_git_dir_partial_failure(
+  monkeypatch,
+):
   from app.routes.github import _cleanup_terminal_staging_checkout
 
   data_dir = Path(get_settings().data_dir)
@@ -2609,6 +2738,22 @@ def test_cleanup_terminal_staging_checkout_removes_separate_git_dir():
     "status": "closed",
     "plan": {"repo_path": str(checkout)},
   }
+  real_rmtree = shutil.rmtree
+  checkout_failed = False
+
+  def fail_checkout_once(path, *args, **kwargs):
+    nonlocal checkout_failed
+    if Path(path) == checkout and not checkout_failed:
+      checkout_failed = True
+      raise OSError("simulated checkout removal failure")
+    return real_rmtree(path, *args, **kwargs)
+
+  monkeypatch.setattr(shutil, "rmtree", fail_checkout_once)
+  with pytest.raises(OSError, match="simulated checkout removal failure"):
+    _cleanup_terminal_staging_checkout(record)
+  assert checkout.exists()
+  assert not git_dir.exists()
+
   assert _cleanup_terminal_staging_checkout(record) is True
   assert not checkout.exists()
   assert not git_dir.exists()
