@@ -14,3 +14,15 @@ def test_default_reflection_brief_has_no_placeholder_question_carrier():
   assert "data-report-questions" not in template
   assert "{{QUESTION_" not in template
   assert "{{INPUT_" not in template
+
+
+def test_default_reflection_brief_has_no_unverified_run_ledger():
+  template = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "reflection-brief-template.html"
+  ).read_text(encoding="utf-8")
+
+  assert "Run ledger" not in template
+  assert "{{N_INTERVIEWED}}" not in template
+  assert "From verified evidence" in template
