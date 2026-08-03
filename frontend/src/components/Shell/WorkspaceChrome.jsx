@@ -144,10 +144,7 @@ export default function WorkspaceChrome({
     const contentSpace = captureLayoutSpace(contentEl)
     const { dir, splitId } = divider
     const startPoint = clientPointToLayout({ x: e.clientX, y: e.clientY }, contentSpace)
-    const dividerCenter = dir === 'row'
-      ? divider.x + divider.w / 2
-      : divider.y + divider.h / 2
-    const grabOffset = (dir === 'row' ? startPoint.x : startPoint.y) - dividerCenter
+    const startAxis = dir === 'row' ? startPoint.x : startPoint.y
 
     // Cache the elements to move; no React render fires during the drag, so the
     // DOM is stable and one lookup suffices.
@@ -174,10 +171,8 @@ export default function WorkspaceChrome({
       const pointerAxis = dir === 'row'
         ? point.x
         : point.y
-      const gap = dir === 'row' ? divider.w : divider.h
-      const dividerStart = pointerAxis - grabOffset - gap / 2
       const raw = divider.span > 0
-        ? (dividerStart - divider.origin) / divider.span
+        ? divider.ratio + (pointerAxis - startAxis) / divider.span
         : 0.5
       const proj = projectLayout(workspace, mode, contentRect, { splitId, ratio: raw })
       committed = proj.dividers.find(d => d.splitId === splitId)?.ratio ?? committed

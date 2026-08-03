@@ -5,7 +5,7 @@ import { ExpandableImage } from './InlineContent.jsx'
 import ImageLightbox from './ImageLightbox.jsx'
 import { projectResolvedGalleryItems } from './imageGallery.js'
 import { useHistoryDismiss } from '../../../hooks/useHistoryDismiss.jsx'
-import { captureLayoutSpace, clientDeltaToLayout } from '../../../lib/layoutSpace.js'
+import { captureLayoutSpace, clientLengthToLayout } from '../../../lib/layoutSpace.js'
 
 const REDUCED_MOTION = '(prefers-reduced-motion: reduce)'
 
@@ -144,10 +144,7 @@ export default function ImageGallery({ images, mediaDimensions }) {
     }
     drag.moved = true
     event.preventDefault()
-    const layoutDeltaX = clientDeltaToLayout(
-      { x: deltaX, y: 0 },
-      drag.layoutSpace,
-    ).x
+    const layoutDeltaX = clientLengthToLayout(deltaX, drag.layoutSpace)
     event.currentTarget.scrollLeft = drag.startScrollLeft - layoutDeltaX
   }
 

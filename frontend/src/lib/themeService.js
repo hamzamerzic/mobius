@@ -90,9 +90,8 @@ function shouldAnimateThemeChange() {
 function defaultThemeTransitionOrigin() {
   if (typeof window === 'undefined') return null
   const root = document.documentElement
-  const space = captureLayoutSpace(root)
-  if (!space.width || !space.height) return null
-  return { x: space.width / 2, y: space.height / 2 }
+  if (!root.offsetWidth || !root.offsetHeight) return null
+  return { x: root.offsetWidth / 2, y: root.offsetHeight / 2 }
 }
 
 function applyThemeTransitionOrigin(root, origin) {

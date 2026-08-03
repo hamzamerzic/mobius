@@ -97,6 +97,14 @@ body,
   color-scheme: light;
 }
 
+/* Intentional desktop density. Client input crosses into this layout space
+   only through lib/layoutSpace.js; mini-app frames remain native-sized. */
+@media (min-width: 1024px) {
+  :root {
+    zoom: 0.9;
+  }
+}
+
 /* Theme flips should feel like one surface changing, not every descendant
    repainting separately. Modern Chromium/Safari get a View Transition bloom
    from the user's tap point; older browsers — and the Settings toggle, which

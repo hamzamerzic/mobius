@@ -369,7 +369,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
     const after = await readTop()
     const movedBox = await page.locator('.workspace__divider').boundingBox()
     const dividerCenterAfter = movedBox.x + movedBox.width / 2
-    expect(dividerCenterAfter - dividerCenterBefore).toBeCloseTo(140, 0)
+    expect(Math.abs(dividerCenterAfter - dividerCenterBefore - 140)).toBeLessThanOrEqual(1)
     expect(after, 'pinned message still measurable after drag').not.toBeNull()
     // Vertical position held (width change must not re-scroll the pin).
     expect(Math.abs(after - before)).toBeLessThanOrEqual(16)

@@ -112,13 +112,11 @@ test('close watchdog releases immediately when transform motion is disabled', ()
 test('drawer resize follows pointer delta from either panel edge', () => {
   assert.equal(drawerWidthFromPointerDelta({
     startWidth: 320,
-    startX: 400,
-    currentX: 448,
+    delta: 48,
   }), 368)
   assert.equal(drawerWidthFromPointerDelta({
     startWidth: 320,
-    startX: 1000,
-    currentX: 952,
+    delta: -48,
     edgeDirection: -1,
   }), 368)
 })

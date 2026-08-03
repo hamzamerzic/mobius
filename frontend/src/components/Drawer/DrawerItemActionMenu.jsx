@@ -95,16 +95,11 @@ export default function DrawerItemActionMenu({
     const menuRect = menuRef.current
     const placementX = Number(placement?.clientX)
     const placementY = Number(placement?.clientY)
-    const clientPoint = {
-      x: Number.isFinite(placementX)
-        ? placementX
-        : rootSpace.clientLeft + rootSpace.clientWidth / 2,
-      y: Number.isFinite(placementY)
-        ? placementY
-        : rootSpace.clientTop + rootSpace.clientHeight / 2,
-    }
+    const point = Number.isFinite(placementX) && Number.isFinite(placementY)
+      ? clientPointToLayout({ x: placementX, y: placementY }, rootSpace)
+      : { x: rootSpace.width / 2, y: rootSpace.height / 2 }
     setPosition(placeContextMenu({
-      point: clientPointToLayout(clientPoint, rootSpace),
+      point,
       viewport: { width: rootSpace.width, height: rootSpace.height },
       menuSize: {
         width: menuRect.offsetWidth,

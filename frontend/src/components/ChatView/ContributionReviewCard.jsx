@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from '@openai/apps-sdk-ui/components/Icon'
 import { api } from '../../api/client.js'
 import { appQueries } from '../../hooks/queries.js'
-import { captureLayoutSpace, clientDeltaToLayout } from '../../lib/layoutSpace.js'
+import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 import {
   autopilotOnSend,
   contributeApp as findContributeApp,
@@ -215,10 +215,7 @@ function useSwipeToDismiss(onDismiss) {
       state.claimed = true
       event.preventDefault()
       el.classList.add('contrib-card--dragging')
-      const layoutDx = clientDeltaToLayout(
-        { x: dx, y: 0 },
-        state.layoutSpace,
-      ).x
+      const layoutDx = clientLengthToLayout(dx, state.layoutSpace)
       el.style.transform = `translateX(${layoutDx}px)`
       el.style.opacity = String(Math.max(0.3, 1 - Math.abs(dx) / 260))
     }

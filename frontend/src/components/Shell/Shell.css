@@ -629,13 +629,6 @@
    turns that same rail into the drawer header (brand + notification bell);
    collapsing it leaves a stable Möbius mark plus compact quick actions. */
 @media (min-width: 1024px) {
-  /* Intentional desktop density. Keep custom client/layout conversion
-     centralized in lib/layoutSpace.js; see ARCHITECTURE.md. */
-  :root {
-    --desktop-shell-density: 0.9;
-    zoom: var(--desktop-shell-density);
-  }
-
   .shell {
     --desktop-rail-width: 58px;
     --shell-bar-height: 0px;

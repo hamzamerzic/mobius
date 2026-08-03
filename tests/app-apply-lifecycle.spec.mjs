@@ -1,7 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { expect, test } from '@playwright/test'
 import { applyApp, applySource, writeAppSource } from './app-source.mjs'
-import { activateFrameControl } from './frame-actions.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const CONTAINER = process.env.MOBIUS_CONTAINER || 'mobius-test'
@@ -114,7 +113,8 @@ test('explicit apply owns draft, publication, iframe refresh, and rollback', asy
     })
     let frame = await currentFrame(page, app.id)
     await expect(frame.locator('#revision')).toHaveText('revision one ready')
-    await activateFrameControl(frame.locator('#increment'))
+    // This test owns lifecycle behavior; workspace-panes owns physical frame clicks.
+    await frame.locator('#increment').press('Enter')
     await expect(frame.locator('#count')).toHaveText('1')
 
     await page.waitForTimeout(1_000)

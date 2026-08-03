@@ -1,4 +1,4 @@
-import { captureLayoutSpace, clientDeltaToLayout } from '../../lib/layoutSpace.js'
+import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 
 export function preserveTogglePosition(anchorEl, bodyEl = anchorEl?.nextElementSibling) {
   if (!anchorEl || typeof requestAnimationFrame !== 'function') return
@@ -27,7 +27,7 @@ export function preserveTogglePosition(anchorEl, bodyEl = anchorEl?.nextElementS
     settled = true
     observer?.disconnect()
     const after = anchorEl.getBoundingClientRect().top
-    const delta = clientDeltaToLayout({ x: 0, y: after - before }, layoutSpace).y
+    const delta = clientLengthToLayout(after - before, layoutSpace)
     if (Math.abs(delta) > 0.5) scroller.scrollTop += delta
   }
 
