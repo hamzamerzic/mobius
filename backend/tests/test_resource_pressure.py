@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from app.resource_pressure import (
   MIB,
+  assess_memory_pressure,
   assess_resource_pressure,
   resource_facts,
   resource_status,
@@ -128,6 +129,54 @@ def test_memory_ratio_and_sustained_psi_raise_pressure():
   assert constrained["memory"]["state"] == "constrained"
   assert critical["state"] == "critical"
   assert critical["memory"]["reason"]["full_avg60"] == 2.5
+
+
+def test_finite_memory_exposes_current_headroom():
+  pressure = assess_memory_pressure({
+    "available": True,
+    "working_set_bytes": 400 * MIB,
+    "limit_bytes": 1024 * MIB,
+    "pressure": {},
+  })
+
+  assert pressure["state"] == "normal"
+  assert pressure["headroom_bytes"] == 624 * MIB
+  assert pressure["working_set_ratio"] == 400 / 1024
+
+
+def test_unlimited_memory_is_assessed_from_valid_psi():
+  pressure = assess_memory_pressure({
+    "available": True,
+    "working_set_bytes": 400 * MIB,
+    "limit_bytes": None,
+    "pressure": {
+      "some": {"avg60": 1.25},
+      "full": {"avg60": 0.0},
+    },
+  })
+
+  assert pressure["state"] == "constrained"
+  assert pressure["headroom_bytes"] is None
+  assert pressure["working_set_ratio"] is None
+  assert pressure["reason"]["some_avg60"] == 1.25
+
+
+def test_unlimited_memory_without_valid_psi_is_unknown():
+  pressure = assess_memory_pressure({
+    "available": True,
+    "working_set_bytes": 400 * MIB,
+    "limit_bytes": None,
+    "pressure": {"some": {"avg60": "unreadable"}},
+  })
+
+  assert pressure == {
+    "state": "unknown",
+    "headroom_bytes": None,
+    "reason": {
+      "resource": "memory",
+      "code": "memory_pressure_unavailable",
+    },
+  }
 
 
 def test_unknown_resource_does_not_hide_known_pressure():

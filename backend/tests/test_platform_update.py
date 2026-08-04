@@ -858,6 +858,69 @@ def test_reconcile_pins_upstream_hook_source_before_unlock(monkeypatch, tmp_path
   assert result.hook_source_sha == "trusted-upstream-oid"
 
 
+@pytest.mark.parametrize("build_fails", [False, True])
+def test_owner_apply_excludes_watcher_until_frontend_success_or_rollback(
+  monkeypatch, tmp_path, build_fails,
+):
+  repo = tmp_path / "platform"
+  repo.mkdir()
+  events = []
+
+  @contextmanager
+  def reconcile_lock():
+    events.append("reconcile-acquired")
+    yield
+    events.append("reconcile-released")
+
+  class BuildLease:
+    def __enter__(self):
+      events.append("build-acquired")
+      return self
+
+    def __exit__(self, *_exc):
+      events.append("build-released")
+
+  lease = BuildLease()
+
+  def reconcile(*_args, **_kwargs):
+    assert events == ["reconcile-acquired", "build-acquired"]
+    events.append("source-mutated")
+    return pu.ReconcileResult("updated", "pre", "new", "target")
+
+  def rebuild(_repo, _result, *, build_lease):
+    assert build_lease is lease
+    events.append("explicit-build")
+    if build_fails:
+      raise RuntimeError("build failed")
+
+  def rollback(_repo, _result, _previous, _error):
+    assert events[-1] == "explicit-build"
+    events.append("source-rolled-back")
+    return pu.ReconcileResult("rolled_back", "pre", "pre", "target")
+
+  monkeypatch.setattr(pu, "_reconcile_flock", reconcile_lock)
+  monkeypatch.setattr(
+    pu, "acquire_build_lease", lambda *, blocking: lease,
+  )
+  monkeypatch.setattr(pu, "_rev", lambda *_args: "upstream")
+  monkeypatch.setattr(pu, "reconcile_clone", reconcile)
+  monkeypatch.setattr(pu, "_touched_frontend", lambda *_args: True)
+  monkeypatch.setattr(pu, "_rebuild_frontend_after_update_if_needed", rebuild)
+  monkeypatch.setattr(pu, "_roll_back_failed_frontend_build", rollback)
+
+  pu._reconcile_under_lock(repo, at_boot=False, prepare_frontend=True)
+
+  assert events == [
+    "reconcile-acquired",
+    "build-acquired",
+    "source-mutated",
+    "explicit-build",
+    *(["source-rolled-back"] if build_fails else []),
+    "build-released",
+    "reconcile-released",
+  ]
+
+
 def _make_hook_repo(tmp_path: Path, *, complete: bool = True) -> Path:
   tmp_path.mkdir(parents=True, exist_ok=True)
   repo = tmp_path / "hook-repo"
@@ -1757,7 +1820,7 @@ async def test_frontend_build_failure_rolls_back_source_and_is_not_success(
   pu._fetch(platform)
   preview = pu.platform_update_preview(platform)
 
-  def fail_build(_repo, _result):
+  def fail_build(_repo, _result, **_kwargs):
     raise RuntimeError("vite exploded")
 
   monkeypatch.setattr(

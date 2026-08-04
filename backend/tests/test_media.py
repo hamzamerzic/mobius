@@ -62,8 +62,12 @@ def test_serve_chat_media_uses_safe_raster_content_type(client, auth, chat):
 
 
 def test_chat_media_preview_is_bounded_webp_and_original_stays_unchanged(
-  client, auth, chat,
+  client, auth, chat, monkeypatch,
 ):
+  monkeypatch.setattr(
+    "app.image_previews.assess_memory_pressure",
+    lambda: {"state": "normal", "headroom_bytes": 1024 * 1024**2},
+  )
   media_dir = Path(get_settings().data_dir) / "chats" / chat.id / "media"
   media_dir.mkdir(parents=True, exist_ok=True)
   source_path = media_dir / "large-screenshot.png"

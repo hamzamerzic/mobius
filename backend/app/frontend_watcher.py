@@ -32,10 +32,12 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserverVFS
 
+from app.build_admission import BuildLease, acquire_build_lease
 from app.process_groups import (
   isolated_process_group_id,
   lower_process_group_priority,
 )
+from app.resource_pressure import MIB, assess_memory_pressure
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +46,11 @@ _POLL_INTERVAL_SECS = 2.0
 _INCOMPLETE_GRACE_SECS = 30.0
 _WATCH_RESTART_BACKOFF_MAX = 30.0
 _WATCH_LEASE_RETRY_INITIAL = 1.0
+# Exact 512 MiB canaries repeatedly reached memory.max and OOM-killed Vite even
+# with a 256 MiB JS heap; much of Rolldown's memory is native. Keep that work
+# deferred while the last-good/baked shell remains served. A 1 GiB canary has
+# enough headroom. This is capacity-based, not hosting-provider-specific.
+_VITE_BUILD_STARTING_RESERVE_BYTES = 512 * MIB
 _ROOT_SOURCE_FILES = {
   "index.html", "package-lock.json", "package.json", "vite.config.js",
 }
@@ -96,6 +103,31 @@ _ACTIVE_LOCK = threading.Lock()
 _START_LOCK = threading.Lock()
 _ACTIVE_WATCHER: "_FrontendHandler | None" = None
 _ACTIVE_SUPERVISOR: "_FrontendSupervisor | None" = None
+
+
+def _vite_build_deferral_reason() -> str | None:
+  """Return why a new Vite process is unsafe, or None to start it.
+
+  Missing telemetry fails open. Pressure is an admission check only: callers
+  deliberately do not interrupt a build after it has started.
+  """
+  pressure = assess_memory_pressure()
+  state = pressure.get("state")
+  if state == "unknown":
+    return None
+  if state in {"constrained", "critical"}:
+    return f"memory pressure is {state}"
+  headroom = pressure.get("headroom_bytes")
+  if (
+    isinstance(headroom, int)
+    and not isinstance(headroom, bool)
+    and headroom < _VITE_BUILD_STARTING_RESERVE_BYTES
+  ):
+    return (
+      f"memory headroom is {headroom} bytes; "
+      f"{_VITE_BUILD_STARTING_RESERVE_BYTES} bytes are required"
+    )
+  return None
 
 
 def _source_tree_scandir(
@@ -699,29 +731,43 @@ def _publish_built_dir(source_dir: Path, reason: str) -> bool:
         fcntl.flock(lock_fh, fcntl.LOCK_UN)
 
 
-def _run_vite_build_once(out_dir: Path) -> str:
+def _run_vite_build_once(
+  out_dir: Path, *, build_lease: BuildLease | None = None,
+) -> str:
   """Run one explicit full Vite build into ``out_dir``."""
-  _ensure_node_modules()
-  if out_dir.exists():
-    shutil.rmtree(out_dir)
-  result = subprocess.run(
-    _vite_build_cmd(out_dir),
-    cwd=str(_FRONTEND_DIR),
-    env=_vite_env(_REBUILD_CACHE_DIR, _REBUILD_TMP_DIR),
-    stdout=subprocess.PIPE,
-    stderr=subprocess.STDOUT,
-    text=True,
-    timeout=180,
-  )
-  if result.returncode != 0:
+  lease = build_lease or acquire_build_lease(blocking=True)
+  if lease is None:  # A blocking acquisition either returns a lease or raises.
+    raise RuntimeError("frontend build lease unavailable")
+  owns_lease = build_lease is None
+  try:
+    deferred = _vite_build_deferral_reason()
+    if deferred is not None:
+      raise RuntimeError(f"frontend build deferred: {deferred}")
+    _ensure_node_modules()
     if out_dir.exists():
       shutil.rmtree(out_dir)
-    raise RuntimeError(_tail(result.stdout) or "vite build failed")
-  return result.stdout
+    result = subprocess.run(
+      _vite_build_cmd(out_dir),
+      cwd=str(_FRONTEND_DIR),
+      env=_vite_env(_REBUILD_CACHE_DIR, _REBUILD_TMP_DIR),
+      stdout=subprocess.PIPE,
+      stderr=subprocess.STDOUT,
+      text=True,
+      timeout=180,
+    )
+    if result.returncode != 0:
+      if out_dir.exists():
+        shutil.rmtree(out_dir)
+      raise RuntimeError(_tail(result.stdout) or "vite build failed")
+    return result.stdout
+  finally:
+    if owns_lease:
+      lease.close()
 
 
 def rebuild_frontend_now(
   reason: str = "manual", *, emit_events: bool = True,
+  build_lease: BuildLease | None = None,
 ) -> str:
   """Run an explicit full rebuild, then publish via the generation path.
 
@@ -733,7 +779,9 @@ def rebuild_frontend_now(
   if emit_events:
     _publish_system_event({"type": "shell_rebuilding"})
   try:
-    output = _run_vite_build_once(_REBUILD_DIST_DIR)
+    output = _run_vite_build_once(
+      _REBUILD_DIST_DIR, build_lease=build_lease,
+    )
     published = _publish_built_dir(_REBUILD_DIST_DIR, reason)
   except Exception as exc:
     if emit_events:
@@ -784,6 +832,8 @@ class _FrontendHandler(FileSystemEventHandler):
     self._last_source_change = 0.0
     self._last_build_reason = "startup"
     self._blocked_conflict_signature: str | None = None
+    self._memory_deferred = False
+    self._build_deferred_reason: str | None = None
     self._staging_dirty = False
     self._incomplete_since: float | None = None
     self._incomplete_notified = False
@@ -869,12 +919,14 @@ class _FrontendHandler(FileSystemEventHandler):
         pass
     with self._state_lock:
       staging_dirty = self._staging_dirty
+      build_deferred_reason = self._build_deferred_reason
     return {
       "running": not self._closed.is_set(),
       "building": pid is not None,
       "pid": pid,
       "rss_bytes": rss_bytes,
       "staging_dirty": staging_dirty,
+      "build_deferred_reason": build_deferred_reason,
       "lease_path": str(_FRONTEND_DIR / ".watch.lock"),
     }
 
@@ -984,6 +1036,31 @@ class _FrontendHandler(FileSystemEventHandler):
 
   def _run_demand_build(self, reason: str) -> None:
     """Run one isolated build and publish it before releasing its heap."""
+    lease = acquire_build_lease(blocking=False)
+    if lease is None:
+      with self._state_lock:
+        self._build_deferred_reason = "another JavaScript build is running"
+      self._queue_build("build lease retry")
+      return
+    with lease:
+      self._run_admitted_demand_build(reason)
+
+  def _run_admitted_demand_build(self, reason: str) -> None:
+    """Build after atomically excluding every other owned JS compiler."""
+    deferred = _vite_build_deferral_reason()
+    if deferred is not None:
+      if not self._memory_deferred:
+        log.info("frontend demand build deferred: %s", deferred)
+      self._memory_deferred = True
+      with self._state_lock:
+        self._build_deferred_reason = deferred
+      self._queue_build("memory-pressure retry")
+      return
+    if self._memory_deferred:
+      log.info("frontend demand build resuming after memory recovered")
+      self._memory_deferred = False
+    with self._state_lock:
+      self._build_deferred_reason = None
     with self._state_lock:
       blocked_signature = self._blocked_conflict_signature
     if blocked_signature is not None:
@@ -1278,6 +1355,7 @@ class _FrontendSupervisor:
       "pid": None,
       "rss_bytes": None,
       "staging_dirty": False,
+      "build_deferred_reason": None,
       "lease_path": str(_FRONTEND_DIR / ".watch.lock"),
     }
     return {
@@ -1313,6 +1391,7 @@ def watcher_health() -> dict:
     "pid": None,
     "rss_bytes": None,
     "staging_dirty": False,
+    "build_deferred_reason": None,
     "lease_path": str(_FRONTEND_DIR / ".watch.lock"),
     "last_error": None,
     "retry_in_seconds": None,

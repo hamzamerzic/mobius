@@ -63,6 +63,11 @@ def fw_dirs(tmp_path, monkeypatch):
   monkeypatch.setattr(fw, "_TMP_DIR", dirs["tmp"])
   monkeypatch.setattr(
     fw,
+    "assess_memory_pressure",
+    lambda: {"state": "normal", "headroom_bytes": 1024 * 1024**2},
+  )
+  monkeypatch.setattr(
+    fw,
     "_BUILT_GLOBAL_CHECK",
     Path(__file__).resolve().parents[2]
     / "frontend" / "scripts" / "check-built-globals.mjs",
@@ -454,6 +459,192 @@ def test_edit_during_demand_build_requests_one_rerun(fw_dirs, monkeypatch):
     str(fw_dirs["frontend"] / "src" / "first.js"),
     str(fw_dirs["frontend"] / "src" / "second.js"),
   ]
+
+
+@pytest.mark.parametrize("pressure", [
+  {"state": "constrained", "headroom_bytes": 700 * 1024**2},
+  {
+    "state": "normal",
+    "headroom_bytes": fw._VITE_BUILD_STARTING_RESERVE_BYTES - 1,
+  },
+])
+def test_demand_build_defers_before_preflight_setup_or_spawn(
+  fw_dirs, monkeypatch, pressure,
+):
+  monkeypatch.setattr(fw, "assess_memory_pressure", lambda: pressure)
+  monkeypatch.setattr(
+    fw,
+    "_stable_source_preflight",
+    lambda: pytest.fail("deferred build must not inspect the source tree"),
+  )
+  monkeypatch.setattr(
+    fw,
+    "_ensure_node_modules",
+    lambda: pytest.fail("deferred build must not set up Node"),
+  )
+  monkeypatch.setattr(
+    fw.subprocess,
+    "Popen",
+    lambda *args, **kwargs: pytest.fail("deferred build must not spawn Vite"),
+  )
+  loop = asyncio.new_event_loop()
+  handler = fw._FrontendHandler(loop, start_threads=False)
+  try:
+    handler._run_demand_build("source edit")
+    assert handler._build_requested.is_set()
+    assert handler._last_build_reason == "memory-pressure retry"
+  finally:
+    handler.close()
+    loop.close()
+
+
+def test_demand_build_requeues_before_pressure_check_when_build_lease_busy(
+  fw_dirs, monkeypatch,
+):
+  monkeypatch.setattr(
+    fw,
+    "acquire_build_lease",
+    lambda *, blocking: None,
+  )
+  monkeypatch.setattr(
+    fw,
+    "assess_memory_pressure",
+    lambda: pytest.fail("memory admission must happen after the build lease"),
+  )
+  loop = asyncio.new_event_loop()
+  handler = fw._FrontendHandler(loop, start_threads=False)
+  try:
+    handler._run_demand_build("source edit")
+    assert handler._build_requested.is_set()
+    assert handler._last_build_reason == "build lease retry"
+    assert handler.health()["build_deferred_reason"] == (
+      "another JavaScript build is running"
+    )
+  finally:
+    handler.close()
+    loop.close()
+
+
+def test_deferred_demand_build_retries_and_finishes_after_memory_recovers(
+  fw_dirs, monkeypatch,
+):
+  src = fw_dirs["frontend"] / "src"
+  src.mkdir()
+  source_file = src / "Shell.jsx"
+  source_file.write_text("export default 1\n", encoding="utf-8")
+  observations = iter([
+    {"state": "critical", "headroom_bytes": 32 * 1024**2},
+    {"state": "normal", "headroom_bytes": 700 * 1024**2},
+  ])
+  assessment_calls = 0
+
+  def assess():
+    nonlocal assessment_calls
+    assessment_calls += 1
+    return next(observations)
+
+  vite_calls = []
+  publish_calls = []
+  monkeypatch.setattr(fw, "assess_memory_pressure", assess)
+  monkeypatch.setattr(fw, "_ensure_node_modules", lambda: None)
+  monkeypatch.setattr(
+    fw.subprocess,
+    "Popen",
+    lambda *args, **kwargs: vite_calls.append(args) or _FakeViteProcess(
+      lambda: _write_build(fw_dirs["staging"], "recovered"),
+    ),
+  )
+  monkeypatch.setattr(
+    fw,
+    "_publish_built_dir",
+    lambda source, reason: publish_calls.append((source, reason)) or True,
+  )
+  monkeypatch.setattr(fw, "_publish_system_event", lambda _event: None)
+  loop = asyncio.new_event_loop()
+  handler = fw._FrontendHandler(loop, start_threads=False)
+  try:
+    handler._run_demand_build(str(source_file))
+    assert handler._build_requested.is_set()
+    assert handler.health()["build_deferred_reason"] == (
+      "memory pressure is critical"
+    )
+
+    handler._build_requested.clear()
+    handler._run_demand_build("memory-pressure retry")
+    assert handler.health()["build_deferred_reason"] is None
+  finally:
+    handler.close()
+    loop.close()
+
+  assert assessment_calls == 2
+  assert len(vite_calls) == 1
+  assert publish_calls == [(fw_dirs["staging"], "build:memory-pressure retry")]
+
+
+@pytest.mark.parametrize("pressure", [
+  {"state": "critical", "headroom_bytes": 32 * 1024**2},
+  {
+    "state": "normal",
+    "headroom_bytes": fw._VITE_BUILD_STARTING_RESERVE_BYTES - 1,
+  },
+])
+def test_explicit_build_refuses_pressure_before_setup_or_output_mutation(
+  fw_dirs, monkeypatch, pressure,
+):
+  output = fw_dirs["rebuild"]
+  output.mkdir()
+  sentinel = output / "keep.txt"
+  sentinel.write_text("existing output", encoding="utf-8")
+  monkeypatch.setattr(fw, "assess_memory_pressure", lambda: pressure)
+  monkeypatch.setattr(
+    fw,
+    "_ensure_node_modules",
+    lambda: pytest.fail("deferred rebuild must not set up Node"),
+  )
+  monkeypatch.setattr(
+    fw.subprocess,
+    "run",
+    lambda *args, **kwargs: pytest.fail("deferred rebuild must not run Vite"),
+  )
+
+  with pytest.raises(RuntimeError, match="frontend build deferred"):
+    fw._run_vite_build_once(output)
+
+  assert sentinel.read_text(encoding="utf-8") == "existing output"
+
+
+def test_explicit_pressure_rejection_releases_build_lease(
+  fw_dirs, monkeypatch,
+):
+  released = []
+
+  class Lease:
+    def close(self):
+      released.append(True)
+
+  monkeypatch.setattr(
+    fw, "acquire_build_lease", lambda *, blocking: Lease(),
+  )
+  monkeypatch.setattr(
+    fw,
+    "assess_memory_pressure",
+    lambda: {"state": "critical", "headroom_bytes": 0},
+  )
+
+  with pytest.raises(RuntimeError, match="frontend build deferred"):
+    fw._run_vite_build_once(fw_dirs["rebuild"])
+
+  assert released == [True]
+
+
+def test_unknown_memory_telemetry_does_not_block_vite(monkeypatch):
+  monkeypatch.setattr(
+    fw,
+    "assess_memory_pressure",
+    lambda: {"state": "unknown", "headroom_bytes": None},
+  )
+
+  assert fw._vite_build_deferral_reason() is None
 
 
 def test_conflict_markers_defer_vite_without_touching_generations(

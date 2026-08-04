@@ -65,6 +65,7 @@ from typing import Callable, Literal, TypedDict
 from sqlalchemy.orm import Session
 
 from app import app_git, platform_activation, release_channel
+from app.build_admission import BuildLease, acquire_build_lease
 from app.platform_activation import PlatformActivationImpact
 
 
@@ -1217,7 +1218,7 @@ def _refresh_git_hooks(repo: Path, source_oid: str | None) -> str | None:
 
 
 def _rebuild_frontend_after_update_if_needed(
-  repo: Path, res: ReconcileResult,
+  repo: Path, res: ReconcileResult, *, build_lease: BuildLease | None = None,
 ) -> None:
   """Rebuild served frontend assets after a clean update that changed them.
 
@@ -1234,6 +1235,7 @@ def _rebuild_frontend_after_update_if_needed(
     raise RuntimeError("frontend rebuild is unavailable") from exc
   rebuild_frontend_now(
     f"platform update {_short(res.pre_sha)}->{_short(res.new_sha)}",
+    build_lease=build_lease,
   )
 
 
@@ -1582,7 +1584,7 @@ def _reconcile_under_lock(
   future supervisor/generation implementation should move this transaction out
   of uvicorn while preserving the exact-target + phase contract.
   """
-  with _reconcile_flock():
+  with _reconcile_flock(), contextlib.ExitStack() as lease_stack:
     if plan_id is not None:
       if current_sha is None:
         raise PlatformUpdateError("update_plan_invalid")
@@ -1592,6 +1594,16 @@ def _reconcile_under_lock(
         current_sha=current_sha,
         target_sha=target_ref,
       )
+    # Owner Apply mutates the same frontend source whose watcher can publish
+    # dist. Exclude every owned JS builder before that mutation and retain the
+    # lease through explicit build success or source rollback. Lock order is
+    # reconcile -> build -> publish; no caller acquires these in reverse.
+    build_lease = None
+    if prepare_frontend:
+      build_lease = acquire_build_lease(blocking=True)
+      if build_lease is None:
+        raise PlatformUpdateError("frontend_build_lease_unavailable")
+      lease_stack.enter_context(build_lease)
     previous_upstream_sha = _rev(repo, UPSTREAM_BRANCH) or None
     reconcile_kwargs = {
       "target_ref": target_ref,
@@ -1617,7 +1629,9 @@ def _reconcile_under_lock(
       if progress:
         progress(PlatformUpdatePhase.BUILDING)
       try:
-        _rebuild_frontend_after_update_if_needed(repo, result)
+        _rebuild_frontend_after_update_if_needed(
+          repo, result, build_lease=build_lease,
+        )
       except Exception as exc:
         log.warning(
           "frontend build rejected platform update %s: %r",

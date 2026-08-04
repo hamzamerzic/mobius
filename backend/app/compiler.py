@@ -16,6 +16,7 @@ from app.app_compile_contract import (
   rolldown_command,
   rolldown_report_contract_error,
 )
+from app.build_admission import acquire_build_lease
 from app.config import get_settings
 
 
@@ -228,43 +229,51 @@ def _remove_unsupported_output(out: Path) -> None:
 # apps are not. One process at a time keeps a small Railway instance's peak
 # bounded without retaining a resident build worker between requests.
 _COMPILE_SLOT = asyncio.Semaphore(1)
+_BUILD_LEASE_RETRY_SECONDS = 0.1
 
 
 async def _run_rolldown(
   command: list[str], *, cwd: str | None,
 ) -> tuple[int, bytes]:
   async with _COMPILE_SLOT:
+    lease = acquire_build_lease(blocking=False)
+    while lease is None:
+      await asyncio.sleep(_BUILD_LEASE_RETRY_SECONDS)
+      lease = acquire_build_lease(blocking=False)
     try:
-      proc = await asyncio.create_subprocess_exec(
-        *command,
-        cwd=cwd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-      )
-    except FileNotFoundError:
-      raise RuntimeError(
-        "Node.js is not installed or not on PATH. "
-        "The Docker image installs it automatically."
-      )
-    try:
-      _, stderr = await asyncio.wait_for(
-        proc.communicate(), timeout=ROLLDOWN_TIMEOUT_SECS,
-      )
-    except asyncio.TimeoutError:
-      proc.kill()
-      await proc.communicate()
-      raise RuntimeError(
-        f"Rolldown timed out after {ROLLDOWN_TIMEOUT_SECS} seconds"
-      )
-    except asyncio.CancelledError:
-      # Shutdown must not leave a child writing after locks are released.
-      proc.kill()
       try:
+        proc = await asyncio.create_subprocess_exec(
+          *command,
+          cwd=cwd,
+          stdout=asyncio.subprocess.PIPE,
+          stderr=asyncio.subprocess.PIPE,
+        )
+      except FileNotFoundError:
+        raise RuntimeError(
+          "Node.js is not installed or not on PATH. "
+          "The Docker image installs it automatically."
+        )
+      try:
+        _, stderr = await asyncio.wait_for(
+          proc.communicate(), timeout=ROLLDOWN_TIMEOUT_SECS,
+        )
+      except asyncio.TimeoutError:
+        proc.kill()
         await proc.communicate()
-      except Exception:
-        pass
-      raise
-    return proc.returncode or 0, stderr
+        raise RuntimeError(
+          f"Rolldown timed out after {ROLLDOWN_TIMEOUT_SECS} seconds"
+        )
+      except asyncio.CancelledError:
+        # Shutdown must not leave a child writing after locks are released.
+        proc.kill()
+        try:
+          await proc.communicate()
+        except Exception:
+          pass
+        raise
+      return proc.returncode or 0, stderr
+    finally:
+      lease.close()
 
 
 async def compile_jsx(

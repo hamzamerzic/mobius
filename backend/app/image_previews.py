@@ -9,6 +9,8 @@ from pathlib import Path
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+from app.resource_pressure import assess_memory_pressure
+
 
 PREVIEW_MAX_EDGE = 1024
 PREVIEW_WEBP_QUALITY = 72
@@ -180,6 +182,11 @@ def display_image_preview(file_path: Path, base: Path) -> Path | None:
     cached = fresh_preview()
     if cached is not None:
       return cached
+
+    # Admission belongs after the bounded wait: a request that sampled normal
+    # memory before waiting must not decode after another preview raised it.
+    if assess_memory_pressure().get("state") in {"constrained", "critical"}:
+      return None
 
     temp_path = None
     try:
