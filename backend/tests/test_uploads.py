@@ -87,12 +87,8 @@ def test_serve_uploaded_file(client, db, auth, chat):
 
 
 def test_serve_uploaded_image_preview_without_touching_original(
-  client, db, auth, chat, monkeypatch,
+  client, db, auth, chat,
 ):
-  monkeypatch.setattr(
-    "app.image_previews.assess_memory_pressure",
-    lambda: {"state": "normal", "headroom_bytes": 1024 * 1024**2},
-  )
   image_bytes = io.BytesIO()
   Image.new("RGB", (1800, 1200), (42, 91, 130)).save(image_bytes, "PNG")
   original = image_bytes.getvalue()

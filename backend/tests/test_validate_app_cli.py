@@ -10,7 +10,6 @@ import pytest
 from fastapi import HTTPException
 
 from app.install import _validate_manifest
-from app.build_admission import acquire_build_lease
 from app.manifest_contract import ManifestContractError, validate_manifest_contract
 
 
@@ -45,9 +44,11 @@ def test_validator_accepts_an_installable_app(tmp_path):
 
 
 def test_validator_stays_zero_configuration_outside_a_runtime(tmp_path):
+  """A developer checkout has no settings; the build lease must not need any."""
   _write_app(tmp_path, "export default function App(){ return <div /> }")
   env = os.environ.copy()
-  env.pop("DATA_DIR", None)
+  for key in ("DATA_DIR", "SECRET_KEY"):
+    env.pop(key, None)
 
   result = subprocess.run(
     [sys.executable, str(SCRIPT), str(tmp_path)],
@@ -59,27 +60,6 @@ def test_validator_stays_zero_configuration_outside_a_runtime(tmp_path):
 
   assert result.returncode == 0, result.stderr
   assert "OK" in result.stdout
-
-
-def test_validator_waits_for_the_shared_runtime_build_lease(tmp_path):
-  _write_app(tmp_path, "export default function App(){ return <div /> }")
-  lease = acquire_build_lease(blocking=False)
-  assert lease is not None
-  process = subprocess.Popen(
-    [sys.executable, str(SCRIPT), str(tmp_path)],
-    stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
-    text=True,
-  )
-  try:
-    with pytest.raises(subprocess.TimeoutExpired):
-      process.wait(timeout=1)
-  finally:
-    lease.close()
-  stdout, stderr = process.communicate(timeout=10)
-
-  assert process.returncode == 0, stderr
-  assert "OK" in stdout
 
 
 def test_validator_rejects_a_bundle_compile_failure(tmp_path):

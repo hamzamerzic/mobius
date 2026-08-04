@@ -190,12 +190,11 @@ def _disk_pressure(disk: dict[str, Any]) -> dict[str, Any]:
   }
 
 
-def _nonnegative_float(value: Any) -> float | None:
+def _float(value: Any) -> float:
   try:
-    parsed = float(value)
+    return float(value)
   except (TypeError, ValueError):
-    return None
-  return parsed if parsed >= 0 else None
+    return 0.0
 
 
 def _memory_pressure(memory: dict[str, Any]) -> dict[str, Any]:
@@ -207,58 +206,40 @@ def _memory_pressure(memory: dict[str, Any]) -> dict[str, Any]:
         "code": "memory_facts_unavailable",
       },
     }
-  working_set = None
   try:
-    candidate = int(memory["working_set_bytes"])
-    if candidate >= 0:
-      working_set = candidate
+    working_set = int(memory["working_set_bytes"])
+    limit = int(memory["limit_bytes"])
   except (KeyError, TypeError, ValueError):
-    pass
-  limit = None
-  try:
-    candidate = int(memory["limit_bytes"])
-    if candidate > 0:
-      limit = candidate
-  except (KeyError, TypeError, ValueError):
-    pass
+    return {
+      "state": "unknown",
+      "reason": {
+        "resource": "memory",
+        "code": "memory_limit_unavailable",
+      },
+    }
+  if working_set < 0 or limit <= 0:
+    return {
+      "state": "unknown",
+      "reason": {
+        "resource": "memory",
+        "code": "memory_limit_unavailable",
+      },
+    }
 
-  ratio = (
-    working_set / limit
-    if working_set is not None and limit is not None
-    else None
-  )
-  headroom = (
-    max(0, limit - working_set)
-    if working_set is not None and limit is not None
-    else None
-  )
+  ratio = working_set / limit
   pressure = memory.get("pressure")
   pressure = pressure if isinstance(pressure, dict) else {}
   some = pressure.get("some")
   full = pressure.get("full")
   some = some if isinstance(some, dict) else {}
   full = full if isinstance(full, dict) else {}
-  observed_some_avg60 = _nonnegative_float(some.get("avg60"))
-  observed_full_avg60 = _nonnegative_float(full.get("avg60"))
-  psi_available = (
-    observed_some_avg60 is not None or observed_full_avg60 is not None
-  )
-  if ratio is None and not psi_available:
-    return {
-      "state": "unknown",
-      "headroom_bytes": None,
-      "reason": {
-        "resource": "memory",
-        "code": "memory_pressure_unavailable",
-      },
-    }
-  some_avg60 = observed_some_avg60 or 0.0
-  full_avg60 = observed_full_avg60 or 0.0
+  some_avg60 = _float(some.get("avg60"))
+  full_avg60 = _float(full.get("avg60"))
 
   state = "normal"
   reason = None
   if (
-    (ratio is not None and ratio >= _MEMORY_CRITICAL_RATIO)
+    ratio >= _MEMORY_CRITICAL_RATIO
     or some_avg60 >= _MEMORY_CRITICAL_SOME_AVG60
     or full_avg60 >= _MEMORY_CRITICAL_FULL_AVG60
   ):
@@ -271,7 +252,7 @@ def _memory_pressure(memory: dict[str, Any]) -> dict[str, Any]:
       "full_avg60": full_avg60,
     }
   elif (
-    (ratio is not None and ratio >= _MEMORY_CONSTRAINED_RATIO)
+    ratio >= _MEMORY_CONSTRAINED_RATIO
     or some_avg60 >= _MEMORY_CONSTRAINED_SOME_AVG60
     or full_avg60 >= _MEMORY_CONSTRAINED_FULL_AVG60
   ):
@@ -286,7 +267,7 @@ def _memory_pressure(memory: dict[str, Any]) -> dict[str, Any]:
   return {
     "state": state,
     "working_set_ratio": ratio,
-    "headroom_bytes": headroom,
+    "headroom_bytes": max(0, limit - working_set),
     "some_avg60": some_avg60,
     "full_avg60": full_avg60,
     "constrained_at_ratio": _MEMORY_CONSTRAINED_RATIO,
@@ -298,12 +279,11 @@ def _memory_pressure(memory: dict[str, Any]) -> dict[str, Any]:
 def assess_memory_pressure(
   memory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-  """Assess current memory only, without requiring disk facts.
+  """Assess memory alone, for callers that must not react to disk pressure.
 
-  A finite cgroup limit provides both a working-set ratio and byte headroom.
-  An unlimited cgroup can still be assessed from valid memory PSI. When
-  neither signal is available the result is ``unknown``, allowing callers to
-  fail open instead of treating missing telemetry as pressure.
+  Without a cgroup limit there is nothing to be constrained relative to, so
+  the result is ``unknown`` and callers fail open rather than treating missing
+  telemetry as pressure.
   """
   snapshot = cgroup_memory_snapshot() if memory is None else memory
   return _memory_pressure(_memory_facts(snapshot))
@@ -314,7 +294,7 @@ def assess_resource_pressure(facts: dict[str, Any]) -> dict[str, Any]:
   disk = _disk_pressure(
     facts.get("disk") if isinstance(facts.get("disk"), dict) else {},
   )
-  memory = assess_memory_pressure(
+  memory = _memory_pressure(
     facts.get("memory") if isinstance(facts.get("memory"), dict) else {},
   )
   assessments = (disk, memory)

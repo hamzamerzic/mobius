@@ -1,101 +1,86 @@
-"""Shared admission for Mobius-owned JavaScript compilers."""
+"""One cross-process lease admits one Mobius-owned JavaScript build."""
 
 import asyncio
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from app.build_admission import acquire_build_lease, build_lease_path
+from app.build_admission import (
+  BuildLeaseUnavailable,
+  build_lease,
+  build_lease_async,
+)
 
 
-def test_build_lease_serializes_independent_callers(tmp_path, monkeypatch):
-  monkeypatch.setenv("DATA_DIR", str(tmp_path))
+_HOLD_THE_LEASE = textwrap.dedent("""
+    import sys, time
+    sys.path.insert(0, sys.argv[1])
+    from app.build_admission import build_lease
+    with build_lease():
+      print("held", flush=True)
+      time.sleep(30)
+""")
 
-  first = acquire_build_lease(blocking=False)
-  assert first is not None
+
+def test_lease_excludes_a_build_running_in_another_process():
+  holder = subprocess.Popen(
+    [sys.executable, "-c", _HOLD_THE_LEASE,
+     str(Path(__file__).resolve().parents[1])],
+    stdout=subprocess.PIPE,
+    text=True,
+  )
   try:
-    assert acquire_build_lease(blocking=False) is None
+    assert holder.stdout.readline().strip() == "held"
+    with pytest.raises(BuildLeaseUnavailable):
+      with build_lease(blocking=False):
+        pytest.fail("a second build must not start while one is running")
   finally:
-    first.close()
+    holder.kill()
+    holder.wait(timeout=10)
 
-  with acquire_build_lease(blocking=False) as second:
-    assert second is not None
+  # The kernel releases the lease with the holder's last descriptor.
+  with build_lease(blocking=False):
+    pass
 
-  assert build_lease_path() == tmp_path / "run" / "build.lock"
 
-
-def test_build_lease_close_is_idempotent(tmp_path, monkeypatch):
-  monkeypatch.setenv("DATA_DIR", str(tmp_path))
-  lease = acquire_build_lease(blocking=False)
-  assert lease is not None
-
-  lease.close()
-  lease.close()
-
-  replacement = acquire_build_lease(blocking=False)
-  assert replacement is not None
-  replacement.close()
+def test_a_blocked_build_fails_instead_of_waiting_forever():
+  with build_lease():
+    with pytest.raises(BuildLeaseUnavailable):
+      with build_lease(timeout=0.05):
+        pytest.fail("the wait budget must be bounded")
 
 
 @pytest.mark.asyncio
-async def test_compiler_cancellation_while_waiting_does_not_spawn(
-  monkeypatch,
+async def test_awaiting_the_lease_does_not_stall_the_event_loop():
+  entered = asyncio.Event()
+
+  async def compile_when_admitted():
+    async with build_lease_async(timeout=10):
+      entered.set()
+
+  with build_lease():
+    task = asyncio.create_task(compile_when_admitted())
+    await asyncio.sleep(0.3)  # Other loop work still runs while it waits.
+    assert not entered.is_set()
+
+  await asyncio.wait_for(task, timeout=10)
+
+
+def test_no_reachable_runtime_directory_admits_every_build(
+  tmp_path, monkeypatch,
 ):
-  from app import compiler
-
+  """A developer checkout has no runtime, so nothing to serialize against."""
+  not_a_directory = tmp_path / "data"
+  not_a_directory.write_text("", encoding="utf-8")
   monkeypatch.setattr(
-    compiler, "acquire_build_lease", lambda *, blocking: None,
-  )
-  monkeypatch.setattr(compiler, "_BUILD_LEASE_RETRY_SECONDS", 0)
-
-  async def unexpected_spawn(*_args, **_kwargs):
-    pytest.fail("a compiler waiting for the lease must not spawn")
-
-  monkeypatch.setattr(asyncio, "create_subprocess_exec", unexpected_spawn)
-  task = asyncio.create_task(compiler._run_rolldown(["node"], cwd=None))
-  await asyncio.sleep(0)
-  task.cancel()
-
-  with pytest.raises(asyncio.CancelledError):
-    await task
-
-
-@pytest.mark.asyncio
-async def test_compiler_cancellation_releases_held_lease(monkeypatch):
-  from app import compiler
-
-  released = []
-
-  class Lease:
-    def close(self):
-      released.append(True)
-
-  class Process:
-    returncode = None
-    killed = False
-
-    async def communicate(self):
-      if self.killed:
-        return b"", b""
-      await asyncio.Event().wait()
-
-    def kill(self):
-      self.killed = True
-
-  process = Process()
-  monkeypatch.setattr(
-    compiler, "acquire_build_lease", lambda *, blocking: Lease(),
+    "app.config.get_settings",
+    lambda: SimpleNamespace(data_dir=str(not_a_directory)),
   )
 
-  async def spawn(*_args, **_kwargs):
-    return process
-
-  monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-  task = asyncio.create_task(compiler._run_rolldown(["node"], cwd=None))
-  await asyncio.sleep(0)
-  task.cancel()
-
-  with pytest.raises(asyncio.CancelledError):
-    await task
-
-  assert process.killed is True
-  assert released == [True]
+  with build_lease(blocking=False):
+    with build_lease(blocking=False):
+      pass

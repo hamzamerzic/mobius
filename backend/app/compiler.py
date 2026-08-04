@@ -16,7 +16,7 @@ from app.app_compile_contract import (
   rolldown_command,
   rolldown_report_contract_error,
 )
-from app.build_admission import acquire_build_lease
+from app.build_admission import build_lease_async
 from app.config import get_settings
 
 
@@ -226,54 +226,46 @@ def _remove_unsupported_output(out: Path) -> None:
 
 # Rolldown's native compiler has a larger transient RSS than the old compiler.
 # Installs are normally serialized already, but explicit applies to different
-# apps are not. One process at a time keeps a small Railway instance's peak
-# bounded without retaining a resident build worker between requests.
-_COMPILE_SLOT = asyncio.Semaphore(1)
-_BUILD_LEASE_RETRY_SECONDS = 0.1
+# apps are not. The shared build lease bounds a small instance's peak more
+# strongly than an in-process semaphore could: shell Vite and the validator
+# compile from other processes entirely.
 
 
 async def _run_rolldown(
   command: list[str], *, cwd: str | None,
 ) -> tuple[int, bytes]:
-  async with _COMPILE_SLOT:
-    lease = acquire_build_lease(blocking=False)
-    while lease is None:
-      await asyncio.sleep(_BUILD_LEASE_RETRY_SECONDS)
-      lease = acquire_build_lease(blocking=False)
+  async with build_lease_async():
     try:
+      proc = await asyncio.create_subprocess_exec(
+        *command,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+      )
+    except FileNotFoundError:
+      raise RuntimeError(
+        "Node.js is not installed or not on PATH. "
+        "The Docker image installs it automatically."
+      )
+    try:
+      _, stderr = await asyncio.wait_for(
+        proc.communicate(), timeout=ROLLDOWN_TIMEOUT_SECS,
+      )
+    except asyncio.TimeoutError:
+      proc.kill()
+      await proc.communicate()
+      raise RuntimeError(
+        f"Rolldown timed out after {ROLLDOWN_TIMEOUT_SECS} seconds"
+      )
+    except asyncio.CancelledError:
+      # Shutdown must not leave a child writing after locks are released.
+      proc.kill()
       try:
-        proc = await asyncio.create_subprocess_exec(
-          *command,
-          cwd=cwd,
-          stdout=asyncio.subprocess.PIPE,
-          stderr=asyncio.subprocess.PIPE,
-        )
-      except FileNotFoundError:
-        raise RuntimeError(
-          "Node.js is not installed or not on PATH. "
-          "The Docker image installs it automatically."
-        )
-      try:
-        _, stderr = await asyncio.wait_for(
-          proc.communicate(), timeout=ROLLDOWN_TIMEOUT_SECS,
-        )
-      except asyncio.TimeoutError:
-        proc.kill()
         await proc.communicate()
-        raise RuntimeError(
-          f"Rolldown timed out after {ROLLDOWN_TIMEOUT_SECS} seconds"
-        )
-      except asyncio.CancelledError:
-        # Shutdown must not leave a child writing after locks are released.
-        proc.kill()
-        try:
-          await proc.communicate()
-        except Exception:
-          pass
-        raise
-      return proc.returncode or 0, stderr
-    finally:
-      lease.close()
+      except Exception:
+        pass
+      raise
+    return proc.returncode or 0, stderr
 
 
 async def compile_jsx(

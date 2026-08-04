@@ -32,12 +32,12 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserverVFS
 
-from app.build_admission import BuildLease, acquire_build_lease
+from app.build_admission import BuildLeaseUnavailable, build_lease
 from app.process_groups import (
   isolated_process_group_id,
   lower_process_group_priority,
 )
-from app.resource_pressure import MIB, assess_memory_pressure
+from app.resource_pressure import assess_memory_pressure
 
 log = logging.getLogger(__name__)
 
@@ -46,12 +46,6 @@ _POLL_INTERVAL_SECS = 2.0
 _INCOMPLETE_GRACE_SECS = 30.0
 _WATCH_RESTART_BACKOFF_MAX = 30.0
 _WATCH_LEASE_RETRY_INITIAL = 1.0
-_BUILD_ADMISSION_RETRY_SECS = 5.0
-# Exact 512 MiB canaries repeatedly reached memory.max and OOM-killed Vite even
-# with a 256 MiB JS heap; much of Rolldown's memory is native. Keep that work
-# deferred while the last-good/baked shell remains served. A 1 GiB canary has
-# enough headroom. This is capacity-based, not hosting-provider-specific.
-_VITE_BUILD_STARTING_RESERVE_BYTES = 512 * MIB
 _ROOT_SOURCE_FILES = {
   "index.html", "package-lock.json", "package.json", "vite.config.js",
 }
@@ -106,29 +100,13 @@ _ACTIVE_WATCHER: "_FrontendHandler | None" = None
 _ACTIVE_SUPERVISOR: "_FrontendSupervisor | None" = None
 
 
-def _vite_build_deferral_reason() -> str | None:
-  """Return why a new Vite process is unsafe, or None to start it.
+def _memory_is_tight() -> bool:
+  """True when starting another native JS build risks an OOM kill.
 
-  Missing telemetry fails open. Pressure is an admission check only: callers
-  deliberately do not interrupt a build after it has started.
+  Unmeasurable memory is ``unknown``, which fails open. Only the watcher may
+  act on this: it owns a free retry, so a deferral costs nothing.
   """
-  pressure = assess_memory_pressure()
-  state = pressure.get("state")
-  if state == "unknown":
-    return None
-  if state in {"constrained", "critical"}:
-    return f"memory pressure is {state}"
-  headroom = pressure.get("headroom_bytes")
-  if (
-    isinstance(headroom, int)
-    and not isinstance(headroom, bool)
-    and headroom < _VITE_BUILD_STARTING_RESERVE_BYTES
-  ):
-    return (
-      f"memory headroom is {headroom} bytes; "
-      f"{_VITE_BUILD_STARTING_RESERVE_BYTES} bytes are required"
-    )
-  return None
+  return assess_memory_pressure()["state"] in {"constrained", "critical"}
 
 
 def _source_tree_scandir(
@@ -732,18 +710,14 @@ def _publish_built_dir(source_dir: Path, reason: str) -> bool:
         fcntl.flock(lock_fh, fcntl.LOCK_UN)
 
 
-def _run_vite_build_once(
-  out_dir: Path, *, build_lease: BuildLease | None = None,
-) -> str:
-  """Run one explicit full Vite build into ``out_dir``."""
-  lease = build_lease or acquire_build_lease(blocking=True)
-  if lease is None:  # A blocking acquisition either returns a lease or raises.
-    raise RuntimeError("frontend build lease unavailable")
-  owns_lease = build_lease is None
-  try:
-    deferred = _vite_build_deferral_reason()
-    if deferred is not None:
-      raise RuntimeError(f"frontend build deferred: {deferred}")
+def _run_vite_build_once(out_dir: Path) -> str:
+  """Run one explicit full Vite build into ``out_dir``.
+
+  This path has no free retry — owner Apply rolls the source tree back and
+  rebuild_shell.sh aborts a production deploy — so it waits for the lease
+  rather than deferring, and never declines on memory pressure.
+  """
+  with build_lease():
     _ensure_node_modules()
     if out_dir.exists():
       shutil.rmtree(out_dir)
@@ -756,19 +730,15 @@ def _run_vite_build_once(
       text=True,
       timeout=180,
     )
-    if result.returncode != 0:
-      if out_dir.exists():
-        shutil.rmtree(out_dir)
-      raise RuntimeError(_tail(result.stdout) or "vite build failed")
-    return result.stdout
-  finally:
-    if owns_lease:
-      lease.close()
+  if result.returncode != 0:
+    if out_dir.exists():
+      shutil.rmtree(out_dir)
+    raise RuntimeError(_tail(result.stdout) or "vite build failed")
+  return result.stdout
 
 
 def rebuild_frontend_now(
   reason: str = "manual", *, emit_events: bool = True,
-  build_lease: BuildLease | None = None,
 ) -> str:
   """Run an explicit full rebuild, then publish via the generation path.
 
@@ -780,9 +750,7 @@ def rebuild_frontend_now(
   if emit_events:
     _publish_system_event({"type": "shell_rebuilding"})
   try:
-    output = _run_vite_build_once(
-      _REBUILD_DIST_DIR, build_lease=build_lease,
-    )
+    output = _run_vite_build_once(_REBUILD_DIST_DIR)
     published = _publish_built_dir(_REBUILD_DIST_DIR, reason)
   except Exception as exc:
     if emit_events:
@@ -833,8 +801,6 @@ class _FrontendHandler(FileSystemEventHandler):
     self._last_source_change = 0.0
     self._last_build_reason = "startup"
     self._blocked_conflict_signature: str | None = None
-    self._memory_deferred = False
-    self._build_deferred_reason: str | None = None
     self._staging_dirty = False
     self._incomplete_since: float | None = None
     self._incomplete_notified = False
@@ -920,14 +886,12 @@ class _FrontendHandler(FileSystemEventHandler):
         pass
     with self._state_lock:
       staging_dirty = self._staging_dirty
-      build_deferred_reason = self._build_deferred_reason
     return {
       "running": not self._closed.is_set(),
       "building": pid is not None,
       "pid": pid,
       "rss_bytes": rss_bytes,
       "staging_dirty": staging_dirty,
-      "build_deferred_reason": build_deferred_reason,
       "lease_path": str(_FRONTEND_DIR / ".watch.lock"),
     }
 
@@ -1036,137 +1000,129 @@ class _FrontendHandler(FileSystemEventHandler):
         })
 
   def _run_demand_build(self, reason: str) -> None:
-    """Run one isolated build and publish it before releasing its heap."""
-    lease = acquire_build_lease(blocking=False)
-    if lease is None:
-      with self._state_lock:
-        self._build_deferred_reason = "another JavaScript build is running"
-      if self._closed.wait(_BUILD_ADMISSION_RETRY_SECS):
-        return
-      self._queue_build("build lease retry")
-      return
-    with lease:
-      retry_reason = self._run_admitted_demand_build(reason)
-    if retry_reason is not None:
-      if self._closed.wait(_BUILD_ADMISSION_RETRY_SECS):
-        return
-      self._queue_build(retry_reason)
+    """Run one isolated build and publish it before releasing its heap.
 
-  def _run_admitted_demand_build(self, reason: str) -> str | None:
-    """Build after atomically excluding every other owned JS compiler."""
-    deferred = _vite_build_deferral_reason()
-    if deferred is not None:
-      if not self._memory_deferred:
-        log.info("frontend demand build deferred: %s", deferred)
-      self._memory_deferred = True
-      with self._state_lock:
-        self._build_deferred_reason = deferred
-      return "memory-pressure retry"
-    if self._memory_deferred:
-      log.info("frontend demand build resuming after memory recovered")
-      self._memory_deferred = False
-    with self._state_lock:
-      self._build_deferred_reason = None
-    with self._state_lock:
-      blocked_signature = self._blocked_conflict_signature
-    if blocked_signature is not None:
-      current_signature, _ = _source_snapshot()
-      if current_signature == blocked_signature:
-        # The same conflicted snapshot is still present. Stat it cheaply, but
-        # do not reread every text input on each backstop retry.
-        self._queue_build("conflict-marker preflight retry")
-        return
-    preflight = _stable_source_preflight()
-    if preflight is None:
-      self._queue_build("source changed during conflict-marker preflight")
-      return
-    source_signature, conflicts = preflight
-    if conflicts:
-      with self._state_lock:
-        newly_blocked = self._blocked_conflict_signature != source_signature
-        self._blocked_conflict_signature = source_signature
-      if newly_blocked:
-        log.warning(
-          "frontend demand build deferred; conflict markers remain in %s",
-          ", ".join(conflicts),
-        )
-      # Poll the cheap preflight after the normal debounce as a backstop for a
-      # missed/coalesced observer event. Do not make a transient editing state
-      # sticky, and do not emit shell_rebuild_failed while the last good dist
-      # remains served.
-      self._queue_build("conflict-marker preflight retry")
-      return
-    with self._state_lock:
-      conflict_cleared = self._blocked_conflict_signature is not None
-      self._blocked_conflict_signature = None
-    if conflict_cleared:
-      log.info("frontend conflict-marker preflight cleared; resuming build")
-    _ensure_node_modules()
-    if _STAGING_DIST_DIR.exists():
-      shutil.rmtree(_STAGING_DIST_DIR)
-    cmd = _vite_build_cmd(_STAGING_DIST_DIR)
-    proc: subprocess.Popen | None = None
-    rc: int | None = None
-    output = ""
+    Both admission failures requeue the ORIGINAL reason after the normal
+    debounce, exactly like the conflict-marker retry below. Deferring is only
+    correct here, where a retry is free: the explicit rebuild path cannot
+    retry, so it waits for the lease instead.
+    """
     try:
-      proc = subprocess.Popen(
-        cmd,
-        cwd=str(_FRONTEND_DIR),
-        env=_vite_env(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        start_new_session=True,
-      )
-      lower_process_group_priority(
-        isolated_process_group_id(proc.pid),
-        logger=log,
-        label="Frontend build",
-      )
-      with self._proc_lock:
-        self._watch_proc = proc
-      log.info("frontend demand build started after %s", reason)
-      try:
-        output, _ = proc.communicate(timeout=180)
-      except subprocess.TimeoutExpired as exc:
-        self._terminate_watch_process(signal.SIGTERM)
+      with build_lease(blocking=False):
+        if _memory_is_tight():
+          self._queue_build(reason)
+          return
+        with self._state_lock:
+          blocked_signature = self._blocked_conflict_signature
+        if blocked_signature is not None:
+          current_signature, _ = _source_snapshot()
+          if current_signature == blocked_signature:
+            # The same conflicted snapshot is still present. Stat it
+            # cheaply, but do not reread every text input on each retry.
+            self._queue_build("conflict-marker preflight retry")
+            return
+        preflight = _stable_source_preflight()
+        if preflight is None:
+          self._queue_build("source changed during conflict-marker preflight")
+          return
+        source_signature, conflicts = preflight
+        if conflicts:
+          with self._state_lock:
+            newly_blocked = (
+              self._blocked_conflict_signature != source_signature
+            )
+            self._blocked_conflict_signature = source_signature
+          if newly_blocked:
+            log.warning(
+              "frontend demand build deferred; conflict markers remain in %s",
+              ", ".join(conflicts),
+            )
+          # Poll the cheap preflight after the normal debounce as a
+          # backstop for a missed/coalesced observer event. Do not make a
+          # transient editing state sticky, and do not emit
+          # shell_rebuild_failed while the last good dist remains served.
+          self._queue_build("conflict-marker preflight retry")
+          return
+        with self._state_lock:
+          conflict_cleared = self._blocked_conflict_signature is not None
+          self._blocked_conflict_signature = None
+        if conflict_cleared:
+          log.info(
+            "frontend conflict-marker preflight cleared; resuming build",
+          )
+        _ensure_node_modules()
+        if _STAGING_DIST_DIR.exists():
+          shutil.rmtree(_STAGING_DIST_DIR)
+        cmd = _vite_build_cmd(_STAGING_DIST_DIR)
+        proc: subprocess.Popen | None = None
+        rc: int | None = None
+        output = ""
         try:
-          output, _ = proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-          self._terminate_watch_process(signal.SIGKILL)
-          output, _ = proc.communicate()
-        raise RuntimeError("vite build timed out after 180 seconds") from exc
-      rc = proc.returncode
-    finally:
-      with self._proc_lock:
-        if self._watch_proc is proc:
-          self._watch_proc = None
-    if self._closed.is_set():
-      return
-    if rc != 0:
-      shutil.rmtree(_STAGING_DIST_DIR, ignore_errors=True)
-      detail = _tail(output) or f"vite build exited {rc}"
-      raise RuntimeError(detail)
-    if output.strip():
-      log.info("frontend demand build complete: %s", _tail(output, 1000))
-    current_source_signature, _ = _source_snapshot()
-    if current_source_signature != source_signature:
-      shutil.rmtree(_STAGING_DIST_DIR, ignore_errors=True)
-      log.info(
-        "frontend source changed during demand build; discarding staging",
-      )
-      self._queue_build("source changed during demand build")
-      return
-    if not self._refresh_staging_signature():
-      raise RuntimeError("vite build completed without a staging generation")
-    self._publish_dirty_sync(f"build:{reason}")
-    with self._state_lock:
-      publish_pending = self._staging_dirty
-    if not publish_pending:
-      try:
-        _write_source_stamp(source_signature)
-      except OSError:
-        log.warning("could not persist frontend source signature")
+          proc = subprocess.Popen(
+            cmd,
+            cwd=str(_FRONTEND_DIR),
+            env=_vite_env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+          )
+          lower_process_group_priority(
+            isolated_process_group_id(proc.pid),
+            logger=log,
+            label="Frontend build",
+          )
+          with self._proc_lock:
+            self._watch_proc = proc
+          log.info("frontend demand build started after %s", reason)
+          try:
+            output, _ = proc.communicate(timeout=180)
+          except subprocess.TimeoutExpired as exc:
+            self._terminate_watch_process(signal.SIGTERM)
+            try:
+              output, _ = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+              self._terminate_watch_process(signal.SIGKILL)
+              output, _ = proc.communicate()
+            raise RuntimeError(
+              "vite build timed out after 180 seconds",
+            ) from exc
+          rc = proc.returncode
+        finally:
+          with self._proc_lock:
+            if self._watch_proc is proc:
+              self._watch_proc = None
+        if self._closed.is_set():
+          return
+        if rc != 0:
+          shutil.rmtree(_STAGING_DIST_DIR, ignore_errors=True)
+          detail = _tail(output) or f"vite build exited {rc}"
+          raise RuntimeError(detail)
+        if output.strip():
+          log.info("frontend demand build complete: %s", _tail(output, 1000))
+        current_source_signature, _ = _source_snapshot()
+        if current_source_signature != source_signature:
+          shutil.rmtree(_STAGING_DIST_DIR, ignore_errors=True)
+          log.info(
+            "frontend source changed during demand build; discarding staging",
+          )
+          self._queue_build("source changed during demand build")
+          return
+        if not self._refresh_staging_signature():
+          raise RuntimeError(
+            "vite build completed without a staging generation",
+          )
+        self._publish_dirty_sync(f"build:{reason}")
+        with self._state_lock:
+          publish_pending = self._staging_dirty
+        if not publish_pending:
+          try:
+            _write_source_stamp(source_signature)
+          except OSError:
+            log.warning("could not persist frontend source signature")
+    except BuildLeaseUnavailable:
+      # Only the acquisition above can raise this; the body takes no lease.
+      self._queue_build(reason)
 
   def _refresh_staging_signature(self) -> bool:
     sig = _tree_signature(_STAGING_DIST_DIR)
@@ -1361,7 +1317,6 @@ class _FrontendSupervisor:
       "pid": None,
       "rss_bytes": None,
       "staging_dirty": False,
-      "build_deferred_reason": None,
       "lease_path": str(_FRONTEND_DIR / ".watch.lock"),
     }
     return {
@@ -1397,7 +1352,6 @@ def watcher_health() -> dict:
     "pid": None,
     "rss_bytes": None,
     "staging_dirty": False,
-    "build_deferred_reason": None,
     "lease_path": str(_FRONTEND_DIR / ".watch.lock"),
     "last_error": None,
     "retry_in_seconds": None,

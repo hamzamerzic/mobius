@@ -22,12 +22,10 @@ Exit code is 1 if any completeness error is found, else 0.
 
 import argparse
 import json
-import os
 import shutil
 import subprocess
 import sys
 import tempfile
-from contextlib import nullcontext
 from pathlib import Path
 
 # Put the backend package root (this script's grandparent) on sys.path so the
@@ -41,7 +39,7 @@ from app.app_compile_contract import (  # noqa: E402
   rolldown_command,
   rolldown_report_contract_error,
 )
-from app.build_admission import acquire_build_lease  # noqa: E402
+from app.build_admission import build_lease  # noqa: E402
 from app.manifest_contract import (  # noqa: E402
   ENTRY_MAX_BYTES,
   ICON_MAX_BYTES,
@@ -102,26 +100,19 @@ def _compile(
     command = rolldown_command(
       staged_root / entry, Path(tmp) / "app.js", report=report_path,
     )
-    # In a running Mobius container, share the same cross-process lease as
-    # shell Vite and server-side mini-app compilation. A standalone developer
-    # checkout has no DATA_DIR runtime (and no competing Mobius process), so it
-    # retains the validator's zero-configuration CLI behavior.
-    lease = (
-      acquire_build_lease(blocking=True)
-      if os.environ.get("DATA_DIR") else nullcontext()
-    )
-    if lease is None:
-      return "JavaScript build lease is unavailable"
     try:
-      with lease:
+      # In a running container this is the same lease shell Vite and mini-app
+      # compilation take; without a runtime directory it is a no-op, so the
+      # CLI stays zero-configuration in a developer checkout.
+      with build_lease():
         result = subprocess.run(
           command, capture_output=True, text=True,
           timeout=ROLLDOWN_TIMEOUT_SECS, check=False,
         )
     except FileNotFoundError:
       return (
-        "Node.js is not installed or not on PATH; install it before "
-        "validating an app"
+        "Node.js is not installed or not on PATH; install it before validating "
+        "an app"
       )
     except subprocess.TimeoutExpired:
       return f"Rolldown timed out after {ROLLDOWN_TIMEOUT_SECS} seconds"
