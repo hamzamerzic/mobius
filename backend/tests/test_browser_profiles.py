@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 from app import browser_profiles, chat
 from app.browser_profiles import enforce_browser_profile_quota
@@ -27,22 +28,67 @@ def _named_profile(root, name, *, cache_bytes, durable_bytes):
   return profile
 
 
-def test_railway_defaults_fit_below_managed_volume_limit(monkeypatch):
+def test_profile_defaults_follow_data_capacity_not_provider(monkeypatch, tmp_path):
+  monkeypatch.setattr(
+    browser_profiles.shutil,
+    "disk_usage",
+    lambda path: SimpleNamespace(total=512 * 1024**2),
+  )
+  expected = (128 * 1024**2, 96 * 1024**2)
+  assert browser_profiles.default_browser_profile_quota(tmp_path) == expected
   for name in (
     "RAILWAY_ENVIRONMENT",
     "RAILWAY_ENVIRONMENT_ID",
     "RAILWAY_PROJECT_ID",
     "RAILWAY_SERVICE_ID",
   ):
-    monkeypatch.delenv(name, raising=False)
-  assert browser_profiles.default_browser_profile_quota() == (
+    monkeypatch.setenv(name, "railway-test")
+  assert browser_profiles.default_browser_profile_quota(tmp_path) == expected
+
+
+def test_profile_defaults_are_capped_and_fall_back_on_probe_failure(
+  monkeypatch, tmp_path,
+):
+  monkeypatch.setattr(
+    browser_profiles.shutil,
+    "disk_usage",
+    lambda path: SimpleNamespace(total=16 * 1024**3),
+  )
+  assert browser_profiles.default_browser_profile_quota(tmp_path) == (
     2 * 1024**3, 1536 * 1024**2,
   )
 
-  monkeypatch.setenv("RAILWAY_PROJECT_ID", "project-test")
-  assert browser_profiles.default_browser_profile_quota() == (
-    128 * 1024**2, 96 * 1024**2,
+  def fail(_path):
+    raise OSError("unavailable")
+
+  monkeypatch.setattr(browser_profiles.shutil, "disk_usage", fail)
+  assert browser_profiles.default_browser_profile_quota(tmp_path) == (
+    2 * 1024**3, 1536 * 1024**2,
   )
+
+  monkeypatch.setattr(
+    browser_profiles.shutil,
+    "disk_usage",
+    lambda path: SimpleNamespace(total=0),
+  )
+  assert browser_profiles.default_browser_profile_quota(tmp_path) == (
+    2 * 1024**3, 1536 * 1024**2,
+  )
+
+
+def test_profile_quota_environment_overrides_capacity(monkeypatch, tmp_path):
+  monkeypatch.setattr(
+    browser_profiles.shutil,
+    "disk_usage",
+    lambda path: SimpleNamespace(total=512 * 1024**2),
+  )
+  monkeypatch.setenv("AGENT_BROWSER_PROFILE_MAX_BYTES", "42")
+  monkeypatch.setenv("AGENT_BROWSER_PROFILE_LOW_WATER_BYTES", "31")
+
+  result = enforce_browser_profile_quota(tmp_path, {}, set())
+
+  assert result["max_bytes"] == 42
+  assert result["low_water_bytes"] == 31
 
 
 def test_profile_sweep_interval_is_hourly_and_bounded(monkeypatch):
