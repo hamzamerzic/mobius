@@ -112,13 +112,19 @@ async def ensure_bootstrap_apps_installed(db: Session) -> None:
       source_url=bootstrap_app.manifest_url,
       manifest_id=bootstrap_app.name,
     )
-    if existing is not None and (
+    existing_id = existing.id if existing is not None else None
+    already_installed = existing is not None and (
       existing.deleted_at is None
       or not bootstrap_app.reinstall_after_uninstall
-    ):
+    )
+    # The identity query autobegins a read transaction. Do not retain its
+    # connection while the installer performs serial network fetches and
+    # compilation; install_from_manifest starts and owns the next transaction.
+    db.rollback()
+    if already_installed:
       log.info(
         "bootstrap: %s already installed (app id=%s)",
-        bootstrap_app.name, existing.id,
+        bootstrap_app.name, existing_id,
       )
       continue
     log.info(

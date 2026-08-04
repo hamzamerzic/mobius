@@ -1206,6 +1206,9 @@ class ChatWriterActor:
       # this probe raises, `.set()` is skipped and the except below marks the
       # writer fatal — it never reports ready on a writer that can't persist.
       self._db.execute(text("SELECT 1"))
+      # SQLAlchemy autobegins even for SELECT 1. End that probe transaction
+      # before readiness so an idle writer owns no connection or snapshot.
+      self._db.rollback()
       self._session_ready.set()
     except BaseException:
       # The session factory raising at first use is thread-fatal: there
@@ -1362,6 +1365,7 @@ class ChatWriterActor:
     # outer `except BaseException` → `_go_fatal`, leaving readiness clear rather
     # than advertising a session that can't persist.
     self._db.execute(text("SELECT 1"))
+    self._db.rollback()
     self._session_ready.set()
 
   def _dispatch(self, db, cmd: _Command):

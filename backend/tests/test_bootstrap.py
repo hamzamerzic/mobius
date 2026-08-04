@@ -78,6 +78,25 @@ async def test_bootstrap_installs_all_apps_in_order_when_absent(db, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_bootstrap_releases_identity_transaction_before_install(
+  db, monkeypatch,
+):
+  """Serial fetch/compile work must not retain the identity query connection."""
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+
+  def install_after_release(*_args, **_kwargs):
+    assert not db.in_transaction()
+    return _install_result()
+
+  install_mock = AsyncMock(side_effect=install_after_release)
+  with patch("app.bootstrap.install_from_manifest", install_mock):
+    await ensure_bootstrap_apps_installed(db)
+
+  assert install_mock.await_count == len(_bootstrap_urls())
+  assert not db.in_transaction()
+
+
+@pytest.mark.asyncio
 async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
   """Store returns after uninstall; Skills/Memory stay gone; live Reflection skips."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
