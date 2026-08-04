@@ -25,7 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def test_cron_parser_resolves_supervised_command_to_real_job():
   line = (
     "30 5 * * * python3 /app/scripts/app-job-runner.py "
-    "57 /data/apps/memory/memory-job.sh"
+    "--scheduled 57 /data/apps/memory/memory-job.sh"
   )
   assert app_cron.crontab_command_path(line) == (
     "/data/apps/memory/memory-job.sh"
@@ -35,7 +35,7 @@ def test_cron_parser_resolves_supervised_command_to_real_job():
 def test_cron_parser_resolves_wall_clock_gate_to_real_job():
   line = (
     "* * * * * python3 /app/scripts/app-job-runner.py "
-    "--wall-clock Europe/Belgrade 30\\ 2\\ \\*\\ \\*\\ \\* "
+    "--scheduled --wall-clock Europe/Belgrade 30\\ 2\\ \\*\\ \\*\\ \\* "
     "57 /data/apps/memory/memory-job.sh"
   )
   assert app_cron.crontab_command_path(line) == (
@@ -153,6 +153,10 @@ def test_wall_clock_tick_that_is_not_due_stops_before_job_launch(
   job.write_text("#!/bin/sh\n")
   monkeypatch.setattr(runner, "DATA_DIR", data_dir)
   monkeypatch.setattr(runner, "_claim_wall_clock_run", lambda *_args: False)
+  monkeypatch.setattr(
+    runner, "_emit_cron_outcome",
+    lambda *_args: pytest.fail("a non-due tick must not emit cron telemetry"),
+  )
   mint = pytest.fail
   monkeypatch.setattr(
     runner, "_mint_app_token",
@@ -179,6 +183,10 @@ def test_wrapper_skips_an_overlapping_job_for_the_same_app(
   job = source / "memory-job.sh"
   job.write_text("#!/bin/sh\nexit 0\n")
   monkeypatch.setattr(runner, "DATA_DIR", data_dir)
+  monkeypatch.setattr(
+    runner, "_emit_cron_outcome",
+    lambda *_args: pytest.fail("an overlapping run must not emit cron telemetry"),
+  )
   events = []
   monkeypatch.setattr(runner, "_log", lambda app_id, message: events.append(
     (app_id, message),
@@ -290,6 +298,10 @@ def test_bootstrap_readiness_timeout_never_mints_a_job_token(
   monkeypatch.setattr(runner, "DATA_DIR", data_dir)
   monkeypatch.setattr(runner.os, "getsid", lambda _pid: os.getpid())
   monkeypatch.setattr(runner, "_wait_for_ready", lambda: False)
+  monkeypatch.setattr(
+    runner, "_emit_cron_outcome",
+    lambda *_args: pytest.fail("a preflight failure must not emit cron telemetry"),
+  )
   minted = []
   monkeypatch.setattr(runner, "_mint_app_token", lambda _app_id: minted.append(True))
   monkeypatch.setattr(runner.sys, "argv", [
@@ -368,6 +380,11 @@ def test_wrapper_runs_job_only_after_live_check(tmp_path, monkeypatch):
     "Popen",
     capture_popen,
   )
+  monkeypatch.setattr(
+    runner,
+    "_emit_cron_outcome",
+    lambda *_args: pytest.fail("a manual run must not emit cron telemetry"),
+  )
   monkeypatch.setattr(runner.sys, "argv", [
     "app-job-runner.py", "57", str(job),
   ])
@@ -381,6 +398,76 @@ def test_wrapper_runs_job_only_after_live_check(tmp_path, monkeypatch):
   assert "AGENT_TOKEN" not in child_env
   assert len(calls[0][1]["pass_fds"]) == 1
   assert signal.getsignal(signal.SIGTERM) is prior_sigterm
+
+
+def test_scheduled_job_emits_owner_authenticated_outcome_after_child_exit(
+  tmp_path, monkeypatch,
+):
+  runner = _load_runner()
+  data_dir = tmp_path / "data"
+  source = data_dir / "apps" / "memory"
+  source.mkdir(parents=True)
+  job = source / "fetch.sh"
+  job.write_text("#!/bin/sh\nexit 7\n")
+  token_file = data_dir / "service-token.txt"
+  token_file.write_text("owner-token\n")
+  monkeypatch.setattr(runner, "DATA_DIR", data_dir)
+  monkeypatch.setattr(runner, "TOKEN_FILE", token_file)
+  monkeypatch.setattr(runner, "API_BASE_URL", "http://mobius.test:8000")
+  monkeypatch.setattr(runner, "_mint_app_token", lambda _app_id: "app-token")
+  monkeypatch.setattr(runner, "_app_is_live", lambda *_args: True)
+  monkeypatch.setattr(
+    runner, "_job_context", lambda *_args: {"source_dir": str(source)},
+  )
+  monkeypatch.setattr(runner.os, "getsid", lambda _pid: os.getpid())
+  lifecycle = []
+
+  def wait():
+    lifecycle.append("child-exit")
+    return 7
+
+  monkeypatch.setattr(
+    runner.subprocess, "Popen",
+    lambda *_args, **_kwargs: types.SimpleNamespace(wait=wait),
+  )
+  emitted = {}
+
+  class Response:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *_args):
+      return False
+
+  def urlopen(request, timeout):
+    lifecycle.append("emit")
+    emitted["url"] = request.full_url
+    emitted["auth"] = request.headers["Authorization"]
+    emitted["body"] = json.loads(request.data)
+    emitted["timeout"] = timeout
+    return Response()
+
+  monkeypatch.setattr(runner.urllib.request, "urlopen", urlopen)
+  monkeypatch.setattr(runner.sys, "argv", [
+    "app-job-runner.py", "--scheduled", "57", str(job),
+  ])
+
+  assert runner.run() == 7
+  assert lifecycle == ["child-exit", "emit"]
+  duration_ms = emitted["body"].pop("duration_ms")
+  assert isinstance(duration_ms, int)
+  assert duration_ms >= 0
+  assert emitted == {
+    "url": "http://mobius.test:8000/api/admin/activity/emit",
+    "auth": "Bearer owner-token",
+    "body": {
+      "ev": "cron_outcome",
+      "app_id": 57,
+      "job": "fetch.sh",
+      "exit_code": 7,
+    },
+    "timeout": 5,
+  }
 
 
 def test_wrapper_rejects_a_job_from_another_live_app(tmp_path, monkeypatch):

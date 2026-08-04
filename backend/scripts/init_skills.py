@@ -8,8 +8,8 @@ knowledge graph, this is CREATE-IF-ABSENT — reseeding would clobber the agent'
 own skill edits.
 
 Propagation policy, precisely (the code below is the contract): on first boot
-the whole seed tree is copied and `.seed-version` is stamped. On every later
-boot we add missing seed skills and apply only explicit, hash-gated migrations:
+the whole seed tree is copied. On every later boot we add missing seed skills
+and apply only explicit, hash-gated migrations:
 an existing file is replaced when it is byte-for-byte a known baked predecessor,
 while every owner/agent-edited copy is preserved. A normal baked-seed edit does
 not propagate until its predecessor hash is deliberately registered below; this
@@ -25,9 +25,8 @@ remains an exact-hash match -- an owner edit that differs by one byte is still
 preserved. App-owned
 skills are not part of this seed tree; they arrive through manifests and their
 generic ownership sidecar.
-`.seed-version`/`SEED_VERSION` are kept as a
-record of the baked seed generation for that future, merge-aware migration; the
-sentinel is written but not yet read.
+`.seed-version` remains a reserved internal name for instances that carry the
+retired marker; bootstrap neither reads nor writes it.
 
 Seed source: /app/scripts/seed-skills/ (baked), falling back to the in-repo
 backend/scripts/seed-skills/ for dev. Run from entrypoint after
@@ -42,8 +41,6 @@ from pathlib import Path
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
-VERSION_FILE = SKILLS / ".seed-version"
-SEED_VERSION = "24"  # v24: propagate current scheduling skill contracts
 # Update only byte-for-byte baked copies; an owner/agent-edited file is never
 # touched. A set preserves every known unmodified predecessor when one skill
 # needs more than one fix-forward migration over its lifetime.
@@ -207,9 +204,8 @@ def init() -> None:
     SKILLS.mkdir(parents=True)
     for src in seed.glob("*.md"):
       shutil.copy2(src, SKILLS / src.name)
-    VERSION_FILE.write_text(SEED_VERSION + "\n", encoding="utf-8")
     n = len(list(SKILLS.glob("*.md")))
-    print(f"init_skills: seeded {n} skills (v{SEED_VERSION})")
+    print(f"init_skills: seeded {n} skills")
     _chown_mobius(SKILLS)
     _write_index()
     return

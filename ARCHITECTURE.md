@@ -491,7 +491,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | Add a supported app package | Pin it in `frontend/package.json`, add it to `BUNDLED_RUNTIME_LIBS`, and run the compiler/offline-frame contracts |
 | Change offline / SW behavior | `frontend/src/sw.js` + `frontend/src/sw-cache-policy.js` (read *Service worker + offline* below first) |
 | Change the in-product agent's instructions | `skill/core.md` (constitution) or `backend/scripts/seed-skills/*.md` (per-task skills) — see below |
-| Add/install a skill | Ecosystem installs go through `POST /api/skills/install` (`routes/skills.py`; the Skills app + `finding-skills.md` seed drive it); new platform seeds go in `backend/scripts/seed-skills/` + a `SEED_VERSION` bump in `init_skills.py`; the index (`skills-index.md`) is generated — never hand-edit it |
+| Add/install a skill | Ecosystem installs go through `POST /api/skills/install` (`routes/skills.py`; the Skills app + `finding-skills.md` seed drive it); new platform seeds go in `backend/scripts/seed-skills/`; edits that must reach existing untouched copies register their predecessor digest in `init_skills.py`; the index (`skills-index.md`) is generated — never hand-edit it |
 | Change a bootstrap app (Store / Memory / Reflection) | Change its catalog repository (`mobius-os/app-<slug>`). `backend/app/bootstrap.py` installs the canonical manifest on first boot; afterward the app is an ordinary owner-editable app under `/data/apps/<slug>` |
 | Theme CSS / tokens | `backend/app/theme.py` + `routes/theme.py` + `frontend/src/hooks/useTheme.js` |
 
