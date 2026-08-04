@@ -471,6 +471,7 @@ def test_edit_during_demand_build_requests_one_rerun(fw_dirs, monkeypatch):
 def test_demand_build_defers_before_preflight_setup_or_spawn(
   fw_dirs, monkeypatch, pressure,
 ):
+  monkeypatch.setattr(fw, "_BUILD_ADMISSION_RETRY_SECS", 0)
   monkeypatch.setattr(fw, "assess_memory_pressure", lambda: pressure)
   monkeypatch.setattr(
     fw,
@@ -501,6 +502,7 @@ def test_demand_build_defers_before_preflight_setup_or_spawn(
 def test_demand_build_requeues_before_pressure_check_when_build_lease_busy(
   fw_dirs, monkeypatch,
 ):
+  monkeypatch.setattr(fw, "_BUILD_ADMISSION_RETRY_SECS", 0)
   monkeypatch.setattr(
     fw,
     "acquire_build_lease",
@@ -528,6 +530,7 @@ def test_demand_build_requeues_before_pressure_check_when_build_lease_busy(
 def test_deferred_demand_build_retries_and_finishes_after_memory_recovers(
   fw_dirs, monkeypatch,
 ):
+  monkeypatch.setattr(fw, "_BUILD_ADMISSION_RETRY_SECS", 0)
   src = fw_dirs["frontend"] / "src"
   src.mkdir()
   source_file = src / "Shell.jsx"

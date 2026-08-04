@@ -46,6 +46,7 @@ _POLL_INTERVAL_SECS = 2.0
 _INCOMPLETE_GRACE_SECS = 30.0
 _WATCH_RESTART_BACKOFF_MAX = 30.0
 _WATCH_LEASE_RETRY_INITIAL = 1.0
+_BUILD_ADMISSION_RETRY_SECS = 5.0
 # Exact 512 MiB canaries repeatedly reached memory.max and OOM-killed Vite even
 # with a 256 MiB JS heap; much of Rolldown's memory is native. Keep that work
 # deferred while the last-good/baked shell remains served. A 1 GiB canary has
@@ -1040,12 +1041,18 @@ class _FrontendHandler(FileSystemEventHandler):
     if lease is None:
       with self._state_lock:
         self._build_deferred_reason = "another JavaScript build is running"
+      if self._closed.wait(_BUILD_ADMISSION_RETRY_SECS):
+        return
       self._queue_build("build lease retry")
       return
     with lease:
-      self._run_admitted_demand_build(reason)
+      retry_reason = self._run_admitted_demand_build(reason)
+    if retry_reason is not None:
+      if self._closed.wait(_BUILD_ADMISSION_RETRY_SECS):
+        return
+      self._queue_build(retry_reason)
 
-  def _run_admitted_demand_build(self, reason: str) -> None:
+  def _run_admitted_demand_build(self, reason: str) -> str | None:
     """Build after atomically excluding every other owned JS compiler."""
     deferred = _vite_build_deferral_reason()
     if deferred is not None:
@@ -1054,8 +1061,7 @@ class _FrontendHandler(FileSystemEventHandler):
       self._memory_deferred = True
       with self._state_lock:
         self._build_deferred_reason = deferred
-      self._queue_build("memory-pressure retry")
-      return
+      return "memory-pressure retry"
     if self._memory_deferred:
       log.info("frontend demand build resuming after memory recovered")
       self._memory_deferred = False
