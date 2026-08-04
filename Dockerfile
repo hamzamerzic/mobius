@@ -15,9 +15,9 @@ FROM node-runtime AS frontend
 
 WORKDIR /build
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci --ignore-scripts
+RUN npm ci --ignore-scripts && rm -rf /root/.npm
 COPY frontend/ .
-RUN npm run build
+RUN npm run build && rm -rf /root/.npm
 
 # -- Stage 2: backend + everything ------------------------------------
 FROM python:3.12-slim-trixie
@@ -30,36 +30,60 @@ COPY --from=node-runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_mod
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
+# Create the runtime user before installing the shared browser payload. Setting
+# its ownership in the payload's own layer avoids copying Chromium into a second
+# image layer solely to change metadata later.
+RUN useradd -m -s /bin/bash mobius
+
 # System deps and global npm packages in a single layer.
 # agent-browser downloads its own Chromium during `install`; we move it
 # to /opt/agent-browser so both root and the mobius user share a single
 # Chromium copy via the symlinks below (~/.agent-browser is where
 # agent-browser looks by default).
-#
+# Discard npm's download cache in each layer: installed packages are the
+# runtime artifact; registry tarballs only make the production image larger.
+ARG CLAUDE_CODE_VERSION=2.1.220
+ARG AGENT_BROWSER_VERSION=0.33.2
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    cron curl ca-certificates git sudo procps util-linux age \
+    age ca-certificates cron curl git jq procps ripgrep sqlite3 sudo unzip util-linux \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
     libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
     fonts-liberation fonts-noto-color-emoji \
-    && npm install -g esbuild@0.28.1 \
-    && npm install -g @anthropic-ai/claude-code@2.1.218 \
-    && npm install -g @openai/codex@0.145.0 \
-    && npm install -g agent-browser@0.31.1 \
+    && npm install -g --engine-strict --strict-allow-scripts \
+      --allow-scripts="@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION},agent-browser@${AGENT_BROWSER_VERSION}" \
+      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+      @openai/codex@0.146.0 \
+      "agent-browser@${AGENT_BROWSER_VERSION}" \
     && agent-browser install \
     && mv /root/.agent-browser /opt/agent-browser \
+    && chown -R mobius:mobius /opt/agent-browser \
     && git_version="$(git --version | awk '{print $3}')" \
     && [ "$(printf '%s\n' "2.38" "$git_version" | sort -V | head -n1)" = "2.38" ] \
-    && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /root/.npm /var/lib/apt/lists/*
 
 # tectonic is a server-side subprocess; CSP connect-src 'self' applies only to
 # browser fetches from the mini-app iframe, not OS-level subprocesses — tectonic's
 # package fetches (from Tectonic's bundle server) are unrestricted at the OS level.
 # Placed after the apt-get layer so a tectonic version bump doesn't bust the apt cache.
-ARG TECTONIC_VERSION=0.16.9
-RUN curl -fsSL "https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%40${TECTONIC_VERSION}/tectonic-${TECTONIC_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
-    | tar xz -C /usr/local/bin/ tectonic && chmod +x /usr/local/bin/tectonic && tectonic --version
+ARG TECTONIC_VERSION=0.17.0
+ARG TECTONIC_SHA256_AMD64=8533d07f9ccbd7a65824b9e0459041bca34af1eb33daba48f59215593753a3b7
+ARG TECTONIC_SHA256_ARM64=b10954a95404f3ab2328d2fa59a5ebab8e657f893fab096f98be8db7c0c979b8
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) target=x86_64; sha256="$TECTONIC_SHA256_AMD64" ;; \
+      arm64) target=aarch64; sha256="$TECTONIC_SHA256_ARM64" ;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    tarball="tectonic-${TECTONIC_VERSION}-${target}-unknown-linux-musl.tar.gz"; \
+    base="https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%40${TECTONIC_VERSION}"; \
+    curl -fsSL "${base}/${tarball}" -o "/tmp/${tarball}"; \
+    echo "${sha256}  /tmp/${tarball}" | sha256sum -c -; \
+    tar xzf "/tmp/${tarball}" -C /usr/local/bin/ tectonic; \
+    rm "/tmp/${tarball}"; \
+    chmod +x /usr/local/bin/tectonic; \
+    tectonic --version
 
 # GitHub CLI: the agent's Contribute flow opens PRs/issues upstream through
 # `gh` (a server-side subprocess, so CSP connect-src 'self' — which governs
@@ -68,7 +92,7 @@ RUN curl -fsSL "https://github.com/tectonic-typesetting/tectonic/releases/downlo
 # fails the build. Built for the image arch (amd64|arm64); only the single
 # `gh` binary is installed, docs/man pages are dropped. Placed after the apt
 # layer so a gh bump doesn't bust the apt cache.
-ARG GH_CLI_VERSION=2.96.0
+ARG GH_CLI_VERSION=2.97.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in amd64|arm64) ;; *) echo "unsupported arch: $arch" >&2; exit 1 ;; esac; \
@@ -83,12 +107,9 @@ RUN set -eux; \
       "/tmp/gh_${GH_CLI_VERSION}_linux_${arch}"; \
     gh --version
 
-# Share the agent-browser install between root and mobius via symlinks.
-# The mobius user is created further down; we chown the shared dir to
-# mobius:mobius after that, so mobius can write session sockets/locks
-# as the owner without needing world-write on the Chromium binaries.
-# (root still has access because root always does.)
-RUN ln -s /opt/agent-browser /root/.agent-browser
+# Share the mobius-owned agent-browser install without a second Chromium copy.
+RUN ln -s /opt/agent-browser /root/.agent-browser \
+    && ln -s /opt/agent-browser /home/mobius/.agent-browser
 
 # openai/codex-plugin-cc — Claude Code plugin that exposes Codex as a
 # delegation/review subagent inside the agent's session. Cloned at
@@ -115,8 +136,8 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.lock \
 # lockstep npm CLI. This preserves the external SDK contract without storing a
 # second ~350 MB runtime or running a second protocol version.
 # Pinned to commit SHA (not tag) for full reproducibility — tags are
-# mutable on GitHub. SHA corresponds to refs/tags/rust-v0.145.0
-# as of 2026-07-24, and is kept in lockstep with the npm @openai/codex
+# mutable on GitHub. SHA corresponds to refs/tags/rust-v0.146.0
+# as of 2026-08-03, and is kept in lockstep with the npm @openai/codex
 # binary above (the SDK spawns it via codex_bin=shutil.which("codex")).
 # We moved from rust-v0.144.5 to this tag because the 0.144.x generated
 # ReasoningEffort enum was strict (none/minimal/low/medium/high/xhigh)
@@ -124,14 +145,14 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.lock \
 # codex.models() and ThreadResumeResponse validation failed and broke a
 # real chat resume. alpha.13 turned ReasoningEffort into a forgiving
 # `str, Enum` with a `_missing_` hook that accepts any effort string;
-# 0.145.0 is the latest stable tag published to BOTH the git repo and npm, so
+# 0.146.0 is the latest stable tag published to BOTH the git repo and npm, so
 # binary and schema stay matched. The SDK exposes the request bridge as a
 # public `approval_handler` constructor argument on
 # `openai_codex.client.CodexClient`; `AsyncCodex` still does not forward
 # it, so codex_sdk_runner.py installs the handler on the wrapped sync
 # client's `_approval_handler`.
 RUN pip install --no-cache-dir --no-deps \
-      'openai-codex @ git+https://github.com/openai/codex.git@25af12f7e61572b0bc18ddb1008be543b91519b0#subdirectory=sdk/python' \
+      'openai-codex @ git+https://github.com/openai/codex.git@e363b08c9175ac1cbe5893615dd2cb9ddf95043b#subdirectory=sdk/python' \
     && pip install --no-cache-dir 'openai-codex-cli-bin==0.144.4' \
     && _codex_cli_bin="$(python -c \
       'from pathlib import Path; import codex_cli_bin; print(Path(codex_cli_bin.__file__).parent)')" \
@@ -150,7 +171,7 @@ RUN pip install --no-cache-dir --no-deps \
 # refreshes the date automatically — no hand-maintained map, no test to
 # satisfy. Best effort: if the npm registry is unreachable the file is left
 # empty and the Settings row simply shows the bare version, never an error.
-RUN node -e "const cp=require('child_process'),fs=require('fs');\
+RUN if ! node -e "const cp=require('child_process'),fs=require('fs');\
 const want=['@anthropic-ai/claude-code','@openai/codex'];\
 let installed={};\
 try{installed=(JSON.parse(cp.execSync('npm ls -g --depth=0 --json',{stdio:['ignore','pipe','ignore']}).toString()).dependencies)||{};}catch(e){}\
@@ -158,15 +179,19 @@ const out={};\
 for(const name of want){const v=installed[name]&&installed[name].version;if(!v)continue;\
 try{const t=JSON.parse(cp.execSync('npm view '+name+'@'+v+' time --json',{stdio:['ignore','pipe','ignore']}).toString());if(t&&t[v])out[v]=String(t[v]).slice(0,10);}catch(e){}}\
 fs.writeFileSync('/app/cli-release-dates.json',JSON.stringify(out));\
-console.log('cli-release-dates.json:',JSON.stringify(out));" \
-    || echo '{}' > /app/cli-release-dates.json
+console.log('cli-release-dates.json:',JSON.stringify(out));"; then \
+      echo '{}' > /app/cli-release-dates.json; \
+    fi; \
+    rm -rf /root/.npm
 
 # Install the shell and mini-app compiler dependency tree from manifests alone.
 # Application source is copied later, so ordinary frontend edits reuse this
 # pinned npm layer. The production compiler resolves app bare imports only from
 # this directory and embeds the complete graph into each app module.
 COPY frontend/package.json frontend/package-lock.json* ./shell-src/
-RUN cd ./shell-src && npm ci --ignore-scripts 2>/dev/null && rm -rf .vite
+RUN cd ./shell-src \
+    && npm ci --ignore-scripts 2>/dev/null \
+    && rm -rf .vite /root/.npm
 
 # pdf.js (Mozilla's engine — what Firefox's built-in PDF viewer uses),
 # vendored same-origin so the LaTeX app renders a compiled PDF as a real
@@ -178,12 +203,13 @@ RUN cd ./shell-src && npm ci --ignore-scripts 2>/dev/null && rm -rf .vite
 # app sets GlobalWorkerOptions.workerSrc to the /vendor worker URL.
 RUN mkdir -p /tmp/pdfjs-install && cd /tmp/pdfjs-install \
     && npm init -y >/dev/null \
-    && npm install --no-audit --no-fund --silent pdfjs-dist@4.10.38 \
+    && npm install --no-audit --no-fund --silent \
+      --engine-strict --strict-allow-scripts pdfjs-dist@4.10.38 \
     && mkdir -p /app/static/vendor/pdfjs@4.10.38 \
     && cp node_modules/pdfjs-dist/build/pdf.mjs /app/static/vendor/pdfjs@4.10.38/pdf.mjs \
     && cp node_modules/pdfjs-dist/build/pdf.worker.mjs /app/static/vendor/pdfjs@4.10.38/pdf.worker.mjs \
     && ln -s pdfjs@4.10.38 /app/static/vendor/pdfjs \
-    && cd / && rm -rf /tmp/pdfjs-install
+    && cd / && rm -rf /tmp/pdfjs-install /root/.npm
 
 # KaTeX browser assets — the package's JavaScript is bundled when an app imports
 # it, while the shell and app-authored stylesheets still use these public files.
@@ -196,14 +222,15 @@ RUN mkdir -p /tmp/pdfjs-install && cd /tmp/pdfjs-install \
 # The stable /vendor/katex/ alias is used by installed app stylesheets.
 RUN mkdir -p /tmp/katex-install && cd /tmp/katex-install \
     && npm init -y >/dev/null \
-    && npm install --no-audit --no-fund --silent katex@0.18.1 \
+    && npm install --no-audit --no-fund --silent \
+      --engine-strict --strict-allow-scripts katex@0.18.1 \
     && mkdir -p /app/static/vendor/katex@0.18.1/fonts \
     && cp node_modules/katex/dist/katex.min.js /app/static/vendor/katex@0.18.1/ \
     && cp node_modules/katex/dist/katex.mjs    /app/static/vendor/katex@0.18.1/ \
     && cp node_modules/katex/dist/katex.min.css /app/static/vendor/katex@0.18.1/ \
     && cp node_modules/katex/dist/fonts/*.woff2 /app/static/vendor/katex@0.18.1/fonts/ \
     && ln -s katex@0.18.1 /app/static/vendor/katex \
-    && cd / && rm -rf /tmp/katex-install
+    && cd / && rm -rf /tmp/katex-install /root/.npm
 
 # Frontend static files + app-frame served by FastAPI, plus the full source
 # tree retained for /data/platform/frontend/node_modules to link at runtime.
@@ -216,6 +243,7 @@ COPY frontend/ ./shell-src/
 # failing the build if any declared input was not copied into the image.
 COPY scripts/test-image-fingerprint.sh /tmp/test-image-inputs/scripts/test-image-fingerprint.sh
 COPY Dockerfile /tmp/test-image-inputs/Dockerfile
+COPY backend/app/platform_activation.py /tmp/test-image-inputs/backend/app/platform_activation.py
 COPY backend/requirements.txt backend/requirements.lock /tmp/test-image-inputs/backend/
 COPY backend/legacy_runtime/ /tmp/test-image-inputs/backend/legacy_runtime/
 COPY frontend/package.json frontend/package-lock.json /tmp/test-image-inputs/frontend/
@@ -234,10 +262,9 @@ RUN python /tmp/verify-legacy-jose.py && rm /tmp/verify-legacy-jose.py
 # Whole-repo platform seed. /data is a runtime volume, so bake the real clone
 # under /app and let entrypoint copy it into /data/platform on first boot. The
 # checkout is pinned to BUILD_SHA. Production/self-host builds fail closed when
-# that identity is absent: otherwise this stack-branch image would silently
-# clone the frozen public main compatibility release. The disposable test
-# compose is the sole explicit exception because it mounts and verifies its
-# checkout at runtime.
+# that identity is absent: otherwise the baked seed could silently drift from
+# the checkout being built. The disposable test compose is the sole explicit
+# exception because it mounts and verifies its checkout at runtime.
 ARG MOBIUS_PLATFORM_ORIGIN=https://github.com/mobius-os/mobius.git
 ARG BUILD_SHA=unknown
 ARG BUILD_DATE=unknown
@@ -255,7 +282,7 @@ RUN set -eux; \
     esac; \
     if ! printf '%s' "$_build_sha" | grep -Eq '^[0-9a-fA-F]{40}$' \
        && [ "${MOBIUS_ALLOW_UNKNOWN_BUILD_SHA:-0}" != "1" ]; then \
-      echo "FATAL: an exact 40-character BUILD_SHA is required; use scripts/mobiusctl update" >&2; \
+      echo "FATAL: an exact 40-character BUILD_SHA is required; set it to the checkout commit before building" >&2; \
       exit 1; \
     fi; \
     git clone --depth 1 "$MOBIUS_PLATFORM_ORIGIN" /app/platform-baked; \
@@ -295,12 +322,9 @@ RUN set -eux; \
     chown -R root:root /app/platform-baked; \
     chmod -R a+rX,go-w /app/platform-baked
 
-# Create a non-root user so the agent can use --dangerously-skip-permissions.
-RUN useradd -m -s /bin/bash mobius \
-    && mkdir -p /data/db /data/apps /data/compiled /data/shared \
-    && chown -R mobius:mobius /data \
-    && ln -s /opt/agent-browser /home/mobius/.agent-browser \
-    && chown -R mobius:mobius /opt/agent-browser
+# Initialize the runtime volume paths for the non-root agent user.
+RUN mkdir -p /data/db /data/apps /data/compiled /data/shared \
+    && chown -R mobius:mobius /data
 
 # Runtime source belongs at the tail of the image so normal code changes reuse
 # the browser, CLI, Python, vendor, and platform-seed layers above.

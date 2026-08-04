@@ -48,16 +48,12 @@ function CustomAnswerArea({
 }) {
   const textareaRef = useRef(null)
 
-  // The fallback re-measures both while writing and when a live answer becomes
-  // its confirmed transcript value. Native content sizing takes this no-op
-  // path and keeps the same natural height through the submission handoff.
   useLayoutEffect(() => {
     resizeCustomAnswer(textareaRef.current)
   }, [value])
 
-  // Older browsers still need measured fallback sizing. scrollHeight depends
-  // on WIDTH, so re-measure when the field settles or later changes width. The
-  // guard makes our own height write a no-op resize instead of a loop.
+  // The measured fallback also reacts to width: wrapping can add lines without
+  // changing the answer value when a pane or device rotates.
   useEffect(() => {
     const textarea = textareaRef.current
     if (
@@ -80,14 +76,14 @@ function CustomAnswerArea({
     <textarea
       ref={textareaRef}
       className={`qcard__input${active ? ' qcard__input--active' : ''}`}
-      data-chat-scroll-edit-field
       aria-label={`Custom answer for: ${question}`}
       placeholder={answered ? 'No custom answer' : 'Or type your own answer…'}
       autoComplete="off"
       rows={1}
       value={value}
       onChange={e => onChange(e.target.value)}
-      disabled={disabled}
+      readOnly={answered}
+      disabled={disabled && !answered}
       onKeyDown={e => {
         if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
           e.preventDefault()

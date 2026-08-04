@@ -8,6 +8,8 @@ import {
   OFFLINE_APPS_CACHE,
   STANDALONE_APPS_CACHE,
   VENDOR_CACHE,
+  appCodeCacheKey,
+  appCodeRequestMayBeStored,
   appCodeStoreAction,
   entriesToTrim,
   isAppCodeRoute,
@@ -49,6 +51,10 @@ test('runtime cache cleanup evicts old offline app caches', () => {
   // from the frame's opaque origin. Serving one cache-first would reinstate the
   // blocked-network failure on exactly the devices the fix targets.
   assert.equal(isStaleRuntimeCache('mobius-offline-apps-v4'), true)
+  // v5 stored frames before the narrow WebAssembly CSP source was enabled.
+  // Those response headers must not keep blocking Wasm compilation after the
+  // server policy changes.
+  assert.equal(isStaleRuntimeCache('mobius-offline-apps-v5'), true)
   assert.equal(isStaleRuntimeCache(OFFLINE_APPS_CACHE), false)
   assert.equal(isStaleRuntimeCache('mobius-standalone'), true)
   assert.equal(isStaleRuntimeCache('mobius-standalone-v1'), true)
@@ -190,6 +196,16 @@ test('app-code route rejects everything else', () => {
   assert.equal(isAppCodeRoute('/api/apps/1/frame/extra'), false)
   // Standalone navigations go through the gated route, not this one.
   assert.equal(isAppCodeRoute('/apps/notes/'), false)
+})
+
+test('install handoff fields normalize to one pass-free app cache key', () => {
+  const carried = `${O}/apps/notes/?install=1&pass=opaque&token=owner&_=retry&v=4`
+  assert.equal(appCodeCacheKey(carried), `${O}/apps/notes/?v=4`)
+  assert.equal(appCodeRequestMayBeStored(carried), false)
+  assert.equal(
+    appCodeRequestMayBeStored(`${O}/apps/notes/?install=1&v=4`),
+    true,
+  )
 })
 
 test('ungated frame/module reads store every 200', () => {

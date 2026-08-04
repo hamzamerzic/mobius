@@ -18,52 +18,27 @@
  * anchor — the form is only relative so other absolutely-positioned
  * children (none today) could anchor to it.
  *
- * ╔════════════════════════════════════════════════════════════════╗
- * ║                                                                ║
- * ║   SOFT-KEYBOARD CONTRACT — the rule that took the longest      ║
- * ║                                                                ║
- * ║   Tapping `+` MUST NEVER change the soft-keyboard state.       ║
- * ║   Up stays up. Down stays down. This holds regardless of       ║
- * ║   which affordance inside the popover the user then taps —     ║
- * ║   Attach files, a model row, an effort stop, or close          ║
- * ║   (Escape / outside-tap). The same contract holds for the      ║
- * ║   file-picker round-trip and the chip × button.                ║
- * ║                                                                ║
- * ║   THREE INDEPENDENT GUARDS make this work:                     ║
- * ║                                                                ║
- * ║   1. `pointerdown.preventDefault()` on EVERY interactive       ║
- * ║      element inside the composer (the +, every popover row,    ║
- * ║      every effort stop, every model row, the chip ×).          ║
- * ║      Spec-correct browsers honour this and don't shift         ║
- * ║      focus on tap.                                             ║
- * ║                                                                ║
- * ║   2. `wasInputFocusedRef` captured SYNCHRONOUSLY inside the    ║
- * ║      `+` button's onClick (not in a post-commit useEffect —    ║
- * ║      that misses iOS Safari's focus-shuffle window). Refocus   ║
- * ║      after every picker action is GATED on this ref. If it     ║
- * ║      was false, no refocus runs.                               ║
- * ║                                                                ║
- * ║   3. Defensive `requestAnimationFrame` blur on the `+` tap     ║
- * ║      if the textarea was NOT focused at tap-time. Catches      ║
- * ║      Android Chrome's occasional focus-restoration that        ║
- * ║      preventDefault doesn't always cover.                      ║
- * ║                                                                ║
- * ║   Violating any one of these can pop the keyboard or drop      ║
- * ║   focus inappropriately. They are NOT redundant; each one      ║
- * ║   plugs a different platform's behaviour. Don't simplify       ║
- * ║   without re-verifying on iOS Safari AND Android Chrome.       ║
- * ║                                                                ║
- * ║   `settingsSaveTailRef` comes from ChatView and outlives this  ║
- * ║   popover. Picker writes therefore keep their order when the   ║
- * ║   panel closes, and message sends can share the same boundary. ║
- * ║                                                                ║
- * ╚════════════════════════════════════════════════════════════════╝
+ * Soft-keyboard contract: opening or using this popover preserves whether the
+ * owning textarea was focused. The + trigger suppresses native button focus
+ * and records that state synchronously. The popover has one bubbling
+ * pointer boundary that suppresses descendant focus and restores the textarea
+ * on the next frame only when it was focused before opening. That next-frame
+ * repair covers mobile Safari dropping focus during the later click without
+ * stealing keyboard focus from keyboard-operated controls. ChatInputBar owns
+ * the separate native file-picker return. Opening with the keyboard down keeps
+ * the defensive next-frame blur for Android's occasional focus restoration.
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { FileDocument, InfoCircle, Paperclip, Plus } from '@openai/apps-sdk-ui/components/Icon'
 import ChatSettingsPanel from './ChatSettingsPanel.jsx'
 import { popoverMaxHeight, nearestClipTop } from './composerPopoverHeight.js'
+import { focusComposerElement } from './composerFocusPolicy.js'
+import {
+  captureLayoutSpace,
+  clientLengthToLayout,
+  clientPointToLayout,
+} from '../../lib/layoutSpace.js'
 
 export default function ComposerPopover({
   chatInfo,
@@ -88,6 +63,7 @@ export default function ComposerPopover({
   onRestartResumeChange,
   providerSwitchState,
   settingsSaveTailRef,
+  composerInputRef,
   onOpenInspector,
   onOpenSummary,
   embedded = false,
@@ -114,23 +90,37 @@ export default function ComposerPopover({
   // can't express either boundary.
   const [maxHeight, setMaxHeight] = useState(null)
 
+  function preservePickerInputFocus(event) {
+    event.preventDefault()
+    if (!wasInputFocusedRef.current) return
+    requestAnimationFrame(() => focusComposerElement(composerInputRef?.current))
+  }
+
   useLayoutEffect(() => {
     if (!open) return
     const measure = () => {
       const trigger = triggerRef.current
       if (!trigger) return
       const rect = trigger.getBoundingClientRect()
+      const rootSpace = captureLayoutSpace(document.documentElement)
+      const pointY = y => clientPointToLayout({ x: 0, y }, rootSpace).y
+      const deltaY = y => clientLengthToLayout(y, rootSpace)
+      const triggerTop = pointY(rect.top)
+      const triggerBottom = pointY(rect.bottom)
+      const viewportTop = deltaY(window.visualViewport?.offsetTop || 0)
+      const viewportHeight = deltaY(window.visualViewport?.height || 0)
+      const clipTop = pointY(nearestClipTop(trigger))
       setMaxHeight(popoverMaxHeight({
-        triggerTop: rect.top,
+        triggerTop,
         // `triggerBottom` + `viewportHeight` are not extra precision — they are
         // how the helper tells which coordinate space `rect` is in. iOS reports
         // fixed-layer rects against the VISUAL viewport once the keyboard
         // offsets it, and subtracting `offsetTop` as well collapsed the panel
         // to a 14px sliver. See composerPopoverHeight.js.
-        triggerBottom: rect.bottom,
-        viewportTop: window.visualViewport?.offsetTop || 0,
-        viewportHeight: window.visualViewport?.height || 0,
-        clipTop: nearestClipTop(trigger),
+        triggerBottom,
+        viewportTop,
+        viewportHeight,
+        clipTop,
       }))
     }
     measure()
@@ -184,8 +174,7 @@ export default function ComposerPopover({
     // up when the popover opened. Otherwise leave focus alone —
     // tapping + on a closed-keyboard chat shouldn't pop it open.
     if (wasInputFocusedRef.current) {
-      const el = document.querySelector('.chat__input')
-      if (el) el.focus({ preventScroll: true })
+      focusComposerElement(composerInputRef?.current)
     }
     onAttachClick()
   }
@@ -216,7 +205,7 @@ export default function ComposerPopover({
           // Capture focus state at the click moment — before React
           // commits and any iOS focus-shuffling completes. See
           // wasInputFocusedRef declaration above.
-          const el = document.querySelector('.chat__input')
+          const el = composerInputRef?.current
           const wasFocused = document.activeElement === el
           if (!open) wasInputFocusedRef.current = wasFocused
           setOpen(o => !o)
@@ -245,15 +234,13 @@ export default function ComposerPopover({
           className="composer-popover"
           role="dialog"
           aria-label="Chat options"
+          onPointerDown={preservePickerInputFocus}
           style={maxHeight !== null ? { maxHeight: `${maxHeight}px` } : undefined}
         >
           <div className="composer-popover__section">
             <button
               type="button"
               className="composer-popover__row"
-              // Keep the textarea focused so the soft keyboard stays
-              // open while the user picks from the popover.
-              onPointerDown={(e) => e.preventDefault()}
               onClick={handleAttach}
             >
               <span className="composer-popover__row-icon"><Paperclip width={20} height={20} /></span>
@@ -284,7 +271,6 @@ export default function ComposerPopover({
                 onChange={onChangeChatInfo}
                 providerSwitchState={providerSwitchState}
                 settingsSaveTailRef={settingsSaveTailRef}
-                wasInputFocusedRef={wasInputFocusedRef}
               />
             </div>
           )}
@@ -293,7 +279,6 @@ export default function ComposerPopover({
             <button
               type="button"
               className="composer-popover__row"
-              onPointerDown={(e) => e.preventDefault()}
               onClick={handleOpenSummary}
             >
               <span className="composer-popover__row-icon" aria-hidden="true">
@@ -309,7 +294,6 @@ export default function ComposerPopover({
             <button
               type="button"
               className="composer-popover__row"
-              onPointerDown={(e) => e.preventDefault()}
               onClick={handleOpenInspector}
             >
               <span className="composer-popover__row-icon" aria-hidden="true">

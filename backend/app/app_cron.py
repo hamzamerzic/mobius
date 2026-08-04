@@ -100,6 +100,46 @@ def register_cron(
     )
 
 
+def read_crontab() -> str | None:
+  """The owner's live crontab text, or None when it could not be read.
+
+  ``None`` and ``""`` are deliberately different answers. An empty string
+  means the spool is genuinely empty; ``None`` means the read FAILED and the
+  crontab may be full of entries we simply cannot see. A caller that rewrites
+  from a failed read would drop every one of them, so mutating callers must
+  treat ``None`` as "change nothing". Read-only callers may flatten it to "".
+  """
+  try:
+    result = subprocess.run(
+      ["crontab", "-u", "mobius", "-l"],
+      capture_output=True, text=True, timeout=10, check=False,
+    )
+  except (OSError, subprocess.SubprocessError):
+    return None
+  if result.returncode != 0:
+    # Only the benign "no crontab for <user>" is real emptiness. Any other
+    # failure (unreadable spool, missing binary in the test image) is a read
+    # error that must not be mistaken for an empty crontab.
+    if "no crontab" in (result.stderr or "").lower():
+      return ""
+    return None
+  return result.stdout
+
+
+def write_crontab(text: str) -> bool:
+  """Replace the owner's crontab wholesale. Returns True when it took."""
+  if cron_mutation_blocked_in_test_runtime():
+    return False
+  try:
+    result = subprocess.run(
+      ["crontab", "-u", "mobius", "-"],
+      input=text, text=True, timeout=10, check=False,
+    )
+  except (OSError, subprocess.SubprocessError):
+    return False
+  return result.returncode == 0
+
+
 def crontab_command_path(line: str) -> str:
   """Return the app executable path from one cron line, or an empty string."""
   stripped = line.strip()

@@ -106,7 +106,7 @@ def test_parse_zone_declaration_round_trip():
   text = (
     "#!/bin/sh\n"
     'ENTRY="* * * * * python3 /app/scripts/app-job-runner.py '
-    '--wall-clock Europe/Belgrade 0\\ 5\\ \\*\\ \\*\\ \\* 4 '
+    '--scheduled --wall-clock Europe/Belgrade 0\\ 5\\ \\*\\ \\*\\ \\* 4 '
     '/data/apps/memory/fetch.sh"\n'
     "# Zone-aware schedule identity (platform-managed).\n"
     'SCHEDULE_TZ="Europe/Belgrade"\n'

@@ -2,17 +2,24 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { createPortal } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
+import { Pause, Play, Stop } from '@openai/apps-sdk-ui/components/Icon'
 import { api } from '../../api/client.js'
 import { appQueries, chatQueries } from '../../hooks/queries.js'
+import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import {
   AppsNavIcon,
   NewChatNavIcon,
   SettingsNavIcon,
 } from '../navigationIcons.js'
-import { appIconUrl } from '../appIcon.js'
+import {
+  appIconIsReady,
+  appIconUrl,
+  forgetAppIconReady,
+  preloadAppIcons,
+  rememberAppIconReady,
+} from '../appIcon.js'
 import {
   computePinnedDrag,
-  heldDrawerRowIntent,
   observePinnedOrderHandoff,
   pinnedEntriesMatchRanks,
   pinnedOrderHandoffStatus,
@@ -23,13 +30,13 @@ import {
   drawerWidthFromPointerDelta,
   isGeneratedTouchClick,
   isHorizontalDrawerSwipe,
+  shouldRestoreDrawerFocus,
   shouldSuppressDrawerSwipeClick,
   shouldAutoRevealActiveChat,
   clearDrawerGestureStyles,
 } from '../../lib/drawerLifecycle.js'
-import { WORKSPACE_SPLITS_ENABLED } from '../Shell/paneModel.js'
 import {
-  DRAWER_HOLD_MS,
+  DRAWER_MENU_HOLD_MS,
   PRE_HOLD_MOVE_PX,
 } from '../Shell/dragController.js'
 import InstallSheet from './InstallSheet.jsx'
@@ -56,6 +63,7 @@ import {
   DESKTOP_SIDEBAR_MAX_WIDTH,
   DESKTOP_SIDEBAR_MIN_WIDTH,
 } from '../Shell/useDesktopSidebar.js'
+import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 import './Drawer.css'
 
 // Module-level constant so default Set props are stable across renders.
@@ -63,16 +71,8 @@ import './Drawer.css'
 // downstream.
 const EMPTY_SET = new Set()
 const TOUCH_CONTEXT_MENU_PROVENANCE_MS = 1500
-
-// Pointerup can precede the matching touchend. Keep a held row's claim through
-// the current input task so Drawer's touchend recognizer also stands down. The
-// owner check prevents an old release from clearing a newer gesture.
-function deferDrawerGestureClaimRelease(claimRef, owner) {
-  if (claimRef?.current !== owner) return
-  setTimeout(() => {
-    if (claimRef.current === owner) claimRef.current = false
-  }, 0)
-}
+const APP_ICON_PRIORITY_COUNT = 24
+const APP_ICON_WARM_LIMIT = 96
 
 export default function Drawer({
   open,
@@ -100,6 +100,9 @@ export default function Drawer({
   appsActive = false,
   onAppsOpen,
   appsHost,
+  nowPlaying,
+  onNowPlayingOpen,
+  onNowPlayingControl,
   // Set of chat ids whose agent is currently streaming. Used to
   // show a small accent dot next to the row label so the user can
   // see at a glance which background builds are still running.
@@ -119,11 +122,12 @@ export default function Drawer({
   // Truthy when local provider credentials are missing or their status could
   // not be checked. Drives a small warning dot on Settings.
   settingsWarning,
-  // Shared flag raised while any held row gesture owns the touch stream. The
-  // swipe-to-close handlers stand down so a menu/reorder gesture cannot also
-  // move the drawer. The workspace drag controller still uses the same flag for
-  // mouse drag-out. Null when gesture coordination is off.
+  // Shared flag raised while a row is being dragged into the workspace. The
+  // swipe-to-close handlers stand down for that same pointer stream.
   dragActiveRef,
+  // The workspace controller owns the row pointer until its held intent is
+  // clear, then calls the matching row for menu/reorder work.
+  drawerRowGesturesRef,
 }) {
   const streamingSet = streamingChatIds || EMPTY_SET
   const attentionSet = attentionChatIds || EMPTY_SET
@@ -136,6 +140,23 @@ export default function Drawer({
     recents: allRecents,
     apps: sortedApps,
   } = useMemo(() => buildDrawerSections(chats, apps), [chats, apps])
+
+  // Decode the first launcher viewport immediately, then warm a bounded
+  // remainder without competing with initial shell work.
+  useEffect(() => {
+    if (sortedApps.length === 0) return
+    const priority = sortedApps.slice(0, APP_ICON_PRIORITY_COUNT)
+    const remainder = sortedApps.slice(APP_ICON_PRIORITY_COUNT, APP_ICON_WARM_LIMIT)
+    void preloadAppIcons(priority)
+    if (remainder.length === 0 || navigator.connection?.saveData) return
+
+    const warmRemainder = () => { void preloadAppIcons(remainder) }
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(warmRemainder, { timeout: 3000 })
+    } else {
+      setTimeout(warmRemainder, 500)
+    }
+  }, [sortedApps])
   const pinnedItems = useMemo(() => (
     pinnedOrderHandoff
       ? projectPinnedEntries(basePinnedItems, pinnedOrderHandoff.visibleKeys)
@@ -194,7 +215,11 @@ export default function Drawer({
     if (!root || !section || !rowsStart) return
     const rootRect = root.getBoundingClientRect()
     const rowsRect = rowsStart.getBoundingClientRect()
-    recentSectionTopRef.current = rowsRect.top - rootRect.top + root.scrollTop
+    const rectDelta = clientLengthToLayout(
+      rowsRect.top - rootRect.top,
+      captureLayoutSpace(root),
+    )
+    recentSectionTopRef.current = rectDelta + root.scrollTop
     const next = drawerRowWindow({
       total: allRecents.length,
       scrollTop: root.scrollTop,
@@ -295,6 +320,15 @@ export default function Drawer({
   // active id (rather than per-row state) lets a click on another row's
   // context action replace any open menu without a global listener per row.
   const [openMenu, setOpenMenu] = useState(null) // { kind, id, surface, placement } | null
+  const {
+    open: openItemMenuHistory,
+    close: closeItemMenu,
+  } = useHistoryDismiss(() => setOpenMenu(null))
+
+  function showItemMenu(kind, id, surface, placement) {
+    openItemMenuHistory()
+    setOpenMenu({ kind, id, surface, placement })
+  }
   // Belt-and-braces orphan cleanup: if the row whose menu was open
   // disappears from the list (delete, chat soft-delete, agent-side
   // removal), openMenu would still reference a dead id and the next
@@ -304,13 +338,19 @@ export default function Drawer({
     if (!openMenu) return
     const collection = openMenu.kind === 'chat' ? (chats || []) : (apps || [])
     const stillThere = collection.some(item => item.id === openMenu.id)
-    if (!stillThere) setOpenMenu(null)
-  }, [openMenu, chats, apps])
+    if (!stillThere) closeItemMenu()
+  }, [openMenu, chats, apps, closeItemMenu])
   const [renamingState, setRenamingState] = useState(null) // { kind, id } | null
   // Mirrors `renaming` synchronously (not via useEffect — that's one render
   // behind) so outside-tap cancellation sees the current edit immediately.
   const renamingRef = useRef(null)
   const overlayCancelRef = useRef(false)
+  // Closing on pointerdown makes the drawer feel immediate, but WebKit may
+  // retarget the compatibility click from that same touch to content revealed
+  // beneath the scrim. Keep ownership of exactly that click. A new pointer or
+  // keyboard activation clears a stale claim first, so a touch sequence that
+  // produces no click cannot poison the owner's next action.
+  const outsideDismissClickRef = useRef(false)
   const renaming = renamingState
   const setRenaming = useCallback((next) => {
     renamingRef.current = next
@@ -329,16 +369,16 @@ export default function Drawer({
 
   const resetAppsSurfaceUi = useCallback(({ restoreFocus = true } = {}) => {
     setAppQuery('')
-    setOpenMenu(null)
+    closeItemMenu()
     setRenaming(null)
     if (restoreFocus) {
       requestAnimationFrame(() => appsButtonRef.current?.focus())
     }
-  }, [setRenaming])
+  }, [closeItemMenu, setRenaming])
 
   function openApps() {
     setAppQuery('')
-    setOpenMenu(null)
+    closeItemMenu()
     setRenaming(null)
     onAppsOpen?.()
   }
@@ -371,12 +411,9 @@ export default function Drawer({
       else current.onApp(id)
     },
     toggleMenu(kind, id, next, surface = 'drawer', placement = null) {
-      rowActionInputsRef.current.setOpenMenu(next ? {
-        kind,
-        id,
-        surface,
-        placement,
-      } : null)
+      const current = rowActionInputsRef.current
+      if (next) current.showItemMenu(kind, id, surface, placement)
+      else current.closeItemMenu()
     },
     startRename(kind, id, surface = 'drawer') {
       rowActionInputsRef.current.setRenaming({ kind, id, surface })
@@ -435,9 +472,34 @@ export default function Drawer({
       renamingRef.current = null
       setRenaming(null)
     }
+    outsideDismissClickRef.current = true
     e.preventDefault()
+    e.stopPropagation()
     onClose?.()
   }
+
+  useEffect(() => {
+    function releaseStaleDismissClaim() {
+      outsideDismissClickRef.current = false
+    }
+    function consumeOutsideDismissClick(e) {
+      if (!outsideDismissClickRef.current) return
+      outsideDismissClickRef.current = false
+      e.preventDefault()
+      e.stopPropagation()
+    }
+    // Capture sees a new activation before the overlay's bubble handler can
+    // claim its own pointerdown. The click listener then catches both an
+    // ordinary scrim click and WebKit's retargeted compatibility click.
+    document.addEventListener('pointerdown', releaseStaleDismissClaim, true)
+    document.addEventListener('keydown', releaseStaleDismissClaim, true)
+    document.addEventListener('click', consumeOutsideDismissClick, true)
+    return () => {
+      document.removeEventListener('pointerdown', releaseStaleDismissClaim, true)
+      document.removeEventListener('keydown', releaseStaleDismissClaim, true)
+      document.removeEventListener('click', consumeOutsideDismissClick, true)
+    }
+  }, [])
 
   const queryClient = useQueryClient()
 
@@ -571,6 +633,7 @@ export default function Drawer({
   // drawer was dismissed (Escape, overlay tap, swipe).
   const previousFocusRef = useRef(null)
   const drawerRef = useRef(null)
+  const closeShieldRef = useRef(null)
   useEffect(() => {
     if (persistent) {
       previousFocusRef.current = null
@@ -590,11 +653,19 @@ export default function Drawer({
       return () => cancelAnimationFrame(focusFrame)
     } else {
       // Restore focus when the drawer closes so keyboard users land
-      // back on the toggle that opened it (or whatever was focused).
-      if (previousFocusRef.current && typeof previousFocusRef.current.focus === 'function') {
+      // back on the toggle that opened it (or whatever was focused). Do not
+      // steal focus back from a destination that already accepted the handoff.
+      const shouldRestore = shouldRestoreDrawerFocus({
+        drawer: drawerRef.current,
+        activeElement: document.activeElement,
+        body: document.body,
+      })
+      if (shouldRestore
+          && previousFocusRef.current
+          && typeof previousFocusRef.current.focus === 'function') {
         previousFocusRef.current.focus()
-        previousFocusRef.current = null
       }
+      previousFocusRef.current = null
     }
   }, [open, persistent])
 
@@ -633,20 +704,9 @@ export default function Drawer({
   // compatibility click; native vertical scrolling never does.
   const drawerGestureRef = useRef(null)
   const suppressGeneratedClickRef = useRef(false)
-  const clickSuppressTimerRef = useRef(null)
 
   function clearClickSuppression() {
     suppressGeneratedClickRef.current = false
-    if (clickSuppressTimerRef.current !== null) {
-      clearTimeout(clickSuppressTimerRef.current)
-      clickSuppressTimerRef.current = null
-    }
-  }
-
-  function armGeneratedClickSuppression() {
-    clearClickSuppression()
-    suppressGeneratedClickRef.current = true
-    clickSuppressTimerRef.current = setTimeout(clearClickSuppression, 400)
   }
 
   function onDrawerClickCapture(e) {
@@ -675,14 +735,17 @@ export default function Drawer({
     drawerGestureRef.current = null
   }, [open, persistent])
 
-  // Keep the scrim hit-testable while the panel is sliding away. `open` flips
-  // false at the START of the 250ms close transition; dropping pointer-events
-  // in that same render exposes the chat/app while drawer pixels are still on
-  // screen. transitionend is the normal release, with a timeout fallback for
-  // reduced-motion or an interrupted compositor transition.
+  // Keep only the panel's still-visible footprint hit-testable while it slides
+  // away. The full-screen visual scrim stops owning input as soon as close is
+  // acknowledged; a geometry-matched shield follows the panel until its
+  // transition ends. This keeps uncovered controls live without allowing taps
+  // through visible drawer pixels.
   const [scrimBlocking, setScrimBlocking] = useState(open && !persistent)
   useLayoutEffect(() => {
-    if (open && !persistent) setScrimBlocking(true)
+    if (open && !persistent) {
+      closeShieldRef.current?.style.setProperty('--drawer-close-start-x', '0px')
+      setScrimBlocking(true)
+    }
     if (persistent) setScrimBlocking(false)
   }, [open, persistent])
   useLayoutEffect(() => {
@@ -701,9 +764,14 @@ export default function Drawer({
 
   function handleDrawerTransitionEnd(e) {
     if (open || e.target !== e.currentTarget || e.propertyName !== 'transform') return
-    const width = e.currentTarget.getBoundingClientRect().width
+    const width = e.currentTarget.offsetWidth
     const x = new DOMMatrixReadOnly(getComputedStyle(e.currentTarget).transform).m41
     if (x > -width + 1) return
+    setScrimBlocking(false)
+  }
+
+  function handleCloseShieldAnimationEnd(e) {
+    if (open || e.target !== e.currentTarget || e.animationName !== 'drawer-close-shield') return
     setScrimBlocking(false)
   }
 
@@ -719,6 +787,8 @@ export default function Drawer({
       pointerId: e.pointerId,
       horizontal: false,
       panning: false,
+      layoutSpace: captureLayoutSpace(drawerRef.current),
+      width: drawerRef.current.offsetWidth,
     }
   }
   function onDrawerPointerMove(e) {
@@ -748,9 +818,14 @@ export default function Drawer({
       if (!el.hasPointerCapture?.(e.pointerId)) el.setPointerCapture?.(e.pointerId)
     } catch { /* capture is optional; touch-action still owns arbitration */ }
     el.classList.add('drawer--dragging')
-    // Clamp to [-320, 0]: a finger that drifts back past the origin must not
-    // drag an already-open panel further right than open.
-    el.style.transform = `translateX(${Math.min(0, Math.max(dx, -320))}px)`
+    // Keep the panel between fully closed and fully open. The close threshold
+    // below intentionally remains a physical finger-travel distance.
+    const layoutX = Math.min(0, Math.max(
+      clientLengthToLayout(dx, gesture.layoutSpace),
+      -gesture.width,
+    ))
+    el.style.transform = `translateX(${layoutX}px)`
+    closeShieldRef.current?.style.setProperty('--drawer-close-start-x', `${layoutX}px`)
   }
   function onDrawerPointerUp(e) {
     // If the controller took over, it owns pointerup too — do nothing here.
@@ -771,19 +846,16 @@ export default function Drawer({
     if (el) {
       el.classList.remove('drawer--dragging')
       if (shouldClose) {
-        // Animate from drag position to closed target. Clear the
-        // inline transform after the transition completes so the
-        // next open doesn't start from translateX(-100%) inline
-        // (which would conflict with the .drawer--open class).
+        // Animate from the drag position to the closed target. The open-state
+        // layout effect clears this inline value as soon as the parent commits
+        // the closed class, whose transform has the same target.
         el.style.transform = 'translateX(-100%)'
-        el.addEventListener('transitionend', () => {
-          el.style.transform = ''
-        }, { once: true })
       } else {
         // Snap-back to open: clearing the inline transform lets
         // the .drawer--open class's translateX(0) take over with
         // the transition running from the drag position.
         el.style.transform = ''
+        closeShieldRef.current?.style.setProperty('--drawer-close-start-x', '0px')
       }
     }
     const suppressGeneratedClick = shouldSuppressDrawerSwipeClick({
@@ -796,7 +868,7 @@ export default function Drawer({
     // click on the row the finger lifted over. Eat it so the swipe
     // doesn't double as a row selection. A genuine tap never set
     // wasSwiping, so its click passes through untouched.
-    if (suppressGeneratedClick) armGeneratedClickSuppression()
+    if (suppressGeneratedClick) suppressGeneratedClickRef.current = true
     if (shouldClose) onClose?.()
   }
   // pointercancel positions are unreliable across browsers (clientX
@@ -806,6 +878,7 @@ export default function Drawer({
     const gesture = drawerGestureRef.current
     if (gesture && e.pointerId !== gesture.pointerId) return
     clearDrawerGestureStyles(drawerRef.current)
+    closeShieldRef.current?.style.setProperty('--drawer-close-start-x', '0px')
     drawerGestureRef.current = null
     // pointercancel means the browser owns the gesture (normally native pan-y).
     // It must never leave a click guard behind for a later destination tap.
@@ -837,6 +910,7 @@ export default function Drawer({
       startWidth: clampDesktopSidebarWidth(width),
       edgeDirection: handleCenter < panelCenter ? -1 : 1,
       width: clampDesktopSidebarWidth(width),
+      layoutSpace: captureLayoutSpace(panel || document.documentElement),
     }
     e.currentTarget.setPointerCapture(e.pointerId)
     drawerRef.current?.classList.add('drawer--resizing')
@@ -844,10 +918,13 @@ export default function Drawer({
 
   function onResizePointerMove(e) {
     if (resizeRef.current?.pointerId !== e.pointerId) return
+    const layoutDelta = clientLengthToLayout(
+      e.clientX - resizeRef.current.startX,
+      resizeRef.current.layoutSpace,
+    )
     applyResizeWidth(drawerWidthFromPointerDelta({
       startWidth: resizeRef.current.startWidth,
-      startX: resizeRef.current.startX,
-      currentX: e.clientX,
+      delta: layoutDelta,
       edgeDirection: resizeRef.current.edgeDirection,
     }))
   }
@@ -881,7 +958,8 @@ export default function Drawer({
     onDeleteChat,
     onDeleteApp,
     onDeleteAppData,
-    setOpenMenu,
+    showItemMenu,
+    closeItemMenu,
     setRenaming,
     setInstallingApp,
     resetAppsSurfaceUi,
@@ -897,10 +975,18 @@ export default function Drawer({
   return (
     <>
       {!persistent && (
-        <div
-          className={`drawer-overlay${open ? ' drawer-overlay--visible' : ''}${scrimBlocking ? ' drawer-overlay--blocking' : ''}`}
-          onPointerDown={handleOverlayPointerDown}
-        />
+        <>
+          <div
+            className={`drawer-overlay${open ? ' drawer-overlay--visible' : ''}${scrimBlocking ? ' drawer-overlay--blocking' : ''}`}
+            onPointerDown={handleOverlayPointerDown}
+          />
+          <div
+            ref={closeShieldRef}
+            className={`drawer-close-shield${!open && scrimBlocking ? ' drawer-close-shield--active' : ''}`}
+            aria-hidden="true"
+            onAnimationEnd={handleCloseShieldAnimationEnd}
+          />
+        </>
       )}
       {/* React 19 reflects the boolean `inert` prop to the boolean
           attribute (present when true, absent when false), so a closed
@@ -976,6 +1062,15 @@ export default function Drawer({
                 <span className="drawer__item-text">Apps</span>
               </button>
 
+              {nowPlaying && (
+                <NowPlaying
+                  session={nowPlaying}
+                  app={apps.find(app => String(app.id) === String(nowPlaying.appId))}
+                  onOpen={onNowPlayingOpen}
+                  onControl={onNowPlayingControl}
+                />
+              )}
+
               {pinnedItems.length > 0 && (
                 <section className="drawer__section" aria-labelledby="drawer-pinned-label">
                   <h2 id="drawer-pinned-label" className="drawer__label">
@@ -1012,7 +1107,8 @@ export default function Drawer({
                         && renaming.kind === kind
                         && renaming.id === item.id)}
                       actions={rowActions}
-                      gestureClaimRef={dragActiveRef}
+                      dragActiveRef={dragActiveRef}
+                      drawerRowGesturesRef={drawerRowGesturesRef}
                     />
                   ))}
                 </section>
@@ -1065,7 +1161,8 @@ export default function Drawer({
                       && renaming.kind === kind
                       && renaming.id === item.id)}
                     actions={rowActions}
-                    gestureClaimRef={dragActiveRef}
+                    dragActiveRef={dragActiveRef}
+                    drawerRowGesturesRef={drawerRowGesturesRef}
                   />
                 )) : chatsStatus === 'loading' || appsStatus === 'loading' ? (
                   <p className="drawer__list-status" role="status">Loading recents…</p>
@@ -1186,6 +1283,54 @@ export default function Drawer({
   )
 }
 
+function NowPlaying({ session, app, onOpen, onControl }) {
+  const appName = app?.name || 'App'
+  const paused = session.playbackState === 'paused'
+  const loading = session.playbackState === 'loading'
+  const stateLabel = loading ? 'Preparing' : paused ? 'Paused' : 'Playing'
+  return (
+    <section className="drawer__now-playing" aria-label={`Now playing from ${appName}`}>
+      <button
+        type="button"
+        className="drawer__now-playing-main"
+        onClick={() => onOpen?.(session.appId)}
+        aria-label={`Open ${appName}`}
+      >
+        {app ? (
+          <AppIcon item={app} label={appName} className="drawer__now-playing-icon" />
+        ) : (
+          <span className="drawer__now-playing-icon" aria-hidden="true">
+            <span>{appInitials(appName)}</span>
+          </span>
+        )}
+        <span className="drawer__now-playing-copy">
+          <strong>{session.title}</strong>
+          <small>{appName} · {stateLabel}</small>
+        </span>
+      </button>
+      <button
+        type="button"
+        className="drawer__now-playing-control"
+        aria-label={paused ? 'Resume playback' : 'Pause playback'}
+        title={paused ? 'Resume' : 'Pause'}
+        disabled={loading}
+        onClick={() => onControl?.(paused ? 'play' : 'pause')}
+      >
+        {paused ? <Play aria-hidden="true" /> : <Pause aria-hidden="true" />}
+      </button>
+      <button
+        type="button"
+        className="drawer__now-playing-control"
+        aria-label="Stop playback"
+        title="Stop"
+        onClick={() => onControl?.('stop')}
+      >
+        <Stop aria-hidden="true" />
+      </button>
+    </section>
+  )
+}
+
 
 /** One row in the chat or app list — handles select, inline rename,
  * contextual actions, and confirm-delete in a single self-contained unit
@@ -1207,7 +1352,8 @@ const DrawerRow = memo(function DrawerRow({
   menuPlacement,
   renaming,
   actions,
-  gestureClaimRef,
+  dragActiveRef,
+  drawerRowGesturesRef,
 }) {
   const id = item.id
   const label = kind === 'chat' ? item.title : item.name
@@ -1218,11 +1364,12 @@ const DrawerRow = memo(function DrawerRow({
   const holdTimerRef = useRef(null)
   const holdOriginRef = useRef(null)
   const itemButtonRef = useRef(null)
+  const menuRestoreFocusRef = useRef(null)
   const suppressCardClickRef = useRef(false)
   const suppressRowClickRef = useRef(false)
   const reorderCleanupRef = useRef(null)
-  const touchMenuCleanupRef = useRef(null)
   const secondaryReleaseCleanupRef = useRef(null)
+  const drawerGestureHandlerRef = useRef(null)
   // iOS may dispatch its long-press contextmenu AFTER pointercancel. Keep the
   // touch provenance independent of the live pointer session so that delayed
   // native event cannot open actions before a release. It expires, and keyboard
@@ -1271,9 +1418,24 @@ const DrawerRow = memo(function DrawerRow({
   useEffect(() => () => {
     if (holdTimerRef.current) clearTimeout(holdTimerRef.current)
     reorderCleanupRef.current?.()
-    touchMenuCleanupRef.current?.()
     secondaryReleaseCleanupRef.current?.()
   }, [])
+
+  drawerGestureHandlerRef.current = {
+    openMenu: point => openItemMenuAt(point, itemButtonRef.current),
+    beginReorder: session => beginPinnedReorder(session),
+  }
+  useLayoutEffect(() => {
+    if (variant === 'card' || !drawerRowGesturesRef?.current) return undefined
+    const key = `${kind}:${id}`
+    const registry = drawerRowGesturesRef.current
+    registry.set(key, drawerGestureHandlerRef)
+    return () => {
+      if (registry.get(key) === drawerGestureHandlerRef) {
+        registry.delete(key)
+      }
+    }
+  }, [drawerRowGesturesRef, id, kind, variant])
 
   // Autofocus + select-all on rename open so the user can either retype
   // from scratch or tap into the existing name to edit it.
@@ -1312,7 +1474,8 @@ const DrawerRow = memo(function DrawerRow({
     }
   }
 
-  function openItemMenuAt(point) {
+  function openItemMenuAt(point, trigger = itemButtonRef.current) {
+    menuRestoreFocusRef.current = trigger
     actions.toggleMenu(kind, id, true, surface, itemMenuPlacement(point))
   }
 
@@ -1334,8 +1497,9 @@ const DrawerRow = memo(function DrawerRow({
   }
 
   function openItemMenu(event) {
-    // Defense in depth for programmatic dispatch or a renderer that bypasses
-    // the capture prop. Ordinary touch events are stopped during capture.
+    // Touch menus open only from the shared gesture controller during its
+    // stationary hold. Native contextmenu would steal that timing and re-open
+    // actions on release, so suppress it; mouse and keyboard remain semantic.
     if (suppressTouchContextMenu(event)) return
     event.preventDefault()
     event.stopPropagation()
@@ -1346,7 +1510,7 @@ const DrawerRow = memo(function DrawerRow({
     openItemMenuAt({
       x: event.clientX,
       y: event.clientY,
-    })
+    }, event.currentTarget)
   }
 
   function recordItemMenuPointer(event) {
@@ -1359,8 +1523,9 @@ const DrawerRow = memo(function DrawerRow({
     if (event.pointerType !== 'mouse' || event.button !== 2) return false
     event.preventDefault()
     secondaryReleaseCleanupRef.current?.()
+    const sourceBtn = event.currentTarget
     const pointerId = event.pointerId
-    const placement = itemMenuPlacement({ x: event.clientX, y: event.clientY })
+    const openingPoint = { x: event.clientX, y: event.clientY }
     let timer = null
     const cleanup = () => {
       window.removeEventListener('pointerup', onSecondaryPointerUp, true)
@@ -1375,7 +1540,7 @@ const DrawerRow = memo(function DrawerRow({
       if (upEvent.pointerId !== pointerId || upEvent.button !== 2) return
       upEvent.preventDefault()
       cleanup()
-      actions.toggleMenu(kind, id, true, surface, placement)
+      openItemMenuAt(openingPoint, sourceBtn)
     }
     window.addEventListener('pointerup', onSecondaryPointerUp, true)
     window.addEventListener('pointercancel', cleanup, true)
@@ -1423,7 +1588,7 @@ const DrawerRow = memo(function DrawerRow({
         holdTimerRef.current = null
         suppressCardClickRef.current = true
         openItemMenuAt(holdOriginRef.current)
-      }, DRAWER_HOLD_MS)
+      }, DRAWER_MENU_HOLD_MS)
     }
     function cancelCardHold() {
       if (holdTimerRef.current) clearTimeout(holdTimerRef.current)
@@ -1470,7 +1635,6 @@ const DrawerRow = memo(function DrawerRow({
             item={item}
             label={label}
             className="apps-directory__card-icon"
-            size={128}
           />
           <span className="apps-directory__card-meta">
             <span className="apps-directory__card-name">{label}</span>
@@ -1484,111 +1648,21 @@ const DrawerRow = memo(function DrawerRow({
           menuOpen={menuOpen}
           actions={actions}
           menuPlacement={menuPlacement}
-          restoreFocusRef={itemButtonRef}
+          restoreFocusRef={menuRestoreFocusRef}
         />
       </div>
     )
   }
 
-  function beginTouchMenuHold(event) {
-    if (event.pointerType === 'mouse' || event.button !== 0 || !event.isPrimary) return
-    touchMenuCleanupRef.current?.()
-    const pointerId = event.pointerId
-    const sourceBtn = event.currentTarget
-    const start = { x: event.clientX, y: event.clientY }
-    let held = false
-    let cancelledAfterHold = false
-    let cleaned = false
-
-    function releaseClaim() {
-      sourceBtn.removeAttribute('data-hold-ready')
-      deferDrawerGestureClaimRelease(gestureClaimRef, sourceBtn)
-      try {
-        if (sourceBtn.hasPointerCapture?.(pointerId)) sourceBtn.releasePointerCapture(pointerId)
-      } catch { /* capture may already be gone at pointerup */ }
-    }
-    function cleanup({ suppressClick = false } = {}) {
-      if (cleaned) return
-      cleaned = true
-      if (holdTimerRef.current) clearTimeout(holdTimerRef.current)
-      holdTimerRef.current = null
-      window.removeEventListener('pointermove', onMove, true)
-      window.removeEventListener('pointerup', onUp, true)
-      window.removeEventListener('pointercancel', onCancel, true)
-      window.removeEventListener('touchmove', preventClaimedTouchMove, true)
-      window.removeEventListener('blur', onInterrupted, true)
-      window.removeEventListener('pagehide', onInterrupted, true)
-      document.removeEventListener('visibilitychange', onVisibility, true)
-      releaseClaim()
-      if (suppressClick) suppressRowClickRef.current = true
-      if (touchMenuCleanupRef.current === cleanup) touchMenuCleanupRef.current = null
-    }
-    function preventClaimedTouchMove(touchEvent) {
-      if (held) touchEvent.preventDefault()
-    }
-    function onMove(moveEvent) {
-      if (moveEvent.pointerId !== pointerId) return
-      const dx = moveEvent.clientX - start.x
-      const dy = moveEvent.clientY - start.y
-      if (!held) {
-        if (Math.hypot(dx, dy) > PRE_HOLD_MOVE_PX) cleanup()
-        return
-      }
-      if (heldDrawerRowIntent(dx, dy, false) === 'pending') return
-      cancelledAfterHold = true
-      moveEvent.preventDefault()
-    }
-    function onUp(upEvent) {
-      if (upEvent.pointerId !== pointerId) return
-      const openMenu = held && !cancelledAfterHold
-      cleanup({ suppressClick: held })
-      if (openMenu) openItemMenuAt({ x: upEvent.clientX, y: upEvent.clientY })
-    }
-    function onCancel(cancelEvent) {
-      if (cancelEvent.pointerId === pointerId) cleanup()
-    }
-    function onInterrupted() { cleanup() }
-    function onVisibility() {
-      if (document.visibilityState === 'hidden') cleanup()
-    }
-
-    window.addEventListener('pointermove', onMove, { capture: true, passive: false })
-    window.addEventListener('pointerup', onUp, true)
-    window.addEventListener('pointercancel', onCancel, true)
-    window.addEventListener('blur', onInterrupted, true)
-    window.addEventListener('pagehide', onInterrupted, true)
-    document.addEventListener('visibilitychange', onVisibility, true)
-    holdTimerRef.current = setTimeout(() => {
-      if (cleaned) return
-      // A row scroll must remain compositor-owned before the stationary hold
-      // resolves. Only the deliberate hold needs a cancelable touch listener;
-      // installing it at pointerdown stalls every first drawer scroll.
-      window.addEventListener('touchmove', preventClaimedTouchMove, { capture: true, passive: false })
-      held = true
-      if (gestureClaimRef) gestureClaimRef.current = sourceBtn
-      sourceBtn.setAttribute('data-hold-ready', 'true')
-      try { sourceBtn.setPointerCapture?.(pointerId) } catch { /* capture optional */ }
-      if (navigator.vibrate) { try { navigator.vibrate(8) } catch { /* unsupported */ } }
-    }, DRAWER_HOLD_MS)
-    touchMenuCleanupRef.current = cleanup
-  }
-
-  function beginPinnedReorder(event) {
-    // Mouse starts reordering after clear vertical slop. Touch first survives a
-    // deliberate hold; release in place opens the contextual menu, while a
-    // following vertical drag reorders. These are one gesture owner, so touch
-    // can never also drag the row into the workspace or move the drawer.
-    if (!pinned || event.button !== 0 || !event.isPrimary) return
-    const isTouch = event.pointerType !== 'mouse'
+  function beginPinnedReorder({ pointerId, start, moveEvent }) {
+    if (!pinned || !moveEvent) return false
     // Finish any still-settling previous drag before this gesture can measure;
     // lingering transforms from the old preview would poison the new geometry.
     reorderCleanupRef.current?.()
 
-    const pointerId = event.pointerId
-    const start = { x: event.clientX, y: event.clientY }
-    const sourceBtn = event.currentTarget
-    let held = !isTouch
-    let cancelledAfterHold = false
+    const sourceBtn = itemButtonRef.current
+    if (!sourceBtn) return false
+    const previousBodySelect = document.body.style.userSelect
     let dragging = false
     let listenersOff = false
     let cancelOrderHandoff = null
@@ -1597,16 +1671,15 @@ const DrawerRow = memo(function DrawerRow({
     let fromIndex = -1
     let src = null
     let pinnedSection = null
+    let ownsDragClaim = false
     let last = { slotDelta: 0, finalKeys: null, changed: false, shifts: new Map() }
 
-    function releaseTouchClaim() {
-      if (!isTouch) return
-      sourceBtn.removeAttribute('data-hold-ready')
-      deferDrawerGestureClaimRelease(gestureClaimRef, sourceBtn)
-      try {
-        if (sourceBtn.hasPointerCapture?.(pointerId)) sourceBtn.releasePointerCapture(pointerId)
-      } catch { /* capture may already be gone at pointerup */ }
+    function releaseDragClaim() {
+      if (!ownsDragClaim) return
+      ownsDragClaim = false
+      dragActiveRef.current = false
     }
+
     function clearStyles() {
       if (stylesCleared) return
       stylesCleared = true
@@ -1617,9 +1690,11 @@ const DrawerRow = memo(function DrawerRow({
         s.position = ''; s.willChange = ''
       }
       src?.btn.removeAttribute('data-reordering')
-      sourceBtn.removeAttribute('data-hold-ready')
-      releaseTouchClaim()
-      document.body.style.userSelect = ''
+      document.body.style.userSelect = previousBodySelect
+      releaseDragClaim()
+      try {
+        if (sourceBtn.hasPointerCapture?.(pointerId)) sourceBtn.releasePointerCapture(pointerId)
+      } catch { /* capture may already be gone at pointerup */ }
       if (reorderCleanupRef.current === forceFinish) reorderCleanupRef.current = null
     }
     function removeListeners() {
@@ -1628,17 +1703,16 @@ const DrawerRow = memo(function DrawerRow({
       window.removeEventListener('pointermove', onMove, true)
       window.removeEventListener('pointerup', onUp, true)
       window.removeEventListener('pointercancel', onCancel, true)
-      window.removeEventListener('touchmove', preventClaimedTouchMove, true)
       window.removeEventListener('blur', forceFinish, true)
       window.removeEventListener('pagehide', forceFinish, true)
+      window.removeEventListener('contextmenu', suppressNativeContextMenu, true)
       document.removeEventListener('visibilitychange', onVisibility, true)
-      if (holdTimerRef.current) clearTimeout(holdTimerRef.current)
-      holdTimerRef.current = null
     }
     // One-shot teardown for the whole session, guarded so a settle that resolves
     // AFTER a superseding drag has taken over cannot double-commit or wipe the
     // newer drag's styles.
     let ended = false
+    let transformSpace = null
     function finalize(commit) {
       if (ended) return
       ended = true
@@ -1667,22 +1741,30 @@ const DrawerRow = memo(function DrawerRow({
     function onVisibility() {
       if (document.visibilityState === 'hidden') forceFinish()
     }
+    function suppressNativeContextMenu(contextEvent) {
+      contextEvent.preventDefault()
+    }
     reorderCleanupRef.current = forceFinish
 
     function measureRows() {
       const drawerEl = sourceBtn.closest('#navigation-drawer')
+      transformSpace = captureLayoutSpace(drawerEl || document.documentElement)
       pinnedSection = sourceBtn.closest('.drawer__section')
       const wrapOf = (btn) => btn.closest('.drawer__row') || btn
-      // Measure once only after reorder intent wins. Ordinary touch scrolls do
-      // no layout work at pointerdown, keeping the first scroll frame crisp.
+      // Measure once only after the held row resolves to vertical reordering.
       rows = [...(drawerEl || document).querySelectorAll('[data-pinned-key]')]
         .map((btn) => {
           const wrap = wrapOf(btn)
           const rect = wrap.getBoundingClientRect()
+          const top = clientLengthToLayout(
+            rect.top - transformSpace.clientTop,
+            transformSpace,
+          )
+          const height = clientLengthToLayout(rect.height, transformSpace)
           return {
             btn, wrap,
             key: btn.dataset.pinnedKey,
-            top: rect.top, height: rect.height, center: rect.top + rect.height / 2,
+            top, height, center: top + height / 2,
           }
         })
       fromIndex = rows.findIndex((r) => r.btn === sourceBtn)
@@ -1693,7 +1775,6 @@ const DrawerRow = memo(function DrawerRow({
       if (!measureRows()) return false
       dragging = true
       src.btn.setAttribute('data-reordering', 'true')
-      src.btn.removeAttribute('data-hold-ready')
       const s = src.wrap.style
       s.zIndex = '6'; s.position = 'relative'; s.transition = 'none'; s.willChange = 'transform'
       for (const r of rows) {
@@ -1705,42 +1786,19 @@ const DrawerRow = memo(function DrawerRow({
       return true
     }
 
-    function preventClaimedTouchMove(touchEvent) {
-      if (held) touchEvent.preventDefault()
-    }
-
     function onMove(moveEvent) {
       if (moveEvent.pointerId !== pointerId) return
-      const dx = moveEvent.clientX - start.x
-      const dy = moveEvent.clientY - start.y
-      if (isTouch && !held) {
-        if (Math.hypot(dx, dy) > PRE_HOLD_MOVE_PX) finalize(false)
-        return
-      }
-      if (isTouch && cancelledAfterHold) {
-        moveEvent.preventDefault()
-        return
-      }
-      if (!dragging) {
-        if (isTouch) {
-          const intent = heldDrawerRowIntent(dx, dy, true)
-          if (intent === 'pending') return
-          if (intent === 'cancel') {
-            cancelledAfterHold = true
-            moveEvent.preventDefault()
-            return
-          }
-        } else if (Math.abs(dx) > Math.abs(dy) || Math.abs(dy) < PRE_HOLD_MOVE_PX) {
-          return
-        }
-        if (!armDrag()) { finalize(false); return }
-      }
+      const dy = clientLengthToLayout(
+        moveEvent.clientY - start.y,
+        transformSpace,
+      )
       moveEvent.preventDefault()
       last = computePinnedDrag(rows, fromIndex, dy)
       src.wrap.style.transform = `translateY(${dy}px)`
       for (const r of rows) {
         if (r === src) continue
-        r.wrap.style.transform = `translateY(${last.shifts.get(r.key) || 0}px)`
+        const shift = last.shifts.get(r.key) || 0
+        r.wrap.style.transform = `translateY(${shift}px)`
       }
     }
 
@@ -1760,7 +1818,8 @@ const DrawerRow = memo(function DrawerRow({
       }
       src.wrap.addEventListener('transitionend', onEnd)
       src.wrap.style.transition = 'transform 190ms cubic-bezier(0.2, 0, 0, 1)'
-      src.wrap.style.transform = `translateY(${commit ? last.slotDelta : 0}px)`
+      const settleY = commit ? last.slotDelta : 0
+      src.wrap.style.transform = `translateY(${settleY}px)`
       // Fallback if transitionend never fires (e.g. the offset was already 0).
       setTimeout(done, 240)
     }
@@ -1768,16 +1827,7 @@ const DrawerRow = memo(function DrawerRow({
     function onUp(upEvent) {
       if (upEvent.pointerId !== pointerId) return
       removeListeners()
-      if (isTouch) {
-        const openMenu = held && !dragging && !cancelledAfterHold
-        releaseTouchClaim()
-        if (held) suppressRowClickRef.current = true
-        if (!dragging) {
-          finalize(false)
-          if (openMenu) openItemMenuAt({ x: upEvent.clientX, y: upEvent.clientY })
-          return
-        }
-      }
+      releaseDragClaim()
       if (!dragging) { finalize(false); return }
       suppressRowClickRef.current = true
       settle(true)
@@ -1785,9 +1835,12 @@ const DrawerRow = memo(function DrawerRow({
     function onCancel(cancelEvent) {
       if (cancelEvent.pointerId !== pointerId) return
       removeListeners()
-      releaseTouchClaim()
-      if (dragging) settle(false)
-      else finalize(false)
+      releaseDragClaim()
+      if (dragging) {
+        settle(false)
+        return
+      }
+      finalize(false)
     }
 
     window.addEventListener('pointermove', onMove, { capture: true, passive: false })
@@ -1795,20 +1848,17 @@ const DrawerRow = memo(function DrawerRow({
     window.addEventListener('pointercancel', onCancel, true)
     window.addEventListener('blur', forceFinish, true)
     window.addEventListener('pagehide', forceFinish, true)
+    window.addEventListener('contextmenu', suppressNativeContextMenu, true)
     document.addEventListener('visibilitychange', onVisibility, true)
-    if (isTouch) {
-      holdTimerRef.current = setTimeout(() => {
-        if (ended) return
-        // Preserve native row scrolling until the hold has deliberately
-        // claimed reorder/menu ownership.
-        window.addEventListener('touchmove', preventClaimedTouchMove, { capture: true, passive: false })
-        held = true
-        if (gestureClaimRef) gestureClaimRef.current = sourceBtn
-        sourceBtn.setAttribute('data-hold-ready', 'true')
-        try { sourceBtn.setPointerCapture?.(pointerId) } catch { /* capture optional */ }
-        if (navigator.vibrate) { try { navigator.vibrate(8) } catch { /* unsupported */ } }
-      }, DRAWER_HOLD_MS)
+    if (!armDrag()) {
+      finalize(false)
+      return false
     }
+    ownsDragClaim = true
+    dragActiveRef.current = true
+    try { sourceBtn.setPointerCapture?.(pointerId) } catch { /* capture optional */ }
+    onMove(moveEvent)
+    return true
   }
 
   function onRowPointerDown(event) {
@@ -1817,26 +1867,21 @@ const DrawerRow = memo(function DrawerRow({
     // and must retire the old one-shot guard rather than inherit it.
     suppressRowClickRef.current = false
     recordItemMenuPointer(event)
-    if (beginSecondaryMenuPress(event)) return
-    if (event.pointerType !== 'mouse' && !pinned) {
-      beginTouchMenuHold(event)
-      return
-    }
-    beginPinnedReorder(event)
+    beginSecondaryMenuPress(event)
   }
 
   return (
-    <div className="drawer__row" ref={wrapRef}>
+    <div className={`drawer__row${active ? ' drawer__row--active' : ''}`} ref={wrapRef}>
       <button
         ref={itemButtonRef}
         type="button"
         className={`drawer__item ${active ? 'drawer__item--active' : ''}`}
         aria-current={active ? 'page' : undefined}
-        // Mouse drag source for the workspace controller (design §3.1). Touch
-        // stays local: hold-release opens actions and held vertical movement
-        // reorders a pin, so one pointer never owns two gesture systems.
+        // One shared controller resolves a held row only after intent is clear:
+        // staying still opens actions, vertical movement reorders a pin, and
+        // outward movement places it in the workspace.
         data-drawer-key={`${kind}:${id}`}
-        data-drag-key={WORKSPACE_SPLITS_ENABLED ? `${kind}:${id}` : undefined}
+        data-drag-key={`${kind}:${id}`}
         data-pinned-key={pinned ? `${kind}:${id}` : undefined}
         onPointerDown={onRowPointerDown}
         onClick={() => {
@@ -1850,7 +1895,6 @@ const DrawerRow = memo(function DrawerRow({
           event.preventDefault()
           actions.startRename(kind, id, surface)
         }}
-        onContextMenuCapture={suppressTouchContextMenu}
         onContextMenu={openItemMenu}
         onKeyDown={event => {
           suppressRowClickRef.current = false
@@ -1861,7 +1905,7 @@ const DrawerRow = memo(function DrawerRow({
         }}
       >
         {kind === 'app' && (
-          <AppIcon item={item} label={label} className="drawer__app-icon" size={64} />
+          <AppIcon item={item} label={label} className="drawer__app-icon" />
         )}
         {/* Status dot. Sits before the text so the user's eye
             picks it up alongside the label rather than at the row's
@@ -1897,16 +1941,20 @@ const DrawerRow = memo(function DrawerRow({
         menuOpen={menuOpen}
         actions={actions}
         menuPlacement={menuPlacement}
-        restoreFocusRef={itemButtonRef}
+        restoreFocusRef={menuRestoreFocusRef}
       />
     </div>
   )
 })
 
-function AppIcon({ item, label, className, size }) {
-  const iconUrl = appIconUrl(item, size)
-  const [loadedUrl, setLoadedUrl] = useState(null)
-  const hasImage = Boolean(iconUrl && loadedUrl === iconUrl)
+function AppIcon({ item, label, className }) {
+  const iconUrl = appIconUrl(item)
+  const [loadedUrl, setLoadedUrl] = useState(
+    () => (appIconIsReady(iconUrl) ? iconUrl : null),
+  )
+  const hasImage = Boolean(
+    iconUrl && (loadedUrl === iconUrl || appIconIsReady(iconUrl)),
+  )
   return (
     <span
       className={`${className}${hasImage ? ' is-image' : ''}`}
@@ -1918,14 +1966,16 @@ function AppIcon({ item, label, className, size }) {
         <img
           src={iconUrl}
           alt=""
-          loading="lazy"
+          loading="eager"
           decoding="async"
           onLoad={event => {
             event.currentTarget.hidden = false
+            rememberAppIconReady(iconUrl)
             setLoadedUrl(iconUrl)
           }}
           onError={event => {
             event.currentTarget.hidden = true
+            forgetAppIconReady(iconUrl)
             setLoadedUrl(null)
           }}
         />

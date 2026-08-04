@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import {
   noteHref,
   noteLabel,
-  safeMemoryAppSlug,
+  safeAppSlug,
   safeNoteId,
 } from '../memoryRecall.js'
 import { memoryRecallCardModel } from '../memoryRecallCard.js'
@@ -38,7 +38,7 @@ test('a note links into the Memory app through the shell intent contract', () =>
     '/shell/?app=memory-2&intent=note%3Aalpha',
     'a suffixed official install links to the app that performed the recall',
   )
-  assert.equal(safeMemoryAppSlug('memory-12'), 'memory-12')
+  assert.equal(safeAppSlug('memory-12'), 'memory-12')
   assert.equal(noteHref({ id: 'alpha', app_slug: '../memory' }), '',
     'a present but invalid app slug fails closed')
 })

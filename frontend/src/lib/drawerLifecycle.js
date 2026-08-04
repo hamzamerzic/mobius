@@ -30,6 +30,18 @@ export function shouldAutoRevealActiveChat({
     && activeChatId != null
 }
 
+/** Restore modal-drawer focus only while the drawer still owns it. */
+export function shouldRestoreDrawerFocus({
+  drawer,
+  activeElement,
+  body,
+} = {}) {
+  return !activeElement
+    || activeElement === body
+    || !drawer
+    || drawer.contains(activeElement)
+}
+
 function cssTimeMs(value) {
   const text = String(value || '').trim()
   const numeric = Number.parseFloat(text)
@@ -75,16 +87,14 @@ export function drawerCloseWatchdogMs(style) {
  */
 export function drawerWidthFromPointerDelta({
   startWidth,
-  startX,
-  currentX,
+  delta,
   edgeDirection = 1,
 }) {
   const width = Number(startWidth)
-  const origin = Number(startX)
-  const current = Number(currentX)
+  const distance = Number(delta)
   const direction = Number(edgeDirection) < 0 ? -1 : 1
-  if (![width, origin, current].every(Number.isFinite)) return width
-  return width + ((current - origin) * direction)
+  if (![width, distance].every(Number.isFinite)) return width
+  return width + (distance * direction)
 }
 
 /** True only when the current displacement is decisively sideways. */

@@ -425,24 +425,6 @@
   .detail-group > summary:focus-visible {
     outline: none; border-radius: 6px; box-shadow: var(--ring);
   }
-  .ledger {
-    list-style: none; margin: 0; padding: 0;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    overflow: hidden;
-    background: var(--surface);
-  }
-  .ledger li {
-    display: flex; gap: var(--sp-3);
-    padding: var(--sp-3) var(--sp-4);
-    border-top: 1px solid var(--border);
-    font-size: var(--step--1);
-  }
-  .ledger li:first-child { border-top: none; }
-  .ledger .label { color: var(--text); flex: 1; }
-  .ledger .val   { color: var(--muted); font-variant-numeric: tabular-nums;
-                   font-family: var(--mono); }
-
   .commits {
     margin: var(--sp-3) 0 0;
     padding: var(--sp-3) var(--sp-4);
@@ -498,7 +480,7 @@
     }
     body { background: #fff; }
     .wrap { max-width: none; padding: 0; }
-    .lede, .item, .ledger, .commits { box-shadow: none; }
+    .lede, .item, .commits { box-shadow: none; }
     section { break-inside: avoid; }
     .item, .lede { break-inside: avoid; }
     .handoff { display: none; }
@@ -545,7 +527,7 @@
   <!-- ===================== §2 What I did ===================== -->
   <section id="did" aria-labelledby="did-h">
     <div class="sec-head"><span class="sec-num">2</span><h2 id="did-h">What I did</h2></div>
-    <p class="sec-sub">Changes already applied — conservative, reversible, each committed.</p>
+    <p class="sec-sub">Verified outcomes from tonight’s work.</p>
     <div class="items">
       <!-- repeatable collapsed item; badge: done | fixed. The summary is the
            ONE-line headline; lead + triad live inside. Never author `open`. -->
@@ -565,7 +547,7 @@
   <!-- ===================== §3 What I learned ===================== -->
   <section id="learned" aria-labelledby="learned-h">
     <div class="sec-head"><span class="sec-num">3</span><h2 id="learned-h">What I learned</h2></div>
-    <p class="sec-sub">From interviewing the agents that worked, from your usage, and from a little research on what you follow.</p>
+    <p class="sec-sub">From verified evidence, direct review, and focused research.</p>
     <div class="items">
       <!-- repeatable collapsed item; badge: learn -->
       <details class="item">
@@ -591,21 +573,6 @@
   <section id="details" aria-labelledby="details-h">
     <div class="sec-head"><span class="sec-num">5</span><h2 id="details-h">Details</h2></div>
     <p class="sec-sub">The receipts — for when you want them. Safe to skip.</p>
-
-    <!-- Each receipts group is itself collapsed by default. -->
-    <details class="detail-group">
-      <summary>Run ledger</summary>
-      <ul class="ledger">
-        <!-- repeatable -->
-        <li><span class="label">{{LEDGER_LABEL_1}}</span><span class="val">{{LEDGER_VAL_1}}</span></li>
-        <li><span class="label">Chats &amp; subagent runs interviewed</span><span class="val">{{N_INTERVIEWED}}</span></li>
-        <li><span class="label">Skills improved</span><span class="val">{{N_SKILLS}}</span></li>
-        <li><span class="label">Memory: notes merged / pruned / added</span><span class="val">{{N_MEMORY}}</span></li>
-        <li><span class="label">App fixes applied</span><span class="val">{{N_APPFIX}}</span></li>
-        <li><span class="label">Security findings (surfaced)</span><span class="val">{{N_SEC}}</span></li>
-        <!-- /repeatable -->
-      </ul>
-    </details>
 
     <details class="detail-group">
       <summary>Commits</summary>

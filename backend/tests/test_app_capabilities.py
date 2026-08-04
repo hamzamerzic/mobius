@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from app import models
 from app.app_capabilities import contract_and_digest
+from app.app_capabilities import contract_with_runtime_capabilities
 from app.app_capabilities import normalize_runtime_capabilities
 from app.config import get_settings
 from test_app_fixtures import create_local_app, write_local_source
@@ -103,6 +104,75 @@ def test_runtime_capability_is_independently_versioned_and_bounded():
       "limits": {"max_duration_ms": 8_000},
     },
   }
+
+
+def test_device_asset_cache_is_client_only_and_reviewed_by_size():
+  runtime = normalize_runtime_capabilities(_manifest(capabilities={
+    "device.asset-cache": {
+      "version": 1,
+      "reason": "Keep an on-device speech model in this browser.",
+      "limits": {
+        "max_bytes": 256 * 1024 * 1024,
+        "max_asset_bytes": 256 * 1024 * 1024,
+        "max_chunk_bytes": 8 * 1024 * 1024,
+      },
+    },
+  }))
+
+  device_cache = runtime["device.asset-cache"]
+  assert device_cache["risk"] == "storage"
+  assert device_cache["lifecycle"] == "active_frame"
+  assert device_cache["description"] == (
+    "Download verified app assets into this browser's private storage."
+  )
+  assert device_cache["limits"]["max_bytes"] == 256 * 1024 * 1024
+
+
+def test_speech_capabilities_separate_model_management_from_generation():
+  runtime = normalize_runtime_capabilities(_manifest(capabilities={
+    "device.speech-models": {
+      "version": 1,
+      "reason": "Manage the shared voice library on this device.",
+    },
+    "media.speech": {
+      "version": 1,
+      "reason": "Read reports aloud with a selected local voice.",
+      "limits": {"max_text_chars": 20_000},
+    },
+  }))
+
+  assert runtime["device.speech-models"]["risk"] == "storage"
+  assert runtime["device.speech-models"]["lifecycle"] == "active_frame"
+  assert runtime["media.speech"]["risk"] == "device"
+  assert runtime["media.speech"]["lifecycle"] == "background"
+  assert runtime["media.speech"]["limits"] == {"max_text_chars": 20_000}
+
+
+def test_explicit_local_runtime_acceptance_preserves_store_contract():
+  installed = _manifest(capabilities={
+    "device.asset-cache": {"version": 1},
+  })
+  contract, _ = contract_and_digest(installed)
+  candidate = contract_with_runtime_capabilities(contract, _manifest(capabilities={
+    "media.speech": {
+      "version": 1,
+      "reason": "Read reports with the shared local voice.",
+      "limits": {"max_text_chars": 50_000},
+    },
+  }))
+
+  assert candidate is not None
+  assert candidate["runtime"] == normalize_runtime_capabilities(_manifest(capabilities={
+    "media.speech": {
+      "version": 1,
+      "reason": "Read reports with the shared local voice.",
+      "limits": {"max_text_chars": 50_000},
+    },
+  }))
+  assert {key: value for key, value in candidate.items() if key != "runtime"} == {
+    key: value for key, value in contract.items() if key != "runtime"
+  }
+  assert contract["runtime"] == normalize_runtime_capabilities(installed)
 
 
 def test_runtime_capability_rejects_unknown_name_version_and_limits():

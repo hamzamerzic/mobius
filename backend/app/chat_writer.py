@@ -1792,7 +1792,11 @@ class ChatWriterActor:
     chat_update = db.execute(
       update(Chat)
       .where(Chat.id == cmd.chat_id, Chat.deleted_at.is_(None))
-      .values(messages=cmd.messages, live_assistant=None)
+      .values(
+        messages=cmd.messages,
+        has_messages=bool(cmd.messages),
+        live_assistant=None,
+      )
     )
     if chat_update.rowcount != 1:
       db.rollback()
@@ -1938,7 +1942,11 @@ class ChatWriterActor:
           ~active_run_exists,
           Chat.updated_at == snap_updated_at,
         )
-        .values(messages=plan.new_messages, pending_messages=plan.new_pending)
+        .values(
+          messages=plan.new_messages,
+          has_messages=bool(plan.new_messages),
+          pending_messages=plan.new_pending,
+        )
       )
     except OperationalError:
       db.rollback()
@@ -2100,11 +2108,12 @@ class ChatWriterActor:
     from app.models import ChatRun
     from app.run_state import goal_objective_for_run_start
     goal_objective = goal_objective_for_run_start(
-      db, cmd.chat_id, cmd.user_msg.get("content"),
+      db, cmd.chat_id, cmd.user_msg,
     )
     self._close_nonterminal_runs(db, cmd.chat_id, "interrupted")
     db.add(ChatRun(
       id=cmd.run_token, chat_id=cmd.chat_id, status="running",
+      root_run_id=cmd.run_token,
       provider=chat.provider, started_at=started_at,
       initiated_by_app_id=cmd.initiated_by_app_id,
       goal_objective=goal_objective,
@@ -2499,15 +2508,31 @@ class ChatWriterActor:
     # continuation. Close its run record and open the continuation's in the
     # SAME commit as the queue handoff.
     from app.models import ChatRun
+    from app.continuations import is_continuation_message
     from app.run_state import goal_objective_for_run_start
     goal_objective = goal_objective_for_run_start(
-      db, cmd.chat_id, agent_pending.get("content"),
+      db, cmd.chat_id, agent_pending,
+    )
+    prior_run = (
+      db.query(ChatRun)
+      .filter(
+        ChatRun.chat_id == cmd.chat_id,
+        ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
+      )
+      .order_by(ChatRun.started_at.desc(), ChatRun.id.desc())
+      .first()
+    )
+    root_run_id = (
+      (prior_run.root_run_id or prior_run.id)
+      if prior_run is not None and is_continuation_message(agent_pending)
+      else cmd.run_token
     )
     self._close_nonterminal_runs(
       db, cmd.chat_id, cmd.ending_status, except_token=cmd.run_token
     )
     db.add(ChatRun(
       id=cmd.run_token, chat_id=cmd.chat_id, status="running",
+      root_run_id=root_run_id,
       provider=chat.provider, started_at=started_at,
       initiated_by_app_id=initiated_by_app_id,
       goal_objective=goal_objective,
@@ -2611,9 +2636,8 @@ class ChatWriterActor:
     # too: a fresh StartTurn / PromotePending on a parked chat means the owner
     # resumed it themselves (one-tap Resume, or any new send), so the stale
     # park must be closed — otherwise it would fire a spurious reset notify /
-    # auto-resume later, and its parked_until could wrongly exempt the NEW
-    # live turn from the stall watchdog. "parked_notified" rows are already
-    # resolved and stay untouched.
+    # auto-resume later. "parked_notified" rows are already resolved and stay
+    # untouched.
     q = db.query(ChatRun).filter(
       ChatRun.chat_id == chat_id,
       ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
@@ -3703,7 +3727,6 @@ def update_live_assistant(
   """Persist the current assistant snapshot without rewriting history."""
   if not chat_id:
     return True
-  from datetime import UTC, datetime
   from app.models import Chat
 
   row = db.execute(
@@ -3757,7 +3780,9 @@ def update_live_assistant(
   db.execute(
     update(Chat)
     .where(Chat.id == chat_id, Chat.deleted_at.is_(None))
-    .values(live_assistant=snapshot, updated_at=datetime.now(UTC))
+    # The stream is authoritative while this value changes. Bypass
+    # updated_at's onupdate default so retained history remains reusable.
+    .values(live_assistant=snapshot, updated_at=Chat.updated_at)
   )
   return _commit_or_rollback(db)
 

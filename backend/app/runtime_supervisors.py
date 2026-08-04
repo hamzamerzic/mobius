@@ -12,14 +12,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from pathlib import Path
-from typing import Awaitable, Callable, Protocol
+from typing import Protocol
 
 from app.database import SessionLocal
 
 
-LagSleep = Callable[..., Awaitable[str | None]]
+RESTART_BACKLOG_DRAIN_INTERVAL_SECS = 2.0
 
 
 class RuntimeSettings(Protocol):
@@ -36,13 +35,11 @@ class RuntimeSupervisors:
     logger: logging.Logger,
     restart_authorization: str | None,
     restart_fallback_chats: list[str],
-    lag_sleep: LagSleep,
   ) -> None:
     self.settings = settings
     self.log = logger
     self.restart_authorization = restart_authorization
     self.restart_fallback_chats = restart_fallback_chats
-    self.lag_sleep = lag_sleep
     self._tasks: dict[str, asyncio.Task] = {}
     self._frontend_observer = None
     self._frontend_handler = None
@@ -59,7 +56,7 @@ class RuntimeSupervisors:
       await self._start_chat_supervisors()
     except Exception as exc:
       self.log.error(
-        "chat liveness sweep wiring failed: %s", exc, exc_info=True,
+        "chat supervisor wiring failed: %s", exc, exc_info=True,
       )
 
   async def _start_frontend_watcher(self) -> None:
@@ -73,11 +70,12 @@ class RuntimeSupervisors:
       self.log.error("start_frontend_watcher failed: %s", exc, exc_info=True)
 
   async def _start_chat_supervisors(self) -> None:
+    from app.agent_scratch import release_if_idle, sweep_idle_scratch
     from app.broadcast import get_system_broadcast
     from app.chat import (
+      ContinuationSweepResult,
       sweep_idle_pending_chats,
       sweep_reset_parks,
-      sweep_stalled_live_runs,
       sweep_wedged_runs,
     )
 
@@ -93,55 +91,49 @@ class RuntimeSupervisors:
         except Exception as exc:
           self.log.error("wedged-marker sweep failed: %s", exc, exc_info=True)
 
-    async def stalled_live_loop():
-      while True:
-        await self.lag_sleep(asyncio.sleep, time.monotonic, self.log)
-        try:
-          with SessionLocal() as db:
-            await sweep_stalled_live_runs(db)
-        except asyncio.CancelledError:
-          raise
-        except Exception as exc:
-          self.log.error("stalled-live sweep failed: %s", exc, exc_info=True)
-
-    async def sweep_reset_parks_once(*, startup: bool = False):
+    async def sweep_reset_parks_once():
       try:
         with SessionLocal() as db:
-          if startup:
-            return await sweep_reset_parks(
-              db, restart_authorization=self.restart_authorization,
-            )
-          return await sweep_reset_parks(db)
+          return await sweep_reset_parks(
+            db, restart_authorization=self.restart_authorization,
+          )
       except asyncio.CancelledError:
         raise
       except Exception as exc:
         self.log.error("reset-park sweep failed: %s", exc, exc_info=True)
-        return []
+        return ContinuationSweepResult()
 
-    startup_continuations = await sweep_reset_parks_once(startup=True)
+    startup_sweep = await sweep_reset_parks_once()
     if self.restart_authorization:
       self.log.info(
         "startup restart continuation pass authorized=%d fallback_recovered=%d "
         "started_or_resolved=%d",
         1,
         len(self.restart_fallback_chats),
-        len(startup_continuations),
+        len(startup_sweep.resolved),
       )
 
     async def reset_park_loop():
       system_broadcast = get_system_broadcast()
       events = system_broadcast.subscribe()
+      last_sweep = startup_sweep
       try:
         while True:
-          try:
-            async with asyncio.timeout(60):
-              while True:
-                event = await events.get()
-                if event and event.get("type") == "chat_run_finished":
-                  break
-          except asyncio.TimeoutError:
-            pass
-          await sweep_reset_parks_once()
+          fast_followup = bool(
+            last_sweep.restart_deferred and last_sweep.resolved
+          )
+          if fast_followup:
+            await asyncio.sleep(RESTART_BACKLOG_DRAIN_INTERVAL_SECS)
+          else:
+            try:
+              async with asyncio.timeout(60):
+                while True:
+                  event = await events.get()
+                  if event and event.get("type") == "chat_run_finished":
+                    break
+            except asyncio.TimeoutError:
+              pass
+          last_sweep = await sweep_reset_parks_once()
       finally:
         system_broadcast.unsubscribe(events)
 
@@ -226,33 +218,56 @@ class RuntimeSupervisors:
         await asyncio.sleep(sweep_seconds)
 
     async def agent_scratch_loop():
-      # Scratch cleanup is retention work, not part of starting a chat. Keeping
-      # it here avoids making every concurrent turn rescan the same directory.
-      await asyncio.sleep(300)
-      while True:
-        try:
-          from app.agent_scratch import sweep_idle_scratch
+      # Exact physical-completion hints own the normal path. The deadline is
+      # independent of event traffic so the broad sweep still repairs missed
+      # hints after five minutes at startup and hourly thereafter.
+      system_broadcast = get_system_broadcast()
+      events = system_broadcast.subscribe()
+      loop = asyncio.get_running_loop()
+      next_sweep_at = loop.time() + 300
+      try:
+        while True:
+          event = None
+          wait_seconds = max(0.0, next_sweep_at - loop.time())
+          if wait_seconds:
+            try:
+              async with asyncio.timeout(wait_seconds):
+                event = await events.get()
+            except asyncio.TimeoutError:
+              pass
 
-          def sweep_once():
-            with SessionLocal() as db:
-              return sweep_idle_scratch(db)
+          if event and event.get("type") == "chat_scratch_releasable":
+            chat_id = event.get("chatId")
+            if isinstance(chat_id, str) and chat_id:
+              try:
+                await release_if_idle(chat_id)
+              except asyncio.CancelledError:
+                raise
+              except Exception as exc:
+                self.log.error(
+                  "agent scratch release failed chat_id=%s: %s",
+                  chat_id, exc, exc_info=True,
+                )
 
-          result = await asyncio.to_thread(sweep_once)
-          if result["bytes"]:
-            self.log.info(
-              "agent scratch retention reclaimed %d bytes",
-              result["bytes"],
-            )
-        except asyncio.CancelledError:
-          raise
-        except Exception as exc:
-          self.log.error(
-            "agent scratch retention failed: %s", exc, exc_info=True,
-          )
-        await asyncio.sleep(60 * 60)
+          if loop.time() >= next_sweep_at:
+            try:
+              result = await sweep_idle_scratch()
+              if result["bytes"]:
+                self.log.info(
+                  "agent scratch retention reclaimed %d bytes",
+                  result["bytes"],
+                )
+            except asyncio.CancelledError:
+              raise
+            except Exception as exc:
+              self.log.error(
+                "agent scratch retention failed: %s", exc, exc_info=True,
+              )
+            next_sweep_at = loop.time() + 60 * 60
+      finally:
+        system_broadcast.unsubscribe(events)
 
     self._spawn("wedged-marker-sweep", wedged_marker_loop())
-    self._spawn("stalled-live-sweep", stalled_live_loop())
     self._spawn("reset-park-sweep", reset_park_loop())
     self._spawn("writer-supervisor", writer_supervisor_loop())
     self._spawn("browser-profile-quota", browser_profile_loop())

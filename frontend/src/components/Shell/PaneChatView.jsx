@@ -1,8 +1,9 @@
-import { memo, useCallback, useMemo } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef } from 'react'
 import ChatView from '../ChatView/ChatView.jsx'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import { builtAppsSignature, derivedBuiltApps } from './builtAppState.js'
 import { samePaneChatProps } from './paneChatProps.js'
+import { scheduleAfterBrowserPaint } from './scheduleAfterBrowserPaint.js'
 
 // Per-chat binding for a tiled pane (design §2, M13). The single-mount ChatView
 // in Shell closes every callback over the ONE global `activeChatId`; a second
@@ -24,7 +25,8 @@ function PaneChatView({
   chatId,
   paneId,
   apps,
-  visible = true,
+  runtimeActive = true,
+  keepTranscriptPainted = false,
   paneContentHeight,
   // Shell selects this chat's stable signal before React.memo compares props.
   // An unrelated chat can replace the global signal Map without crossing this
@@ -38,6 +40,7 @@ function PaneChatView({
   markVoiceListening,
   refreshApps,
   acknowledgeAppPreview,
+  refreshChats,
   markChatOwnerActivity,
   loadTheme,
   navTo,
@@ -71,7 +74,11 @@ function PaneChatView({
   const handleFirstMessage = useCallback(() => {
     onFirstMessage?.(chatId)
     markChatOwnerActivity(chatId)
-  }, [chatId, markChatOwnerActivity, onFirstMessage])
+    // The server commits the fallback title with the first message. This one
+    // fresh read restores that exact row (New chat -> message preview) without
+    // bringing back the per-run start/finish refetches removed for performance.
+    refreshChats()
+  }, [chatId, markChatOwnerActivity, onFirstMessage, refreshChats])
 
   const handleOwnerActivity = useCallback(() => {
     markChatOwnerActivity(chatId)
@@ -93,9 +100,18 @@ function PaneChatView({
     onChatMissing?.(missingId, chatId)
   }, [chatId, onChatMissing])
 
+  const displayReadyCancelRef = useRef(() => {})
   const handleDisplayReady = useCallback((readyChatId) => {
-    onDisplayReady?.(paneId, readyChatId)
+    displayReadyCancelRef.current()
+
+    // ChatView reports layout readiness before the transcript's first paint.
+    // Prepare that frame beneath the outgoing cover before promotion.
+    displayReadyCancelRef.current = scheduleAfterBrowserPaint(
+      () => onDisplayReady(paneId, readyChatId),
+    )
   }, [onDisplayReady, paneId])
+
+  useEffect(() => () => displayReadyCancelRef.current(), [])
 
   return (
     <ErrorBoundary
@@ -107,7 +123,8 @@ function PaneChatView({
       <ChatView
         key={chatId}
         chatId={chatId}
-        hidden={!visible}
+        hidden={!runtimeActive}
+        keepTranscriptPainted={keepTranscriptPainted}
         paneContentHeight={paneContentHeight}
         externalRunSignal={externalRunSignal}
         onStreamEnd={handleStreamEnd}

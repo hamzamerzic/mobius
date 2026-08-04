@@ -7,11 +7,24 @@ import {
   drawerWidthFromPointerDelta,
   isGeneratedTouchClick,
   isHorizontalDrawerSwipe,
+  shouldRestoreDrawerFocus,
   shouldSuppressDrawerSwipeClick,
   shouldAutoRevealActiveChat,
   clearDrawerGestureStyles,
   drawerOpenBlockedByDrag,
 } from '../drawerLifecycle.js'
+
+test('drawer close restores only while the drawer still owns focus', () => {
+  const inside = { id: 'inside' }
+  const outside = { id: 'outside' }
+  const body = { id: 'body' }
+  const drawer = { contains: element => element === inside }
+
+  assert.equal(shouldRestoreDrawerFocus({ drawer, activeElement: inside, body }), true)
+  assert.equal(shouldRestoreDrawerFocus({ drawer, activeElement: body, body }), true)
+  assert.equal(shouldRestoreDrawerFocus({ drawer, activeElement: null, body }), true)
+  assert.equal(shouldRestoreDrawerFocus({ drawer, activeElement: outside, body }), false)
+})
 
 test('only the persistent sidebar follows active chat selections', () => {
   const activeChat = {
@@ -99,13 +112,11 @@ test('close watchdog releases immediately when transform motion is disabled', ()
 test('drawer resize follows pointer delta from either panel edge', () => {
   assert.equal(drawerWidthFromPointerDelta({
     startWidth: 320,
-    startX: 400,
-    currentX: 448,
+    delta: 48,
   }), 368)
   assert.equal(drawerWidthFromPointerDelta({
     startWidth: 320,
-    startX: 1000,
-    currentX: 952,
+    delta: -48,
     edgeDirection: -1,
   }), 368)
 })

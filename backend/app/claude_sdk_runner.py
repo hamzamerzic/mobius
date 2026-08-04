@@ -64,6 +64,7 @@ import os
 import signal
 import shutil
 from collections import deque
+from contextlib import ExitStack
 from typing import Any
 
 from claude_agent_sdk import (
@@ -754,6 +755,8 @@ async def run_claude_sdk_turn(
   db,
   agent_settings: dict | None = None,
   skills_enabled: bool = False,
+  run_policy=None,
+  connector_plan=None,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
@@ -774,6 +777,8 @@ async def run_claude_sdk_turn(
       path can ship without changing what the agent does — skill loads
       are still observed (chip + activity log) whenever a skill does
       load, regardless of this flag.
+    connector_plan: Detached owner-managed MCP configuration built before the
+      request session was released. It is plain data and never queries SQLite.
 
   Returns:
     A dict containing the resulting session ID, final cost, and error.
@@ -800,6 +805,28 @@ async def run_claude_sdk_turn(
     context,
   ) -> PermissionResultAllow | PermissionResultDeny:
     del context
+    if run_policy is not None:
+      nested_tools = {
+        "Task", "TaskOutput", "TaskStop", "Workflow", "Workflows", "Agent",
+      }
+      if tool_name in nested_tools:
+        return PermissionResultDeny(
+          message="Delegated child tasks cannot launch or manage other agents."
+        )
+      if tool_name == "AskUserQuestion":
+        return PermissionResultDeny(
+          message=(
+            "Delegated child tasks cannot park on an owner question; return the "
+            "blocker to the parent instead."
+          )
+        )
+      if run_policy.scope == "read" and tool_name in {
+        "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
+      }:
+        return PermissionResultDeny(
+          message="This delegated task is read-only."
+        )
+      return PermissionResultAllow(updated_input=input_data)
     # Auto-approve every tool except AskUserQuestion — this preserves
     # the "trust the agent" posture (no tool gating) while still
     # intercepting AskUserQuestion for the partner UX. The callback is
@@ -898,8 +925,8 @@ async def run_claude_sdk_turn(
   # The "ultracode" tier maps to xhigh effort for the SDK flag (which only
   # accepts low/medium/high/xhigh/max) and arms the Workflow-tool
   # orchestration via the keyword trigger appended to this turn's prompt.
-  _ultracode = _effort == "ultracode"
-  if _ultracode:
+  _ultracode = _effort == "ultracode" and run_policy is None
+  if _effort == "ultracode":
     _effort = "xhigh"
   turn_message = user_message + _ULTRACODE_REMINDER if _ultracode else user_message
   # Cross-provider mismatch defense (mirrors codex_sdk_runner).
@@ -968,6 +995,18 @@ async def run_claude_sdk_turn(
         ],
       },
     }
+    if run_policy is not None:
+      options_kwargs.update({
+        "permission_mode": (
+          "plan" if run_policy.scope == "read" else "acceptEdits"
+        ),
+        "max_budget_usd": run_policy.max_budget_usd,
+        "disallowed_tools": [
+          "AskUserQuestion", "Task", "TaskOutput", "TaskStop",
+          "Workflow", "Workflows", "Agent",
+        ],
+        "agents": {},
+      })
     if skills_enabled:
       options_kwargs["skills"] = "all"
     if model_override:
@@ -986,15 +1025,51 @@ async def run_claude_sdk_turn(
     # Passed via --settings as inline JSON.
     _cli_settings = {"ultracode": True} if _ultracode else {"disableWorkflows": True}
     options_kwargs["extra_args"] = {"settings": json.dumps(_cli_settings)}
-    options = ClaudeAgentOptions(**options_kwargs)
 
-    client = ClaudeSDKClient(options)
+    # A dict-valued SDK mcp_servers option is serialized directly into the CLI
+    # argv. Keep credentials out of /proc/cmdline by handing Claude an anonymous
+    # 0600 config file path instead. After connect(), replace that fd with
+    # /dev/null but keep its number reserved until teardown: simply closing it
+    # would let the argv-visible path alias an unrelated descriptor later.
+    connector_config_stack = ExitStack()
+    connector_config_handle = None
+    if connector_plan is not None:
+      try:
+        from app.connectors import claude_mcp_config_handle
+        connector_config_handle = connector_config_stack.enter_context(
+          claude_mcp_config_handle(connector_plan)
+        )
+        if connector_config_handle:
+          options_kwargs["mcp_servers"] = connector_config_handle.path
+      except Exception:
+        connector_config_stack.close()
+        connector_config_stack = ExitStack()
+        log.warning(
+          "Claude MCP connection injection skipped chat_id=%s",
+          chat_id,
+          exc_info=True,
+        )
+    try:
+      options = ClaudeAgentOptions(**options_kwargs)
+      client = ClaudeSDKClient(options)
+    except Exception:
+      connector_config_stack.close()
+      raise
+
     active_client = ActiveClaudeClient(client, chat_id=chat_id)
     registry.register(active_client)
 
     try:
       try:
-        await asyncio.wait_for(client.connect(), timeout=30.0)
+        try:
+          await asyncio.wait_for(client.connect(), timeout=30.0)
+        finally:
+          # Claude has consumed the config by the time the control channel is
+          # connected. Destroy its contents before query() gives the model a
+          # shell or process-inspection tool, while reserving the argv-visible
+          # fd number so it cannot alias another live descriptor.
+          if connector_config_handle is not None:
+            connector_config_handle.retire()
       except asyncio.TimeoutError:
         bc.publish({
           "type": "error",
@@ -1242,6 +1317,7 @@ async def run_claude_sdk_turn(
       try:
         await client.disconnect()
       finally:
+        connector_config_stack.close()
         # The SDK closes only its direct CLI PID. Reap the verified private
         # group as a bounded backstop for tool children, and do not let a
         # repeated task cancellation skip the SIGKILL worker once it starts.

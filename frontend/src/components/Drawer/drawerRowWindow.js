@@ -1,6 +1,6 @@
 /* Constant-size drawer windowing for the mixed Recent list. */
 
-export const DRAWER_ROW_HEIGHT = 44
+export const DRAWER_ROW_HEIGHT = 40
 export const DRAWER_ROW_OVERSCAN = 8
 export const DRAWER_INITIAL_WINDOW_ROWS = 48
 
@@ -40,20 +40,29 @@ export function drawerRowWindow({
   scrollTop,
   viewportHeight,
   sectionTop,
-  rowHeight = DRAWER_ROW_HEIGHT,
-  overscan = DRAWER_ROW_OVERSCAN,
 }) {
   const count = boundedTotal(total)
   if (count === 0) return { start: 0, end: 0 }
-  const height = Math.max(1, Number(rowHeight) || DRAWER_ROW_HEIGHT)
   const localTop = Math.max(0, (Number(scrollTop) || 0) - (Number(sectionTop) || 0))
-  const visibleStart = Math.floor(localTop / height)
-  const visibleEnd = Math.ceil(
-    (localTop + Math.max(height, Number(viewportHeight) || 0)) / height,
+  const visibleStart = Math.floor(localTop / DRAWER_ROW_HEIGHT)
+  const viewportRows = Math.ceil(
+    Math.max(DRAWER_ROW_HEIGHT, Number(viewportHeight) || 0) / DRAWER_ROW_HEIGHT,
   )
+  // Move the React window in overscan-sized buckets instead of replacing one
+  // row at every 40px boundary. The bucket still retains a full overscan band
+  // around every viewport position it represents, but native momentum now gets
+  // several uninterrupted frames between DOM swaps.
+  const bucketStart = Math.floor(visibleStart / DRAWER_ROW_OVERSCAN)
+    * DRAWER_ROW_OVERSCAN
+  // The viewport may begin at the final row (and final fractional pixel) of the
+  // bucket, so reserve the complete bucket width before the lower overscan.
+  const bucketEnd = bucketStart + DRAWER_ROW_OVERSCAN + viewportRows
   return {
-    start: Math.max(0, visibleStart - overscan),
-    end: Math.min(count, Math.max(visibleStart + 1, visibleEnd + overscan)),
+    start: Math.max(0, bucketStart - DRAWER_ROW_OVERSCAN),
+    end: Math.min(
+      count,
+      bucketEnd + DRAWER_ROW_OVERSCAN,
+    ),
   }
 }
 
@@ -78,11 +87,11 @@ export function drawerRowWindowForIndex(current, total, rowIndex) {
   return drawerRowWindowContaining(count, rowIndex)
 }
 
-export function drawerRowSpacerHeights(window, total, rowHeight = DRAWER_ROW_HEIGHT) {
+export function drawerRowSpacerHeights(window, total) {
   const bounded = clampDrawerRowWindow(window, total)
   return {
-    before: bounded.start * rowHeight,
-    after: Math.max(0, boundedTotal(total) - bounded.end) * rowHeight,
+    before: bounded.start * DRAWER_ROW_HEIGHT,
+    after: Math.max(0, boundedTotal(total) - bounded.end) * DRAWER_ROW_HEIGHT,
   }
 }
 

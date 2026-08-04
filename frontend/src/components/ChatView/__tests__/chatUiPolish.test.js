@@ -44,7 +44,9 @@ test('stop action has no visible circular shell', () => {
   const stopRules = css.match(/\.chat__stop\s*\{[^}]*\}/g) || []
   const stopRule = stopRules.find((rule) => /background:\s*transparent/.test(rule)) || ''
   const stopFocusRule = css.match(/\.chat__stop:focus-visible\s*\{[^}]*\}/)?.[0] || ''
-  const stopGlyphFocusRule = css.match(/\.chat__stop:focus-visible svg\s*\{[^}]*\}/)?.[0] || ''
+  const stopGlyphFocusRule = css.match(
+    /\.chat__stop:focus-visible \.chat__action-glyph--stop\s*\{[^}]*\}/,
+  )?.[0] || ''
 
   assert.match(stopRule, /background:\s*transparent/,
     'Stop keeps the touch target but removes the visible circular fill')
@@ -56,10 +58,14 @@ test('stop action has no visible circular shell', () => {
     'Stop keyboard focus should move to the square glyph')
 })
 
-test('stop action keeps a legible glyph inside its full touch target', () => {
+test('primary actions reuse one mounted glyph stack', () => {
+  assert.match(chatInputBar, /function PrimaryActionGlyphs\(\{ action \}\)/)
+  for (const action of ['steer', 'stop', 'send']) {
+    assert.match(chatInputBar, new RegExp(`<PrimaryActionGlyphs action="${action}" />`))
+  }
   assert.match(
     chatInputBar,
-    /<Stop width=\{28\} height=\{28\} aria-hidden="true" \/>/,
+    /<Stop className="chat__action-glyph chat__action-glyph--stop" width=\{28\} height=\{28\} \/>/,
     'the SDK Stop icon needs a 28px box because its square occupies only part of the viewBox',
   )
 })
@@ -124,20 +130,31 @@ test('message references use a bounded responsive two-column grid', () => {
     'narrow panes should fall back to one reference column')
 })
 
-test('Send, Steer, and Stop never fade through an empty replacement frame', () => {
+test('transitions into Stop are sequential while Send to Steer stays immediate', () => {
   const css = stripComments(chatCss)
-  const sendRule = css.match(/\.chat__send\s*\{[^}]*\}/)?.[0] || ''
-  const steerRule = css.match(/\.chat__steer\s*\{[^}]*\}/)?.[0] || ''
-  const stopRules = css.match(/\.chat__stop\s*\{[^}]*\}/g)?.join('\n') || ''
+  const glyphStackRule = css.match(/\.chat__action-glyphs\s*\{[^}]*\}/)?.[0] || ''
+  const staticDirectionalRule = css.match(
+    /\.chat__action-glyphs--send \.chat__action-glyph--send,\s*\.chat__action-glyphs--steer \.chat__action-glyph--steer\s*\{[^}]*\}/,
+  )?.[0] || ''
+  const outgoingStopRule = css.match(
+    /\.chat__action-glyphs--stop :is\(\.chat__action-glyph--send, \.chat__action-glyph--steer\)\s*\{[^}]*\}/,
+  )?.[0] || ''
+  const visibleStopRule = css.match(
+    /\.chat__action-glyphs--stop \.chat__action-glyph--stop\s*\{[^}]*\}/,
+  )?.[0] || ''
 
-  assert.doesNotMatch(sendRule, /animation:/,
-    'Send must keep the shared action target continuously visible')
-  assert.doesNotMatch(steerRule, /animation:/,
-    'Steer must keep the shared action target continuously visible')
-  assert.doesNotMatch(stopRules, /animation:/,
-    'Stop must appear immediately instead of starting at opacity zero')
-  assert.doesNotMatch(css, /@keyframes\s+chat-action-reveal/,
-    'the empty-frame reveal must not remain available to a primary action')
+  assert.match(glyphStackRule, /--stop-handoff:\s*0\.1s/,
+    'one timing value should own both halves of the sequential handoff')
+  assert.doesNotMatch(staticDirectionalRule, /transition:/,
+    'Send to Steer should retain its existing immediate icon swap')
+  assert.match(outgoingStopRule, /opacity var\(--stop-handoff\) ease-in/,
+    'the directional glyph should leave before Stop appears')
+  assert.match(visibleStopRule, /opacity 0\.12s ease-out var\(--stop-handoff\)/,
+    'Stop should wait for the directional glyph to finish before appearing')
+  assert.match(visibleStopRule, /opacity:\s*1/)
+  assert.match(css,
+    /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*?\.chat__action-glyphs--stop \.chat__action-glyph\s*\{\s*transition:\s*none/,
+    'reduced-motion users should skip the staged handoff')
 })
 
 test('running activity uses a masked solid-text sweep, not gradient-clipped text', () => {

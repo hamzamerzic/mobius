@@ -17,7 +17,12 @@ function queryClientWith(initial) {
 }
 
 test('consecutive transcript commits compose through the synchronous owner ref', () => {
-  const queryClient = queryClientWith({ messages: [], offset: 0, updated_at: 'proof' })
+  const queryClient = queryClientWith({
+    messages: [],
+    offset: 0,
+    updated_at: 'proof',
+    restorationWindowComplete: true,
+  })
   const { result } = renderHook(useTranscriptState, {
     cacheKey: ['chat-messages', 7],
     cached: queryClient.value,
@@ -31,6 +36,8 @@ test('consecutive transcript commits compose through the synchronous owner ref',
   assert.deepEqual(result.current.messagesRef.current, [{ ts: 1 }, { ts: 2 }])
   assert.equal(queryClient.writes, 2)
   assert.equal(queryClient.value.updated_at, null)
+  assert.equal(queryClient.value.restorationWindowComplete, true,
+    'local and streamed commits preserve canonical first-paint provenance')
 })
 
 test('an authoritative view activation does not republish the query cache', () => {

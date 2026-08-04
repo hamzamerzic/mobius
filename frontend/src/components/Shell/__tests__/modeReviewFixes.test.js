@@ -88,8 +88,8 @@ test('finding 4: non-history newChat routes through applyModeDestination (not a 
   assert.doesNotMatch(shell, /type: 'OPEN_TAB', paneId: ws\.focusedPaneId,\s*\n\s*tab: tabModel\.makeTab\('chat', chatId\)/)
 })
 
-test('finding 9: applyModeDestination clamps the kill switch BEFORE the world branch', () => {
-  assert.match(nav, /const mode = paneModel\.WORKSPACE_SPLITS_ENABLED \? ws\.viewMode : 'single'/)
+test('finding 9: applyModeDestination branches on the canonical workspace world', () => {
+  assert.match(nav, /const mode = ws\.viewMode/)
   assert.match(nav, /if \(mode === 'single'\) \{[\s\S]*?SET_SINGLE_SCREEN/)
 })
 
@@ -111,7 +111,7 @@ test('finding F9: historical-chat repair is builder-only; single mode requests N
   // the explicit New Chat landing instead.
   assert.match(shell, /applyModeDestination\(\{ view: 'chat', chatId: fallback\.id, appId: null, paneId: ws\.focusedPaneId \}, \{ preserveSettings: true \}\)/)
   assert.match(shell, /applyModeDestination\(\{ view: 'chat', chatId: chats\[0\]\.id, appId: null, paneId: ws\.focusedPaneId \}, \{ preserveSettings: true \}\)/)
-  assert.match(shell, /const single = !paneModel\.WORKSPACE_SPLITS_ENABLED \|\| ws\.viewMode === 'single'/)
+  assert.match(shell, /const single = ws\.viewMode === 'single'/)
   assert.match(shell, /if \(single && ws\.singleScreen == null && chats\.length > 0\s*&& pendingNewChatRef\.current == null\) \{\s*requestEmptySingleNewChat\(\)/)
   assert.match(shell, /else if \(!single && focusedPaneEmpty && chats\[0\]\)/)
   assert.match(shell, /const builderEmpty = !single/)
@@ -143,26 +143,25 @@ test('finding 6: exit enables capture names before collecting departing panes', 
   assert.ok(enableAt < collectAt, 'capture names must exist before exit reads them')
 })
 
-// -- Finding 7: mode-restoring Undo routes through the controller --------------
-test('finding 7: undo routes the mode restoration through mode.undo before UNDO_LAST', () => {
+// -- Finding 7: every actual reducer mode change synchronizes presentation -----
+test('finding 7: undo relies on the shared actual-transition synchronizer', () => {
   assert.match(shell, /modeView\.run\(\{[\s\S]*?cause: 'undo'/)
-  assert.match(shell, /update: \(\) => \{\s*\n\s*mode\.undo\(\{ restoredMode \}\)\s*\n\s*dispatchWorkspace\(\{ type: 'UNDO_LAST' \}\)/)
+  assert.match(shell, /onWorkspaceTransitionRef\.current = \(prevWs, nextWs\) => \{[\s\S]*?mode\.syncCommitted\(nextWs\.viewMode\)/)
+  assert.match(shell, /update: \(\) => \{\s*\n\s*dispatchWorkspace\(\{ type: 'UNDO_LAST' \}\)/)
+  assert.doesNotMatch(shell, /mode\.undo/)
   assert.match(shell, /const restoredMode = undoSlot\.restoreViewMode\s*\n\s*\? undoSlot\.ws\.viewMode : wsState\.ws\.viewMode/)
   assert.match(shell, /const plan = deriveModeSnapshotPlan\(\{/)
 })
 
 // -- Finding R3: the last-tab-close auto-return arms the descriptor same-batch ---
-test('finding R3: an emptying close arms the auto-return flip in the SAME batch, no autoFlip API', () => {
-  // The auto-return no longer lags a frame: closeTab detects the close will empty
-  // the builder tree and dispatches an INSTANT mode flip (cause 'auto') alongside
-  // CLOSE_TAB, so committedMode flips to single WITH the tree — not a render later
-  // via the passive sync-committed reconcile. It is a normal mode change, not a
-  // separate autoFlip event (that orphaned API was deleted).
-  assert.match(shell, /paneModel\.isEmptyTree\(paneModel\.closeTab\(ws, key\)\)\) \{\s*\n\s*mode\.toggle\(\{ cause: 'auto', to: 'single' \}\)/)
+test('finding R3: an emptying close presents the reducer actual auto-return in the same batch', () => {
+  assert.match(shell, /const closeTab = useCallback\(\(tab, \{ reason \} = \{\}\) => \{[\s\S]*?dispatchWorkspace\(\{ type: 'CLOSE_TAB', tabKey: key, reason \}\)/)
+  assert.match(shell, /prevWs\.viewMode !== nextWs\.viewMode[\s\S]*?mode\.syncCommitted\(nextWs\.viewMode\)/)
+  assert.doesNotMatch(shell, /mode\.toggle/)
   assert.doesNotMatch(controller, /autoFlip/)
-  // An emptied-tree flip is ordinary state with no visual scene to capture.
+  // The reducer's actual result, not the close request, owns presentation.
   const flipped = modeReducer({ committedMode: 'panes', transition: null, nextId: 1 },
-    { type: 'toggle', cause: 'auto', to: 'single' })
+    { type: 'sync-committed', committedMode: 'single' })
   assert.equal(flipped.committedMode, 'single')
   assert.equal(flipped.transition, null)
 })
@@ -241,23 +240,21 @@ test('finding 11: the hold cancels on the page-lifecycle interruptions', () => {
   assert.match(gesture, /window\.addEventListener\('pagehide', cancel\)/)
   assert.match(gesture, /document\.addEventListener\('visibilitychange', onHidden\)/)
   assert.match(gesture, /const onLostPointerCapture = useCallback/)
-  assert.match(brand, /onLostPointerCapture=\{splitsEnabled \? logoGesture\.onLostPointerCapture : undefined\}/)
+  assert.match(brand, /onLostPointerCapture=\{logoGesture\.onLostPointerCapture\}/)
 })
 
 // -- Finding 12: Shift+Enter e.repeat guard + keyboardModeClickRef cleanup -----
 test('finding 12: Shift+Enter ignores auto-repeat and clears its click-suppression on keyup', () => {
-  assert.match(brand, /e\.shiftKey && e\.key === 'Enter' && !e\.repeat/)
+  assert.match(brand, /shortcutMatches\(e, SHELL_SHORTCUTS\.toggleBuilder\)/)
   assert.match(brand, /onKeyUp=\{\(e\) => \{[\s\S]*?keyboardModeClickRef\.current = false/)
 })
 
 // -- Finding F13 (expanding review): the beat carries an HONEST cause -----------
 test('finding F13: cause threads from the gesture/keyboard, never a hardcoded hold', () => {
-  // The controller forwards the caller's cause instead of hardcoding 'hold'.
-  assert.match(controller, /const toggle = useCallback\(\(\{ cause, to \} = \{\}\)/)
-  assert.match(controller, /dispatch\(\{ type: 'toggle', cause, to: dest \}\)/)
-  assert.doesNotMatch(controller, /type: 'toggle', cause: 'hold'/)
+  // Cause belongs to the browser scene only; committed mode comes from workspace.
+  assert.doesNotMatch(controller, /cause|type: 'toggle'/)
   assert.match(shell, /cause,\s*\n\s*plan,\s*\n\s*update:/)
-  assert.match(shell, /mode\.toggle\(\{ cause, to \}\)/)
+  assert.match(shell, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: to \}\)/)
   // Each source layer names its own beat honestly.
   assert.match(gesture, /onToggleMode\?\.\('hold'\)/)
   assert.match(gesture, /onToggleMode\?\.\('swipe'\)/)

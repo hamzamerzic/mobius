@@ -53,7 +53,7 @@ async function navigateToSettings(page) {
 async function setup(
   page,
   viewport = { width: 412, height: 915 },
-  { assistantContent = 'Fixture response' } = {},
+  { assistantContent = 'Fixture response', chatDetailGate = null } = {},
 ) {
   await page.setViewportSize(viewport)
 
@@ -74,11 +74,14 @@ async function setup(
   await page.route(/\/api\/chats\/([0-9a-f-]+)(?:\?.*)?$/, route => {
     if (route.request().method() !== 'GET') return route.fallback()
     const id = new URL(route.request().url()).pathname.split('/').pop()
-    return route.fulfill({
+    const fulfill = () => route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify(navChatDetail(id, assistantContent)),
     })
+    return chatDetailGate?.id === id
+      ? chatDetailGate.wait.then(fulfill)
+      : fulfill()
   })
   await page.route('**/test-image.svg', route => route.fulfill({
     status: 200,
@@ -343,6 +346,110 @@ test.describe('Navigation basics', () => {
   })
 })
 
+test.describe('Touch navigation', () => {
+  test.use({ hasTouch: true, isMobile: true })
+
+  test('chat selection keeps the drawer over the outgoing chat until the destination paints', async ({ page }) => {
+    let releaseChatDetail
+    const wait = new Promise(resolve => { releaseChatDetail = resolve })
+    await setup(page, { width: 412, height: 915 }, {
+      chatDetailGate: { id: NAV_CHATS[1].id, wait },
+    })
+
+    await openDrawer(page)
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    await navigation.getByRole('button', { name: NAV_CHATS[1].title, exact: true }).click()
+
+    const drawer = page.locator('#navigation-drawer')
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
+      .toBe(NAV_CHATS[1].id)
+    await expect(drawer).toHaveClass(/drawer--open/)
+    await expect(drawer).toHaveClass(/drawer--locked/)
+    await expect.poll(() => page.evaluate(() => ({
+      held: document.querySelector('.shell__chat-view--held')?.dataset.chatId,
+      staging: document.querySelector('.shell__chat-view--staging')?.dataset.chatId,
+    }))).toEqual({
+      held: NAV_CHATS[0].id,
+      staging: NAV_CHATS[1].id,
+    })
+
+    releaseChatDetail()
+
+    await expect(page.locator('[data-chat-surface="painted"]'))
+      .toHaveAttribute('data-chat-id', NAV_CHATS[1].id)
+    await expect(drawer).not.toHaveClass(/drawer--open/)
+    await expect(drawer).not.toHaveClass(/drawer--locked/)
+  })
+
+  test('New chat preserves phone focus and early typing through allocation', async ({ page }) => {
+    const newChatId = '10000000-0000-4000-8000-000000000099'
+    await setup(page)
+    await expect.poll(() => page.evaluate(() => (
+      matchMedia('(hover: none) and (pointer: coarse)').matches
+    ))).toBe(true)
+
+    let releaseCreation
+    const creationGate = new Promise(resolve => { releaseCreation = resolve })
+    await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
+      if (route.request().method() !== 'POST') return route.fallback()
+      await creationGate
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: newChatId,
+          title: 'New chat',
+          created_at: '2026-01-01T00:01:00Z',
+          updated_at: '2026-01-01T00:01:00Z',
+          activity_at: '2026-01-01T00:01:00Z',
+          pinned_at: null,
+          created_by_app_id: null,
+          has_messages: false,
+          running: false,
+        }),
+      })
+    })
+    await page.route(new RegExp(`/api/chats/${newChatId}(?:\\?.*)?$`), route => (
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          messages: [],
+          total: 0,
+          offset: 0,
+          running: false,
+          pending_messages: [],
+          pending_question_id: null,
+          session_id: null,
+        }),
+      })
+    ))
+
+    await openDrawer(page)
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    // Let the drawer's opening focus frame settle before the New-chat tap.
+    // The real regression is focus lost after this settled user interaction,
+    // not a synthetic test click racing the drawer's own opening frame.
+    await expect(navigation).toBeFocused()
+    await navigation
+      .getByRole('button', { name: 'New chat', exact: true })
+      .click()
+
+    const focusLease = page.getByRole('textbox', { name: 'New chat message' })
+    const presentation = page.locator('[data-new-chat-presentation]')
+    await expect(presentation).toBeVisible()
+    await expect(presentation.getByText("What's on your mind?", { exact: true })).toBeVisible()
+    await expect(focusLease).toBeFocused()
+    await page.keyboard.type('Typed while opening')
+    releaseCreation()
+
+    const composer = page.locator('[data-chat-surface="painted"] textarea')
+    await expect(composer).toBeFocused()
+    await expect(composer).toHaveValue('Typed while opening')
+    await expect(presentation).toHaveCount(0)
+  })
+})
+
 test.describe('Desktop sidebar navigation', () => {
   async function setupDesktop(page, open = true) {
     await page.addInitScript(({ key, value }) => {
@@ -353,6 +460,42 @@ test.describe('Desktop sidebar navigation', () => {
     })
     await setup(page, { width: 1280, height: 800 })
   }
+
+  test('desktop web keeps 90% density while tablet and phone stay native', async ({ page }) => {
+    await setupDesktop(page)
+
+    const readDensity = () => page.evaluate(() => {
+      const root = document.documentElement
+      const rootRect = root.getBoundingClientRect()
+      const shellRect = document.querySelector('.shell').getBoundingClientRect()
+      return {
+        ratio: root.offsetWidth > 0 ? rootRect.width / root.offsetWidth : 0,
+        shell: {
+          left: shellRect.left,
+          top: shellRect.top,
+          right: shellRect.right,
+          bottom: shellRect.bottom,
+        },
+        viewport: { width: innerWidth, height: innerHeight },
+      }
+    })
+
+    for (const { label, size, ratio } of [
+      { label: 'desktop boundary', size: { width: 1024, height: 800 }, ratio: 0.9 },
+      { label: 'below desktop', size: { width: 1023, height: 800 }, ratio: 1 },
+      { label: 'phone', size: { width: 390, height: 844 }, ratio: 1 },
+    ]) {
+      await test.step(label, async () => {
+        await page.setViewportSize(size)
+        await expect.poll(async () => (await readDensity()).ratio).toBeCloseTo(ratio, 2)
+        const density = await readDensity()
+        expect(density.shell.left).toBeCloseTo(0, 1)
+        expect(density.shell.top).toBeCloseTo(0, 1)
+        expect(density.shell.right).toBeCloseTo(density.viewport.width, 1)
+        expect(density.shell.bottom).toBeCloseTo(density.viewport.height, 1)
+      })
+    }
+  })
 
   test('28. desktop sidebar reserves workspace width and persists its toggle', async ({ page }) => {
     await setupDesktop(page)
@@ -497,12 +640,8 @@ test.describe('Drawer touch lifecycle', () => {
   test.use({ hasTouch: true })
 
   test('an interrupted workspace drag cannot consume the next real drawer-row tap', async ({ page }) => {
-    // Enable workspace gestures before the shell module evaluates. Touch drawer
-    // rows intentionally own menu/reorder locally; a hybrid device's mouse or
+    // Touch drawer rows own menu/reorder locally; a hybrid device's mouse or
     // trackpad still uses the row-to-workspace drag contract tested below.
-    await page.addInitScript(() => {
-      localStorage.setItem('mobius:workspace-splits', '1')
-    })
     await setup(page, { width: 412, height: 915 })
     await openDrawer(page)
 
@@ -1129,20 +1268,53 @@ test.describe('Drawer close paths converge through handleBack', () => {
     expect(calls).toBe(1)
   })
 
-  test('22. Pointer-down on overlay closes drawer (does not navigate)', async ({ page }) => {
+  test('22. Outside press closes drawer without activating revealed content', async ({ page }) => {
     await setup(page)
     await openDrawer(page)
     await navigateToSettings(page)
     expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
+    await page.evaluate(() => {
+      const probe = document.createElement('button')
+      probe.id = 'drawer-underlay-probe'
+      probe.textContent = 'Underlying action'
+      probe.style.cssText = 'position:fixed;right:8px;top:280px;z-index:80'
+      probe.addEventListener('click', () => {
+        probe.dataset.clicks = String(Number(probe.dataset.clicks || 0) + 1)
+      })
+      document.body.appendChild(probe)
+    })
     await openDrawer(page)
     expect((await getNavState(page)).drawerOpen).toBe(true)
-    // Use a real pointer sequence rather than HTMLElement.click(). The drawer
-    // dismisses on pointerdown so a touch that moves enough for Chrome to
-    // suppress the later synthetic click still closes reliably.
-    await page.locator('.drawer-overlay').click({ position: { x: 400, y: 300 } })
-    await page.evaluate(() => new Promise(r => setTimeout(r, 400)))
+    await page.locator('.drawer-overlay').dispatchEvent('pointerdown', {
+      button: 0,
+      isPrimary: true,
+      pointerId: 4,
+      pointerType: 'touch',
+    })
     expect((await getNavState(page)).drawerOpen).toBe(false)
-    // Still on settings — overlay tap did not navigate.
+
+    // WebKit can retarget the compatibility click after the pointerdown has
+    // removed the scrim. That click still belongs to the drawer dismissal.
+    await page.locator('#drawer-underlay-probe').dispatchEvent('click', { detail: 1 })
+    await expect(page.locator('#drawer-underlay-probe')).not.toHaveAttribute('data-clicks')
+
+    // A genuinely new activation remains live. This also covers touch
+    // sequences that never synthesize the compatibility click: pointerdown
+    // releases any stale dismissal claim before the new click arrives.
+    await page.locator('#drawer-underlay-probe').click()
+    await expect(page.locator('#drawer-underlay-probe')).toHaveAttribute('data-clicks', '1')
+
+    await openDrawer(page)
+    await page.locator('.drawer-overlay').dispatchEvent('pointerdown', {
+      button: 0,
+      isPrimary: true,
+      pointerId: 5,
+      pointerType: 'touch',
+    })
+    await page.locator('#drawer-underlay-probe').click()
+    await expect(page.locator('#drawer-underlay-probe')).toHaveAttribute('data-clicks', '2')
+
+    // The close stays local to the drawer rather than navigating Settings.
     expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
   })
 
@@ -1152,7 +1324,7 @@ test.describe('Drawer close paths converge through handleBack', () => {
 
     // Closing the drawer traverses history and arms the Android bare-click
     // guard. A fresh owner tap has its own pointerdown, so it must clear that
-    // guard and reopen the drawer without waiting for the 400ms timeout.
+    // guard and reopen the drawer immediately.
     await page.evaluate(() => history.back())
     await expect(page.getByRole('button', { name: 'Toggle navigation' }))
       .toHaveAttribute('aria-expanded', 'false')
@@ -1191,10 +1363,10 @@ test.describe('Drawer close paths converge through handleBack', () => {
     await setup(page, { width: 426, height: 860 })
     await openDrawer(page)
 
-    // Reproduce the Android sequence without waiting out the old suppressor's
-    // 400ms fallback: a noisy diagonal sample briefly looks horizontal, then
-    // native pan-y takes over and emits pointercancel. The immediately-following
-    // destination tap must pass; cancellation is not a custom swipe completion.
+    // Reproduce the Android sequence: a noisy diagonal sample briefly looks
+    // horizontal, then native pan-y takes over and emits pointercancel. The
+    // immediately-following destination tap must pass; cancellation is not a
+    // custom swipe completion.
     await dispatchDrawerPointerGesture(page, {
       pointerId: 37,
       points: [[180, 520], [165, 512], [165, 390]],
@@ -1244,6 +1416,23 @@ test.describe('Drawer close paths converge through handleBack', () => {
     expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(false)
   })
 
+  test('22cc. Swipe-to-close returns transform ownership to the closed state', async ({ page }) => {
+    await setup(page, { width: 426, height: 860 })
+    await openDrawer(page)
+
+    await dispatchDrawerPointerGesture(page, {
+      pointerId: 40,
+      points: [[260, 420], [110, 420]],
+    })
+
+    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
+      .toHaveAttribute('aria-expanded', 'false')
+    expect(await page.locator('.drawer').evaluate((drawer) => ({
+      inlineTransform: drawer.style.transform,
+      inert: drawer.inert,
+    }))).toEqual({ inlineTransform: '', inert: true })
+  })
+
   test('22d. Interrupted drawer swipe cannot strand an inert panel onscreen', async ({ page }) => {
     await setup(page, { width: 426, height: 860 })
     await openDrawer(page)
@@ -1273,9 +1462,13 @@ test.describe('Drawer close paths converge through handleBack', () => {
     )).toBeLessThanOrEqual(-359)
   })
 
-  test('22e. Closing scrim blocks the app until the panel is offscreen', async ({ page }) => {
+  test('22e. Closing input shield follows the panel instead of blocking the workspace', async ({ page }) => {
     await setup(page, { width: 426, height: 860 })
     await openDrawer(page)
+    await page.addStyleTag({ content: `
+      .drawer { transition-duration: 1s !important; }
+      .drawer-close-shield--active { animation-duration: 1s !important; }
+    ` })
     await page.locator('.drawer-overlay').dispatchEvent('pointerdown', {
       button: 0,
       isPrimary: true,
@@ -1287,16 +1480,28 @@ test.describe('Drawer close paths converge through handleBack', () => {
       .toHaveAttribute('aria-expanded', 'false')
     const closing = await page.locator('.drawer').evaluate((drawer) => {
       const x = new DOMMatrixReadOnly(getComputedStyle(drawer).transform).m41
+      const overlay = document.querySelector('.drawer-overlay')
+      const shield = document.querySelector('.drawer-close-shield')
       return {
         x,
-        blocking: getComputedStyle(document.querySelector('.drawer-overlay')).pointerEvents,
+        overlayPointerEvents: getComputedStyle(overlay).pointerEvents,
+        shieldPointerEvents: getComputedStyle(shield).pointerEvents,
+        shieldRect: shield.getBoundingClientRect().toJSON(),
+        uncoveredTarget: document.elementFromPoint(400, 300)?.className || null,
       }
     })
-    if (closing.x > -359) expect(closing.blocking).toBe('auto')
+    expect(closing.overlayPointerEvents).toBe('none')
+    if (closing.x > -359) {
+      expect(closing.shieldPointerEvents).toBe('auto')
+      expect(closing.shieldRect.right).toBeLessThanOrEqual(360)
+      expect(closing.uncoveredTarget).not.toContain('drawer-overlay')
+      expect(closing.uncoveredTarget).not.toContain('drawer-close-shield')
+    }
     await expect.poll(() => page.locator('.drawer').evaluate(
       (drawer) => new DOMMatrixReadOnly(getComputedStyle(drawer).transform).m41,
     )).toBeLessThanOrEqual(-359)
     await expect(page.locator('.drawer-overlay')).toHaveCSS('pointer-events', 'none')
+    await expect(page.locator('.drawer-close-shield')).toHaveCSS('pointer-events', 'none')
   })
 
   test('22f. Reduced motion releases the scrim in the committed close layout', async ({ page }) => {
@@ -1334,7 +1539,25 @@ test.describe('Drawer close paths converge through handleBack', () => {
     })
   })
 
-  test('22g. Desktop drawer resize follows pointer delta and settles lost capture', async ({ page }) => {
+  test('22g. Swipe close leaves a click-only next activation live', async ({ page }) => {
+    await setup(page, { width: 426, height: 860 })
+    await openDrawer(page)
+    const toggle = page.getByRole('button', { name: 'Toggle navigation' })
+
+    await dispatchDrawerPointerGesture(page, {
+      pointerId: 72,
+      points: [[260, 420], [100, 422]],
+    })
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+
+    // WebKit can omit the next pointerdown after a moved touch stream while
+    // still delivering its click. The drawer's own history.back() is not an OS
+    // Back gesture, so that click must remain a first-try open.
+    await toggle.dispatchEvent('click', { detail: 1 })
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  test('22h. Desktop drawer resize follows pointer delta and settles lost capture', async ({ page }) => {
     await setup(page, { width: 1280, height: 800 })
     const drawer = page.locator('.drawer--persistent')
     const handle = page.getByRole('separator', { name: 'Resize navigation drawer' })
@@ -1461,16 +1684,15 @@ async function bootTwoAppPanes(page) {
     contentType: 'application/json',
     body: JSON.stringify({ token: 'mock-app-token' }),
   }))
-  // Land on the origin, then seed the flag + workspace blob and re-navigate so
-  // the shell boots the two-pane tree with the splits flag on.
+  // Land on the origin, then seed the canonical workspace and re-navigate so
+  // the shell boots the two-pane tree.
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   const blob = paneModel.serializeWorkspace(twoAppPanes())
-  await page.addInitScript(([flagKey, wsKey, wsBlob]) => {
+  await page.addInitScript(([wsKey, wsBlob]) => {
     try {
-      localStorage.setItem(flagKey, '1')
-      sessionStorage.setItem(wsKey, wsBlob)
+      localStorage.setItem(wsKey, wsBlob)
     } catch { /* private mode */ }
-  }, ['mobius:workspace-splits', paneModel.STORAGE_KEY, blob])
+  }, [paneModel.STORAGE_KEY, blob])
   await page.goto(`${BASE}/shell/?app=${PANE_APP_A}`, { waitUntil: 'domcontentloaded' })
   await expect(page.locator('.workspace__chrome')).toHaveCount(1, { timeout: 8000 })
   await page.evaluate(() => new Promise(r =>

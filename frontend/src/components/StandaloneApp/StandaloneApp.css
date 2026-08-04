@@ -6,39 +6,6 @@
   color: var(--text, #e8e8e8);
 }
 
-.standalone-app__mobius-link {
-  position: fixed;
-  right: max(14px, env(safe-area-inset-right));
-  bottom: max(14px, env(safe-area-inset-bottom));
-  z-index: 20;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 42px;
-  padding: 0 13px;
-  border: 1px solid color-mix(in srgb, var(--text, #fff) 14%, transparent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--bg, #0d0d0d) 86%, transparent);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
-  color: var(--text, #fff);
-  font: 600 12px/1 var(--font, system-ui, sans-serif);
-  text-decoration: none;
-  backdrop-filter: blur(14px);
-  opacity: 0.72;
-  transition: opacity 160ms ease, transform 160ms ease;
-}
-
-.standalone-app__mobius-link:hover,
-.standalone-app__mobius-link:focus-visible {
-  opacity: 1;
-  transform: translateY(-1px);
-}
-
-.standalone-app--immersive .standalone-app__mobius-link {
-  opacity: 0;
-  pointer-events: none;
-}
-
 .standalone-app__update {
   position: fixed;
   top: max(14px, env(safe-area-inset-top));
@@ -141,9 +108,10 @@
 }
 
 .standalone-install {
-  width: min(430px, 100%);
+  position: relative;
+  width: min(370px, 100%);
   max-height: calc(100dvh - 32px);
-  padding: 22px;
+  padding: 30px 26px 26px;
   overflow: auto;
   border: 1px solid var(--border, #333);
   border-radius: 20px;
@@ -154,12 +122,11 @@
 
 .standalone-install__identity {
   display: flex;
+  flex-direction: column;
   align-items: center;
   gap: 14px;
 }
 
-.standalone-install__identity p,
-.standalone-install__hint,
 .standalone-app--message p {
   margin: 5px 0 0;
   color: var(--muted, #aaa);
@@ -167,38 +134,24 @@
   line-height: 1.5;
 }
 
-.standalone-install__icon-button {
-  position: relative;
-  flex: 0 0 64px;
-  width: 64px;
-  height: 64px;
-  padding: 0;
-  overflow: hidden;
-  border-radius: 15px;
-}
-
-.standalone-install__icon-button img {
-  width: 100%;
-  height: 100%;
+.standalone-install__icon {
+  width: 72px;
+  height: 72px;
   display: block;
+  border-radius: 21px;
   object-fit: cover;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.38);
 }
 
-.standalone-install__icon-button span {
-  position: absolute;
-  right: 3px;
-  bottom: 3px;
-  display: grid;
-  place-items: center;
-  width: 21px;
-  height: 21px;
-  border-radius: 50%;
-  background: var(--accent, #a78bfa);
-  color: var(--accent-fg, #111);
-  font-size: 11px;
+.standalone-install__identity h1 {
+  max-width: 100%;
+  padding-inline: 38px;
+  overflow-wrap: anywhere;
+  text-align: center;
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
-
-.standalone-install__hint { margin-top: 14px; }
 
 .standalone-install__instructions {
   display: flex;
@@ -215,8 +168,74 @@
 }
 
 .standalone-install__instructions strong { color: var(--text, #fff); }
-.standalone-install__message { margin-top: 12px; color: var(--muted, #aaa); font-size: 12px; }
-.standalone-install__actions { margin-top: 18px; }
+
+/* The iOS instruction is the card's body, not an inset panel: on iPhone it is
+   the only thing the card has to say, so it gets the room rather than a border. */
+.standalone-install__steps {
+  margin: 18px 0 0;
+  text-align: center;
+  text-wrap: balance;
+  color: var(--muted, #aaa);
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.standalone-install__steps strong {
+  color: var(--text, #fff);
+  font-weight: 600;
+}
+
+.standalone-install__arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  margin: 20px auto 2px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent, #a78bfa) 34%, var(--border, #333));
+  background: color-mix(in srgb, var(--accent, #a78bfa) 10%, transparent);
+  font-size: 18px;
+  color: var(--accent, #a78bfa);
+  animation: standalone-install-arrow-cue 1.8s var(--ease-out-soft, ease-out) infinite;
+}
+
+@keyframes standalone-install-arrow-cue {
+  0%, 100% { opacity: 0.72; transform: translateY(0); }
+  50% { opacity: 1; transform: translateY(-2px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .standalone-install__arrow { animation: none; }
+}
+
+.standalone-install__actions { margin-top: 18px; justify-content: center; }
+
+/* Corner dismissal, replacing a worded "Maybe later" that competed with the
+   one action worth taking. Larger touch target than the glyph it draws. */
+.standalone-install .standalone-install__close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  min-height: 34px;
+  padding: 0;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted, #aaa);
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.standalone-install .standalone-install__close:hover {
+  color: var(--text, #fff);
+  background: var(--hover, rgba(255, 255, 255, 0.06));
+}
 .standalone-install .standalone-install__primary {
   border-color: var(--accent, #a78bfa);
   background: var(--accent, #a78bfa);
@@ -238,7 +257,3 @@
 
 .standalone-install__success + h1 { text-align: center; }
 .standalone-install__success ~ .standalone-install__primary { display: block; margin: 18px auto 0; }
-
-@media (prefers-reduced-motion: reduce) {
-  .standalone-app__mobius-link { transition: none; }
-}

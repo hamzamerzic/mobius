@@ -26,23 +26,43 @@
   transition-timing-function: cubic-bezier(0, 0, 0.2, 1);
 }
 
-/* `open` becomes false when the close transition STARTS, not when the panel
-   has left the viewport. Keep the fading scrim as the touch/pointer owner until
-   Drawer.jsx observes the panel's transform transitionend (or its fallback),
-   so the app behind never becomes interactive beneath visible drawer pixels. */
-.drawer-overlay--blocking {
+/* The full scrim owns outside taps only while the drawer is open. Once closing
+   starts, the geometry-matched shield below follows the remaining panel pixels
+   instead of leaving an invisible full-screen dead zone over the workspace. */
+.drawer-overlay--visible.drawer-overlay--blocking {
   pointer-events: auto;
 }
 
-/* ── Panel ─────────────────────────────────────────── */
-
+.drawer-close-shield,
 .drawer {
   position: fixed;
   top: calc(58px + env(safe-area-inset-top));
   left: 0;
   bottom: 0;
-  z-index: 95;
   width: min(360px, 90vw);
+}
+
+.drawer-close-shield {
+  z-index: 94;
+  pointer-events: none;
+  touch-action: none;
+  transform: translateX(-100%);
+}
+
+.drawer-close-shield--active {
+  pointer-events: auto;
+  animation: drawer-close-shield 100ms cubic-bezier(0.3, 0.6, 0.6, 1) both;
+}
+
+@keyframes drawer-close-shield {
+  from { transform: translateX(var(--drawer-close-start-x, 0px)); }
+  to { transform: translateX(-100%); }
+}
+
+/* ── Panel ─────────────────────────────────────────── */
+
+.drawer {
+  z-index: 95;
   background: var(--bg);
   border-right: 1px solid var(--border-light);
   display: flex;
@@ -177,8 +197,6 @@
   color: var(--text);
   font-weight: 500;
   margin: 0;
-  padding: 11px 12px;
-  min-height: 44px;
 }
 
 .drawer__item--new:hover {
@@ -257,6 +275,127 @@
   font-weight: 500;
 }
 
+.drawer__now-playing {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: 2px 0 8px;
+  padding: 5px 6px;
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.drawer__now-playing-main,
+.drawer__now-playing-control {
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.drawer__now-playing-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 3px 5px;
+  text-align: left;
+}
+
+.drawer__now-playing-icon {
+  position: relative;
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--app-color, var(--accent));
+  color: var(--accent-fg, #fff);
+  font-size: 9px;
+  font-weight: 750;
+}
+
+.drawer__now-playing-icon img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.drawer__now-playing-icon.is-image {
+  overflow: visible;
+  border-radius: 0;
+  background: transparent;
+}
+
+.drawer__now-playing-icon.is-image > span { visibility: hidden; }
+
+.drawer__now-playing-copy {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.drawer__now-playing-copy strong,
+.drawer__now-playing-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawer__now-playing-copy strong {
+  font-size: 13px;
+  line-height: 17px;
+  font-weight: 600;
+}
+
+.drawer__now-playing-copy small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.drawer__now-playing-control {
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  padding: 8px;
+  border-radius: 999px;
+}
+
+.drawer__now-playing-control svg {
+  width: 17px;
+  height: 17px;
+}
+
+.drawer__now-playing-main:focus-visible,
+.drawer__now-playing-control:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.drawer__now-playing-control:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .drawer__now-playing-main:hover,
+  .drawer__now-playing-control:not(:disabled):hover {
+    background: var(--surface-raised, var(--border-light));
+  }
+}
+
 .drawer__item-count {
   flex: 0 0 auto;
   min-width: 20px;
@@ -280,16 +419,16 @@
 
 .drawer__item {
   width: 100%;
-  min-height: 44px;
+  min-height: 40px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 8px 12px;
   background: none;
   border: none;
   border-radius: 10px;
   color: var(--text);
-  font-size: 14px;
+  font-size: 15px;
   font-family: var(--font);
   font-weight: 400;
   text-align: left;
@@ -328,14 +467,6 @@
    handoffs. The selected row already has its own steady accent wash. */
 .drawer__item:not(.drawer__item--active):active {
   background-color: var(--surface);
-}
-
-/* The hold threshold has resolved, but the owner has not moved or released yet.
-   A quiet lift is the button-free affordance: release opens actions; vertical
-   movement of a pin becomes reorder. */
-.drawer__item[data-hold-ready="true"] {
-  background: var(--surface);
-  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.20);
 }
 
 /* The lifted row while it is being dragged to a new spot. It reads as "picked
@@ -415,8 +546,7 @@
 .drawer__row {
   position: relative;
   display: flex;
-  flex: 0 0 44px;
-  height: 44px;
+  height: 40px;
   align-items: center;
   gap: 0;
 }
@@ -424,15 +554,19 @@
 .drawer__row .drawer__item {
   flex: 1;
   min-width: 0;
-  /* iOS can cancel the pointer and show its callout before our release path.
-     This property affects touch callouts only; desktop context menus remain. */
-  -webkit-touch-callout: none;
 }
 
-/* Drawer rows scroll vertically before a hold. Once a hold resolves, the local
-   row gesture owns menu/reorder and the shared drawer swipe recognizer yields. */
+/* Ordinary rows retain native momentum scrolling. A pinned row must reserve its
+   one-finger pointer stream from pointerdown: touch-action cannot be changed
+   after a gesture starts, so allowing pan-y there lets the browser cancel the
+   pointer exactly when a held pin begins moving vertically. The shared row
+   controller mirrors pre-hold scrolling for pins; pinch zoom remains native. */
 .drawer__row .drawer__item[data-drag-key] {
   touch-action: pan-y pinch-zoom;
+}
+
+.drawer__row .drawer__item[data-pinned-key] {
+  touch-action: pinch-zoom;
 }
 
 /* App cards and drawer rows share one action-menu placement path. */
@@ -441,6 +575,7 @@
   inset: 0;
   z-index: 1000;
   background: transparent;
+  pointer-events: none;
 }
 
 .drawer__item-action-menu {
@@ -459,6 +594,7 @@
   color: var(--text);
   box-shadow: 0 14px 38px rgba(0, 0, 0, 0.38);
   scrollbar-width: none;
+  pointer-events: auto;
 }
 
 .drawer__item-action-menu[data-positioned="true"] {
@@ -654,9 +790,9 @@
 }
 
 /* Desktop's collapsed rail and expanded drawer are two presentations of the
-   same three actions. Match their 20px glyphs and exact centers; the slightly
-   larger 15px labels preserve the rail's stronger visual weight when expanded.
-   Mobile has no collapsed rail, so it keeps its existing compact drawer scale. */
+   same three actions. Match their 20px glyphs and exact centers. Row labels use
+   the same readable 15px scale at every width; section labels retain their own
+   desktop treatment below. */
 @media (min-width: 1024px) {
   /* 58px drawer header + 8px body inset matches the collapsed rail's 66px
      action start; the shared 40px row height keeps Apps aligned too. */
@@ -668,7 +804,6 @@
   .drawer__item--new {
     min-height: 40px;
     padding: 0 11px;
-    font-size: 15px;
   }
 
   .drawer__label {
@@ -737,6 +872,7 @@
 @media (prefers-reduced-motion: reduce) {
   .drawer,
   .drawer-overlay { transition: none; }
+  .drawer-close-shield { animation: none; }
   .drawer__item-action-menu { animation: none; }
   .drawer__item { transition: none; }
 }

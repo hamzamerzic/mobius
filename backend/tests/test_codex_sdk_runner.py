@@ -1,12 +1,13 @@
 import asyncio
 import signal
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from types import SimpleNamespace
 
 import pytest
 
-from app import codex_sdk_runner, models
+from app import codex_sdk_runner, connectors as connector_core, models
 from app.agent_lifecycle import normalize_chat_event
 from app.database import SessionLocal
 from app.runner_registry import RunnerKind, registry
@@ -2034,8 +2035,8 @@ def _run_turn_whose_stream_dies(
   """Runs one turn whose stream raises `exc`, optionally mid-teardown.
 
   `on_register` fires against the handle the runner has just registered —
-  the same window in which the real Stop / stall watchdog reaches a live
-  turn — so a test can mark the teardown as ours before the stream dies.
+  the same window in which a real Stop reaches a live turn — so a test can
+  mark the teardown as ours before the stream dies.
   `notifications` are delivered before the death, so a test can give the
   turn something to have spent; `sdk_patch` supplies the payload classes
   those notifications need to be recognized as.
@@ -2095,12 +2096,8 @@ def test_run_codex_sdk_turn_reports_self_requested_kill_as_interrupted(
 ):
   """A stop we asked for must not read as a provider failure.
 
-  Stop and the stall watchdog both interrupt first and then, on timeout,
-  SIGTERM the turn's private process group — so the transport dies
-  mid-stream instead of delivering turn/completed. Reporting the resulting
-  "closed stdout" as an error is wrong twice over: it blames Codex for our
-  own teardown, and the error block overwrites the stop/stall note in the
-  transcript and strips its one-tap Resume.
+  A forced stop closes the transport before turn/completed. Reporting the
+  resulting "closed stdout" as an error would blame Codex for our teardown.
   """
   result, bc = _run_turn_whose_stream_dies(
     monkeypatch,
@@ -2698,7 +2695,7 @@ def test_chatgpt_model_rejection_explains_connection_and_recovery():
   message = codex_sdk_runner._codex_user_error(error)
 
   assert message == (
-    "GPT-5.6 Sol isn’t available for this ChatGPT account. Codex is "
+    "gpt-5.6-sol isn’t available for this ChatGPT account. Codex is "
     "connected, but this account’s current plan or model rollout does not "
     "include it. Choose another Codex model from this chat’s Model menu, "
     "then try again."
@@ -3220,6 +3217,54 @@ def test_codex_process_group_id_refuses_shared_uvicorn_group(monkeypatch):
   monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 4000)
 
   assert codex_sdk_runner._codex_process_group_id(codex) is None
+
+
+def test_codex_call_executor_progresses_with_default_pool_saturated():
+  async def scenario():
+    loop = asyncio.get_running_loop()
+    release = threading.Event()
+    occupied = threading.Event()
+    saturated = ThreadPoolExecutor(max_workers=1)
+    replacement = ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(saturated)
+
+    def occupy_default_worker():
+      occupied.set()
+      release.wait()
+
+    blocker = loop.run_in_executor(None, occupy_default_worker)
+    while not occupied.is_set():
+      await asyncio.sleep(0)
+
+    client = SimpleNamespace(_call_sync=lambda *_args, **_kwargs: None)
+    codex = SimpleNamespace(_client=client)
+    owner = codex_sdk_runner._install_codex_call_executor(
+      codex, "chat-owned-executor",
+    )
+    try:
+      assert owner is not None
+      worker_name = await asyncio.wait_for(
+        client._call_sync(lambda: threading.current_thread().name),
+        timeout=1,
+      )
+      assert worker_name.startswith("mobius-codex-chat-own")
+    finally:
+      owner.close()
+      release.set()
+      await blocker
+      loop.set_default_executor(replacement)
+      saturated.shutdown(wait=True)
+
+  asyncio.run(scenario())
+
+
+def test_process_group_capture_poll_backs_off_after_startup_window():
+  spin = codex_sdk_runner._PROCESS_GROUP_CAPTURE_SPIN_SECONDS
+  assert codex_sdk_runner._process_group_capture_delay(spin / 2) == 0
+  assert codex_sdk_runner._process_group_capture_delay(spin) == (
+    codex_sdk_runner._PROCESS_GROUP_CAPTURE_POLL_SECONDS
+  )
+  assert codex_sdk_runner._PROCESS_GROUP_CAPTURE_POLL_SECONDS > 0
 
 
 def test_terminate_codex_process_group_has_sigkill_backstop(monkeypatch):
@@ -3749,10 +3794,22 @@ def test_run_codex_sdk_turn_controls_prompt_layers(monkeypatch, session_id):
   ]
   thread = _FakeThread("resumed-thread", _FakeTurnHandle(notifications))
   captured: dict = {}
+  connector_plan = connector_core.ConnectorTurnPlan(
+    codex_config={
+      "mcp_servers": {
+        "search": {
+          "url": "https://mcp.example/mcp",
+          "bearer_token_env_var": "MOBIUS_CONNECTOR_3_SEARCH",
+        },
+      },
+    },
+    codex_env={"MOBIUS_CONNECTOR_3_SEARCH": "private-key"},
+  )
 
   class FakeAsyncCodex:
     def __init__(self, config=None):
       self.config = config
+      captured["process_config"] = config
 
     async def __aenter__(self):
       return self
@@ -3784,6 +3841,7 @@ def test_run_codex_sdk_turn_controls_prompt_layers(monkeypatch, session_id):
     pending_questions={},
     db=None,
     system_prompt="FROZEN CONSTITUTION SNAPSHOT",
+    connector_plan=connector_plan,
   ))
 
   assert captured["session_id"] == session_id
@@ -3792,6 +3850,10 @@ def test_run_codex_sdk_turn_controls_prompt_layers(monkeypatch, session_id):
   )
   assert captured["thread_options"]["developer_instructions"] == ""
   assert captured["thread_options"]["personality"] == "none"
+  assert captured["thread_options"]["config"] == connector_plan.codex_config
+  process_env = captured["process_config"].kwargs["env"]
+  assert process_env["MOBIUS_CONNECTOR_3_SEARCH"] == "private-key"
+  assert "private-key" not in repr(captured["thread_options"]["config"])
   assert result["session_id"] == "resumed-thread"
   assert result["error"] is None
 # --- Structured rate-limit reset extraction --------------------------------

@@ -1,24 +1,25 @@
 """Durable continuation (design §2.4): parse/drain → park → sweep → resume.
 
-Locks in the six contracts of the limit-park feature:
+Locks in the contracts of the limit-park feature:
 
   (a) Reset-time parsing is lenient: structured value → text parse →
       30-minute fallback, clamped, and it NEVER raises.
   (b) A limit kill PARKS the run row (parked_until + park_reason) and
       clears the per-chat marker; ownership is identity-keyed like
       FinishRun (a superseded run never parks onto a fresh marker).
-  (c) Latest-run-wins: the park probe + stall exemption honor a park only
-      while the chat's newest run row is the parked one, and a fresh
-      StartTurn closes a stale park (no orphaned notify/auto-resume).
+  (c) Latest-run-wins: the park probe honors a park only while the chat's
+      newest run row is the parked one, and a fresh StartTurn closes a stale
+      park (no orphaned notify/auto-resume).
   (d) The reset sweep makes at most one notification attempt per park, keeps
       an opted park
       retryable until its continuation starts, skips future parks, stands down
       while draining, and resolves deleted chats silently.
   (e) Auto-resume is policy-controlled (off = notify only). Provider-limit
       retries ignore unrelated live work and launch with a short stagger,
-      while an accepted planned restart resumes the exact previously-live set
-      together. Each resumed turn combines its preserved queue + a "continue"
-      into one continuation.
+      while an accepted planned restart relaunches the exact previously-live
+      set in prompt batches that do not wait for earlier turns to finish. Each
+      resumed turn combines its preserved queue + a "continue" into one
+      continuation.
   (f) The parks are observable: /api/debug/status lists parked runs.
   (g) A planned restart reuses the same exact-run state with a due-now time;
       crashes, unanswered questions, and app-owned work stay manual.
@@ -44,6 +45,7 @@ from app.chat_writer import (
 from app.database import SessionLocal
 from app.chat_transcript import materialized_messages
 from app.runner_registry import RunnerKind, registry
+from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 NOW = datetime(2026, 7, 10, 22, 0, 0)
@@ -506,24 +508,10 @@ def test_parked_probe_latest_run_wins():
   try:
     # Parked row is the latest → the park is honored.
     assert chat_mod._parked_until_for_chat(db, cid) == until
-    # A NEWER running row (a fresh turn) hides the stale park immediately,
-    # so the stall watchdog can never be wrongly exempted by it.
+    # A NEWER running row (a fresh turn) hides the stale park immediately.
     _seed_run(cid, "rt-latest-new", status="running", started_offset=60)
     db.expire_all()
     assert chat_mod._parked_until_for_chat(db, cid) is None
-  finally:
-    db.close()
-
-
-def test_stall_exemption_reports_parked():
-  cid = "park-exempt"
-  _seed_chat(cid)
-  future = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
-  _seed_run(cid, "rt-exempt", status="parked", parked_until=future)
-
-  db = SessionLocal()
-  try:
-    assert chat_mod._stall_exemption(db, cid) == "parked"
   finally:
     db.close()
 
@@ -581,12 +569,16 @@ def _due_park(
             initiated_by_app_id=initiated_by_app_id)
 
 
-def _run_sweep():
+def _run_sweep_result():
   db = SessionLocal()
   try:
     return asyncio.run(chat_mod.sweep_reset_parks(db))
   finally:
     db.close()
+
+
+def _run_sweep():
+  return list(_run_sweep_result().resolved)
 
 
 def test_sweep_notifies_once_and_resolves(owner_token, monkeypatch):
@@ -986,14 +978,14 @@ def test_startup_sweep_uses_one_captured_restart_authorization(
 
   db = SessionLocal()
   try:
-    resolved = asyncio.run(chat_mod.sweep_reset_parks(
+    result = asyncio.run(chat_mod.sweep_reset_parks(
       db, restart_authorization=nonce,
     ))
   finally:
     db.close()
 
   try:
-    assert resolved == [cid]
+    assert list(result.resolved) == [cid]
     assert len(scheduled) == 1
   finally:
     chat_mod.discard_starting(cid)
@@ -1432,10 +1424,10 @@ def test_sweep_starts_only_one_of_two_opted_chats(owner_token, monkeypatch):
       chat_mod.discard_starting(cid)
 
 
-def test_sweep_restarts_every_opted_chat_in_the_accepted_batch(
+def test_sweep_paces_restart_batch_without_waiting_for_live_turns(
   owner_token, monkeypatch,
 ):
-  """A restart restores the exact set that was already concurrent."""
+  """A durable remainder advances even while prior recoveries stay live."""
   del owner_token
   nonce = "restart-nonce-batch"
   monkeypatch.setattr(
@@ -1462,11 +1454,16 @@ def test_sweep_restarts_every_opted_chat_in_the_accepted_batch(
     )
 
   try:
-    assert set(_run_sweep()) == set(chat_ids)
+    first = _run_sweep_result()
+    assert len(first.resolved) == chat_mod.RESTART_AUTO_RESUME_BATCH_SIZE
+    assert first.restart_deferred is True
+
+    # Do not settle/discard either launched turn. The next pass is paced by
+    # launches, not by a global live-chat ceiling.
+    second = _run_sweep_result()
+    assert len(second.resolved) == 1
+    assert second.restart_deferred is False
     assert {item["chat_id"] for item in scheduled} == set(chat_ids)
-    assert [kind for kind, _ in events[:len(chat_ids)]] == [
-      "schedule", "schedule", "schedule",
-    ]
     assert {chat_id for kind, chat_id in events if kind == "notify"} == set(
       chat_ids
     )
@@ -1873,7 +1870,7 @@ def _limit_complete_turn(cid, *, parked_until, monkeypatch=None,
   _seed_chat(cid)
   _seed_run(cid, f"rt-{cid}")
   bc = create_broadcast(cid)
-  sink = chat_mod._ChatEventSink(bc, cid, run_token=f"rt-{cid}")
+  sink = chat_mod._ChatEventSink(bc, cid, run_token=f"rt-{cid}", recall_binding=EMPTY_RECALL_BINDING)
   sink.publish({"type": "text", "content": "partial answer"})
   sink.publish(chat_mod._limit_error_event(
     "hit your weekly limit · resets 1:40am", parked_until, "usage_limit",

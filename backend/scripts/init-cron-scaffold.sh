@@ -151,9 +151,9 @@ JOB_RUNNER_ARG="$(printf '%q' "$JOB_RUNNER")"
 if [ -n "$SCHEDULE_TZ" ]; then
   SCHEDULE_TZ_ARG="$(printf '%q' "$SCHEDULE_TZ")"
   SCHEDULE_SOURCE_ARG="$(printf '%q' "$SCHEDULE_SOURCE")"
-  CRON_CMD="${JOB_API_BASE_ASSIGNMENT} python3 ${JOB_RUNNER_ARG} --wall-clock ${SCHEDULE_TZ_ARG} ${SCHEDULE_SOURCE_ARG} ${APP_ID} ${JOB_PATH}"
+  CRON_CMD="${JOB_API_BASE_ASSIGNMENT} python3 ${JOB_RUNNER_ARG} --scheduled --wall-clock ${SCHEDULE_TZ_ARG} ${SCHEDULE_SOURCE_ARG} ${APP_ID} ${JOB_PATH}"
 elif [ -n "$APP_ID" ]; then
-  CRON_CMD="${JOB_API_BASE_ASSIGNMENT} python3 ${JOB_RUNNER_ARG} ${APP_ID} ${JOB_PATH}"
+  CRON_CMD="${JOB_API_BASE_ASSIGNMENT} python3 ${JOB_RUNNER_ARG} --scheduled ${APP_ID} ${JOB_PATH}"
 else
   CRON_CMD="${JOB_PATH}"
 fi

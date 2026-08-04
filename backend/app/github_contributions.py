@@ -28,16 +28,17 @@ from app import (
   github_auth,
   github_contribution_git as _git_ops,
   models,
-  release_channel,
 )
 from app.config import get_settings
-from app.contribution_errors import ContributionSubmitError
+from app.contribution_errors import ContributionSubmitError, push_rejected
+from app.terminal_output import readable_output
 from app.github_contribution_contract import (
   BRANCH_NAME as _BRANCH_NAME,
   COAUTHOR_TRAILER as _COAUTHOR_TRAILER,
   GITHUB_LOGIN as _GITHUB_LOGIN,
   GITHUB_REPO as _GITHUB_REPO,
   GIT_SHA as _GIT_SHA,
+  PRE_PR_CHECK_ACTIVE_STATES as _PRE_PR_CHECK_ACTIVE_STATES,
   SUBMIT_TIMEOUT_SECONDS as _SUBMIT_TIMEOUT,
 )
 from app.contribution_records import (
@@ -52,7 +53,6 @@ from app.deps import Principal
 _CONTRIBUTION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _PUSH_RETRIES = 3
 _PUSH_RETRY_BASE_SECONDS = 0.5
-_PLATFORM_REPO = "mobius-os/mobius"
 
 def _require_github_access_principal(
   principal: Principal, db: Session
@@ -139,38 +139,6 @@ def _safe_repo_path(raw: object) -> Path:
     "Ask the agent to prepare it again from /data/contrib, /data/apps, or "
     "/data/platform; nothing was sent to GitHub."
   )
-
-
-def _record_targets_platform(record: dict) -> bool:
-  """Recognize platform records even when review uses a staging worktree."""
-  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
-  target = str(plan.get("repo") or record.get("repo") or "").casefold()
-  if target == _PLATFORM_REPO:
-    return True
-  platform = Path(get_settings().data_dir).resolve() / "platform"
-  for key in ("source_repo_path", "repo_path"):
-    raw = plan.get(key)
-    if not isinstance(raw, str) or not raw:
-      continue
-    try:
-      candidate = Path(raw).resolve()
-      if candidate == platform or candidate.is_relative_to(platform):
-        return True
-    except (OSError, RuntimeError, ValueError):
-      continue
-  return False
-
-
-def _require_platform_contribution_allowed(record: dict) -> None:
-  """Block before a private record is claimed or any GitHub write can start."""
-  if (
-    release_channel.platform_contributions_disabled()
-    and _record_targets_platform(record)
-  ):
-    raise HTTPException(
-      status_code=409,
-      detail=release_channel.CONTRIBUTION_DISABLED_REASON,
-    )
 
 
 def _safe_equivalence_source_path(raw: object) -> Path:
@@ -365,75 +333,113 @@ def _cleanup_terminal_staging_checkout(record: dict) -> bool:
   }:
     return False
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
-  repo = _safe_repo_path(plan.get("repo_path"))
+  raw_repo = plan.get("repo_path")
+  repo = _safe_repo_path(raw_repo)
+  recorded_repo = Path(raw_repo)
+  if not recorded_repo.is_absolute() or recorded_repo != repo:
+    return False
   data_dir = Path(get_settings().data_dir).resolve()
   roots = (data_dir / "contrib", data_dir / "contributions")
   if not any(repo.is_relative_to(root) for root in roots):
     return False
+  if not repo.exists():
+    return True
   marker = repo / ".git"
   if not marker.exists() or marker.is_symlink():
     return False
 
-  # A linked worktree has a .git *file*. Deleting its directory directly
-  # strands the registration and branch lock in the source repository. Ask Git
-  # to remove it instead, using the common directory as the stable owner even
-  # while the checkout itself disappears.
+  # Linked worktrees and separate-git-dir checkouts both use a .git file.
   if marker.is_file():
+    try:
+      marker_value = marker.read_text().strip()
+    except OSError:
+      return False
+    if not marker_value.startswith("gitdir:"):
+      return False
+    raw_git_dir = marker_value.removeprefix("gitdir:").strip()
+    if not raw_git_dir:
+      return False
+    marker_git_dir = Path(raw_git_dir)
+    if not marker_git_dir.is_absolute():
+      marker_git_dir = marker.parent / marker_git_dir
+    try:
+      marker_git_dir = marker_git_dir.resolve()
+    except (OSError, RuntimeError):
+      return False
+
+    separate_git_dir = (
+      marker_git_dir.name == "git" and marker_git_dir.parent == repo.parent
+    )
+    if separate_git_dir:
+      # Delete the Git directory first. If removing the checkout then fails,
+      # the next call sees its missing sibling and can finish idempotently.
+      if marker_git_dir.exists():
+        shutil.rmtree(marker_git_dir)
+      shutil.rmtree(repo)
+      return True
+
+    # Git can recycle a pruned worktree admin slot for a newer checkout. Every
+    # linked admin directory must still point back to this exact checkout.
+    back_reference = marker_git_dir / "gitdir"
+    owns_checkout = False
+    if back_reference.is_file() and not back_reference.is_symlink():
+      try:
+        registered_marker = Path(back_reference.read_text().strip())
+        if not registered_marker.is_absolute():
+          registered_marker = back_reference.parent / registered_marker
+        owns_checkout = registered_marker.resolve() == marker.resolve()
+      except (OSError, RuntimeError):
+        owns_checkout = False
+    if not owns_checkout:
+      shutil.rmtree(repo)
+      return True
+
+    common_pointer = marker_git_dir / "commondir"
+    if not common_pointer.is_file() or common_pointer.is_symlink():
+      return False
+    try:
+      raw_common_dir = common_pointer.read_text().strip()
+      if not raw_common_dir:
+        return False
+      common_dir = Path(raw_common_dir)
+      if not common_dir.is_absolute():
+        common_dir = common_pointer.parent / common_dir
+      common_dir = common_dir.resolve()
+    except (OSError, RuntimeError):
+      return False
+    common_roots = (
+      data_dir / "platform",
+      data_dir / "apps",
+      data_dir / "contrib",
+      data_dir / "contributions",
+    )
+    if not any(common_dir.is_relative_to(root) for root in common_roots):
+      return False
+
     env = dict(os.environ)
     for name in (
       "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
       "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE",
     ):
       env.pop(name, None)
-    probe = subprocess.run(
+    removed = subprocess.run(
       [
-        "git", "-C", str(repo), "rev-parse", "--path-format=absolute",
-        "--git-dir", "--git-common-dir",
+        "git", f"--git-dir={common_dir}",
+        "worktree", "remove", "--force", str(repo),
       ],
-      cwd=str(repo.parent),
+      cwd=str(data_dir),
       capture_output=True,
       text=True,
       check=False,
       env=env,
     )
-    paths = [Path(line).resolve() for line in probe.stdout.splitlines() if line]
-    if probe.returncode != 0 or len(paths) != 2:
-      return False
-    git_dir, common_dir = paths
-    if not common_dir.is_relative_to(data_dir):
-      return False
-
-    if git_dir != common_dir:
-      removed = subprocess.run(
-        [
-          "git", f"--git-dir={common_dir}",
-          "worktree", "remove", "--force", str(repo),
-        ],
-        cwd=str(data_dir),
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
+    if removed.returncode != 0:
+      raise ContributionSubmitError(
+        "Could not clear the old review checkout for this contribution.",
+        detail=readable_output(
+          removed.stderr or removed.stdout or "git worktree remove failed",
+        ),
       )
-      if removed.returncode != 0:
-        detail = (removed.stderr or removed.stdout or "git worktree remove failed").strip()
-        raise ContributionSubmitError(detail[:600])
-      subprocess.run(
-        ["git", f"--git-dir={common_dir}", "worktree", "prune"],
-        cwd=str(data_dir),
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-      )
-      return True
-
-    # Manifest-installed apps use `--separate-git-dir=<record-root>/git`.
-    # That is a main checkout rather than a linked worktree, so remove both
-    # halves only when the git directory is the documented sibling.
-    shutil.rmtree(repo)
-    if common_dir.name == "git" and common_dir.parent == repo.parent:
-      shutil.rmtree(common_dir, ignore_errors=True)
     return True
 
   # Ordinary standalone clones keep a real .git directory inside the checkout.
@@ -452,6 +458,18 @@ def _claim_record(
     raise HTTPException(
       status_code=409,
       detail="This contribution is no longer waiting for approval.",
+    )
+  pre_pr_checks = record.get("pre_pr_checks")
+  if (
+    isinstance(pre_pr_checks, dict)
+    and pre_pr_checks.get("state") in _PRE_PR_CHECK_ACTIVE_STATES
+  ):
+    raise HTTPException(
+      status_code=409,
+      detail=(
+        "GitHub checks are still starting or running for this review. Wait "
+        "for them to finish before opening the pull request."
+      ),
     )
   plan = record.get("plan")
   if not isinstance(plan, dict):
@@ -472,7 +490,6 @@ def _claim_record(
         "chain together."
       ),
     )
-  _require_platform_contribution_allowed(record)
   now = _now_iso()
   claimed = {
     **record,
@@ -628,8 +645,6 @@ def _claim_stack_records(
     validated = _validate_stack_records([row["record"] for row in rows])
   except ContributionSubmitError as exc:
     raise HTTPException(status_code=409, detail=exc.message) from exc
-  for item in validated:
-    _require_platform_contribution_allowed(item["record"])
   by_id = {row["record"]["id"]: row for row in rows}
   ordered = []
   now = _now_iso()
@@ -683,8 +698,6 @@ def _claim_stack_landing(
     validated = _validate_stack_records([row["record"] for row in rows])
   except ContributionSubmitError as exc:
     raise HTTPException(status_code=409, detail=exc.message) from exc
-  for item in validated:
-    _require_platform_contribution_allowed(item["record"])
   statuses = {item["record"].get("status") for item in validated}
   by_id = {row["record"]["id"]: row for row in rows}
   ordered = [
@@ -940,6 +953,7 @@ def _mark_submit_failure(
   record_path: Path,
   message: str,
   record_patch: dict | None = None,
+  detail: str = "",
 ) -> dict | None:
   try:
     record = _read_record(record_path)
@@ -954,6 +968,12 @@ def _mark_submit_failure(
     "last_submit_error": message,
     "updated_at": _now_iso(),
   }
+  # The diagnostic belongs to exactly one attempt. Carrying a previous
+  # transcript next to a new message would explain the wrong failure.
+  if detail:
+    next_record["last_submit_error_detail"] = detail
+  else:
+    next_record.pop("last_submit_error_detail", None)
   _write_record(record_path, next_record)
   return next_record
 
@@ -978,6 +998,7 @@ def _mark_submit_success(
   if number is not None:
     next_record["number"] = number
   next_record.pop("last_submit_error", None)
+  next_record.pop("last_submit_error_detail", None)
   _write_record(record_path, next_record)
   return next_record
 
@@ -988,17 +1009,22 @@ def _mark_stack_submit_failure(
   *,
   failed_id: str | None = None,
   record_patch: dict | None = None,
+  detail: str = "",
 ) -> list[dict]:
   snapshots = []
   for row in rows:
     current = _read_record(row["record_path"])
     if current.get("status") == "submitting":
-      patch = record_patch if current.get("id") == failed_id else None
+      is_failed = current.get("id") == failed_id
+      patch = record_patch if is_failed else None
       current = _mark_submit_failure(
         app_id=0,
         record_path=row["record_path"],
         message=message,
         record_patch=patch,
+        # Only the layer that actually failed owns the transcript; the
+        # siblings were stopped, not rejected.
+        detail=detail if is_failed else "",
       ) or current
     snapshots.append(current)
   return snapshots
@@ -1264,9 +1290,10 @@ def _existing_branch_pr(
   except (subprocess.TimeoutExpired, OSError) as exc:
     raise ContributionSubmitError(could_not_verify) from exc
   if proc.returncode != 0:
-    detail = (proc.stderr or proc.stdout or "").strip()
-    suffix = f" ({detail[:200]})" if detail else ""
-    raise ContributionSubmitError(could_not_verify + suffix)
+    raise ContributionSubmitError(
+      could_not_verify,
+      detail=readable_output(proc.stderr or proc.stdout or ""),
+    )
   try:
     rows = json.loads(proc.stdout or "[]")
   except ValueError:
@@ -1699,10 +1726,7 @@ def _push_reviewed_topic(
   if not last_push_error:
     return push_source, record_patch
   if not _is_workflow_scope_push_error(last_push_error):
-    raise ContributionSubmitError(
-      last_push_error[:600] or "Git push failed.",
-      record_patch=record_patch,
-    )
+    raise push_rejected(last_push_error, record_patch=record_patch)
 
   # Most topic branches can be pushed without consulting the fork's default
   # branch. GitHub only makes that state relevant when a public_repo-only
@@ -1765,10 +1789,7 @@ def _push_reviewed_topic(
       raise _git_ops._merge_error_patch(sync_exc, record_patch) from sync_exc
   last_push_error = _push_topic_branch(repo, branch, push_source)
   if last_push_error:
-    raise ContributionSubmitError(
-      last_push_error[:600] or "Git push failed.",
-      record_patch=record_patch,
-    )
+    raise push_rejected(last_push_error, record_patch=record_patch)
   return push_source, record_patch
 
 
@@ -1901,10 +1922,7 @@ def _submit_prepared_pr(
         repo, push_remote, branch, push_source,
       )
       if last_push_error:
-        raise ContributionSubmitError(
-          last_push_error[:600] or "Git push failed.",
-          record_patch=record_patch,
-        )
+        raise push_rejected(last_push_error, record_patch=record_patch)
     else:
       try:
         fork_slug = _ensure_owner_fork_remote(repo, upstream_repo, login)

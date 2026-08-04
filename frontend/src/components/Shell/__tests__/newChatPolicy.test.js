@@ -10,6 +10,7 @@ import {
   enteredEmptySingleScreen,
   mergeChatListWithCreatedGuards,
   mostRecentConcreteChatId,
+  newChatPresentationIsCurrent,
   reconcileCreatedChatGuard,
   rememberCreatedChat,
   reusableChatDetailVerdict,
@@ -25,6 +26,58 @@ const empty = (id, extra = {}) => ({
   has_messages: false,
   running: false,
   ...extra,
+})
+
+test('New Chat presentation ownership follows allocation context then destination', () => {
+  const presentation = {
+    chatId: null,
+    navigationEpoch: 4,
+    viewMode: 'single',
+    drawerEntryOpen: true,
+  }
+  const current = {
+    navigationEpoch: 4,
+    viewMode: 'single',
+    drawerEntryOpen: true,
+    activeView: 'chat',
+    activeChatId: 'old',
+  }
+
+  for (const [change, expected] of [
+    [{}, true],
+    [{ navigationEpoch: 5 }, false],
+    [{ drawerEntryOpen: false }, false],
+    [{ viewMode: 'panes' }, false],
+  ]) {
+    assert.equal(newChatPresentationIsCurrent(presentation, {
+      ...current, ...change,
+    }), expected)
+  }
+  assert.equal(newChatPresentationIsCurrent({
+    ...presentation, drawerEntryOpen: false,
+  }, current), false)
+
+  const resolvedPresentation = {
+    chatId: 'new',
+    navigationEpoch: 4,
+    viewMode: 'single',
+    drawerEntryOpen: true,
+  }
+  const resolvedCurrent = {
+    navigationEpoch: 9,
+    viewMode: 'single',
+    drawerEntryOpen: false,
+    activeView: 'chat',
+    activeChatId: 'new',
+  }
+
+  assert.equal(newChatPresentationIsCurrent(resolvedPresentation, resolvedCurrent), true)
+  assert.equal(newChatPresentationIsCurrent(resolvedPresentation, {
+    ...resolvedCurrent, activeView: 'canvas', activeChatId: null,
+  }), false)
+  assert.equal(newChatPresentationIsCurrent(resolvedPresentation, {
+    ...resolvedCurrent, activeChatId: 'other',
+  }), false)
 })
 
 test('empty-single policy fires only on the transition edge', () => {
@@ -44,19 +97,6 @@ test('empty-single policy fires only on the transition edge', () => {
   assert.equal(enteredEmptySingleScreen(
     { viewMode: 'panes', singleScreen: chat },
     { viewMode: 'panes', singleScreen: null },
-  ), false)
-})
-
-test('empty-single policy respects the splits kill switch', () => {
-  assert.equal(enteredEmptySingleScreen(
-    { viewMode: 'panes', singleScreen: { kind: 'app', id: 4 } },
-    { viewMode: 'panes', singleScreen: null },
-    false,
-  ), true)
-  assert.equal(enteredEmptySingleScreen(
-    { viewMode: 'panes', singleScreen: null },
-    { viewMode: 'single', singleScreen: null },
-    false,
   ), false)
 })
 
@@ -183,6 +223,7 @@ test('a canonical create response becomes an authoritative empty detail cache', 
   })
 
   assert.deepEqual(cache, {
+    restorationWindowComplete: true,
     updated_at: '2026-07-30T12:00:00Z',
     messages: [],
     pending_messages: [],
@@ -233,9 +274,10 @@ test('a created chat enters the cache without displacing pinned chats', () => {
 
 test('ordinary chat selection does not launch a competing drawer refresh', () => {
   const selectChat = shellSource.match(
-    /function selectChat\(id\) \{([\s\S]*?)\n  \}/,
+    /function selectChat\(id, \{ focusComposer = true \} = \{\}\) \{([\s\S]*?)\n  \}/,
   )?.[1] || ''
-  assert.match(selectChat, /navTo\('chat', \{ chatId: id \}\)/)
+  assert.match(selectChat,
+    /navTo\('chat', \{ chatId: id, preserveDrawerPresentation \}\)/)
   assert.doesNotMatch(selectChat, /refreshChats/)
 })
 

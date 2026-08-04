@@ -238,8 +238,8 @@
   font-family: inherit;
   line-height: 1.45;
   outline: none;
-  /* Unknown declarations are ignored, so older browsers fall through to the
-     measured QuestionCard.jsx path without a second CSS branch. */
+  /* Grow with the answer while the chat scroll owner keeps the surrounding
+     reading position anchored. Older browsers use the measured JSX fallback. */
   field-sizing: content;
   max-height: 180px;
   overflow-y: auto;
@@ -260,7 +260,8 @@
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-dim);
 }
-.qcard__input:disabled {
+.qcard__input:disabled,
+.qcard__input[readonly] {
   /* Keep the submitted custom answer readable but visibly settled. Safari
      otherwise preserves the active text color through -webkit-text-fill-color. */
   color: var(--muted);

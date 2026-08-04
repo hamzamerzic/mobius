@@ -36,6 +36,8 @@
  * ║      + tap, so the check is accurate. Refocus after pick is      ║
  * ║      GATED on this ref — unconditional refocus would pop the     ║
  * ║      keyboard up even when the user opened + with kb down.       ║
+ * ║      The same restoration runs when the native picker is         ║
+ * ║      cancelled, so returning empty-handed does not lose focus.   ║
  * ║                                                                  ║
  * ║   3. CHIP × BUTTON keeps the keyboard                            ║
  * ║      The remove-attachment × has `onPointerDown.preventDefault`  ║
@@ -105,6 +107,7 @@ import {
   textareaUsesNativeSizing,
   syncComposerTallClass,
 } from './composerTextareaSizing.js'
+import { focusComposerElement } from './composerFocusPolicy.js'
 
 
 // Detect touch-primary once (same heuristic ChatView uses).
@@ -128,9 +131,19 @@ _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
  *
  *  Send, Steer, and Stop are states of the same primary action. They
  *  deliberately share the `primary` key so React preserves the 40px action
- *  target and swaps only its icon, label, handler, and semantic colour—there
- *  must be no empty/black replacement frame between any of them. Mic remains
- *  distinct because it is the idle input affordance rather than a turn action. */
+ *  target. Its glyph stack stays mounted so CSS can finish the directional
+ *  glyph before Stop appears, without timing state in React. Send → Steer
+ *  remains immediate. Mic stays distinct as the idle input affordance. */
+function PrimaryActionGlyphs({ action }) {
+  return (
+    <span className={`chat__action-glyphs chat__action-glyphs--${action}`} aria-hidden="true">
+      <ArrowUp className="chat__action-glyph chat__action-glyph--send" width={22} height={22} />
+      <DoubleChevronRight className="chat__action-glyph chat__action-glyph--steer" width={20} height={20} />
+      <Stop className="chat__action-glyph chat__action-glyph--stop" width={28} height={28} />
+    </span>
+  )
+}
+
 function PrimaryAction({
   sending, listening, hasInput, hasUploading, offline, showSteer, steerReady,
   submissionBlocked,
@@ -142,9 +155,9 @@ function PrimaryAction({
         key="primary"
         className="chat__action chat__steer"
         type="button"
-        // Keep focus stable through pointerdown, then let ChatView dismiss
-        // the keyboard deliberately as part of the steer action. Dispatching
-        // on touchend avoids waiting for Safari's synthesized click.
+        // Keep focus stable through pointerdown, then let ChatView dismiss the
+        // keyboard only after the authoritative steer row is positioned.
+        // Dispatching on touchend avoids waiting for Safari's synthesized click.
         onPointerDown={(e) => e.preventDefault()}
         onTouchEnd={(e) => { e.preventDefault(); onSteer() }}
         onClick={onSteer}
@@ -152,7 +165,7 @@ function PrimaryAction({
         aria-busy={!steerReady}
         disabled={!steerReady}
       >
-        <DoubleChevronRight width={20} height={20} />
+        <PrimaryActionGlyphs action="steer" />
       </button>
     )
   }
@@ -171,7 +184,7 @@ function PrimaryAction({
         onClick={onStop}
         aria-label="Stop"
       >
-        <Stop width={28} height={28} aria-hidden="true" />
+        <PrimaryActionGlyphs action="stop" />
       </button>
     )
   }
@@ -193,7 +206,7 @@ function PrimaryAction({
         aria-label="Send"
         disabled={hasUploading || offline || submissionBlocked}
       >
-        <ArrowUp width={22} height={22} />
+        <PrimaryActionGlyphs action="send" />
       </button>
     )
   }
@@ -408,6 +421,7 @@ function FileChips({ files, onRemove, chatId }) {
  * Props:
  *   input              — current textarea value
  *   onInputChange      — receives new string
+ *   onInputIntent      — runs after the controlled draft accepts an edit
  *   onSubmit           — called with FormEvent | MouseEvent | TouchEvent
  *   onSubmitSteer      — submits composed text and immediately steers
  *                        it when a live turn can accept steering
@@ -461,6 +475,7 @@ export default function ChatInputBar({
   chatId,
   input,
   onInputChange,
+  onInputIntent,
   onSubmit,
   onSubmitSteer,
   inputRef,
@@ -594,10 +609,7 @@ export default function ChatInputBar({
       const borderSize = Array.isArray(entry?.borderBoxSize)
         ? entry.borderBoxSize[0]?.blockSize
         : entry?.borderBoxSize?.blockSize
-      syncComposerTallClass(
-        textarea,
-        borderSize ?? entry?.target?.getBoundingClientRect?.().height,
-      )
+      syncComposerTallClass(textarea, borderSize ?? textarea.offsetHeight)
     })
     observer.observe(textarea)
     return () => observer.disconnect()
@@ -609,25 +621,30 @@ export default function ChatInputBar({
   const hasInput = hasSendablePayload(input, pendingFiles)
   const hasUploading = pendingFiles?.some(c => c.status === 'uploading') ?? false
 
-  function handleFileSelect(e) {
-    const fileList = Array.from(e.target.files || [])
-    if (!fileList.length) return
-    e.target.value = ''
-    onAddFiles(fileList)
-    // Only refocus the textarea (reopening the soft keyboard) if it
-    // was focused BEFORE the OS file picker opened. Unconditional
-    // refocus would pop the keyboard up even when the user tapped
-    // `+` with the keyboard down — see the matching contract in
-    // ComposerPopover and ChatSettingsPanel.
-    if (wasInputFocusedAtPickerOpenRef.current) {
-      setTimeout(() => inputRef?.current?.focus({ preventScroll: true }), 0)
+  function restoreFocusAfterFilePicker() {
+    const shouldRestore = wasInputFocusedAtPickerOpenRef.current
+    wasInputFocusedAtPickerOpenRef.current = false
+    // The OS picker temporarily replaces the page. Restore the exact state the
+    // owner had before opening it, including when they cancel without choosing
+    // a file (modern browsers emit `cancel` instead of `change` in that case).
+    if (shouldRestore) {
+      setTimeout(() => focusComposerElement(inputRef?.current), 0)
     }
   }
 
+  function handleFileSelect(e) {
+    const fileList = Array.from(e.target.files || [])
+    e.target.value = ''
+    if (fileList.length) onAddFiles(fileList)
+    restoreFocusAfterFilePicker()
+  }
+
   function handleTextareaChange(e) {
+    const value = e.target.value
     resetMessageHistory()
-    if (listeningRef?.current) onManualVoiceEdit?.(e.target.value)
-    onInputChange(e.target.value)
+    if (listeningRef?.current) onManualVoiceEdit?.(value)
+    onInputChange(value)
+    onInputIntent?.(e.nativeEvent)
   }
 
   function handlePaste(e) {
@@ -775,6 +792,7 @@ export default function ChatInputBar({
         multiple
         ref={fileInputRef}
         onChange={handleFileSelect}
+        onCancel={restoreFocusAfterFilePicker}
         style={{ display: 'none' }}
       />
       {sendFailure && (

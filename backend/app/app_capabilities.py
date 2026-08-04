@@ -26,6 +26,56 @@ CONTRACT_SCHEMA = 4
 # its own integer version, so adding (say) camera v2 never forces every storage
 # or microphone consumer onto a new global runtime version.
 RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
+  "device.asset-cache": {
+    "version": 1,
+    "kind": "session",
+    "title": "Store large files on this device",
+    "description": (
+      "Download verified app assets into this browser's private storage."
+    ),
+    "risk": "storage",
+    "lifecycle": "active_frame",
+    "default_limits": {
+      "max_bytes": 256 * 1024 * 1024,
+      "max_asset_bytes": 256 * 1024 * 1024,
+      "max_chunk_bytes": 8 * 1024 * 1024,
+    },
+    "hard_limits": {
+      "max_bytes": (1 * 1024 * 1024, 2 * 1024 * 1024 * 1024),
+      "max_asset_bytes": (1 * 1024 * 1024, 1 * 1024 * 1024 * 1024),
+      "max_chunk_bytes": (256 * 1024, 16 * 1024 * 1024),
+    },
+  },
+  "device.speech-models": {
+    "version": 1,
+    "kind": "session",
+    "title": "Manage local speech models",
+    "description": (
+      "Download and select verified speech models shared by apps on this device."
+    ),
+    "risk": "storage",
+    "lifecycle": "active_frame",
+    "default_limits": {
+      "max_bytes": 256 * 1024 * 1024,
+      "max_asset_bytes": 256 * 1024 * 1024,
+      "max_chunk_bytes": 8 * 1024 * 1024,
+    },
+    "hard_limits": {
+      "max_bytes": (1 * 1024 * 1024, 2 * 1024 * 1024 * 1024),
+      "max_asset_bytes": (1 * 1024 * 1024, 1 * 1024 * 1024 * 1024),
+      "max_chunk_bytes": (256 * 1024, 16 * 1024 * 1024),
+    },
+  },
+  "media.speech": {
+    "version": 1,
+    "kind": "session",
+    "title": "Generate speech",
+    "description": "Turn text into audio with a speech model saved on this device.",
+    "risk": "device",
+    "lifecycle": "background",
+    "default_limits": {"max_text_chars": 50_000},
+    "hard_limits": {"max_text_chars": (1, 250_000)},
+  },
   "media.microphone.capture": {
     "version": 1,
     "kind": "session",
@@ -297,6 +347,24 @@ def contract_with_chat_log_access(
   chat_logs["requested"] = access
   chat_logs["effective"] = access
   chat_logs["redaction"] = "structural" if access != "none" else "none"
+  return updated
+
+
+def contract_with_runtime_capabilities(
+  contract: dict[str, Any] | None,
+  manifest: dict[str, Any],
+) -> dict[str, Any] | None:
+  """Replace only the runtime capabilities in a reviewed contract.
+
+  Store-installed apps keep package-owned background, data, agent, and offline
+  facts when an owner explicitly accepts capabilities from a local source
+  revision.  The caller binds that acceptance to a digest; this projection
+  merely owns the narrow immutable replacement.
+  """
+  if not isinstance(contract, dict):
+    return None
+  updated = deepcopy(contract)
+  updated["runtime"] = normalize_runtime_capabilities(manifest)
   return updated
 
 

@@ -1,10 +1,18 @@
 /* DrawerItemActionMenu gives app launcher cards and drawer rows one compact,
    pointer-accurate contextual menu across mouse, keyboard, and touch. */
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import {
+  beginMenuPress,
+  cancelMenuPress,
+  consumeMenuClick,
+  finishMenuPress,
+} from './menuPointerOwnership.js'
 import { Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
 import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
+import useContextMenuOutsideDismiss from '../../hooks/useContextMenuOutsideDismiss.js'
+import { captureLayoutSpace, clientPointToLayout } from '../../lib/layoutSpace.js'
 
 function focusableMenuItems(menu) {
   return [...(menu?.querySelectorAll('[role="menuitem"]:not([disabled])') || [])]
@@ -30,6 +38,7 @@ export default function DrawerItemActionMenu({
   const menuRef = useRef(null)
   const wasOpenRef = useRef(false)
   const restoreOnCloseRef = useRef(true)
+  const pointerOwnerRef = useRef({ press: null, clickAction: null })
   const [confirmation, setConfirmation] = useState(null)
   const [position, setPosition] = useState(null)
 
@@ -38,11 +47,24 @@ export default function DrawerItemActionMenu({
     onClose()
   }
 
+  const closeFromOutside = useCallback(() => {
+    pointerOwnerRef.current = { press: null, clickAction: null }
+    restoreOnCloseRef.current = false
+    onClose()
+  }, [onClose])
+
+  useContextMenuOutsideDismiss({
+    open,
+    menuRef,
+    onDismiss: closeFromOutside,
+  })
+
   useEffect(() => {
     if (open) {
       wasOpenRef.current = true
       return
     }
+    pointerOwnerRef.current = { press: null, clickAction: null }
     setConfirmation(null)
     setPosition(null)
     if (!wasOpenRef.current) return
@@ -69,20 +91,16 @@ export default function DrawerItemActionMenu({
   useLayoutEffect(() => {
     if (!open || !menuRef.current) return
     const root = document.documentElement
-    const rootRect = root.getBoundingClientRect()
+    const rootSpace = captureLayoutSpace(root)
     const menuRect = menuRef.current
     const placementX = Number(placement?.clientX)
     const placementY = Number(placement?.clientY)
+    const point = Number.isFinite(placementX) && Number.isFinite(placementY)
+      ? clientPointToLayout({ x: placementX, y: placementY }, rootSpace)
+      : { x: rootSpace.width / 2, y: rootSpace.height / 2 }
     setPosition(placeContextMenu({
-      clientPoint: {
-        x: Number.isFinite(placementX)
-          ? placementX
-          : rootRect.left + rootRect.width / 2,
-        y: Number.isFinite(placementY)
-          ? placementY
-          : rootRect.top + rootRect.height / 2,
-      },
-      clientViewport: rootRect,
+      point,
+      viewport: { width: rootSpace.width, height: rootSpace.height },
       menuSize: {
         width: menuRect.offsetWidth,
         height: menuRect.offsetHeight,
@@ -97,8 +115,6 @@ export default function DrawerItemActionMenu({
     })
     return () => cancelAnimationFrame(frame)
   }, [open, position, confirmation])
-
-  if (!open) return null
 
   function run(action, { restoreFocus = true } = {}) {
     close({ restoreFocus })
@@ -131,16 +147,49 @@ export default function DrawerItemActionMenu({
 
   const recoveryLabel = itemKind === 'chat' ? 'chats' : 'apps'
 
+  function actionFor(target) {
+    return target?.closest?.('.drawer__item-action-item') || null
+  }
+
+  function blockReleaseThroughClick(event) {
+    // A touch menu can appear underneath the contact that opened it. Android
+    // may retarget that contact's trailing click to the newly mounted action,
+    // even though no pointerdown ever began inside the menu. Only a click with
+    // menu-owned press provenance may run; detail=0 preserves keyboard and
+    // assistive-technology activation.
+    const outcome = consumeMenuClick(pointerOwnerRef.current, {
+      detail: event.detail,
+      action: actionFor(event.target),
+    })
+    pointerOwnerRef.current = outcome.owner
+    if (outcome.allowed) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.nativeEvent?.stopImmediatePropagation?.()
+  }
+
+  useEffect(() => {
+    if (!open) return
+    function clearAbandonedPointer(event) {
+      if (menuRef.current?.contains(event.target)) return
+      pointerOwnerRef.current = cancelMenuPress(
+        pointerOwnerRef.current,
+        event.pointerId,
+      )
+    }
+    document.addEventListener('pointerup', clearAbandonedPointer, true)
+    document.addEventListener('pointercancel', clearAbandonedPointer, true)
+    return () => {
+      document.removeEventListener('pointerup', clearAbandonedPointer, true)
+      document.removeEventListener('pointercancel', clearAbandonedPointer, true)
+    }
+  }, [onClose, open])
+
+  if (!open) return null
+
   const layer = (
     <div
       className="drawer__item-action-layer"
-      onPointerDown={event => {
-        if (event.target === event.currentTarget) close()
-      }}
-      onContextMenu={event => event.preventDefault()}
-      onWheel={event => {
-        if (event.target === event.currentTarget) close()
-      }}
     >
       <div
         ref={menuRef}
@@ -152,7 +201,27 @@ export default function DrawerItemActionMenu({
           '--item-action-x': `${position?.x || 0}px`,
           '--item-action-y': `${position?.y || 0}px`,
         }}
-        onPointerDown={event => event.stopPropagation()}
+        onPointerDown={event => {
+          pointerOwnerRef.current = beginMenuPress(pointerOwnerRef.current, {
+            pointerId: event.pointerId,
+            action: actionFor(event.target),
+            isPrimary: event.isPrimary,
+          })
+          event.stopPropagation()
+        }}
+        onPointerUp={event => {
+          pointerOwnerRef.current = finishMenuPress(pointerOwnerRef.current, {
+            pointerId: event.pointerId,
+            action: actionFor(event.target),
+          })
+        }}
+        onPointerCancel={event => {
+          pointerOwnerRef.current = cancelMenuPress(
+            pointerOwnerRef.current,
+            event.pointerId,
+          )
+        }}
+        onClickCapture={blockReleaseThroughClick}
         onKeyDown={onMenuKeyDown}
       >
         {confirmation === 'delete-data' ? (

@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 import stat
 import subprocess
 import time
@@ -27,7 +28,8 @@ import pytest
 from fastapi import HTTPException
 from fastapi.responses import Response
 
-from app import github_auth, release_channel, source_status
+from app import github_auth, github_pre_pr_checks, source_status
+from app.contribution_errors import ContributionSubmitError
 from app.config import get_settings
 from app.database import checked_out_connections
 from app.storage_io import atomic_write
@@ -1263,59 +1265,202 @@ def _prepared_real_review(app_id, record_id):
   return repo, record, diff_text
 
 
-def test_non_main_release_blocks_platform_contribution_before_claim_or_push(
-  client, owner_token, monkeypatch, tmp_path,
-):
-  app_id, app_token = _app_token(
-    client, owner_token, github_access=True,
-  )
-  record_id = "managed-platform"
+def _prepared_platform_review(app_id, record_id):
+  """Build the supported standalone platform variant of a real review."""
+  repo, record, diff_text = _prepared_real_review(app_id, record_id)
   record = {
-    "id": record_id,
-    "type": "pr",
+    **record,
     "repo": "mobius-os/mobius",
-    "status": "prepared",
-    "plan": {
-      "action": "pr",
-      "repo": "mobius-os/mobius",
-    },
+    "plan": {**record["plan"], "repo": "mobius-os/mobius"},
   }
-  _write_contribution(app_id, record_id, record, "reviewed")
-  baked_sha = "d" * 40
-  info = tmp_path / "build-info.json"
-  info.write_text(f'{{"sha":"{baked_sha}"}}\n')
-  monkeypatch.setattr(release_channel, "BUILD_INFO_PATH", info)
-  monkeypatch.setenv(
-    release_channel.PLATFORM_RELEASE_REF_ENV,
-    "refs/heads/release/external-recovery",
-  )
-  pushed = False
+  _write_contribution(app_id, record_id, record, diff_text)
+  return repo, record, diff_text
 
-  def unexpected_push(*_args, **_kwargs):
-    nonlocal pushed
-    pushed = True
+
+def test_run_pre_pr_checks_persists_exact_run_and_blocks_duplicates(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat", user_id=42, scopes=("public_repo", "workflow"))
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  _repo, _record, _diff = _prepared_platform_review(
+    app_id, "pre-pr-check-success",
+  )
+
+  requested_at = "2026-08-02T14:00:00Z"
+
+  def fake_dispatch(record, diff_path):
+    assert record["pre_pr_checks"]["state"] == "dispatching"
+    assert diff_path.name == "pre-pr-check-success.diff"
+    assert "requested_at" not in record["pre_pr_checks"]
+    return ({
+      "state": "queued",
+      "run_id": 734,
+      "url": "https://github.com/octocat/mobius/actions/runs/734",
+      "fork_repo": "octocat/mobius",
+      "branch": "fix/demo-review",
+      "head_sha": record["plan"]["head_sha"],
+      "workflow": "test.yml",
+      "requested_at": requested_at,
+      "observed_at": requested_at,
+    }, {"last_submit_push_sha": record["plan"]["head_sha"]})
 
   monkeypatch.setattr(
-    "app.routes.github._submit_prepared_pr", unexpected_push,
+    github_pre_pr_checks, "dispatch_pre_pr_checks", fake_dispatch,
+  )
+  headers = {"Authorization": f"Bearer {app_token}"}
+  response = client.post(
+    f"/api/github/contributions/{app_id}/pre-pr-check-success/pre-pr-checks",
+    headers=headers,
+  )
+  assert response.status_code == 200, response.text
+  record = response.json()["record"]
+  assert record["status"] == "prepared"
+  assert record["pre_pr_checks"]["state"] == "queued"
+  assert record["pre_pr_checks"]["run_id"] == 734
+  assert record["pre_pr_checks"]["request_id"]
+  assert record["last_submit_push_sha"] == record["plan"]["head_sha"]
+
+  duplicate = client.post(
+    f"/api/github/contributions/{app_id}/pre-pr-check-success/pre-pr-checks",
+    headers=headers,
+  )
+  assert duplicate.status_code == 409
+  assert "already" in duplicate.json()["detail"].lower()
+
+
+def test_run_pre_pr_checks_keeps_recoverable_failure_on_the_record(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat", user_id=42, scopes=("public_repo", "workflow"))
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  _repo, record, _diff = _prepared_platform_review(
+    app_id, "pre-pr-check-error",
   )
 
+  requested_at = "2026-08-02T14:00:00Z"
+
+  def fake_dispatch(_record, _diff_path):
+    raise ContributionSubmitError(
+      "GitHub could not start Tests.",
+      status_code=409,
+      code="pre_pr_checks_dispatch_failed",
+      record_patch={
+        "last_submit_push_sha": record["plan"]["head_sha"],
+        "pre_pr_checks": {
+          "state": "error",
+          "message": "GitHub could not start Tests.",
+          "requested_at": requested_at,
+          "observed_at": requested_at,
+        },
+      },
+    )
+
+  monkeypatch.setattr(
+    github_pre_pr_checks, "dispatch_pre_pr_checks", fake_dispatch,
+  )
   response = client.post(
-    f"/api/github/contributions/{app_id}/{record_id}/submit",
+    f"/api/github/contributions/{app_id}/pre-pr-check-error/pre-pr-checks",
     headers={"Authorization": f"Bearer {app_token}"},
   )
-
-  assert response.status_code == 409
-  assert "non-main release channel" in response.json()["detail"]
-  assert pushed is False
-  projection = github_routes._chat_review_projection(record, app_id)
-  assert "non-main release channel" in (
-    projection["contribution_disabled_reason"]
-  )
-  stored = json.loads((
-    Path(get_settings().data_dir) / "apps" / str(app_id)
-    / "contributions" / f"{record_id}.json"
-  ).read_text())
+  assert response.status_code == 409, response.text
+  stored = response.json()["detail"]["record"]
   assert stored["status"] == "prepared"
+  assert stored["pre_pr_checks"]["state"] == "error"
+  assert stored["pre_pr_checks"]["request_id"]
+  assert stored["last_submit_push_sha"] == record["plan"]["head_sha"]
+
+
+def test_run_pre_pr_checks_settles_an_invalid_checkout_claim(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42, scopes=("public_repo", "workflow"))
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  _repo, record, diff_text = _prepared_platform_review(
+    app_id, "pre-pr-check-invalid-path",
+  )
+  record["plan"]["repo_path"] = ""
+  _write_contribution(app_id, "pre-pr-check-invalid-path", record, diff_text)
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/pre-pr-check-invalid-path/pre-pr-checks",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert response.status_code == 409, response.text
+  stored = response.json()["detail"]["record"]
+  assert stored["status"] == "prepared"
+  assert stored["pre_pr_checks"]["state"] == "error"
+  assert "durable repo_path" in stored["pre_pr_checks"]["message"]
+
+
+def test_refresh_pre_pr_checks_persists_the_exact_terminal_run(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat", user_id=42, scopes=("public_repo", "workflow"))
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  _repo, record, diff_text = _prepared_platform_review(
+    app_id, "pre-pr-check-refresh",
+  )
+  record["pre_pr_checks"] = {
+    "state": "in_progress",
+    "request_id": "request-1",
+    "run_id": 735,
+    "url": "https://github.com/octocat/mobius/actions/runs/735",
+    "fork_repo": "octocat/mobius",
+    "branch": record["plan"]["branch"],
+    "head_sha": record["plan"]["head_sha"],
+  }
+  _write_contribution(app_id, "pre-pr-check-refresh", record, diff_text)
+
+  def fake_refresh(_record):
+    return {
+      **_record["pre_pr_checks"],
+      "state": "completed",
+      "conclusion": "success",
+      "completed_at": "2026-08-02T15:00:00Z",
+    }
+
+  monkeypatch.setattr(
+    github_pre_pr_checks, "refresh_pre_pr_check", fake_refresh,
+  )
+  headers = {"Authorization": f"Bearer {app_token}"}
+  url = f"/api/github/contributions/{app_id}/pre-pr-checks/refresh"
+  response = client.post(url, headers=headers)
+  assert response.status_code == 200, response.text
+  assert response.json()["refreshed"][0]["pre_pr_checks"]["conclusion"] == (
+    "success"
+  )
+
+  repeat = client.post(url, headers=headers)
+  assert repeat.status_code == 200
+  assert repeat.json() == {"refreshed": []}
+
+
+def test_send_waits_while_pre_pr_checks_are_active(client, owner_token):
+  _write_token(login="octocat", user_id=42, scopes=("public_repo", "workflow"))
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  _repo, record, diff_text = _prepared_platform_review(
+    app_id, "pre-pr-check-send-lock",
+  )
+  record["pre_pr_checks"] = {
+    "state": "queued",
+    "request_id": "request-2",
+    "run_id": 736,
+  }
+  _write_contribution(app_id, "pre-pr-check-send-lock", record, diff_text)
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/pre-pr-check-send-lock/submit",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert response.status_code == 409
+  assert "starting or running" in response.json()["detail"].lower()
+
+  stored = json.loads(
+    (Path(get_settings().data_dir) / "apps" / str(app_id) /
+     "contributions" / "pre-pr-check-send-lock.json").read_text()
+  )
+  assert stored["status"] == "prepared"
+  assert stored["pre_pr_checks"]["state"] == "queued"
 
 
 def test_review_status_catches_local_drift_before_send(
@@ -2448,7 +2593,135 @@ def test_cleanup_terminal_staging_checkout_unregisters_linked_worktree():
   assert str(checkout) not in listed
 
 
-def test_cleanup_terminal_staging_checkout_removes_separate_git_dir():
+def test_cleanup_terminal_staging_checkout_removes_stale_missing_admin():
+  from app.routes.github import _cleanup_terminal_staging_checkout
+
+  data_dir = Path(get_settings().data_dir)
+  checkout = data_dir / "contrib" / "terminal-cleanup-missing-admin" / "worktree"
+  missing_admin = data_dir / "contrib" / "missing-owner" / ".git" / "worktrees" / "worktree"
+  checkout.mkdir(parents=True)
+  (checkout / ".git").write_text(f"gitdir: {missing_admin}\n")
+  (checkout / "review.txt").write_text("stale\n")
+
+  record = {
+    "status": "closed",
+    "plan": {"repo_path": str(checkout)},
+  }
+  assert _cleanup_terminal_staging_checkout(record) is True
+  assert not checkout.exists()
+
+
+def test_cleanup_terminal_staging_checkout_preserves_recycled_worktree_slot():
+  from app.routes.github import _cleanup_terminal_staging_checkout
+
+  data_dir = Path(get_settings().data_dir)
+  owner = data_dir / "contrib" / "terminal-cleanup-recycled-owner"
+  stale = data_dir / "contrib" / "terminal-cleanup-recycled-old" / "worktree"
+  current = data_dir / "contrib" / "terminal-cleanup-recycled-new" / "worktree"
+  owner.mkdir(parents=True)
+  subprocess.run(["git", "init", "-qb", "main", str(owner)], check=True)
+  subprocess.run(["git", "-C", str(owner), "config", "user.name", "Test"], check=True)
+  subprocess.run(
+    ["git", "-C", str(owner), "config", "user.email", "test@example.invalid"],
+    check=True,
+  )
+  (owner / "tracked.txt").write_text("base\n")
+  subprocess.run(["git", "-C", str(owner), "add", "tracked.txt"], check=True)
+  subprocess.run(["git", "-C", str(owner), "commit", "-qm", "base"], check=True)
+
+  stale.parent.mkdir(parents=True)
+  subprocess.run(
+    ["git", "-C", str(owner), "worktree", "add", "-qb", "fix/stale", str(stale)],
+    check=True,
+  )
+  admin_dir = Path((stale / ".git").read_text().split(":", 1)[1].strip())
+  shutil.rmtree(admin_dir)
+
+  current.parent.mkdir(parents=True)
+  subprocess.run(
+    ["git", "-C", str(owner), "worktree", "add", "-qb", "fix/current", str(current)],
+    check=True,
+  )
+  assert Path((current / ".git").read_text().split(":", 1)[1].strip()) == admin_dir
+
+  record = {
+    "status": "merged",
+    "plan": {"repo_path": str(stale)},
+  }
+  assert _cleanup_terminal_staging_checkout(record) is True
+  assert not stale.exists()
+  assert current.exists()
+  assert (admin_dir / "gitdir").read_text().strip() == str(current / ".git")
+  listed = subprocess.run(
+    ["git", "-C", str(owner), "worktree", "list", "--porcelain"],
+    check=True,
+    capture_output=True,
+    text=True,
+  ).stdout
+  assert str(current) in listed
+
+
+def test_cleanup_terminal_staging_checkout_preserves_reciprocal_outside_owner():
+  from app.routes.github import _cleanup_terminal_staging_checkout
+
+  data_dir = Path(get_settings().data_dir)
+  checkout = data_dir / "contrib" / "terminal-cleanup-outside-owner" / "worktree"
+  admin_dir = data_dir / "shared" / "outside-owner-admin"
+  outside_owner = data_dir / "shared" / "outside-owner.git"
+  checkout.mkdir(parents=True)
+  admin_dir.mkdir(parents=True)
+  outside_owner.mkdir(parents=True)
+  (checkout / ".git").write_text(f"gitdir: {admin_dir}\n")
+  (admin_dir / "gitdir").write_text(f"{checkout / '.git'}\n")
+  (admin_dir / "commondir").write_text(f"{outside_owner}\n")
+  (outside_owner / "sentinel").write_text("keep\n")
+
+  record = {
+    "status": "closed",
+    "plan": {"repo_path": str(checkout)},
+  }
+  assert _cleanup_terminal_staging_checkout(record) is False
+  assert checkout.exists()
+  assert (outside_owner / "sentinel").read_text() == "keep\n"
+
+
+def test_cleanup_terminal_staging_checkout_rejects_repo_symlink_alias():
+  from app.routes.github import _cleanup_terminal_staging_checkout
+
+  data_dir = Path(get_settings().data_dir)
+  target = data_dir / "contrib" / "terminal-cleanup-alias-target" / "repo"
+  alias = data_dir / "contrib" / "terminal-cleanup-alias"
+  (target / ".git").mkdir(parents=True)
+  (target / "sentinel").write_text("keep\n")
+  alias.symlink_to(target)
+
+  record = {
+    "status": "closed",
+    "plan": {"repo_path": str(alias)},
+  }
+  assert _cleanup_terminal_staging_checkout(record) is False
+  assert alias.is_symlink()
+  assert (target / "sentinel").read_text() == "keep\n"
+
+
+def test_cleanup_terminal_staging_checkout_is_idempotent_after_removal():
+  from app.routes.github import _cleanup_terminal_staging_checkout
+
+  data_dir = Path(get_settings().data_dir)
+  checkout = data_dir / "contrib" / "terminal-cleanup-idempotent" / "repo"
+  (checkout / ".git").mkdir(parents=True)
+  record = {
+    "status": "abandoned",
+    "plan": {"repo_path": str(checkout)},
+  }
+
+  assert _cleanup_terminal_staging_checkout(record) is True
+  assert _cleanup_terminal_staging_checkout(record) is True
+
+
+def test_cleanup_terminal_staging_checkout_retries_separate_git_dir_partial_failure(
+  monkeypatch,
+):
   from app.routes.github import _cleanup_terminal_staging_checkout
 
   data_dir = Path(get_settings().data_dir)
@@ -2465,6 +2738,22 @@ def test_cleanup_terminal_staging_checkout_removes_separate_git_dir():
     "status": "closed",
     "plan": {"repo_path": str(checkout)},
   }
+  real_rmtree = shutil.rmtree
+  checkout_failed = False
+
+  def fail_checkout_once(path, *args, **kwargs):
+    nonlocal checkout_failed
+    if Path(path) == checkout and not checkout_failed:
+      checkout_failed = True
+      raise OSError("simulated checkout removal failure")
+    return real_rmtree(path, *args, **kwargs)
+
+  monkeypatch.setattr(shutil, "rmtree", fail_checkout_once)
+  with pytest.raises(OSError, match="simulated checkout removal failure"):
+    _cleanup_terminal_staging_checkout(record)
+  assert checkout.exists()
+  assert not git_dir.exists()
+
   assert _cleanup_terminal_staging_checkout(record) is True
   assert not checkout.exists()
   assert not git_dir.exists()
@@ -5108,3 +5397,150 @@ def test_send_refuses_branch_with_existing_pr_before_any_push(
   # of any kind and no PR creation.
   assert not any("push" in call for call in git_calls)
   assert not any(call[:2] == ("pr", "create") for call in gh_calls)
+
+
+def _conflicting_upstream_commit(repo, content):
+  """Commit a rival change to main, and return its sha.
+
+  The review branch already edited this file, so a different edit to the same
+  line is a genuine merge conflict rather than a simulated one.
+  """
+  subprocess.run(["git", "checkout", "main"], cwd=repo, check=True,
+                 capture_output=True)
+  (repo / "index.jsx").write_text(content)
+  subprocess.run(["git", "add", "index.jsx"], cwd=repo, check=True)
+  subprocess.run(["git", "commit", "-m", "upstream moved"], cwd=repo,
+                 check=True, capture_output=True)
+  sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo,
+                                text=True).strip()
+  subprocess.run(["git", "checkout", "fix/demo-review"], cwd=repo, check=True,
+                 capture_output=True)
+  return sha
+
+
+def _record_upstream(app_id, record_id, sha):
+  path = (
+    Path(get_settings().data_dir) / "apps" / str(app_id)
+    / "contributions" / f"{record_id}.json"
+  )
+  stored = json.loads(path.read_text())
+  stored["last_submit_upstream_sha"] = sha
+  path.write_text(json.dumps(stored))
+
+
+def test_review_status_reports_a_branch_that_no_longer_merges(
+  client, owner_token,
+):
+  """The one verdict local freshness checks cannot reach.
+
+  A conflict is a fact about upstream, so every check about the staged
+  checkout still passes and the review would otherwise read "ready".
+  """
+  _write_token(login="octocat", user_id=42)
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  repo, _record, _diff = _prepared_real_review(app_id, "conflicted")
+  headers = {"Authorization": f"Bearer {app_token}"}
+
+  assert client.get(
+    f"/api/github/contributions/{app_id}/review-status", headers=headers,
+  ).json()["records"][0]["state"] == "ready"
+
+  _record_upstream(
+    app_id, "conflicted", _conflicting_upstream_commit(repo, "export default 9\n"),
+  )
+
+  blocked = client.get(
+    f"/api/github/contributions/{app_id}/review-status", headers=headers,
+  )
+  assert blocked.status_code == 200, blocked.text
+  assert blocked.json()["needs_refresh"] == 1
+  verdict = blocked.json()["records"][0]
+  assert verdict["code"] == "upstream_conflict"
+  assert verdict["message"] == (
+    github_routes._REVIEW_STATUS_MESSAGES["upstream_conflict"]
+  )
+
+
+def test_refreshing_the_branch_clears_the_conflict_with_nothing_to_reset(
+  client, owner_token,
+):
+  """The property a stored verdict could not have.
+
+  Nothing records that this review was conflicted, so nothing has to remember
+  to clear it: merging upstream in is enough, and the next read is honest.
+  """
+  _write_token(login="octocat", user_id=42)
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  repo, _record, _diff = _prepared_real_review(app_id, "healing")
+  headers = {"Authorization": f"Bearer {app_token}"}
+  upstream = _conflicting_upstream_commit(repo, "export default 9\n")
+  _record_upstream(app_id, "healing", upstream)
+
+  assert client.get(
+    f"/api/github/contributions/{app_id}/review-status", headers=headers,
+  ).json()["records"][0]["code"] == "upstream_conflict"
+
+  # Resolve it exactly as a refresh would, then re-stage the reviewed source.
+  subprocess.run(["git", "merge", upstream, "-m", "merge upstream"], cwd=repo,
+                 check=False, capture_output=True)
+  (repo / "index.jsx").write_text("export default 2\n")
+  subprocess.run(["git", "add", "index.jsx"], cwd=repo, check=True)
+  subprocess.run([
+    "git", "commit", "--no-edit", "-m", "refreshed", "-m",
+    "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>",
+  ], cwd=repo, check=False, capture_output=True)
+  head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo,
+                                 text=True).strip()
+  path = (
+    Path(get_settings().data_dir) / "apps" / str(app_id)
+    / "contributions" / "healing.json"
+  )
+  stored = json.loads(path.read_text())
+  base = stored["plan"]["base_sha"]
+  diff_text = subprocess.check_output([
+    "git", "-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-color",
+    "--binary", "--full-index", "--src-prefix=a/", "--dst-prefix=b/",
+    f"{base}..{head}",
+  ], cwd=repo, text=True)
+  stored["plan"]["head_sha"] = head
+  stored["plan"]["diff_sha256"] = hashlib.sha256(diff_text.encode()).hexdigest()
+  _write_contribution(app_id, "healing", stored, diff_text)
+
+  healed = client.get(
+    f"/api/github/contributions/{app_id}/review-status", headers=headers,
+  )
+  assert healed.json()["records"][0]["state"] == "ready", healed.text
+
+
+def test_a_review_that_never_reached_upstream_is_not_inspected_for_conflicts(
+  client, owner_token,
+):
+  """No recorded upstream means nothing local to compare against."""
+  _write_token(login="octocat", user_id=42)
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  _prepared_real_review(app_id, "never-sent")
+
+  response = client.get(
+    f"/api/github/contributions/{app_id}/review-status",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert response.json()["records"][0]["state"] == "ready"
+
+
+def test_a_dirty_checkout_is_named_before_an_upstream_conflict(
+  client, owner_token,
+):
+  """Two things wrong at once: say the one the owner can act on locally."""
+  _write_token(login="octocat", user_id=42)
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  repo, _record, _diff = _prepared_real_review(app_id, "both-wrong")
+  _record_upstream(
+    app_id, "both-wrong", _conflicting_upstream_commit(repo, "export default 9\n"),
+  )
+  (repo / "index.jsx").write_text("export default 77\n")
+
+  response = client.get(
+    f"/api/github/contributions/{app_id}/review-status",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert response.json()["records"][0]["code"] == "working_changes"

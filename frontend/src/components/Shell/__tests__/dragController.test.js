@@ -1,12 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  POINTER_SLOP, TAB_HOLD_MS, DRAWER_HOLD_MS, PRE_HOLD_MOVE_PX, RELEASE_IN_PLACE_PX,
+  POINTER_SLOP, TAB_HOLD_MS, DRAWER_DRAG_HOLD_MS, DRAWER_MENU_HOLD_MS,
+  PRE_HOLD_MOVE_PX, RELEASE_IN_PLACE_PX,
   HYSTERESIS_PX, ROOT_EDGE_PX, CARET_W, CARET_H, CENTER_INSET, DRAWER_EXIT_PX,
   CHIP_MOUSE_DX, CHIP_MOUSE_DY, CHIP_TOUCH_ABOVE,
   EDGE_BAND_MIN, EDGE_BAND_FRACTION,
-  passedSlop, touchTabMoveIntent, releasedInPlace, chipOffset,
-  clientPointToLocal,
+  passedSlop, touchTabMoveIntent, drawerRowMoveIntent, releasedInPlace, chipOffset,
   crossedDrawerExit, edgeBands, edgePreviewRect, caretZone, edgeZone, centerZone,
   rootEdgeZone, hitTest, zoneTarget, releaseZone, zoneEq, buildScene,
 } from '../dragController.js'
@@ -19,6 +19,7 @@ function pane(paneId, rect, opts = {}) {
   return {
     paneId,
     rect,
+    stripRect: opts.stripRect || { x: rect.x, y: rect.y, w: rect.w, h: STRIP_H },
     tabs: opts.tabs || [],
     canSplit: { left: true, right: true, top: true, bottom: true, ...(opts.canSplit || {}) },
   }
@@ -33,18 +34,6 @@ function scene(panes, opts = {}) {
     rootCanSplit: { left: true, right: true, top: true, bottom: true, ...(opts.rootCanSplit || {}) },
   }
 }
-
-// ── Client-to-local coordinate boundary ─────────────────────────────────────
-
-test('clientPointToLocal translates viewport coordinates into the content box', () => {
-  assert.deepEqual(
-    clientPointToLocal(
-      { x: 235, y: 120 },
-      { left: 200, top: 80, width: 500, height: 300 },
-    ),
-    { x: 35, y: 40 },
-  )
-})
 
 // ── Threshold predicates ─────────────────────────────────────────────────────
 
@@ -62,14 +51,35 @@ test('touchTabMoveIntent reserves every pre-hold tab move for scrolling', () => 
   assert.equal(PRE_HOLD_MOVE_PX, 8)
 })
 
+test('drawerRowMoveIntent resolves one gesture without competing owners', () => {
+  const touchPin = { isTouch: true, pinned: true }
+  assert.equal(drawerRowMoveIntent(4, 4, touchPin), 'pending')
+  assert.equal(drawerRowMoveIntent(0, 9, touchPin), 'scroll',
+    'vertical movement before the hold scrolls through the pointer owner')
+  assert.equal(drawerRowMoveIntent(9, 0, touchPin), 'yield',
+    'horizontal movement before the hold returns to drawer swipe')
+  assert.equal(drawerRowMoveIntent(0, 9, { isTouch: true }), 'yield',
+    'an unpinned row keeps native momentum scrolling')
+  assert.equal(drawerRowMoveIntent(0, 9, { ...touchPin, held: true }), 'reorder')
+  assert.equal(drawerRowMoveIntent(9, 0, { ...touchPin, held: true }), 'workspace')
+  assert.equal(drawerRowMoveIntent(-9, 0, { ...touchPin, held: true }), 'cancel')
+  assert.equal(drawerRowMoveIntent(0, 9, { isTouch: true, held: true }), 'cancel',
+    'an unpinned row cannot enter the reorder branch')
+  assert.equal(drawerRowMoveIntent(0, 6, { pinned: true }), 'reorder',
+    'mouse rows use ordinary drag slop without a hold')
+})
+
 test('releasedInPlace is true only within the release radius', () => {
   assert.equal(releasedInPlace(RELEASE_IN_PLACE_PX, 0), true)
   assert.equal(releasedInPlace(RELEASE_IN_PLACE_PX + 0.1, 0), false)
 })
 
-test('drawer rows retain a more deliberate hold than tabs', () => {
+test('drawer rows expose drag before a stationary hold opens actions', () => {
   assert.equal(TAB_HOLD_MS, 350)
-  assert.equal(DRAWER_HOLD_MS, 450)
+  assert.equal(DRAWER_DRAG_HOLD_MS, 180)
+  assert.equal(DRAWER_MENU_HOLD_MS, 400)
+  assert.ok(DRAWER_DRAG_HOLD_MS < TAB_HOLD_MS)
+  assert.ok(DRAWER_MENU_HOLD_MS > TAB_HOLD_MS)
 })
 
 test('chipOffset floats above a touch point and trails a mouse', () => {
@@ -146,6 +156,21 @@ test('strip caret beats every other zone at overlapping coordinates', () => {
   const s = scene([p], { allowRootEdge: true })
   const z = hitTest({ x: 12, y: 12 }, s)
   assert.equal(z.type, 'strip')
+})
+
+test('a shell-level Builder strip above content still owns its caret preview', () => {
+  const p = pane('p0', { x: 0, y: 0, w: 426, h: 768 }, {
+    stripRect: { x: 0, y: -34, w: 426, h: 34 },
+    tabs: [
+      { key: 'chat:a', left: 9, right: 142 },
+      { key: 'app:62', left: 173, right: 215 },
+    ],
+  })
+  const z = hitTest({ x: 200, y: -17 }, scene([p], { mode: 'phone' }))
+  assert.equal(z.type, 'strip')
+  assert.equal(z.paneId, 'p0')
+  assert.equal(z.index, 2)
+  assert.equal(z.rect.y, -29, 'caret stays aligned to the measured shell strip')
 })
 
 test('root edge beats a pane edge, and only when fine pointers allow it', () => {
@@ -346,7 +371,10 @@ test('buildScene projects panes and evaluates the shared feasibility predicates'
   const ws = twoChatPanes('1', '2')
   const content = { x: 0, y: 0, w: 1400, h: 900 }
   const proj = paneModel.projectLayout(ws, 'wide', content)
-  const measure = (paneId) => [{ key: `chat:${paneId === 'p0' ? '1' : '2'}`, left: 0, right: 60 }]
+  const measure = (paneId) => ({
+    rect: { x: 0, y: 0, w: 700, h: STRIP_H },
+    tabs: [{ key: `chat:${paneId === 'p0' ? '1' : '2'}`, left: 0, right: 60 }],
+  })
   const s = buildScene(ws, proj, 'wide', content, null, true, measure)
   assert.equal(s.panes.length, 2)
   // A roomy wide layout can split further on every edge.
@@ -368,7 +396,7 @@ test('buildScene suppresses root split at the depth cap', () => {
   ws = paneModel.moveTab(ws, 'chat:4', { paneId: 'p0', edge: 'bottom' })
   const content = { x: 0, y: 0, w: 1600, h: 1000 }
   const proj = paneModel.projectLayout(ws, 'wide', content)
-  const s = buildScene(ws, proj, 'wide', content, null, true, () => [])
+  const s = buildScene(ws, proj, 'wide', content, null, true)
   // No root split possible — the tree is already as deep and as wide as allowed.
   assert.deepEqual(s.rootCanSplit, { left: false, right: false, top: false, bottom: false })
 })
@@ -378,7 +406,10 @@ test('buildScene canRootSplit matches paneModel.canRootSplit directly', () => {
   const content = { x: 0, y: 0, w: 1400, h: 900 }
   for (const edge of ['left', 'right', 'top', 'bottom']) {
     assert.equal(
-      buildScene(ws, paneModel.projectLayout(ws, 'wide', content), 'wide', content, null, true, () => []).rootCanSplit[edge],
+      buildScene(
+        ws, paneModel.projectLayout(ws, 'wide', content),
+        'wide', content, null, true,
+      ).rootCanSplit[edge],
       paneModel.canRootSplit(ws, edge, 'wide', content),
     )
   }
@@ -465,7 +496,7 @@ test('buildScene records each single-tab pane sole key', () => {
   const ws = paneModel.seedFromFlatTabs([{ kind: 'chat', id: '5' }])
   const content = { x: 0, y: 0, w: 1400, h: 900 }
   const proj = paneModel.projectLayout(ws, 'wide', content)
-  const s = buildScene(ws, proj, 'wide', content, null, true, () => [])
+  const s = buildScene(ws, proj, 'wide', content, null, true)
   assert.equal(s.panes[0].soleTabKey, 'chat:5')
 })
 

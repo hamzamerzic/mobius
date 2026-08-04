@@ -36,6 +36,12 @@ function makeDomStub() {
   // them back. `_props` records the last setProperty per name.
   const documentElement = {
     _attrs: {},
+    currentCSSZoom: 1,
+    clientWidth: 100,
+    clientHeight: 100,
+    offsetWidth: 100,
+    offsetHeight: 100,
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }),
     getAttribute: (k) => documentElement._attrs[k],
     setAttribute: (k, v) => { documentElement._attrs[k] = v },
     classList: {

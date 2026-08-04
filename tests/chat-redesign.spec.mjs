@@ -29,8 +29,12 @@ function fulfillStartedPost(route) {
 
 /** Helper: log in via the storageState set by auth.setup.mjs and
  *  install a default route mock that returns 204 for /stream. */
-async function setupWithStreamMock(page, streamBody) {
-  await page.setViewportSize({ width: 412, height: 915 })
+async function setupWithStreamMock(
+  page,
+  streamBody,
+  viewport = { width: 412, height: 915 },
+) {
+  await page.setViewportSize(viewport)
   await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
     fulfillStartedPost(route)
   )
@@ -261,7 +265,8 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await expect(page.getByRole('button', { name: 'Submitted' })).toBeDisabled()
     await expect(card.locator('.qcard__hint')).toHaveText('Choose one')
     await expect(card.locator('.qcard__opt')).toHaveCount(2)
-    await expect(customAnswer).toBeDisabled()
+    await expect(customAnswer).toHaveAttribute('readonly', '')
+    await expect(customAnswer).not.toBeEditable()
     await expect(customAnswer).toHaveValue('Take the quiet streets')
 
     const after = await geometry()
@@ -275,6 +280,84 @@ test.describe('Bug 1: AskUserQuestion', () => {
     expect(after.input.color).not.toBe(before.input.color)
     expect(after.input.textFillColor).toBe(after.input.color)
     expect(after.submitTop).toBeCloseTo(before.submitTop, 5)
+  })
+
+
+  test('multiline custom answers grow inline without moving the conversation', async ({ page }) => {
+    const streamBody = [
+      `data: ${JSON.stringify({
+        type: 'question',
+        question_id: 'q-steady-multiline',
+        questions: [{
+          question: 'Describe the change',
+          header: 'Details',
+          multiSelect: false,
+          options: [
+            { label: 'Small', description: 'Keep the change focused' },
+            { label: 'Broad', description: 'Cover the surrounding behavior' },
+          ],
+        }],
+      })}\n\n`,
+      'data: {"type":"done"}\n\n',
+    ].join('')
+    await setupWithStreamMock(page, streamBody, { width: 426, height: 510 })
+    await newChat(page)
+    await sendMessage(page, 'Ask for multiline details')
+
+    const card = page.locator('[data-chat-surface="painted"] .qcard')
+    const customAnswer = card.getByRole('textbox', {
+      name: 'Custom answer for: Describe the change',
+    })
+    await expect(card).toBeVisible({ timeout: 5000 })
+    expect(await card.evaluate(el => !!el.closest('.chat__scroll'))).toBe(true)
+    expect(await card.evaluate(el => !!el.closest('.chat__question-dock'))).toBe(false)
+    await customAnswer.focus()
+
+    const geometry = () => card.evaluate(el => {
+      const scroll = el.closest('.chat__scroll')
+      const input = el.querySelector('.qcard__input')
+      const rect = node => node?.getBoundingClientRect()
+      return {
+        cardTop: rect(el)?.top,
+        cardHeight: rect(el)?.height,
+        inputHeight: rect(input)?.height,
+        chatScrollTop: scroll?.scrollTop,
+      }
+    })
+
+    const before = await geometry()
+    await customAnswer.pressSequentially('First line')
+    await page.keyboard.press('Enter')
+    await customAnswer.pressSequentially('Second line')
+    await page.keyboard.press('Enter')
+    await customAnswer.pressSequentially('Third line')
+    await page.evaluate(() => new Promise(resolve => (
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    )))
+    const after = await geometry()
+
+    await expect(customAnswer).toHaveValue('First line\nSecond line\nThird line')
+    expect(after.cardHeight).toBeGreaterThan(before.cardHeight)
+    expect(after.inputHeight).toBeGreaterThan(before.inputHeight)
+    expect(after.cardTop).toBeCloseTo(before.cardTop, 5)
+    expect(after.chatScrollTop).toBeCloseTo(before.chatScrollTop, 5)
+
+    // Past the growth cap, the writing field—not the transcript—owns overflow.
+    // Drive the real keyboard path so caret reveal, beforeinput, input, and the
+    // chat scroll owner race exactly as they do for an owner writing an answer.
+    for (let line = 4; line <= 14; line += 1) {
+      await page.keyboard.press('Enter')
+      await customAnswer.pressSequentially(`Line ${line}`)
+    }
+    await page.evaluate(() => new Promise(resolve => (
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    )))
+    const capped = await geometry()
+    const inputScrollTop = await customAnswer.evaluate(el => el.scrollTop)
+    expect(capped.inputHeight).toBeLessThanOrEqual(181)
+    expect(inputScrollTop).toBeGreaterThan(0)
+    expect(capped.cardTop).toBeCloseTo(before.cardTop, 5)
+    expect(capped.chatScrollTop).toBeCloseTo(before.chatScrollTop, 5)
   })
 
 

@@ -37,7 +37,13 @@ export const SHELL_DATA_CACHE = 'mobius-shell-data'
 // blocks every API call and see no fix at all on its first post-upgrade open.
 // That is precisely the population this change is for, so the eviction is the
 // half that actually delivers it.
-export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v5'
+// Bumped -v5 → -v6 (2026-08-03): app frames now permit the narrow
+// `wasm-unsafe-eval` source needed to compile WebAssembly without enabling
+// JavaScript eval. A cached response retains its original CSP header, so merely
+// changing the backend header leaves existing devices serving v5 indefinitely
+// on this cache-first route. Activation evicts that response before News (or
+// any other Wasm app) opens under the revised policy.
+export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v6'
 // Bumped -v2 → -v3 (2026-07-30): v2 standalone documents executed app-authored
 // modules directly at owner origin. The secure host now mounts the shared
 // opaque AppCanvas frame; activation must evict every cached v2 document so an
@@ -253,6 +259,32 @@ export function shouldServeCacheFirst(hasCached, gated) {
 // matcher in sw.js and the server routes in backend/app/routes/apps.py.
 export function isAppCodeRoute(pathname) {
   return /^\/api\/apps\/\d+\/(frame|module)$/.test(pathname)
+}
+
+// PURE: transient install/auth parameters never define app-code identity.
+// Keeping this normalization in one place prevents live fetches and precache
+// warming from drifting into different keys as new handoff fields are added.
+export function appCodeCacheKey(rawUrl, origin) {
+  try {
+    const key = new URL(rawUrl, origin)
+    for (const param of ['token', '_', 'install', 'pass']) {
+      key.searchParams.delete(param)
+    }
+    return key.href
+  } catch {
+    return null
+  }
+}
+
+// A pass-bearing standalone document includes the opaque secret again in its
+// manifest link. Cache-Control does not govern Cache API writes, so the
+// service worker must refuse to store that body explicitly.
+export function appCodeRequestMayBeStored(rawUrl, origin) {
+  try {
+    return !new URL(rawUrl, origin).searchParams.has('pass')
+  } catch {
+    return false
+  }
 }
 
 // PURE: what to do with a RESOLVED network response on an app-code route.

@@ -5,7 +5,6 @@ static files.  API routes are registered first; the frontend SPA is
 mounted last as a catch-all so that client-side routing works.
 """
 
-import asyncio
 import logging
 import mimetypes
 import os
@@ -30,6 +29,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from sqlalchemy.exc import OperationalError
+from starlette.concurrency import run_in_threadpool
 
 from app.config import get_settings
 from app.database import (
@@ -47,6 +47,13 @@ from app.frontend_assets import (
   resolve_frontend_dir,
 )
 from app.memory_observability import record_memory_checkpoint
+from app.response_policy import (
+  CHAT_EMBED_CSP,
+  PUBLISHED_SITE_CSP,
+  app_frame_csp,
+  shell_csp,
+  static_embed_csp,
+)
 from app.storage_io import atomic_write
 from app import activity, models
 # providers and push are on the agent's write surface; deferred into
@@ -56,7 +63,8 @@ from app import activity, models
 from app.routes import (
   admin_router, apps_router, auth_router,
   chat_embed_router, chat_logs_router, chat_router, chats_router, chats_stream_router,
-  debug_router, fs_router, github_router, media_router,
+  connectors_router,
+  debug_router, delegations_router, fs_router, github_router, media_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
   secrets_router, self_reminders_router, settings_router, skills_router,
   client_error_router, client_signal_router, standalone_router, storage_router,
@@ -122,51 +130,6 @@ def _assert_provider_defaults(provider_names) -> None:
   )
 
 
-# A wake warns once only after more than two full periods of lateness.
-_LOOP_PERIOD_SECS = 60.0
-_LOOP_LATE_PERIODS = 2.0
-
-
-def loop_lateness_warning(
-  period: float, observed_gap: float, *, late_periods: float = _LOOP_LATE_PERIODS,
-) -> str | None:
-  """Return a WARNING string when a periodic loop woke far later than scheduled.
-
-  Compares the actual wake gap to the scheduled period: a lateness (observed
-  minus scheduled) beyond `late_periods` periods means the loop was blocked for
-  multiple cycles — event-loop starvation from a long synchronous call, GC
-  pause, or disk stall — not scheduler jitter. Returns None for a healthy or
-  merely-jittery wake. Pure so the watchdog decision is unit-testable without
-  driving a real loop; the log is necessarily retrospective (a loop that never
-  recovers cannot warn — only an external HTTP monitor can).
-  """
-  lateness = observed_gap - period
-  if lateness <= period * late_periods:
-    return None
-  return (
-    "periodic loop woke %.1fs after a %.0fs sleep (%.1fs late, >%.0f periods)"
-    " — the event loop may be starved" % (
-      observed_gap, period, lateness, late_periods,
-    )
-  )
-
-
-async def _sleep_with_lag_warning(
-  sleep,
-  monotonic,
-  logger,
-  *,
-  period: float = _LOOP_PERIOD_SECS,
-) -> str | None:
-  """Sleep once and report a multi-period event-loop stall."""
-  started_at = monotonic()
-  await sleep(period)
-  warning = loop_lateness_warning(period, monotonic() - started_at)
-  if warning is not None:
-    logger.warning("%s", warning)
-  return warning
-
-
 @asynccontextmanager
 async def lifespan(app):
   _log = logging.getLogger(__name__)
@@ -192,7 +155,6 @@ async def lifespan(app):
     logger=_log,
     restart_authorization=startup_context.restart_authorization,
     restart_fallback_chats=startup_context.restart_fallback_chats,
-    lag_sleep=_sleep_with_lag_warning,
   )
   await supervisors.start()
   record_memory_checkpoint("startup_frontend_watcher_started")
@@ -308,24 +270,15 @@ class _BodySizeLimitMiddleware:
     })
 
 
-# Standard security headers. The bundled Caddy sets these, but production is
-# fronted by an external Caddy whose vhost has no header block (and managed
-# deployments often proxy the app directly), so prod serves NONE of them today.
-# Setting them here means they hold regardless of what fronts the app. These are
-# resource-load-agnostic — they protect against clickjacking, MIME-sniffing, TLS
-# downgrade, and referrer leakage WITHOUT restricting what apps may load, so web
-# images / external embeds keep working. There is deliberately no global
-# Content-Security-Policy here yet: mini-apps intentionally support user-chosen
-# external resources and a strict shell-wide policy would break that contract.
-# App isolation instead comes from opaque-origin sandboxed frames plus scoped
-# tokens. Clickjacking is covered by X-Frame-Options without a CSP. Narrow
-# exceptions are the inert embedded-chat bootstrap, response-sandboxed packaged
-# documents, and an explicitly configured shared service-gateway surface.
+# Standard security headers are origin-owned so Railway and the bundled Caddy
+# expose one contract. Camera/location remain unavailable to opaque app frames,
+# while ``self`` leaves room for a future shell-owned capability provider after
+# the owner grants browser permission.
 _SECURITY_HEADERS = [
   (b"x-content-type-options", b"nosniff"),
   (b"x-frame-options", b"SAMEORIGIN"),
   (b"referrer-policy", b"strict-origin-when-cross-origin"),
-  (b"permissions-policy", b"camera=(), geolocation=()"),
+  (b"permissions-policy", b"camera=(self), geolocation=(self)"),
   (b"strict-transport-security",
    b"max-age=31536000; includeSubDomains; preload"),
 ]
@@ -334,6 +287,7 @@ _X_FRAME_OPTIONS = b"x-frame-options"
 _CONTENT_SECURITY_POLICY = b"content-security-policy"
 _OPAQUE_STATIC_EMBED_PREFIX = "/app-embeds/by-id/"
 _PUBLISHED_SITE_PREFIX = "/sites/"
+_APP_FRAME_PATH = re.compile(r"^/api/apps/[^/]+/frame$")
 
 # This isolation boundary must always be enforced, never Report-Only: browsers
 # ignore the CSP sandbox directive in a Report-Only policy. The sandbox omits
@@ -342,17 +296,11 @@ _PUBLISHED_SITE_PREFIX = "/sites/"
 # absolute origin explicitly in every fetch directive. This does not weaken the
 # credential boundary: packaged code already executes in the opaque document,
 # and it still cannot reach the shell's localStorage, cookies, or owner token.
-_STATIC_EMBED_ORIGIN = settings.frontend_origin.rstrip("/")
-_STATIC_EMBED_CSP = (
-  "sandbox allow-scripts allow-forms allow-pointer-lock; "
-  f"default-src {_STATIC_EMBED_ORIGIN}; "
-  f"script-src {_STATIC_EMBED_ORIGIN} 'unsafe-inline'; "
-  f"style-src {_STATIC_EMBED_ORIGIN} 'unsafe-inline'; "
-  f"font-src {_STATIC_EMBED_ORIGIN} data:; "
-  f"connect-src {_STATIC_EMBED_ORIGIN}; "
-  f"img-src {_STATIC_EMBED_ORIGIN} data: blob:; "
-  f"media-src {_STATIC_EMBED_ORIGIN} blob:; "
-  f"worker-src {_STATIC_EMBED_ORIGIN} blob:"
+_STATIC_EMBED_CSP = static_embed_csp(settings.frontend_origin)
+_SHELL_CSP = shell_csp(os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", ""))
+_APP_FRAME_CSP = app_frame_csp(
+  settings.frontend_origin,
+  os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", ""),
 )
 
 # Published sites (`/sites/<token>/`) are public snapshots of the owner's own
@@ -370,34 +318,28 @@ _STATIC_EMBED_CSP = (
 # share token + public artifact data, but never the shell origin or the owner
 # JWT. Must be enforcing, never Report-Only. X-Frame-Options SAMEORIGIN is
 # KEPT (published pages open top-level; no cross-site framing need).
-_PUBLISHED_SITE_CSP = (
-  "sandbox allow-scripts allow-forms allow-popups; "
-  "object-src 'none'; base-uri 'none'; frame-ancestors 'self'"
-)
+_PUBLISHED_SITE_CSP = PUBLISHED_SITE_CSP
 
 
-def _frame_policy_exception(scope) -> bool:
-  """Exact routes whose own isolation permits a non-SAMEORIGIN ancestor."""
+def _is_public_service_surface(scope) -> bool:
+  """Whether the gateway host may frame this registered service route."""
   path = scope.get("path") or ""
-  if path == "/shell/embed/chat":
-    return True
-  if path.startswith("/services/"):
-    try:
-      from app.routes.local_services import is_public_service_surface_request
-      return is_public_service_surface_request(scope)
-    except Exception:
-      return False
-  return False
+  if not path.startswith("/services/"):
+    return False
+  try:
+    from app.routes.local_services import is_public_service_surface_request
+    return is_public_service_surface_request(scope)
+  except Exception:
+    return False
 
 
 class _SecurityHeadersMiddleware:
   """Authoritatively sets the platform security headers on every response. Pure
   ASGI so it never buffers a streaming body. It strips any same-named header a
   route may have set first and replaces it with the platform value, so no route
-  can weaken the HSTS/MIME/etc. wall. Opaque static embeds get their enforced
-  response sandbox here alongside their frame-policy exception. Other frame
-  exceptions are exact routes whose inert response or gateway-origin adapter
-  provides the replacement boundary; ordinary routes retain SAMEORIGIN."""
+  can weaken the HSTS/MIME/etc. wall. Document policies are selected by exact
+  origin-owned namespaces. The shared service gateway is the sole exception:
+  its host adapter supplies a topology-specific frame policy."""
 
   def __init__(self, app):
     self.app = app
@@ -411,22 +353,27 @@ class _SecurityHeadersMiddleware:
     path = scope.get("path") or ""
     opaque_static_embed = path.startswith(_OPAQUE_STATIC_EMBED_PREFIX)
     published_site = path.startswith(_PUBLISHED_SITE_PREFIX)
-    # Both namespaces need an ENFORCED response CSP and the same protection on
-    # the generic-500 path; only the embed also drops X-Frame-Options.
-    response_sandboxed = opaque_static_embed or published_site
-    response_headers = _SECURITY_HEADERS
+    chat_embed = path == "/shell/embed/chat"
+    app_frame = bool(_APP_FRAME_PATH.fullmatch(path))
+    service_surface = _is_public_service_surface(scope)
+    response_headers = list(_SECURITY_HEADERS)
     replaced_header_names = _SECURITY_HEADER_NAMES
-    if opaque_static_embed or _frame_policy_exception(scope):
+    if opaque_static_embed or chat_embed or service_surface:
       response_headers = [
         (name, value) for name, value in _SECURITY_HEADERS
         if name != _X_FRAME_OPTIONS
       ]
-    if response_sandboxed:
-      csp = _STATIC_EMBED_CSP if opaque_static_embed else _PUBLISHED_SITE_CSP
-      # Copy before appending so we never mutate the _SECURITY_HEADERS module
-      # constant (the published-site branch leaves X-Frame-Options in place, so
-      # response_headers is still that shared list here).
-      response_headers = list(response_headers)
+    if not service_surface:
+      if opaque_static_embed:
+        csp = _STATIC_EMBED_CSP
+      elif published_site:
+        csp = _PUBLISHED_SITE_CSP
+      elif chat_embed:
+        csp = CHAT_EMBED_CSP
+      elif app_frame:
+        csp = _APP_FRAME_CSP
+      else:
+        csp = _SHELL_CSP
       response_headers.append((
         _CONTENT_SECURITY_POLICY,
         csp.encode("ascii"),
@@ -453,9 +400,9 @@ class _SecurityHeadersMiddleware:
       return await self.app(scope, receive, _send)
     except Exception:
       # Starlette's unhandled-error response is outside user middleware. Send
-      # this namespace's generic 500 through our wrapper before re-raising so
-      # the outer layer still logs it without bypassing the sandbox boundary.
-      if response_sandboxed and not response_started:
+      # one through this wrapper before re-raising so direct and proxied generic
+      # errors cannot diverge on the response policy.
+      if not response_started:
         response = Response(
           "Internal Server Error",
           status_code=500,
@@ -563,6 +510,7 @@ app.add_middleware(
     "Authorization",
     "Content-Type",
     "X-Mobius-Embed-Instance",
+    "X-Mobius-Stream-Snapshot",
     "X-Mobius-Version",
     "If-Match",
     "If-None-Match",
@@ -643,7 +591,9 @@ app.include_router(chat_router)
 app.include_router(chat_embed_router)
 app.include_router(chats_router)
 app.include_router(chats_stream_router)
+app.include_router(delegations_router)
 app.include_router(chat_logs_router)
+app.include_router(connectors_router)
 # App-attributed chat contract (design §1) — a SECOND router defined in
 # routes/chats.py under /api/app-chats, so it's imported directly rather
 # than via routes/__init__'s `_load` (which only returns `.router`).
@@ -1097,7 +1047,7 @@ def _app_source_dir_for_static_asset(
 # all-DIGIT segment isn't mistaken for a content hash: a date-stamped name
 # like IMG-20260612.png or report.20260101.html is replaced in place on a
 # re-upload and MUST keep revalidate semantics — marking it immutable would
-# pin a year-stale copy in every client's cache. A real esbuild/Vite hash
+# pin a year-stale copy in every client's cache. A real content/Vite hash
 # always mixes in a-f (it's hex of a digest), so this never misfires on a
 # genuine content hash.
 _HASHED_ASSET_NAME = re.compile(
@@ -1209,7 +1159,7 @@ async def app_owned_asset_by_id(app_id: int, asset_path: str, request: Request):
   the installed app's source_dir/static.
   """
   return _serve_app_static_asset(
-    await asyncio.to_thread(_app_source_dir_for_static_asset, app_id=app_id),
+    await run_in_threadpool(_app_source_dir_for_static_asset, app_id=app_id),
     asset_path,
     request,
   )
@@ -1231,7 +1181,7 @@ async def app_owned_opaque_embed_by_id(
   SAMEORIGIN and is never the document-navigation surface.
   """
   return _serve_app_static_asset(
-    await asyncio.to_thread(_app_source_dir_for_static_asset, app_id=app_id),
+    await run_in_threadpool(_app_source_dir_for_static_asset, app_id=app_id),
     asset_path,
     request,
   )
@@ -1247,7 +1197,7 @@ async def app_owned_asset(slug: str, asset_path: str, request: Request):
   if not slug or not all(ch.isalnum() or ch in "-_" for ch in slug):
     raise HTTPException(status_code=404, detail="Not found.")
   return _serve_app_static_asset(
-    await asyncio.to_thread(_app_source_dir_for_static_asset, slug=slug),
+    await run_in_threadpool(_app_source_dir_for_static_asset, slug=slug),
     asset_path,
     request,
   )
@@ -1273,7 +1223,7 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
     "/assets/{asset_path:path}", methods=["GET", "HEAD"], include_in_schema=False
   )
   async def serve_asset(request: Request, asset_path: str):
-    target = await asyncio.to_thread(_resolve_asset_file, asset_path)
+    target = await run_in_threadpool(_resolve_asset_file, asset_path)
     if target is None:
       raise HTTPException(status_code=404, detail="Not found.")
     media_type = (
@@ -1300,7 +1250,7 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
     # Resolve which build serves THIS request (live dist if complete, else the
     # baked floor) once, up front — per request, never a module-load snapshot.
     static_dir = _resolve_static_dir()
-    app_slug = await asyncio.to_thread(_top_level_app_slug_alias, path)
+    app_slug = await run_in_threadpool(_top_level_app_slug_alias, path)
     if app_slug:
       from fastapi.responses import RedirectResponse
       return RedirectResponse(

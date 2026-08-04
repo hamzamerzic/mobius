@@ -8,9 +8,9 @@
  * consumers, no per-component loading flash on mount.
  *
  * Persistence (`createAsyncStoragePersister` + `idb-keyval`) mirrors
- * the in-memory cache to IndexedDB. After a reload, queries hydrate
- * from disk before any network round-trip — chats and messages
- * appear instantly, then revalidate in background.
+ * the in-memory cache to IndexedDB using IndexedDB's native structured clone.
+ * After a reload, queries hydrate from disk before any network round-trip —
+ * chats and messages appear instantly, then revalidate in background.
  *
  * `defaultOptions` are tuned to "cached but not stale": staleTime 30s
  * means data is considered fresh for 30s (no refetch on remount in
@@ -20,12 +20,11 @@
 import { QueryClient, dehydrate } from '@tanstack/react-query'
 import { createAsyncStoragePersister } from '@tanstack/query-async-storage-persister'
 import { get, set, del } from 'idb-keyval'
-import { compactChatDetailCacheValue } from './lib/chatDetailCache.js'
+import { compactPersistedChatDetailCacheValue } from './lib/chatDetailCache.js'
 
 const QUERY_CACHE_KEY = 'mobius-query-cache'
 const QUERY_CACHE_BUSTER = 'v1'
 export const QUERY_CACHE_RELOAD_FLUSH_TIMEOUT_MS = 750
-const mountedChatDetails = new WeakMap()
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -39,64 +38,14 @@ export const queryClient = new QueryClient({
   },
 })
 
-function mountedChatDetailCount(client, chatId) {
-  return mountedChatDetails.get(client)?.get(String(chatId)) || 0
+const idbStorage = {
+  getItem: (key) => get(key),
+  setItem: (key, value) => set(key, value),
+  removeItem: (key) => del(key),
 }
 
-/**
- * Retain the complete loaded window only while a ChatView owns it.
- *
- * This is working-set ownership rather than an arbitrary cache-size policy:
- * every mounted/hidden pane keeps its exact pagination and scroll state; the
- * moment the final owner releases, that one inactive entry returns to the
- * server's ordinary 20-message activation page.
- */
-export function retainChatDetailQuery(client, chatId) {
-  const id = String(chatId || '')
-  if (!client || !id) return () => {}
-  let counts = mountedChatDetails.get(client)
-  if (!counts) {
-    counts = new Map()
-    mountedChatDetails.set(client, counts)
-  }
-  counts.set(id, (counts.get(id) || 0) + 1)
-  let released = false
-  return () => {
-    if (released) return
-    released = true
-    const current = mountedChatDetailCount(client, id)
-    if (current <= 1) counts.delete(id)
-    else counts.set(id, current - 1)
-    if (counts.size === 0) mountedChatDetails.delete(client)
-    if (current > 1) return
-
-    // React StrictMode deliberately runs mount effects through a synthetic
-    // setup -> cleanup -> setup cycle. Let that same-tick handoff (and a real
-    // cross-world owner handoff) re-retain the chat before deciding it is
-    // inactive; otherwise the optimization would compact a view that never
-    // actually left the screen.
-    const compactIfStillUnowned = () => {
-      if (mountedChatDetailCount(client, id) > 0) return
-      const query = client.getQueryCache().find({
-        queryKey: ['chat-messages', id],
-        exact: true,
-      })
-      if (!query || query.state.fetchStatus !== 'idle') return
-      const compacted = compactChatDetailCacheValue(query.state.data)
-      if (compacted === query.state.data) return
-      query.setData(compacted, {
-        manual: true,
-        updatedAt: query.state.dataUpdatedAt,
-      })
-    }
-    if (typeof queueMicrotask === 'function') queueMicrotask(compactIfStillUnowned)
-    else Promise.resolve().then(compactIfStillUnowned)
-  }
-}
-
-/** Persistence-only projection: all visited chats may remain warm, but each
- * snapshot stores only the same recent page a cold activation asks the server
- * for. The live QueryClient is never changed here. */
+/** Bound steady-state IndexedDB growth without changing the live query cache.
+ * An explicit shell reload writes the full current window separately below. */
 export function compactPersistedChatDetails(persistedClient) {
   const queries = persistedClient?.clientState?.queries
   if (!Array.isArray(queries)) return persistedClient
@@ -111,7 +60,7 @@ export function compactPersistedChatDetails(persistedClient) {
               ...query,
               state: {
                 ...query.state,
-                data: compactChatDetailCacheValue(query.state?.data),
+                data: compactPersistedChatDetailCacheValue(query.state?.data),
               },
             }
       )),
@@ -119,23 +68,23 @@ export function compactPersistedChatDetails(persistedClient) {
   }
 }
 
-const idbStorage = {
-  getItem: (key) => get(key),
-  setItem: (key, value) => set(key, value),
-  removeItem: (key) => del(key),
+// Earlier releases stored this value as one large JSON string. Keep restore
+// compatible with that on-disk shape while writing the structured value
+// directly from now on. Avoiding JSON.stringify on the main thread matters on
+// large chat histories: the throttled save can otherwise land between touch
+// start and the browser's first native scroll frame.
+export function restorePersistedClient(storedClient) {
+  return typeof storedClient === 'string'
+    ? JSON.parse(storedClient)
+    : storedClient
 }
 
 export const queryPersister = createAsyncStoragePersister({
   storage: idbStorage,
   key: QUERY_CACHE_KEY,
   throttleTime: 1000,
-  serialize: persistedClient => JSON.stringify(
-    compactPersistedChatDetails(persistedClient),
-  ),
-  // Repair any unbounded snapshot written by an older shell before it reaches
-  // React. This makes the correction take effect on the first reload instead
-  // of waiting for every historical chat to be revisited.
-  deserialize: value => compactPersistedChatDetails(JSON.parse(value)),
+  serialize: compactPersistedChatDetails,
+  deserialize: restorePersistedClient,
 })
 
 export const persistOptions = {
@@ -179,14 +128,14 @@ export function shouldPersistQueryKey(queryKey) {
  * handoff snapshots the same allowlisted cache without changing steady-state
  * throttling. */
 export async function flushPersistedQueryCache(client = queryClient) {
-  const persistedClient = compactPersistedChatDetails({
+  const persistedClient = {
     buster: QUERY_CACHE_BUSTER,
     timestamp: Date.now(),
     clientState: dehydrate(client, {
       shouldDehydrateQuery: (query) => shouldPersistQueryKey(query.queryKey),
     }),
-  })
-  await idbStorage.setItem(QUERY_CACHE_KEY, JSON.stringify(persistedClient))
+  }
+  await idbStorage.setItem(QUERY_CACHE_KEY, persistedClient)
 }
 
 /** Wait briefly for the reload handoff, but never let a blocked IndexedDB

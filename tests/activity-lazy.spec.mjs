@@ -541,13 +541,12 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
   expect(activityBox).not.toBeNull()
   expect(timelineBox.x).toBeGreaterThan(activityBox.x + 12)
   expect(toolBox.x).toBeGreaterThan(timelineBox.x + 8)
-  const activityHeaderBox = await activityHeader.boundingBox()
   const thoughtToggleBox = await thoughtToggle.boundingBox()
   const toolToggleBox = await toolToggle.boundingBox()
-  expect(activityHeaderBox.height).toBeGreaterThanOrEqual(43)
+  expect(activityBox.height).toBe(32)
   for (const box of [thoughtToggleBox, toolToggleBox]) {
     expect(box.height).toBeGreaterThanOrEqual(27)
-    expect(box.height).toBeLessThan(43)
+    expect(box.height).toBeLessThan(33)
   }
 
   await thoughtToggle.click()

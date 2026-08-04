@@ -14,7 +14,8 @@ from sqlalchemy import Text, case, cast, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import activity, auth, models, providers, questions
+from app import activity, auth, chat_search, models, providers, questions
+from app.chat_visibility import coerce_agent_settings, visible_in_owner_drawer
 from app.config import get_settings
 from app.chat import (
   _finish_run,
@@ -93,10 +94,17 @@ def _project_legacy_memory_recall_sidecars(
     legacy_memory_recall_output_ids,
     project_legacy_memory_recalls,
   )
+  from app.memory_provider import resolve_recall_binding
   from app.memory_recall import MAX_RECALL_RESULT_SCAN_CHARS
 
+  # Recognizing HISTORY only requires that the path once belonged to a
+  # grant holder. Uninstalling Memory must not retroactively strip citations
+  # from transcripts the owner already read, so the read path deliberately
+  # accepts soft-deleted providers where the mint path would not.
+  binding = resolve_recall_binding(db, include_uninstalled=True)
   tool_ids = legacy_memory_recall_output_ids(
     messages,
+    binding=binding,
     live_message=live_message,
   )
   if not tool_ids:
@@ -136,6 +144,7 @@ def _project_legacy_memory_recall_sidecars(
   ).all()
   return project_legacy_memory_recalls(
     messages,
+    binding=binding,
     output_tails={
       tool_use_id: decode_tool_output(stored)[-MAX_RECALL_RESULT_SCAN_CHARS:]
       for tool_use_id, stored in rows
@@ -201,29 +210,7 @@ class PinnedOrderUpdate(BaseModel):
   items: list[PinnedOrderItem] = Field(min_length=1, max_length=5000)
 
 
-def _coerce_agent_settings(raw) -> dict:
-  """Returns a fresh dict from a possibly-string JSON value.
-
-  SQLAlchemy's JSON column type usually returns dict on read, but
-  on some SQLite + driver combos (especially with text-backed JSON
-  columns) the value comes back as a raw string. Calling
-  `dict(some_str)` raises TypeError. Normalize once at every
-  read site to defend against that — and against legacy rows
-  written before the column was typed as JSON.
-
-  Returns `{}` for None, invalid JSON, or non-dict values.
-  """
-  if raw is None:
-    return {}
-  if isinstance(raw, dict):
-    return dict(raw)
-  if isinstance(raw, str):
-    try:
-      parsed = json.loads(raw)
-      return dict(parsed) if isinstance(parsed, dict) else {}
-    except (ValueError, TypeError):
-      return {}
-  return {}
+_coerce_agent_settings = coerce_agent_settings
 
 
 def _mirror_agent_defaults(
@@ -261,18 +248,7 @@ def _switch_request_fingerprint(provider_id: str, settings_patch: dict) -> str:
   return hashlib.sha256(payload).hexdigest()
 
 
-def _visible_in_owner_drawer(chat: models.Chat) -> bool:
-  settings = _coerce_agent_settings(chat.agent_settings_json)
-  # An explicit ``drawer_hidden`` bit overrides the default rule in either
-  # direction. Autopilot follow-up chats are ordinary owner chats that use it to
-  # stay out of the drawer except while an escalation is waiting on the owner, so
-  # routine self-resolving rounds never clutter the chat list.
-  hidden = settings.get("drawer_hidden")
-  if hidden is not None:
-    return not bool(hidden)
-  if chat.created_by_app_id is None:
-    return True
-  return settings.get("owner_visible") is True
+_visible_in_owner_drawer = visible_in_owner_drawer
 
 
 @router.post(
@@ -325,36 +301,15 @@ def issue_media_token(
   return {"token": token, "expires_in": 900}
 
 
-def _owner_chat_summary(chat: models.Chat, *, durable_running: bool = False) -> dict:
-  """Canonical shape shared by create and the owner drawer list."""
+def _owner_chat_summary(chat, *, durable_running: bool = False) -> dict:
+  """Canonical owner-list shape for a Chat or its lightweight projection."""
   return {
     "id": chat.id,
     "title": chat.title,
     "updated_at": chat.updated_at.isoformat(),
     "activity_at": chat.activity_at.isoformat() if chat.activity_at else None,
     "pinned_at": chat.pinned_at.isoformat() if chat.pinned_at else None,
-    "has_messages": bool(chat.messages and len(chat.messages) > 0),
-    "created_by_app_id": chat.created_by_app_id,
-    "running": durable_running or is_chat_running(chat.id),
-  }
-
-
-def _owner_chat_summary_projection(chat, *, durable_running: bool = False) -> dict:
-  """Serialize the lightweight row projection used by the drawer list.
-
-  ``GET /api/chats`` used to hydrate every complete ``Chat`` ORM object merely
-  to return eight summary fields. On a long-lived instance that decoded tens of
-  megabytes of transcript JSON on every drawer open and chat switch, contending
-  with the selected chat's small detail read. Keep transcript inspection inside
-  the database (``message_count``) and never materialize ``messages`` here.
-  """
-  return {
-    "id": chat.id,
-    "title": chat.title,
-    "updated_at": chat.updated_at.isoformat(),
-    "activity_at": chat.activity_at.isoformat() if chat.activity_at else None,
-    "pinned_at": chat.pinned_at.isoformat() if chat.pinned_at else None,
-    "has_messages": bool(chat.message_count),
+    "has_messages": bool(chat.has_messages),
     "created_by_app_id": chat.created_by_app_id,
     "running": durable_running or is_chat_running(chat.id),
   }
@@ -371,12 +326,63 @@ def _reclaim_expired_tombstones_after_chat_write(db: Session) -> None:
     log.exception("Expired chat tombstone cleanup failed after chat write")
 
 
+def _chat_message_matches_key(
+  message: object,
+  index: int,
+  key: str,
+) -> bool:
+  """Match every durable address a frontend transcript row can carry."""
+  if not isinstance(message, dict):
+    return False
+  target = str(key)
+  message_id = message.get("id")
+  if message_id is not None and str(message_id) == target:
+    return True
+  client_id = message.get("cid")
+  if client_id is not None and str(client_id) == target:
+    return True
+  role = message.get("role")
+  timestamp = message.get("ts")
+  if timestamp is not None and f"{role}-{timestamp}" == target:
+    return True
+  return f"{role}-{index}" == target
+
+
+def _chat_detail_window(
+  messages: list,
+  *,
+  limit: int,
+  before: int | None,
+  anchor_key: str | None,
+) -> tuple[list, int, bool | None]:
+  """Select one authoritative detail window and report anchor coverage."""
+  total = len(messages)
+  if anchor_key is not None:
+    anchor_index = next((
+      index for index, message in enumerate(messages)
+      if _chat_message_matches_key(message, index, anchor_key)
+    ), None)
+    if anchor_index is not None:
+      # Exact restoration is one atomic snapshot: the saved row through the
+      # current tail. A page ceiling here silently discards the very address
+      # the caller asked us to preserve.
+      return messages[anchor_index:], anchor_index, True
+    start = max(0, total - limit)
+    return messages[start:], start, False
+  if before is not None:
+    start = max(0, before - limit)
+    return messages[start:before], start, None
+  start = max(0, total - limit)
+  return messages[start:], start, None
+
+
 def _chat_detail_response(
   chat: models.Chat,
   *,
   db: Session,
   limit: int = 20,
   before: int | None = None,
+  anchor_key: str | None = None,
   expose_session: bool = True,
   compact: bool = False,
 ) -> dict:
@@ -413,12 +419,12 @@ def _chat_detail_response(
     else None
   )
   total = len(all_msgs)
-  if before is not None:
-    start = max(0, before - limit)
-    page = all_msgs[start:before]
-  else:
-    start = max(0, total - limit)
-    page = all_msgs[start:]
+  page, start, requested_anchor_found = _chat_detail_window(
+    all_msgs,
+    limit=limit,
+    before=before,
+    anchor_key=anchor_key,
+  )
   page = _project_legacy_memory_recall_sidecars(
     page,
     chat_id=chat.id,
@@ -446,9 +452,12 @@ def _chat_detail_response(
     live_message=live_message,
   )
   if compact:
+    from app.memory_provider import resolve_recall_binding
     page = compact_messages_for_detail(
       page,
       message_offset=start,
+      # Read path: an uninstalled provider's past citations stay readable.
+      binding=resolve_recall_binding(db, include_uninstalled=True),
       live_message=compact_exempt_live_message,
     )
   from app.chat_media_dimensions import project_message_image_dimensions
@@ -463,7 +472,7 @@ def _chat_detail_response(
   active_goal_objective = (
     running_goal_objective(db, chat.id) if running else None
   )
-  return {
+  response = {
     "id": chat.id,
     "title": chat.title,
     "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
@@ -494,6 +503,9 @@ def _chat_detail_response(
       message.get("role") == "assistant" for message in all_msgs
     ),
   }
+  if requested_anchor_found is not None:
+    response["requested_anchor_found"] = requested_anchor_found
+  return response
 
 
 @router.get("")
@@ -512,16 +524,9 @@ def list_chats(
   # a `desc()` on a nullable column would put NULL last under our
   # SQLite collation, but making the boolean explicit is clearer and
   # portable.
-  # Drawer projection only. Selecting the Chat entity here hydrates its full
-  # ``messages`` JSON column even though the response needs only a boolean; on
-  # this owner's history that was ~47 MB of JSON decoding per refresh. Compare
-  # the canonical serialized empty-array value in SQL instead of parsing every
-  # JSON array with json_array_length: Chat.messages is a non-null list written
-  # by SQLAlchemy's canonical serializer, and CAST(... AS TEXT) is portable
-  # across SQLite and PostgreSQL. A future raw-import path must normalize JSON
-  # text first (PostgreSQL's json type preserves whitespace such as ``[ ]``).
-  # The database can reject non-empty values from their stored length without
-  # walking every transcript.
+  # Drawer projection only. ``has_messages`` is maintained with the transcript
+  # by the Chat model and the two writer bulk-update paths, so this hot query
+  # never reads or decodes the potentially large ``messages`` JSON column.
   q = db.query(
     models.Chat.id,
     models.Chat.title,
@@ -533,10 +538,7 @@ def list_chats(
     # chats normally keep this NULL, so this remains a tiny projection rather
     # than pulling transcript/runtime JSON into the hot path.
     models.Chat.agent_settings_json,
-    case(
-      (cast(models.Chat.messages, Text) != "[]", 1),
-      else_=0,
-    ).label("message_count"),
+    models.Chat.has_messages,
   ).filter(models.Chat.deleted_at.is_(None))
   chats = (
     q.order_by(
@@ -557,11 +559,31 @@ def list_chats(
     chat_count=len(chats),
   )
   return [
-    _owner_chat_summary_projection(
+    _owner_chat_summary(
       chat, durable_running=chat.id in durable_running,
     )
     for chat in chats
   ]
+
+
+@router.get("/search")
+def search_chats(
+  q: str = Query("", max_length=256),
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Full-text search over chat titles and conversation prose.
+
+  Registered before ``/{chat_id}`` so the literal path wins. The index is
+  derived data reconciled inside the request (see ``chat_search``); the first
+  query on an existing instance pays a one-time backfill, after which only
+  changed chats are touched. Snippets mark matches with private-use
+  sentinels U+E000/U+E001; the drawer converts them to highlight marks.
+  """
+  query = q.strip()
+  if not query:
+    return []
+  return chat_search.search(db, query)
 
 
 @router.get("/session-links")
@@ -646,10 +668,26 @@ def list_agent_lifecycle(
   rows = fetched[:limit]
 
   run_query = (
-    db.query(models.AgentLifecycleRunUpdate)
+    db.query(
+      models.AgentLifecycleRunUpdate,
+      models.ChatRun.root_run_id,
+    )
     .join(models.Chat, models.Chat.id == models.AgentLifecycleRunUpdate.chat_id)
+    .outerjoin(
+      models.ChatRun,
+      models.ChatRun.id == models.AgentLifecycleRunUpdate.chat_run_id,
+    )
+    .outerjoin(
+      models.Delegation,
+      models.Delegation.child_chat_id
+      == models.AgentLifecycleRunUpdate.chat_id,
+    )
     .filter(
       models.Chat.deleted_at.is_(None),
+      # Durable delegation children are projected as normalized lifecycle
+      # events under their parent root. Suppressing their private child
+      # ChatRun here prevents Workflows from rendering a duplicate root.
+      models.Delegation.id.is_(None),
       models.AgentLifecycleRunUpdate.id > runs_after_id,
     )
     .order_by(models.AgentLifecycleRunUpdate.id.asc())
@@ -688,15 +726,18 @@ def list_agent_lifecycle(
     } for row in rows],
     "runs": [{
       "update_id": run.id,
-      "id": run.chat_run_id,
+      # Continuations/restart resumes update one logical Workflows root even
+      # though each provider process has a distinct physical ChatRun id.
+      "id": root_run_id or run.chat_run_id,
+      "physical_run_id": run.chat_run_id,
       "chat_id": run.chat_id,
       "provider": run.provider,
       "status": run.status,
       "started_at": _iso(run.started_at),
       "ended_at": _iso(run.ended_at),
-    } for run in runs],
+    } for run, root_run_id in runs],
     "next_after_id": rows[-1].id if rows else after_id,
-    "next_runs_after_id": runs[-1].id if runs else runs_after_id,
+    "next_runs_after_id": runs[-1][0].id if runs else runs_after_id,
     "has_more": has_more,
     "runs_has_more": runs_has_more,
   }
@@ -1171,8 +1212,9 @@ async def patch_chat(
 @router.get("/{chat_id}")
 def get_chat(
   chat_id: str,
-  limit: int = 20,
+  limit: int = Query(20, ge=1),
   before: int | None = None,
+  anchor: str | None = Query(None, max_length=512),
   compact: bool = False,
   principal: Principal = Depends(get_owner_or_chat_embed_principal),
   db: Session = Depends(get_db),
@@ -1187,6 +1229,12 @@ def get_chat(
   Messages are returned in the order they appear in the list, so newer
   messages have higher indices. The response includes `offset` (the index
   of the first message in this page) and `total` (total message count).
+
+  `anchor` is a durable rendered-row key used when restoring an older reading
+  position. If found, the response contains that row through the current tail
+  from one authoritative snapshot and reports `requested_anchor_found=true`;
+  `limit` is intentionally ignored. If it is absent, the ordinary latest page
+  is returned with `requested_anchor_found=false`.
   """
   if principal.scope == "app":
     raise HTTPException(status_code=403, detail="App token is not valid here.")
@@ -1203,6 +1251,7 @@ def get_chat(
     db=db,
     limit=limit,
     before=before,
+    anchor_key=anchor,
     compact=compact,
     # Provider thread ids are backend continuity state, not part of the
     # embedded participant surface.
@@ -2261,7 +2310,7 @@ def _app_chat_summary(chat: models.Chat) -> dict:
     "created_at": chat.created_at.isoformat() if chat.created_at else None,
     "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
     "activity_at": chat.activity_at.isoformat() if chat.activity_at else None,
-    "has_messages": bool(chat.messages and len(chat.messages) > 0),
+    "has_messages": bool(chat.has_messages),
     "provider": chat.provider or "claude",
     "scope": _app_chat_scope(chat),
     "scope_label": _app_chat_scope_label(chat),

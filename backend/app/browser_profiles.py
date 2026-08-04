@@ -17,6 +17,10 @@ from app.run_state import running_chat_ids
 
 
 _CHAT_PROFILE = re.compile(r"^chat-([0-9a-fA-F-]{36})$")
+_AGENT_BROWSER_SERVER_EXECUTABLES = frozenset({
+  "agent-browser-linux-arm64",
+  "agent-browser-linux-x64",
+})
 _CACHE_PATHS = (
   "Default/Cache",
   "Default/Code Cache",
@@ -54,6 +58,14 @@ class BrowserSessionTarget:
   session: str
   namespace: str | None = None
   socket_dir: str | None = None
+
+
+@dataclass(frozen=True)
+class BrowserSessionScan:
+  """Exact targets plus whether process discovery was complete."""
+
+  targets: frozenset[BrowserSessionTarget]
+  complete: bool
 
 
 def _env_int(name: str, default: int) -> int:
@@ -155,7 +167,7 @@ def browser_session_targets_for_chat(
   chat_id: str,
   *,
   proc_root: Path = Path("/proc"),
-) -> set[BrowserSessionTarget]:
+) -> BrowserSessionScan:
   """Return live agent-browser routing targets created by one chat.
 
   ``AGENT_BROWSER_SESSION=chat-<id>`` gives ordinary invocations a safe
@@ -169,24 +181,27 @@ def browser_session_targets_for_chat(
   Routing values are opaque. agent-browser accepts values that look like paths
   or options; cleanup passes them only through a child environment (never a
   shell, CLI option value, or path operation), matching the daemon exactly.
-  Only the agent-browser server binary is considered. Proc races and permission
-  errors are normal and read as an incomplete, best-effort set.
+  Only the agent-browser server binary is considered. A process disappearing
+  during the scan cannot remain a live target and is safe to ignore; any other
+  unreadable process makes the result incomplete so destructive callers can
+  preserve scratch rather than mistaking uncertainty for an empty inventory.
   """
   if not chat_id or not proc_root.is_dir():
-    return set()
+    return BrowserSessionScan(frozenset(), False)
   try:
     processes = list(proc_root.iterdir())
   except OSError:
-    return set()
+    return BrowserSessionScan(frozenset(), False)
 
   targets: set[BrowserSessionTarget] = set()
+  complete = True
   for process in processes:
     if not process.name.isdigit():
       continue
     try:
       argv = (process / "cmdline").read_bytes().split(b"\0")
       executable = Path(argv[0].decode("utf-8", errors="replace")).name
-      if executable != "agent-browser-linux-x64":
+      if executable not in _AGENT_BROWSER_SERVER_EXECUTABLES:
         continue
       values: dict[bytes, str] = {}
       for raw in (process / "environ").read_bytes().split(b"\0"):
@@ -198,7 +213,10 @@ def browser_session_targets_for_chat(
           b"AGENT_BROWSER_SOCKET_DIR",
         ):
           values[key] = value.decode("utf-8", errors="surrogateescape")
+    except (FileNotFoundError, ProcessLookupError):
+      continue
     except OSError:
+      complete = False
       continue
     session = values.get(b"AGENT_BROWSER_SESSION")
     if values.get(b"CHAT_ID") == chat_id and session is not None:
@@ -207,7 +225,7 @@ def browser_session_targets_for_chat(
         namespace=values.get(b"AGENT_BROWSER_NAMESPACE"),
         socket_dir=values.get(b"AGENT_BROWSER_SOCKET_DIR"),
       ))
-  return targets
+  return BrowserSessionScan(frozenset(targets), complete)
 
 
 def chat_activity_snapshot(db: Session) -> dict[str, dict]:

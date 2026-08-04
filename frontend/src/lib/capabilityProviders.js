@@ -1,6 +1,40 @@
 import { startMicrophoneCapture } from './microphoneCapture.js'
+import {
+  createDeviceAssetCacheProvider,
+  DEVICE_ASSET_CACHE,
+} from './deviceAssetCache.js'
 
 export const MICROPHONE_CAPTURE = 'media.microphone.capture'
+export const SPEECH = 'media.speech'
+export const SPEECH_MODELS = 'device.speech-models'
+
+export function createSpeechProvider({
+  loadRuntime = () => import('./speech/speechProviderRuntime.js'),
+} = {}) {
+  return {
+    version: 1,
+    exclusive: true,
+    async open(context) {
+      const runtime = await loadRuntime()
+      return runtime.openSpeechCapability(context)
+    },
+  }
+}
+
+export function createSpeechModelsProvider({
+  appId,
+  loadRuntime = () => import('./speech/speechModelsProviderRuntime.js'),
+} = {}) {
+  return {
+    version: 1,
+    exclusive: true,
+    onDeactivate: 'cancel',
+    async open(context) {
+      const runtime = await loadRuntime()
+      return runtime.openSpeechModelsCapability({ ...context, appId })
+    },
+  }
+}
 
 export function createMicrophoneProvider({ startCapture = startMicrophoneCapture } = {}) {
   return {
@@ -41,6 +75,12 @@ export function createMicrophoneProvider({ startCapture = startMicrophoneCapture
 
 export function builtInCapabilityProviders(options = {}) {
   return {
+    [DEVICE_ASSET_CACHE]: createDeviceAssetCacheProvider(options.deviceAssets),
     [MICROPHONE_CAPTURE]: createMicrophoneProvider(options.microphone),
+    [SPEECH]: createSpeechProvider(options.speech),
+    [SPEECH_MODELS]: createSpeechModelsProvider({
+      appId: options.deviceAssets?.appId,
+      ...options.speechModels,
+    }),
   }
 }

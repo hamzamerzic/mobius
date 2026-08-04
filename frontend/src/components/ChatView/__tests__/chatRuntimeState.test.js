@@ -7,12 +7,10 @@ import {
   builtAppPulseDecision,
   canFastForwardQueue,
   shouldFreezeStreamingReturn,
-  cidOf,
   coldTranscriptRenderFrames,
   continuationRowsFromPromotedMessage,
   isContinuationMessage,
   isOwnerUserMessage,
-  mergeRecentMessagesIntoLoadedWindow,
   openAppCtaViewModel,
   previewReadyAnnouncement,
   previewUpdatedAnnouncement,
@@ -26,6 +24,7 @@ import {
   stripInternalUserMessageFields,
   systemEventForChat,
 } from '../chatRuntimeState.js'
+import { mergeRecentMessagesIntoLoadedWindow } from '../../../lib/chatDetailCache.js'
 
 test('automatic and manual continuations are product markers, not owner messages', () => {
   const marker = {
@@ -151,6 +150,19 @@ test('ordinary cold transcripts keep the one-commit path', () => {
   assert.deepEqual(coldTranscriptRenderFrames(messages), [messages])
 })
 
+test('collapsed activity runs are prepared as the one row they present', () => {
+  const blocks = Array.from({ length: 360 }, (_, index) => ({
+    type: index % 2 === 0 ? 'thinking' : 'tool',
+    ...(index % 2 === 0
+      ? { content: `reasoning ${index}` }
+      : { tool: 'Bash', status: 'done', output: `step ${index}` }),
+  }))
+  const messages = [{ role: 'assistant', ts: 1, blocks }]
+
+  assert.deepEqual(coldTranscriptRenderFrames(messages), [messages],
+    'one collapsed ActivityStretch must not become ninety hidden prefix commits')
+})
+
 test('one long markdown block grows by token fractions instead of one giant frame', () => {
   const block = { type: 'text', content: 'x'.repeat(48000) }
   const messages = [{ role: 'assistant', ts: 1, blocks: [block] }]
@@ -228,6 +240,7 @@ test('R4: a non-overlapping or rewritten recent page replaces stale loaded histo
   }), {
     messages: recent,
     offset: 20,
+    verified: false,
   })
 })
 
@@ -255,17 +268,6 @@ test('a local turn refreshes completed history while preserving its optimistic s
     recent[1],
     loaded[2],
   ])
-})
-
-test('cidOf returns the row cid, else null (no read-time derivation)', () => {
-  // Post-card-221 every user row carries an explicit cid (client-minted, or a
-  // backfilled `legacy-<ts>`); cidOf returns it as-is and no longer derives one
-  // from `ts`. `ts` is display/ordering metadata only.
-  assert.equal(cidOf({ cid: 'abc', ts: 5 }), 'abc')
-  assert.equal(cidOf({ cid: 'legacy-5', ts: 5 }), 'legacy-5')
-  assert.equal(cidOf({ ts: 5 }), null)
-  assert.equal(cidOf({}), null)
-  assert.equal(cidOf(null), null)
 })
 
 test('stripInternalUserMessageFields KEEPS cid and drops the envelope fields', () => {

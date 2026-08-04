@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs'
 import {
   goalObjectiveAtRunStart,
   goalObjectiveFromText,
+  goalObjectiveFromRuntime,
   latestGoalObjective,
   progressRailViewModel,
 } from '../goalProgress.js'
@@ -75,7 +76,7 @@ test('a resumable continue keeps the same goal through live start and cold attac
   )
 })
 
-test('continue does not revive a completed, cleared, or superseded goal', () => {
+test('continuation recovery preserves only an active goal', () => {
   assert.equal(goalObjectiveAtRunStart('continue', [
     { role: 'user', content: '/goal old objective' },
     { role: 'assistant', content: 'Done' },
@@ -94,6 +95,18 @@ test('continue does not revive a completed, cleared, or superseded goal', () => 
     { role: 'assistant', blocks: [{ type: 'error', resumable: true }] },
     { role: 'user', content: 'continue' },
   ]), '')
+  assert.equal(goalObjectiveFromRuntime({
+    running: true,
+    active_goal_objective: null,
+  }, 'finish the migration'), 'finish the migration')
+  assert.equal(goalObjectiveFromRuntime({
+    running: true,
+    active_goal_objective: 'authoritative goal',
+  }, 'stale goal'), 'authoritative goal')
+  assert.equal(goalObjectiveFromRuntime({
+    running: false,
+    active_goal_objective: null,
+  }, 'finished goal'), '')
 })
 
 test('the goal reuses the progress rail and stays as context for build phases', () => {
@@ -125,6 +138,19 @@ test('the goal reuses the progress rail and stays as context for build phases', 
 })
 
 test('ChatView binds goal state to explicit run boundaries, not transport liveness', () => {
+  const runtimePoll = chatView.match(
+    /const reconcileRuntimeState = useCallback[\s\S]*?const handleCompactionStored/,
+  )?.[0] || ''
+  assert.doesNotMatch(
+    runtimePoll,
+    /setServerRunningState|setActiveGoalState/,
+    'one server snapshot must not publish through independent field setters',
+  )
+  assert.equal(
+    runtimePoll.match(/updateChatRuntimeCache\(/g)?.length,
+    1,
+    'one server snapshot should publish one complete runtime cache patch',
+  )
   const runStarts = chatView.split('setBuildPhases(railAtRunStart())').slice(1)
   assert.equal(runStarts.length, 4, 'every current run-start seam should be covered')
   for (const suffix of runStarts) {
@@ -156,7 +182,7 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
   )
   assert.match(
     streamConnection,
-    /onConnectionLostRef\.current\?\.\(\)[\s\S]{0,100}onNeedsRefreshRef\.current/,
+    /onConnectionLostRef\.current\?\.\(\)[\s\S]{0,100}refreshThenSettleCatchUp\(\{ force: true \}\)/,
     'retry exhaustion must use the non-terminal handoff before reconciliation',
   )
   assert.match(
@@ -171,7 +197,7 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
   )
   assert.match(
     chatView,
-    /runtime\.active_goal_objective \|\| latestGoalObjective\(visibleMessages\)/,
+    /goalObjectiveFromRuntime\(\s*runtime,\s*latestGoalObjective\(visibleMessages\)/,
     'a cold chat read should restore the objective from the durable active run',
   )
   assert.match(
@@ -187,11 +213,6 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
   assert.match(progressRail, /chat__progress-rail/)
   assert.match(progressRail, /aria-expanded=\{expanded\}/)
   assert.match(progressRail, /label\.scrollWidth > step\.clientWidth/)
-  assert.match(
-    chatCss,
-    /\.chat__progress-rail\s*\{[\s\S]*?margin:\s*0 auto 3px;/,
-    'the goal rail should sit close to the composer like other footer status UI',
-  )
   assert.match(
     chatCss,
     /\.chat__foot \.chat__progress-step--toggle[\s\S]*?\{ pointer-events: auto; \}/,

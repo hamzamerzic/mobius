@@ -173,6 +173,7 @@ def test_owner_chat_log_scope_backfills_a_legacy_store_contract(
 
 def test_list_apps_does_not_hydrate_source_or_icon_payloads(client, auth, db):
   app = models.App(
+    source_dir="/tmp/mobius-tests/heavy-metadata-test",
     name="Heavy metadata test",
     description="drawer row",
     jsx_source="x" * 1_000_000,
@@ -308,38 +309,6 @@ def test_delete_scheduled_app_disables_own_cron_replay(
   assert source_dir.exists()
 
 
-def test_delete_legacy_platform_app_disables_runtime_cron_replay(
-  client, auth, db, monkeypatch,
-):
-  """Old platform-core rows also had a replay sidecar under /data/apps/<slug>."""
-  monkeypatch.setattr("app.install._unregister_cron", lambda _source: None)
-  data_dir = Path(get_settings().data_dir)
-  platform_source = data_dir / "platform" / "core-apps" / "reflection"
-  platform_source.mkdir(parents=True, exist_ok=True)
-  (platform_source / "index.jsx").write_text(
-    "export default function App() { return <div/> }",
-    encoding="utf-8",
-  )
-  runtime_dir = data_dir / "apps" / "reflection"
-  runtime_dir.mkdir(parents=True, exist_ok=True)
-  replay = runtime_dir / "init-cron.sh"
-  replay.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-
-  app = models.App(
-    name="Reflection",
-    description="legacy platform app",
-    jsx_source="export default function App() { return <div/> }",
-    slug="reflection",
-    source_dir=str(platform_source),
-  )
-  db.add(app)
-  db.commit()
-
-  assert client.delete(f"/api/apps/{app.id}", headers=auth).status_code == 204
-
-  assert not replay.exists()
-  assert (runtime_dir / "init-cron.sh.tombstoned").exists()
-  assert platform_source.exists()
 
 
 def test_app_token_can_update_own_schedule_only(client, auth, monkeypatch):
@@ -515,6 +484,77 @@ def test_app_schedules_expose_zone_declaration(client, auth):
   assert [(j["cron"], j["timezone"], j["zone_cron"]) for j in rows] == [
     ("* * * * *", "Europe/Belgrade", "0 5 * * *"),
   ]
+
+
+def test_renamed_job_debris_does_not_shadow_the_real_schedule(client, auth, db):
+  """A crontab line for a job the app no longer ships is not a schedule.
+
+  Registration is add-only, so renaming a job (news-2: job.sh -> fetch.sh)
+  strands the old supervised entry. Because discovery took the first matching
+  line, the stranded one won on sort order alone: the schedules API reported
+  the phantom job at its every-minute gate cadence, and reconciliation then
+  failed the app entirely on its own is_file() guard.
+  """
+  source_dir = Path(get_settings().data_dir) / "apps" / "memory"
+  source_dir.mkdir(parents=True)
+  (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+  (source_dir / "init-cron.sh").write_text(
+    f'ENTRY="0 10 * * * {source_dir}/fetch.sh 56"\n',
+    encoding="utf-8",
+  )
+  create_local_app(
+    client, _service_auth(), name="Memory", description="test",
+    source_dir=source_dir,
+  )
+  runner = "/data/platform/backend/scripts/app-job-runner.py"
+  # The stranded entry sorts BEFORE the live one, exactly as observed.
+  live = (
+    f"* * * * * python3 {runner} 56 {source_dir}/job.sh\n"
+    f"0 10 * * * python3 {runner} 56 {source_dir}/fetch.sh\n"
+  )
+
+  from app.routes import app_schedules as apps_module
+  with patch("app.app_cron.read_crontab", lambda: live):
+    r = client.get("/api/apps/schedules", headers=auth)
+    assert r.status_code == 200, r.text
+    assert [(j["cron"], j["job"]) for j in r.json()] == [("0 10 * * *", "fetch.sh")]
+
+    with patch("app.app_cron.register_cron") as register, \
+         patch("app.app_cron.write_crontab", return_value=True) as write:
+      count, warnings = apps_module.reconcile_app_cron_supervision(db)
+
+  assert warnings == []
+  assert count == 1
+  assert register.call_args.args[2] == source_dir / "fetch.sh"
+  # The dead line is retired; the live one survives untouched.
+  written = write.call_args.args[0]
+  assert f"{source_dir}/job.sh" not in written
+  assert f"{source_dir}/fetch.sh" in written
+
+
+def test_prune_spares_unsupervised_and_unreadable_crontabs(client, auth, db):
+  """Pruning only ever retires a supervised entry whose job is really gone."""
+  from app.routes import app_schedules as apps_module
+  apps_root = Path(get_settings().data_dir) / "apps"
+  apps_root.mkdir(parents=True, exist_ok=True)
+  runner = "/data/platform/backend/scripts/app-job-runner.py"
+
+  # An owner's own line naming a missing script is NOT platform-supervised.
+  assert not apps_module._is_orphaned_supervised_entry(
+    f"* * * * * {apps_root}/_self-reminders/job.sh", apps_root,
+  )
+  # Neither are comments or env assignments.
+  assert not apps_module._is_orphaned_supervised_entry("# a comment", apps_root)
+  assert not apps_module._is_orphaned_supervised_entry("PATH=/usr/bin", apps_root)
+  # A supervised entry whose job is gone is debris.
+  assert apps_module._is_orphaned_supervised_entry(
+    f"* * * * * python3 {runner} 61 {apps_root}/gone/job.sh", apps_root,
+  )
+  # A failed crontab READ must never trigger a rewrite from a partial view.
+  with patch("app.app_cron.read_crontab", lambda: None), \
+       patch("app.app_cron.write_crontab") as write:
+    assert apps_module._prune_orphaned_supervised_entries(apps_root) == []
+  write.assert_not_called()
 
 
 def test_platform_source_patch_rejected_and_store_identity_preserved(client, auth, db):

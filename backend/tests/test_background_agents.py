@@ -1,11 +1,11 @@
 """Tests for the canonical scheduled background-agent policy.
 
-Platform runners call it directly and installable jobs receive its system
-ordering through ``job-context``. These tests lock in the system-vs-app layering
-and the two owner toggles
-(primary_agent_mode, secondary_agent_mode), including the behavior-preserving
-legacy-default heuristic that keeps prod's live config (app pins provider=claude
-with no model) inheriting the system model rather than dropping it.
+These lock in what the PLATFORM owns: the system ordering, the shared
+normalization, and the uniform override contract every background agent speaks.
+The contract is deliberately shape-agnostic — an absent key inherits the system
+default, a present key owns that slot — so no app's settings format appears
+here. Each app's translation from its own settings screen into this shape is
+tested with that app, which is what keeps this module free of app knowledge.
 """
 
 import json
@@ -36,57 +36,76 @@ def test_system_only_uses_providers_list(tmp_path):
   assert out["fallback"] == {"provider": "codex", "model": "gpt-5.5", "effort": "medium"}
 
 
-def test_legacy_claude_no_model_inherits_system(tmp_path):
-  # This is prod's LIVE app-56 shape: provider pinned to claude, model null,
-  # no mode. It must NOT override (which would drop opus-4-8 to the SDK default).
+def test_empty_override_inherits_system_untouched(tmp_path):
+  # An app with no preference declares nothing; both slots stay the owner's.
   _write_global(tmp_path, PROVIDERS_LIST)
-  out = bg.resolve_background_agents(str(tmp_path), {"provider": "claude", "model": None})
-  assert out["primary"]["model"] == "claude-opus-4-8"  # inherited, not dropped
+  out = bg.resolve_background_agents(str(tmp_path), {})
+  assert out["primary"]["model"] == "claude-opus-4-8"
   assert out["fallback"]["provider"] == "codex"
 
 
-def test_app_primary_override_switches_provider(tmp_path):
+def test_declared_primary_owns_the_slot(tmp_path):
   _write_global(tmp_path, PROVIDERS_LIST)
-  out = bg.resolve_background_agents(str(tmp_path), {"provider": "codex", "model": "gpt-5.5"})
+  out = bg.resolve_background_agents(
+    str(tmp_path), {"primary": {"provider": "codex", "model": "gpt-5.5"}})
   assert out["primary"] == {"provider": "codex", "model": "gpt-5.5", "effort": None}
 
 
-def test_primary_agent_mode_system_ignores_app_pin(tmp_path):
+def test_declared_primary_owns_the_slot_even_when_it_matches_the_default(tmp_path):
+  # A declared choice is honored verbatim: the null model must NOT silently
+  # inherit the system's model, or an app could never pin the SDK default.
   _write_global(tmp_path, PROVIDERS_LIST)
   out = bg.resolve_background_agents(
-    str(tmp_path), {"primary_agent_mode": "system", "provider": "codex", "model": "gpt-5.5"})
-  assert out["primary"]["provider"] == "claude"  # system wins
-
-
-def test_primary_agent_mode_app_forces_app_even_default(tmp_path):
-  _write_global(tmp_path, PROVIDERS_LIST)
-  out = bg.resolve_background_agents(
-    str(tmp_path), {"primary_agent_mode": "app", "provider": "claude", "model": None})
-  # Forced app mode: claude with null model (not the system's opus-4-8).
+    str(tmp_path), {"primary": {"provider": "claude", "model": None}})
   assert out["primary"] == {"provider": "claude", "model": None, "effort": None}
 
 
-def test_secondary_mode_app_uses_app_fallback(tmp_path):
+def test_absent_primary_key_leaves_system_primary(tmp_path):
+  # Declaring only a fallback must not disturb the system primary.
   _write_global(tmp_path, PROVIDERS_LIST)
   out = bg.resolve_background_agents(
-    str(tmp_path), {"secondary_agent_mode": "app",
-                    "fallback_provider": "codex", "fallback_model": "gpt-5.5"})
+    str(tmp_path), {"fallback": {"provider": "codex", "model": "gpt-5.5"}})
+  assert out["primary"]["model"] == "claude-opus-4-8"
+
+
+def test_declared_fallback_owns_the_slot(tmp_path):
+  _write_global(tmp_path, PROVIDERS_LIST)
+  out = bg.resolve_background_agents(
+    str(tmp_path), {"fallback": {"provider": "codex", "model": "gpt-5.5"}})
   assert out["fallback"] == {"provider": "codex", "model": "gpt-5.5", "effort": None}
 
 
-def test_secondary_mode_system_ignores_app_fallback(tmp_path):
+def test_explicit_null_fallback_means_no_second_agent(tmp_path):
+  # Present-but-None is the only way to say "run without a fallback", and must
+  # not be confused with an absent key, which inherits one.
   _write_global(tmp_path, PROVIDERS_LIST)
-  out = bg.resolve_background_agents(
-    str(tmp_path), {"secondary_agent_mode": "system",
-                    "fallback_provider": "claude", "fallback_model": "claude-opus-4-8"})
-  assert out["fallback"] == {"provider": "codex", "model": "gpt-5.5", "effort": "medium"}  # system
+  out = bg.resolve_background_agents(str(tmp_path), {"fallback": None})
+  assert out["primary"]["provider"] == "claude"
+  assert out["fallback"] is None
 
 
-def test_secondary_mode_unset_presence_heuristic(tmp_path):
+def test_unusable_declared_primary_keeps_system_rather_than_no_agent(tmp_path):
+  # A malformed declaration must never leave the night with no agent at all.
   _write_global(tmp_path, PROVIDERS_LIST)
   out = bg.resolve_background_agents(
-    str(tmp_path), {"fallback_provider": "claude", "fallback_model": "claude-opus-4-8"})
-  assert out["fallback"] == {"provider": "claude", "model": "claude-opus-4-8", "effort": None}
+    str(tmp_path), {"primary": {"provider": "nonsense"}})
+  assert out["primary"]["provider"] == "claude"
+
+
+def test_declared_choice_is_normalized_like_every_other(tmp_path):
+  # Normalization lives here precisely so no app has to repeat it: a model
+  # belonging to the other provider is dropped rather than passed through.
+  _write_global(tmp_path, PROVIDERS_LIST)
+  out = bg.resolve_background_agents(
+    str(tmp_path), {"primary": {"provider": "codex", "model": "claude-opus-4-8"}})
+  assert out["primary"] == {"provider": "codex", "model": None, "effort": None}
+
+
+def test_disabled_declared_choice_is_ignored(tmp_path):
+  _write_global(tmp_path, PROVIDERS_LIST)
+  out = bg.resolve_background_agents(
+    str(tmp_path), {"fallback": {"provider": "codex", "enabled": False}})
+  assert out["fallback"] is None
 
 
 def test_dedup_identical_primary_fallback_nulls_fallback(tmp_path):
@@ -94,11 +113,20 @@ def test_dedup_identical_primary_fallback_nulls_fallback(tmp_path):
     {"provider": "claude", "model": "claude-opus-4-8", "effort": "medium", "enabled": True},
   ]})
   out = bg.resolve_background_agents(
-    str(tmp_path), {"secondary_agent_mode": "app",
-                    "fallback_provider": "claude", "fallback_model": "claude-opus-4-8",
-                    "fallback_effort": "medium"})
+    str(tmp_path), {"fallback": {"provider": "claude", "model": "claude-opus-4-8",
+                                 "effort": "medium"}})
   assert out["primary"]["provider"] == "claude"
   assert out["fallback"] is None
+
+
+def test_resolver_carries_no_app_settings_vocabulary():
+  # The regression this migration exists to prevent: app-specific setting names
+  # creeping back into the shared resolver.
+  import inspect
+  source = inspect.getsource(bg)
+  for token in ("primary_agent_mode", "secondary_agent_mode",
+                "fallback_provider", "fallback_model", "fallback_effort"):
+    assert token not in source, f"app settings key {token!r} leaked into the resolver"
 
 
 def test_no_settings_file_falls_back_to_provider_default(tmp_path):

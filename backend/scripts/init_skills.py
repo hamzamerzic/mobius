@@ -8,8 +8,8 @@ knowledge graph, this is CREATE-IF-ABSENT — reseeding would clobber the agent'
 own skill edits.
 
 Propagation policy, precisely (the code below is the contract): on first boot
-the whole seed tree is copied and `.seed-version` is stamped. On every later
-boot we add missing seed skills and apply only explicit, hash-gated migrations:
+the whole seed tree is copied. On every later boot we add missing seed skills
+and apply only explicit, hash-gated migrations:
 an existing file is replaced when it is byte-for-byte a known baked predecessor,
 while every owner/agent-edited copy is preserved. A normal baked-seed edit does
 not propagate until its predecessor hash is deliberately registered below; this
@@ -25,9 +25,8 @@ remains an exact-hash match -- an owner edit that differs by one byte is still
 preserved. App-owned
 skills are not part of this seed tree; they arrive through manifests and their
 generic ownership sidecar.
-`.seed-version`/`SEED_VERSION` are kept as a
-record of the baked seed generation for that future, merge-aware migration; the
-sentinel is written but not yet read.
+`.seed-version` remains a reserved internal name for instances that carry the
+retired marker; bootstrap neither reads nor writes it.
 
 Seed source: /app/scripts/seed-skills/ (baked), falling back to the in-repo
 backend/scripts/seed-skills/ for dev. Run from entrypoint after
@@ -42,8 +41,6 @@ from pathlib import Path
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
-VERSION_FILE = SKILLS / ".seed-version"
-SEED_VERSION = "23"  # v23: move platform recovery outside the app container
 # Update only byte-for-byte baked copies; an owner/agent-edited file is never
 # touched. A set preserves every known unmodified predecessor when one skill
 # needs more than one fix-forward migration over its lifetime.
@@ -65,6 +62,8 @@ _UNMODIFIED_MIGRATIONS = {
     # the migration is only as complete as this set.
     "76ab03fd128157715b388b16146239217f57bba62c5248b8192a39639d0200b1",
     "e4539739815b80b4c52ca2c56f2a4055e7a4a12cd1843c0cb5077a149547acd1",
+    # Pre-#612 baked copy: remove guidance for the retired cron-emit wrapper.
+    "55a350281a94ecabf35297d4aef019eedaed28378ac0a2a440815120c6219ba7",
     # Locally curated pre-app-token copy. It tells scheduled app jobs to read
     # the owner service token, contradicting supervised $APP_TOKEN authority.
     # Not a baked generation: it exists only on instances whose owner edited
@@ -72,6 +71,10 @@ _UNMODIFIED_MIGRATIONS = {
     # cannot be reproduced from this repository's history.  Registered
     # deliberately -- see the propagation policy note in the module docstring.
     "16055ea6ba6e4663636f87fde9868aa98d49ab39c5037ff90fa673d96c259cd9",
+  },
+  "embedded-app-agent.md": {
+    # Pre-#612 baked copy: clarify that an accepted overlapping run may skip.
+    "e58970bb7357030b9ac9c72e3b547d3bc93cdb75a1442dc5bb92db6174beebad",
   },
   "recovery.md": {
     "ef62abb0d03d740f99add1b6f3938f780b34439cb0025616cb9dc5f74f779633",
@@ -82,6 +85,13 @@ _UNMODIFIED_MIGRATIONS = {
   "theming.md": {
     # v22 baked copy: point shell-break guidance at external recovery.
     "7fb5ed4c1e29e6822b56394c089984a1a7e5da1bdf552a21ff0cbdc6413bd998",
+  },
+  "workflows-app.md": {
+    # Resolved the app by slug=="workflows". An install whose preferred slug
+    # is taken gets a fallback (this instance's row is 'workflows-2'), so the
+    # lookup silently found nothing and the skill's own "skip silently" branch
+    # hid the failure. Now keyed on the manifest id, as bootstrap already is.
+    "895dfa031e1a633ceac9a1f16895d43e5084d052c0616bd79a7a4005d06ba324",
   },
   "images.md": {
     "248ea31e13d2d2d84a5acfca13526aa8ebfa3d90e9ee4bf55cfb72d47937f7d1",
@@ -194,9 +204,8 @@ def init() -> None:
     SKILLS.mkdir(parents=True)
     for src in seed.glob("*.md"):
       shutil.copy2(src, SKILLS / src.name)
-    VERSION_FILE.write_text(SEED_VERSION + "\n", encoding="utf-8")
     n = len(list(SKILLS.glob("*.md")))
-    print(f"init_skills: seeded {n} skills (v{SEED_VERSION})")
+    print(f"init_skills: seeded {n} skills")
     _chown_mobius(SKILLS)
     _write_index()
     return

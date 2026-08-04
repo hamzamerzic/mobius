@@ -253,7 +253,7 @@ test('activeContentRoute reflects the SLOT in single mode, the focused pane in b
 
 // ── Empty-builder auto-return + one-gesture undo (owner semantic) ────────────
 
-test('closing the LAST builder tab auto-returns to single', () => {
+test('closing the final Builder tab keeps a visible Standard item and can re-enter', () => {
   // Single-pane builder with one chat; close it → the tree empties → auto-return.
   const ws = builderSeed([makeTab('chat', '5')])
   const s = reduce(init(ws), { type: 'CLOSE_TAB', tabKey: 'chat:5' })
@@ -264,6 +264,20 @@ test('closing the LAST builder tab auto-returns to single', () => {
     'a legacy workspace carries the departing visible tab into Standard',
   )
   assert.equal(s.undo.restoreViewMode, true, 'the undo is flagged one-gesture')
+
+  const fromNewChat = {
+    ...builderSeed([makeTab('chat', '5')]),
+    singleScreen: null,
+  }
+  const carried = reduce(init(fromNewChat), { type: 'CLOSE_TAB', tabKey: 'chat:5' })
+  assert.deepEqual(
+    carried.ws.singleScreen,
+    { kind: 'chat', id: '5' },
+    'an initialized empty Standard screen still keeps the departing visible tab',
+  )
+  const reentered = reduce(carried, { type: 'SET_VIEW_MODE', mode: 'panes' })
+  assert.equal(reentered.ws.viewMode, 'panes')
+  assert.ok(paneModel.paneOf(reentered.ws, 'chat:5'))
 })
 
 test('an empty builder tree enters by seeding the current Standard chat or app', () => {
@@ -282,8 +296,7 @@ test('an empty builder tree enters by seeding the current Standard chat or app',
   }
 
   const empty = paneModel.seedFromFlatTabs([])
-  const home = empty
-  const refused = reduce(init(home), { type: 'SET_VIEW_MODE', mode: 'panes' })
+  const refused = reduce(init(empty), { type: 'SET_VIEW_MODE', mode: 'panes' })
   assert.equal(refused.ws.viewMode, 'single', 'the New Chat landing has no concrete tab to seed')
 
   const stale = JSON.stringify({ ...empty, viewMode: 'panes' })
@@ -292,18 +305,6 @@ test('an empty builder tree enters by seeding the current Standard chat or app',
     'single',
     'a persisted empty Builder repairs to Standard at boot',
   )
-})
-
-test('closing the final Builder tab can re-enter from the preserved Standard screen', () => {
-  const ws = {
-    ...builderSeed([makeTab('chat', '5')]),
-    singleScreen: { kind: 'chat', id: '5' },
-  }
-  let state = reduce(init(ws), { type: 'CLOSE_TAB', tabKey: 'chat:5' })
-  assert.equal(state.ws.viewMode, 'single')
-  state = reduce(state, { type: 'SET_VIEW_MODE', mode: 'panes' })
-  assert.equal(state.ws.viewMode, 'panes')
-  assert.ok(paneModel.paneOf(state.ws, 'chat:5'))
 })
 
 test('a drawer drop into an empty Builder preserves a Standard chat or app as the first tab', () => {
@@ -334,6 +335,22 @@ test('a drawer drop into an empty Builder preserves a Standard chat or app as th
     )
     assert.deepEqual(state.ws.singleScreen, ws.singleScreen)
   }
+})
+
+test('a refused drawer drop does not enter or seed Builder', () => {
+  const ws = {
+    ...paneModel.seedFromFlatTabs([]),
+    singleScreen: { kind: 'chat', id: '5' },
+  }
+  const state = reduce(init(ws), {
+    type: 'OPEN_TAB_AT',
+    tab: makeTab('app', '42'),
+    target: { paneId: 'missing', edge: 'right' },
+    flipViewMode: 'panes',
+  })
+  assert.equal(state.ws, ws)
+  assert.equal(state.ws.viewMode, 'single')
+  assert.equal(paneModel.isEmptyTree(state.ws), true)
 })
 
 test('deleting the last builder resource also leaves no empty builder behind', () => {
@@ -373,21 +390,6 @@ test('CLOSE_PANE that empties the builder auto-returns to single', () => {
   assert.equal(s.ws.viewMode, 'single')
   assert.deepEqual(s.ws.singleScreen, { kind: 'chat', id: '5' })
   assert.equal(s.undo.restoreViewMode, true)
-})
-
-test('a genuinely empty New Chat entry preserves the coupled close undo', () => {
-  // Auto-return arms a mode-coupled undo (restoreViewMode). Trying to enter an
-  // empty Builder is not a new mode intent because that destination does not
-  // exist, so it must not weaken the one-gesture restoration.
-  const ws = { ...builderSeed([makeTab('chat', '5')]), singleScreen: null }
-  let state = reduce(init(ws), { type: 'CLOSE_TAB', tabKey: 'chat:5' }) // → single, coupled undo
-  assert.equal(state.undo.restoreViewMode, true)
-  state = reduce(state, { type: 'SET_VIEW_MODE', mode: 'panes' }) // refused: tree is empty
-  assert.equal(state.ws.viewMode, 'single')
-  assert.equal(state.undo.restoreViewMode, true, 'the refused entry does not rewrite undo semantics')
-  state = reduce(state, { type: 'UNDO_LAST' })
-  assert.ok(paneModel.paneOf(state.ws, 'chat:5'), 'tab restored')
-  assert.equal(state.ws.viewMode, 'panes', 'the closed Builder world is restored with its tab')
 })
 
 test('a real later mode choice still rebases a coupled undo to tree-only', () => {
