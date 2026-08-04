@@ -868,6 +868,33 @@ class ToolOutput(Base):
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
 
+class Connector(Base):
+  """Owner-managed remote MCP endpoint shared by both agent providers."""
+
+  __tablename__ = "connectors"
+
+  id = Column(Integer, primary_key=True, index=True)
+  # Stable authorization identity. SQLite may reuse an INTEGER PRIMARY KEY
+  # after deletion, so broker capabilities must never authorize by ``id``
+  # alone or an old turn could reach a later connector that reused the row id.
+  capability_id = Column(
+    String(64), nullable=False, unique=True, index=True,
+    default=lambda: secrets.token_hex(32),
+  )
+  slug = Column(String(64), nullable=False, unique=True, index=True)
+  name = Column(String(128), nullable=False)
+  url = Column(String(2048), nullable=False)
+  auth_header = Column(String(64), nullable=True)
+  auth_value_encrypted = Column(Text, nullable=True)
+  enabled = Column(Boolean, nullable=False, default=True, server_default=true())
+  tools_json = Column(JSON, nullable=False, default=list)
+  est_tokens = Column(Integer, nullable=False, default=0, server_default="0")
+  status = Column(String(16), nullable=False, default="ok", server_default="ok")
+  status_detail = Column(Text, nullable=True)
+  created_at = Column(DateTime, default=lambda: now_naive_utc())
+  last_checked_at = Column(DateTime, nullable=True)
+
+
 class ThinkingTrace(Base):
   """Full reasoning text stored outside the bounded chat transcript.
 
