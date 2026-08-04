@@ -1441,6 +1441,7 @@ const DrawerRow = memo(function DrawerRow({
   // from scratch or tap into the existing name to edit it.
   useEffect(() => {
     if (renaming && inputRef.current) {
+      menuRestoreFocusRef.current = inputRef.current
       inputRef.current.focus()
       inputRef.current.select()
     }
@@ -1453,6 +1454,13 @@ const DrawerRow = memo(function DrawerRow({
     }
     const value = inputRef.current?.value || ''
     actions.submitRename(kind, id, label, value.trim())
+  }
+
+  function onRenameBlur() {
+    const input = inputRef.current
+    requestAnimationFrame(() => {
+      if (document.activeElement !== input) commitRename()
+    })
   }
 
   function onInputKeyDown(e) {
@@ -1550,6 +1558,19 @@ const DrawerRow = memo(function DrawerRow({
     return true
   }
 
+  const itemMenu = (
+    <DrawerItemMenu
+      kind={kind}
+      item={item}
+      surface={surface}
+      pinned={pinned}
+      menuOpen={menuOpen}
+      actions={actions}
+      menuPlacement={menuPlacement}
+      restoreFocusRef={menuRestoreFocusRef}
+    />
+  )
+
   if (renaming) {
     if (variant === 'card') {
       return (
@@ -1559,9 +1580,10 @@ const DrawerRow = memo(function DrawerRow({
             className="drawer__rename-input"
             defaultValue={label}
             onKeyDown={onInputKeyDown}
-            onBlur={commitRename}
+            onBlur={onRenameBlur}
             aria-label="Rename app"
           />
+          {itemMenu}
         </div>
       )
     }
@@ -1572,9 +1594,10 @@ const DrawerRow = memo(function DrawerRow({
           className="drawer__rename-input"
           defaultValue={label}
           onKeyDown={onInputKeyDown}
-          onBlur={commitRename}
+          onBlur={onRenameBlur}
           aria-label={`Rename ${kind}`}
         />
+        {itemMenu}
       </div>
     )
   }
@@ -1640,16 +1663,7 @@ const DrawerRow = memo(function DrawerRow({
             <span className="apps-directory__card-name">{label}</span>
           </span>
         </button>
-        <DrawerItemMenu
-          kind={kind}
-          item={item}
-          surface={surface}
-          pinned={pinned}
-          menuOpen={menuOpen}
-          actions={actions}
-          menuPlacement={menuPlacement}
-          restoreFocusRef={menuRestoreFocusRef}
-        />
+        {itemMenu}
       </div>
     )
   }
@@ -1933,16 +1947,7 @@ const DrawerRow = memo(function DrawerRow({
         ) : null}
         <span className="drawer__item-text">{label}</span>
       </button>
-      <DrawerItemMenu
-        kind={kind}
-        item={item}
-        surface={surface}
-        pinned={pinned}
-        menuOpen={menuOpen}
-        actions={actions}
-        menuPlacement={menuPlacement}
-        restoreFocusRef={menuRestoreFocusRef}
-      />
+      {itemMenu}
     </div>
   )
 })
