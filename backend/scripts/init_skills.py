@@ -33,11 +33,19 @@ backend/scripts/seed-skills/ for dev. Run from entrypoint after
 init_chat_summaries.py.
 """
 
+import hashlib
 import os
 import pwd
 import shutil
-import hashlib
+import sys
 from pathlib import Path
+
+# Entrypoint executes this file by absolute path, which puts /app/scripts rather
+# than its sibling /app package on sys.path. Resolve the trusted runtime root
+# from this script so both boot reconciliation imports work standalone.
+_APP_IMPORT_ROOT = str(Path(__file__).resolve().parent.parent)
+if _APP_IMPORT_ROOT not in sys.path:
+  sys.path.insert(0, _APP_IMPORT_ROOT)
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
@@ -177,9 +185,6 @@ def _write_index() -> None:
   install.
   """
   try:
-    import sys
-
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from app.skills import reconcile_installed, write_index
 
     # Startup half of the installer's crash-recovery contract: repair any

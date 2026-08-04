@@ -1,8 +1,11 @@
 """Base boot creates chat continuity only; graph memory belongs to its app."""
 
-import importlib.util
 import hashlib
+import importlib.util
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -51,6 +54,31 @@ def test_base_skill_boot_never_seeds_app_owned_memory_skill(tmp_path, monkeypatc
 
   baked_seed = SCRIPTS / "seed-skills"
   assert not (baked_seed / "memory.md").exists()
+
+
+def test_init_skills_absolute_entrypoint_imports_sibling_app(tmp_path):
+  """Warm boot imports app.skills when invoked outside the backend cwd."""
+  skills = tmp_path / "data" / "shared" / "skills"
+  skills.mkdir(parents=True)
+  (skills / "owner.md").write_text("owner skill", encoding="utf-8")
+  env = os.environ.copy()
+  env.pop("PYTHONPATH", None)
+  env["DATA_DIR"] = str(tmp_path / "data")
+
+  result = subprocess.run(
+    [sys.executable, str(SCRIPTS / "init_skills.py")],
+    cwd=tmp_path,
+    env=env,
+    capture_output=True,
+    text=True,
+    timeout=30,
+    check=False,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert "init_skills: reconcile skipped" not in result.stdout
+  assert "init_skills: skills-index.md regenerated" in result.stdout
+  assert (skills / "skills-index.md").is_file()
 
 
 def test_later_boot_preserves_existing_memory_skill_but_does_not_reseed_it(

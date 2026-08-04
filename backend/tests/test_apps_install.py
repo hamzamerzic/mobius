@@ -929,6 +929,42 @@ def test_derive_repo_ref_only_root_manifest_single_segment_ref():
   ) is None
 
 
+@pytest.mark.parametrize("commit", ["a" * 40, "b" * 64])
+def test_commit_pinned_install_skips_branch_clone_and_uses_fetched_source(
+  commit,
+  client, auth, bypass_url_validation,
+):
+  """A raw commit ref cannot be cloned with --branch; keep the fallback."""
+  base = f"https://raw.githubusercontent.com/acme/pinned/{commit}/"
+  jsx = "export default function App() { return <div>pinned fetch</div> }"
+  manifest = {
+    "id": "pinned-fetch",
+    "name": "Pinned Fetch",
+    "version": "1.0.0",
+    "description": "Immutable fetched-source install",
+    "entry": "index.jsx",
+    "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
+  }
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, jsx.encode()),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ), patch("app.install.app_git.clone_upstream") as clone:
+    response = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+
+  assert response.status_code == 201, response.text
+  clone.assert_not_called()
+  source_dir = Path(get_settings().data_dir) / "apps" / "pinned-fetch"
+  assert (source_dir / "index.jsx").read_text(encoding="utf-8") == jsx
+  assert app_git.is_repo(source_dir)
+  assert not app_git.has_origin(source_dir)
+
+
 def test_update_dropping_schedule_unregisters_orphan_cron(
     client, auth, bypass_url_validation):
   """Recurring → on-demand migration must converge cron state, not just add.
