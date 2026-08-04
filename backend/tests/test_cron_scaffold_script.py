@@ -63,7 +63,7 @@ def test_init_cron_scaffold_does_not_splice_existing_crontab_into_comments(
   assert existing.strip() not in init_text
   assert "ENTRY=\"0 6 * * *" in init_text
   assert "API_BASE_URL=http://jobs.example.test:8123" in init_text
-  assert "/live/scripts/app-job-runner.py 46" in init_text
+  assert "/live/scripts/app-job-runner.py --scheduled 46" in init_text
   live_crontab = state.read_text()
   assert existing.strip() in live_crontab
   assert "0 6 * * *" in live_crontab
@@ -171,6 +171,7 @@ def test_zone_declaration_is_durable_before_live_crontab_changes(tmp_path):
   subprocess.run(["bash", "-c", command], env=env, check=True)
   assert argv_state.read_text().splitlines() == [
     "/live/scripts/app-job-runner.py",
+    "--scheduled",
     "--wall-clock",
     "Europe/Belgrade",
     "30 2 * * *",

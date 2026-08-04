@@ -226,6 +226,39 @@ def _mint_app_token(app_id: int) -> str | None:
     return None
 
 
+def _emit_cron_outcome(
+  app_id: int,
+  job: Path,
+  exit_code: int,
+  duration_ms: int,
+) -> None:
+  """Best-effort scheduled-run telemetry through the owner-authenticated API."""
+  try:
+    owner_token = TOKEN_FILE.read_text(encoding="utf-8").strip()
+    if not owner_token:
+      raise ValueError("empty service token")
+    body = json.dumps({
+      "ev": "cron_outcome",
+      "app_id": app_id,
+      "job": job.name,
+      "exit_code": exit_code,
+      "duration_ms": max(0, duration_ms),
+    }).encode("utf-8")
+    request = urllib.request.Request(
+      f"{API_BASE_URL}/api/admin/activity/emit",
+      data=body,
+      method="POST",
+      headers={
+        "Authorization": f"Bearer {owner_token}",
+        "Content-Type": "application/json",
+      },
+    )
+    with urllib.request.urlopen(request, timeout=5):
+      pass
+  except Exception as exc:
+    _log(app_id, f"activity emit failed for {job.name}: {exc!r}")
+
+
 def _job_env(app_token: str) -> dict[str, str]:
   """Allowlist job environment; never inherit owner/service credentials."""
   allowed = {
@@ -247,6 +280,7 @@ def _execute_job(
   resolved: Path,
   *,
   wait_for_ready: bool,
+  scheduled: bool,
   run_lock_fd: int,
 ) -> int:
   """Execute one already-validated job."""
@@ -302,6 +336,7 @@ def _execute_job(
     # KILL fallback; exec resets the child's caught handler to the default.
     previous_sigterm = signal.signal(signal.SIGTERM, lambda *_args: None)
     try:
+      started = time.monotonic()
       child = subprocess.Popen(
         command,
         cwd=str(resolved.parent),
@@ -311,8 +346,11 @@ def _execute_job(
         pass_fds=(run_lock_fd,),
       )
       rc = child.wait()
+      duration_ms = int((time.monotonic() - started) * 1000)
     finally:
       signal.signal(signal.SIGTERM, previous_sigterm)
+    if scheduled:
+      _emit_cron_outcome(app_id, resolved, rc, duration_ms)
     if rc != 0:
       _log(app_id, f"job exited rc={rc}: {resolved}")
     return rc
@@ -328,6 +366,9 @@ def run() -> int:
   argv = sys.argv[1:]
   wait_for_ready = argv[:1] == ["--wait-for-ready"]
   if wait_for_ready:
+    argv = argv[1:]
+  scheduled = argv[:1] == ["--scheduled"]
+  if scheduled:
     argv = argv[1:]
   wall_clock = None
   if argv[:1] == ["--wall-clock"]:
@@ -374,6 +415,7 @@ def run() -> int:
       app_id,
       resolved,
       wait_for_ready=wait_for_ready,
+      scheduled=scheduled,
       run_lock_fd=run_lock.fileno(),
     )
   finally:

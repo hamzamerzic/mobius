@@ -41,12 +41,12 @@ def test_base_skill_boot_never_seeds_app_owned_memory_skill(tmp_path, monkeypatc
   (seed / "files.md").write_text("base owned", encoding="utf-8")
   monkeypatch.setattr(module, "_SEED_CANDIDATES", [seed])
   monkeypatch.setattr(module, "SKILLS", skills)
-  monkeypatch.setattr(module, "VERSION_FILE", skills / ".seed-version")
   monkeypatch.setattr(module, "_chown_mobius", lambda _path: None)
 
   module.init()
 
   assert (skills / "files.md").read_text(encoding="utf-8") == "base owned"
+  assert not (skills / ".seed-version").exists()
   assert not (skills / "memory.md").exists()
 
   baked_seed = SCRIPTS / "seed-skills"
@@ -65,7 +65,6 @@ def test_later_boot_preserves_existing_memory_skill_but_does_not_reseed_it(
   (skills / "memory.md").write_text("installed app copy", encoding="utf-8")
   monkeypatch.setattr(module, "_SEED_CANDIDATES", [seed])
   monkeypatch.setattr(module, "SKILLS", skills)
-  monkeypatch.setattr(module, "VERSION_FILE", skills / ".seed-version")
   monkeypatch.setattr(module, "_chown_mobius", lambda _path: None)
 
   module.init()
@@ -87,7 +86,6 @@ def test_later_boot_migrates_only_unmodified_graph_aware_base_skill(
   live.write_text(old, encoding="utf-8")
   monkeypatch.setattr(module, "_SEED_CANDIDATES", [seed])
   monkeypatch.setattr(module, "SKILLS", skills)
-  monkeypatch.setattr(module, "VERSION_FILE", skills / ".seed-version")
   monkeypatch.setattr(module, "_chown_mobius", lambda _path: None)
   monkeypatch.setattr(module, "_UNMODIFIED_MIGRATIONS", {
     "reflection.md": {hashlib.sha256(old.encode()).hexdigest()},
@@ -104,7 +102,6 @@ def test_later_boot_migrates_only_unmodified_graph_aware_base_skill(
 def test_controlled_skills_have_fix_forward_migrations():
   module = _load("init_skills")
 
-  assert module.SEED_VERSION == "24"
   assert module._UNMODIFIED_MIGRATIONS["cron.md"] == {
     "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
     "ed100cb496b887a7951adc967e92cda1449c4f8594f7859fbd32762221d24914",
