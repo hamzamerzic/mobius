@@ -398,6 +398,51 @@ export default function LucideIconsFixture() {
   assert output.is_file() and output.stat().st_size > 0
 
 
+def test_recharts_common_chart_api_compiles_into_one_offline_module(tmp_path):
+  """The Recharts 3 migration keeps the ordinary declarative chart API."""
+  entry = tmp_path / "recharts.jsx"
+  output = tmp_path / "recharts.js"
+  report_path = tmp_path / "recharts-meta.json"
+  entry.write_text(
+    """import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
+
+const data = [{ label: 'ready', value: 1 }]
+
+export default function RechartsFixture() {
+  return <ResponsiveContainer width="100%" height={240}>
+    <BarChart data={data}>
+      <CartesianGrid strokeDasharray="3 3" />
+      <XAxis dataKey="label" />
+      <YAxis />
+      <Tooltip />
+      <Bar dataKey="value" />
+    </BarChart>
+  </ResponsiveContainer>
+}
+"""
+  )
+
+  completed = _compile(entry, output, report=report_path)
+  assert completed.returncode == 0, completed.stderr
+
+  report = json.loads(report_path.read_text())
+  entry_outputs = [
+    details for details in report["outputs"]
+    if details.get("isEntry")
+  ]
+  assert len(entry_outputs) == 1
+  assert entry_outputs[0].get("imports") == []
+  assert output.is_file() and output.stat().st_size > 0
+
+
 def test_pdfjs_browser_worker_fallback_remains_supported(tmp_path):
   """PDF.js intentionally retains import(this.workerSrc) as a fallback."""
   entry = tmp_path / "pdfjs.jsx"

@@ -42,7 +42,7 @@ RUN useradd -m -s /bin/bash mobius
 # agent-browser looks by default).
 # Discard npm's download cache in each layer: installed packages are the
 # runtime artifact; registry tarballs only make the production image larger.
-ARG CLAUDE_CODE_VERSION=2.1.221
+ARG CLAUDE_CODE_VERSION=2.1.223
 ARG AGENT_BROWSER_VERSION=0.33.2
 RUN apt-get update && apt-get install -y --no-install-recommends \
     age ca-certificates cron curl git jq procps ripgrep sqlite3 sudo unzip util-linux \
@@ -53,7 +53,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && npm install -g --engine-strict --strict-allow-scripts \
       --allow-scripts="@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION},agent-browser@${AGENT_BROWSER_VERSION}" \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-      @openai/codex@0.146.0 \
+      @openai/codex@0.146.1 \
       "agent-browser@${AGENT_BROWSER_VERSION}" \
     && agent-browser install \
     && mv /root/.agent-browser /opt/agent-browser \
@@ -136,8 +136,8 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.lock \
 # lockstep npm CLI. This preserves the external SDK contract without storing a
 # second ~350 MB runtime or running a second protocol version.
 # Pinned to commit SHA (not tag) for full reproducibility — tags are
-# mutable on GitHub. SHA corresponds to refs/tags/rust-v0.146.0
-# as of 2026-08-03, and is kept in lockstep with the npm @openai/codex
+# mutable on GitHub. SHA corresponds to refs/tags/rust-v0.146.1
+# as of 2026-08-06, and is kept in lockstep with the npm @openai/codex
 # binary above (the SDK spawns it via codex_bin=shutil.which("codex")).
 # We moved from rust-v0.144.5 to this tag because the 0.144.x generated
 # ReasoningEffort enum was strict (none/minimal/low/medium/high/xhigh)
@@ -145,14 +145,14 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.lock \
 # codex.models() and ThreadResumeResponse validation failed and broke a
 # real chat resume. alpha.13 turned ReasoningEffort into a forgiving
 # `str, Enum` with a `_missing_` hook that accepts any effort string;
-# 0.146.0 is the latest stable tag published to BOTH the git repo and npm, so
+# 0.146.1 is the latest stable tag published to BOTH the git repo and npm, so
 # binary and schema stay matched. The SDK exposes the request bridge as a
 # public `approval_handler` constructor argument on
 # `openai_codex.client.CodexClient`; `AsyncCodex` still does not forward
 # it, so codex_sdk_runner.py installs the handler on the wrapped sync
 # client's `_approval_handler`.
 RUN pip install --no-cache-dir --no-deps \
-      'openai-codex @ git+https://github.com/openai/codex.git@e363b08c9175ac1cbe5893615dd2cb9ddf95043b#subdirectory=sdk/python' \
+      'openai-codex @ git+https://github.com/openai/codex.git@79b4f03d35962b005b007a015113b38930711665#subdirectory=sdk/python' \
     && pip install --no-cache-dir 'openai-codex-cli-bin==0.144.4' \
     && _codex_cli_bin="$(python -c \
       'from pathlib import Path; import codex_cli_bin; print(Path(codex_cli_bin.__file__).parent)')" \
@@ -204,11 +204,11 @@ RUN cd ./shell-src \
 RUN mkdir -p /tmp/pdfjs-install && cd /tmp/pdfjs-install \
     && npm init -y >/dev/null \
     && npm install --no-audit --no-fund --silent \
-      --engine-strict --strict-allow-scripts pdfjs-dist@4.10.38 \
-    && mkdir -p /app/static/vendor/pdfjs@4.10.38 \
-    && cp node_modules/pdfjs-dist/build/pdf.mjs /app/static/vendor/pdfjs@4.10.38/pdf.mjs \
-    && cp node_modules/pdfjs-dist/build/pdf.worker.mjs /app/static/vendor/pdfjs@4.10.38/pdf.worker.mjs \
-    && ln -s pdfjs@4.10.38 /app/static/vendor/pdfjs \
+      --engine-strict --strict-allow-scripts pdfjs-dist@6.2.108 \
+    && mkdir -p /app/static/vendor/pdfjs@6.2.108 \
+    && cp node_modules/pdfjs-dist/build/pdf.mjs /app/static/vendor/pdfjs@6.2.108/pdf.mjs \
+    && cp node_modules/pdfjs-dist/build/pdf.worker.mjs /app/static/vendor/pdfjs@6.2.108/pdf.worker.mjs \
+    && ln -s pdfjs@6.2.108 /app/static/vendor/pdfjs \
     && cd / && rm -rf /tmp/pdfjs-install /root/.npm
 
 # KaTeX browser assets — the package's JavaScript is bundled when an app imports

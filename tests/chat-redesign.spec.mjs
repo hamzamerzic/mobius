@@ -14,6 +14,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { mockPendingQuestionState } from './_mockPendingQuestion.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -132,6 +133,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
       'data: {"type":"done"}\n\n',
     ].join('')
     await setupWithStreamMock(page, streamBody)
+    await mockPendingQuestionState(page, 'q-pick-one')
     await newChat(page)
     await sendMessage(page, 'Ask me a question')
 
@@ -160,6 +162,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     ].join('')
     let streamCount = 0
     let answerAttempts = 0
+    let pendingQuestion
     await setupWithStreamMock(page, () => (
       streamCount++ === 0 ? questionStream : 'data: {"type":"done"}\n\n'
     ))
@@ -175,8 +178,10 @@ test.describe('Bug 1: AskUserQuestion', () => {
           body: '{"detail":"temporary failure"}',
         })
       }
+      pendingQuestion.markAnswered()
       return fulfillStartedPost(route)
     })
+    pendingQuestion = await mockPendingQuestionState(page, 'q-retry-answer')
 
     await newChat(page)
     await sendMessage(page, 'Ask for a launch lane')
@@ -219,9 +224,17 @@ test.describe('Bug 1: AskUserQuestion', () => {
       'data: {"type":"done"}\n\n',
     ].join('')
     let streamCount = 0
+    let pendingQuestion
     await setupWithStreamMock(page, () => (
       streamCount++ === 0 ? streamBody : 'data: {"type":"done"}\n\n'
     ))
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
+      if (route.request().method() !== 'POST') return route.fallback()
+      const body = route.request().postDataJSON()
+      if (body.answers) pendingQuestion.markAnswered()
+      return fulfillStartedPost(route)
+    })
+    pendingQuestion = await mockPendingQuestionState(page, 'q-stable-card')
     await newChat(page)
     await sendMessage(page, 'Ask me which route')
 
@@ -301,6 +314,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
       'data: {"type":"done"}\n\n',
     ].join('')
     await setupWithStreamMock(page, streamBody, { width: 426, height: 510 })
+    await mockPendingQuestionState(page, 'q-steady-multiline')
     await newChat(page)
     await sendMessage(page, 'Ask for multiline details')
 
@@ -568,11 +582,13 @@ test.describe('Q&A atomic write', () => {
     // frontend's doSendSilent puts `answers` in the body, not in a
     // separate POST /question-answers request.
     const sentBodies = []
+    let pendingQuestion
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
       if (route.request().method() !== 'POST') return route.continue()
       const body = route.request().postDataJSON()
       sentBodies.push(body)
       if (body.answers) {
+        pendingQuestion.markAnswered()
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -617,6 +633,7 @@ test.describe('Q&A atomic write', () => {
         body: streamCount === 1 ? streamBody : 'data: {"type":"done"}\n\n',
       })
     })
+    pendingQuestion = await mockPendingQuestionState(page, 'q-pick-atomic')
 
     await page.setViewportSize({ width: 412, height: 915 })
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
@@ -692,6 +709,7 @@ test.describe('Q&A atomic write', () => {
     let releaseAnswer
     let markAnswerStarted
     const answerStarted = new Promise(resolve => { markAnswerStarted = resolve })
+    let pendingQuestion
 
     await page.setViewportSize({ width: 426, height: 860 })
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async route => {
@@ -700,6 +718,7 @@ test.describe('Q&A atomic write', () => {
       if (!body.answers) return fulfillStartedPost(route)
       markAnswerStarted()
       await new Promise(resolve => { releaseAnswer = resolve })
+      pendingQuestion.markAnswered()
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
@@ -716,6 +735,7 @@ test.describe('Q&A atomic write', () => {
     await page.route('**/api/chat/stop', route =>
       route.fulfill({ status: 200, body: '{}' })
     )
+    pendingQuestion = await mockPendingQuestionState(page, 'q-viewport-anchor')
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
