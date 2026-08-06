@@ -14,7 +14,8 @@ concurrency:
 
 permissions:
   actions: write
-  contents: read
+  # Required to enqueue the protected release PR; the workflow never pushes it.
+  contents: write
   pull-requests: write
 
 jobs:
@@ -105,5 +106,5 @@ jobs:
           RELEASE_SHA: ${{ steps.merged.outputs.sha }}
         run: |
           gh workflow run "$RELEASE_WORKFLOW" --repo "$GITHUB_REPOSITORY" \
-            --ref "$RELEASE_REF"
+            --ref "$RELEASE_REF" -f candidate_sha="$RELEASE_SHA"
           echo "Dispatched managed-core publication for $RELEASE_SHA"
