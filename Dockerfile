@@ -204,11 +204,11 @@ RUN cd ./shell-src \
 RUN mkdir -p /tmp/pdfjs-install && cd /tmp/pdfjs-install \
     && npm init -y >/dev/null \
     && npm install --no-audit --no-fund --silent \
-      --engine-strict --strict-allow-scripts pdfjs-dist@4.10.38 \
-    && mkdir -p /app/static/vendor/pdfjs@4.10.38 \
-    && cp node_modules/pdfjs-dist/build/pdf.mjs /app/static/vendor/pdfjs@4.10.38/pdf.mjs \
-    && cp node_modules/pdfjs-dist/build/pdf.worker.mjs /app/static/vendor/pdfjs@4.10.38/pdf.worker.mjs \
-    && ln -s pdfjs@4.10.38 /app/static/vendor/pdfjs \
+      --engine-strict --strict-allow-scripts pdfjs-dist@6.2.108 \
+    && mkdir -p /app/static/vendor/pdfjs@6.2.108 \
+    && cp node_modules/pdfjs-dist/build/pdf.mjs /app/static/vendor/pdfjs@6.2.108/pdf.mjs \
+    && cp node_modules/pdfjs-dist/build/pdf.worker.mjs /app/static/vendor/pdfjs@6.2.108/pdf.worker.mjs \
+    && ln -s pdfjs@6.2.108 /app/static/vendor/pdfjs \
     && cd / && rm -rf /tmp/pdfjs-install /root/.npm
 
 # KaTeX browser assets — the package's JavaScript is bundled when an app imports

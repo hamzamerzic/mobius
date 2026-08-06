@@ -3,7 +3,7 @@
 // Dockerfile copies. Stable aliases carry an explicit revision so a pin bump
 // replaces their precached bytes; versioned URLs are immutable cache keys.
 
-export const PDFJS_ASSET_VERSION = '4.10.38'
+export const PDFJS_ASSET_VERSION = '6.2.108'
 export const KATEX_ASSET_VERSION = '0.18.1'
 
 export const KATEX_WOFF2_FILES = [
