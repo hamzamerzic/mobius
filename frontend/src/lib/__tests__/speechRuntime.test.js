@@ -20,6 +20,7 @@ import {
   speechModels,
   SPEECH_MODEL_STORAGE_LIMITS,
 } from '../speech/speechModels.js'
+import { POCKET_TTS_V2_ASSETS } from '../speech/speechModelAssets.js'
 import {
   removeSpeechModel,
   removeSpeechEngine,
@@ -129,6 +130,15 @@ test('speech model selection exposes only the public catalog contract', () => {
     languages: ['English'],
     storedBytes: 148_302_091,
   })
+})
+
+test('speech models download from the public versioned Voice release', () => {
+  for (const [file, asset] of Object.entries(POCKET_TTS_V2_ASSETS)) {
+    assert.equal(
+      asset.url,
+      `https://github.com/mobius-os/app-voice/releases/download/models-v2/${file}`,
+    )
+  }
 })
 
 test('a recorded clone is resampled, persisted privately, and becomes a catalog model', () => {
