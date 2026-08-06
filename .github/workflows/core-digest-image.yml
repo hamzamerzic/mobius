@@ -19,6 +19,7 @@ on:
         type: string
 
 permissions:
+  actions: write
   contents: read
   packages: write
 
@@ -484,3 +485,17 @@ jobs:
             --repository "$MOBIUS_IMAGE_REPOSITORY" \
             --prerequisite-revision "$FROZEN_COMPATIBILITY_SHA" \
             --prerequisite-digest "$FROZEN_COMPATIBILITY_DIGEST"
+
+      # The next automatic promotion must name the release that has just
+      # completed.  Keep this after the controller and registry proofs: an
+      # interrupted or failed publication may never become a prerequisite.
+      - name: Record completed core as the next prerequisite
+        if: steps.current.outputs.mode != 'replay'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_DIGEST: ${{ steps.selected.outputs.digest }}
+        run: |
+          gh variable set MOBIUS_MANAGED_CORE_PREREQUISITE_SHA \
+            --repo "$GITHUB_REPOSITORY" --body "$CANDIDATE_SHA"
+          gh variable set MOBIUS_MANAGED_CORE_PREREQUISITE_DIGEST \
+            --repo "$GITHUB_REPOSITORY" --body "$IMAGE_DIGEST"
