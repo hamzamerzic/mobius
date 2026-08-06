@@ -3760,25 +3760,27 @@ export default function ChatView({
   // A pending AskUserQuestion freezes the turn until the user answers,
   // but the card can sit outside the viewport (the user scrolled away,
   // or content streamed in around it) — the chat then just looks hung.
-  // Detect a pending card in whichever surface currently renders it:
-  // the live stream (a question item without answers) or the durable
-  // tail-question invariant on the last visible assistant message (the
-  // same rule MsgContent's blockAnswerable enforces; recovery preserves
-  // that tail question even when the original process was interrupted).
+  // "A question is open" is the chat's durable pending_question_id
+  // (liveQuestionId) — set when the card is asked, cleared when it is answered
+  // or the turn ends, and KEPT across a resumable interruption. Trusting that
+  // marker instead of the card's block position is what lets a still-open card
+  // trailed by parallel output or a terminal error keep blocking the composer.
+  // The live-stream branch covers the window before the question_id persists.
   const pendingQuestionInStream = activeAssistantIsStreaming
     && streamItems.some(it => it.type === 'question' && !it.answers)
-  const pendingQuestionInMessages = (() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].hidden) continue
-      const msg = messages[i]
-      if (msg.role !== 'assistant' || !msg.blocks?.length) return false
-      const tail = msg.blocks[msg.blocks.length - 1]
-      return !!(tail.type === 'question' && !tail.answers
-        && (!liveQuestionId || tail.question_id === liveQuestionId))
-    }
-    return false
-  })()
-  const hasPendingQuestion = pendingQuestionInStream || pendingQuestionInMessages
+  const hasPendingQuestion = pendingQuestionInStream || !!liveQuestionId
+
+  // Answerability id: prefer the durable pending_question_id marker; during the
+  // streaming window BEFORE that marker persists (or reaches the client via a
+  // runtime poll), fall back to the live streamed question's own id so its card
+  // is answerable immediately. This mirrors the composer lock, which already
+  // trusts pendingQuestionInStream. Without it, a freshly-streamed question is
+  // un-answerable until the marker lands — the regression that broke the
+  // AskUserQuestion / Q&A e2e flows.
+  const answerableQuestionId = liveQuestionId
+    || (pendingQuestionInStream
+      ? streamItems.find(it => it.type === 'question' && !it.answers)?.question_id ?? null
+      : null)
 
   // A live question parks Codex's JSON-RPC reader inside request_user_input.
   // turn/steer cannot be acknowledged until that question is released, so a
@@ -3806,7 +3808,9 @@ export default function ChatView({
   // nudge + SR status can name the recovery. A pause is terminal (the turn has
   // ended), so it only ever lives in `messages`, never in a live stream item.
   const pendingResumeBlock = tailResumableBlock(messages)
-  const hasPendingResume = !!pendingResumeBlock
+  // An open question is the single blocker: answering it IS the continuation,
+  // so don't surface a competing Resume (which the backend would now refuse).
+  const hasPendingResume = !!pendingResumeBlock && !hasPendingQuestion
   const pendingLimitResetAt = pendingResumeBlock?.pause?.resets_at || null
   useEffect(() => {
     if (!embedded || !autoResumeEnabled || !pendingLimitResetAt) {
@@ -4202,7 +4206,7 @@ export default function ChatView({
                 }
                 submissionBlocked={providerSwitching}
                 isLastMsg={isLastMsg}
-                liveQuestionId={liveQuestionId}
+                liveQuestionId={answerableQuestionId}
                 suppressedQuestionKeys={streamItemQuestionKeys}
                 pendingQuestionRef={pendingQuestionRef}
                 resumeCardRef={resumeCardRef}
@@ -4238,7 +4242,7 @@ export default function ChatView({
               }
               onAutoResumeChange={handleAutoResumeChange}
               submissionBlocked={providerSwitching}
-              liveQuestionId={liveQuestionId}
+              liveQuestionId={answerableQuestionId}
               // Same publication channel as the durable rows above: while the
               // turn is live THIS surface owns the pending question card, so
               // the offscreen observer follows the handoff automatically.

@@ -1428,8 +1428,22 @@ class ChatWriterActor:
       # persisted.  Anything but APPLIED (a NOOP on a missing row / empty
       # transcript, or a DROPPED commit) raises so the caller does NOT
       # broadcast a card whose question was never written.
-      outcome = self._persist_message_required(
-        db, cmd.chat_id, cmd.snapshot, cmd.thinking_stashes,
+      # Record which question the chat is now parked on — the durable, position-
+      # independent openness marker every read surface trusts (models.Chat).
+      # Stage it before the transcript helper commits so the card and its
+      # answerability identity become durable in one transaction.
+      qid = next(
+        (
+          block.get("question_id")
+          for block in reversed(cmd.snapshot.get("blocks") or [])
+          if block.get("type") == "question" and not block.get("answers")
+        ),
+        None,
+      )
+      if not qid:
+        raise _PersistFailed("QuestionCommit has no open question id")
+      outcome = self._persist_question_required(
+        db, cmd.chat_id, cmd.snapshot, qid, cmd.thinking_stashes,
       )
       if outcome is not _WriteOutcome.APPLIED:
         raise _PersistFailed(f"QuestionCommit did not persist ({outcome.value})")
@@ -1539,19 +1553,27 @@ class ChatWriterActor:
       return True
     return result
 
-  def _persist_message_required(
-    self, db, chat_id: str, snapshot: dict, thinking_stashes: list | None = None,
+  def _persist_question_required(
+    self,
+    db,
+    chat_id: str,
+    snapshot: dict,
+    question_id: str,
+    thinking_stashes: list | None = None,
   ):
-    """Must-persist variant of `_persist_message`, returning a `_WriteOutcome`.
+    """Atomically persist a question card and its open-question identity.
 
-    Backs `QuestionCommit`: the dispatch raises unless this is APPLIED, so a
-    NOOP (missing row / empty transcript) fails the ack instead of falsely
-    succeeding.  On the DB-free recording stub a recorded commit IS the write,
-    so it reports APPLIED.
+    The dispatch raises unless this is APPLIED, so a NOOP (missing row / empty
+    transcript) fails the ack instead of falsely succeeding. On the DB-free
+    recording stub a recorded commit IS the write, so it reports APPLIED.
     """
     if hasattr(db, "record_commit"):
       self._commit_snapshot(db, snapshot)
       return _WriteOutcome.APPLIED
+    chat = _active_chat(db, chat_id)
+    if chat is None:
+      return _WriteOutcome.NOOP
+    chat.pending_question_id = question_id
     if thinking_stashes:
       self._stage_thinking_stashes(db, thinking_stashes)
     outcome = _apply_last_assistant_message(db, chat_id, snapshot)
@@ -1574,6 +1596,13 @@ class ChatWriterActor:
     if hasattr(db, "record_commit"):
       self._commit_snapshot(db, snapshot)
       return _WriteOutcome.APPLIED
+    chat = _active_chat(db, chat_id)
+    if chat is None:
+      return _WriteOutcome.NOOP
+    # Finalize is terminal; unlike ParkRun it cannot leave an open question.
+    # Stage the clear before the transcript helper commits so both facts become
+    # durable together. A failed/no-op transcript write rolls the clear back.
+    chat.pending_question_id = None
     if thinking_stashes:
       self._stage_thinking_stashes(db, thinking_stashes)
     outcome = finalize_response_outcome(
@@ -1615,6 +1644,9 @@ class ChatWriterActor:
     )
     if not applied:
       raise _PersistFailed("AnswerQuestion: no matching question block")
+    # The question is answered — clear the durable open-question marker in the
+    # same commit so every read surface unblocks atomically with the answer.
+    chat.pending_question_id = None
     # Answering an interactive question is an owner action just like a visible
     # send. Keep drawer recency separate from generic transcript writes, but do
     # advance it here so a parked chat returns to the top as soon as the answer
@@ -2674,7 +2706,7 @@ class ChatWriterActor:
       )
 
     owner = self._run_token_owner.get(cmd.chat_id)
-    changed = False
+    run_changed = False
     if cmd.run_token:
       run = db.query(ChatRun).filter(
         ChatRun.id == cmd.run_token,
@@ -2684,11 +2716,25 @@ class ChatWriterActor:
         run.status = cmd.terminal_status
         run.ended_at = datetime.now(UTC)
         run.restart_nonce = None
-        changed = True
+        run_changed = True
     else:
-      changed = self._close_nonterminal_runs(
+      run_changed = self._close_nonterminal_runs(
         db, cmd.chat_id, cmd.terminal_status
-      ) or changed
+      )
+    changed = run_changed
+    # A tokened terminal may clear the marker only when it actually closed that
+    # exact running row. Otherwise a delayed FinishRun from predecessor A could
+    # erase the open question written by successor B. The tokenless lifecycle
+    # path intentionally retires all work and may always clear it.
+    should_clear_question = (
+      cmd.terminal_status != "interrupted"
+      and (not cmd.run_token or run_changed)
+    )
+    if should_clear_question:
+      chat = _active_chat(db, cmd.chat_id)
+      if chat is not None and chat.pending_question_id is not None:
+        chat.pending_question_id = None
+        changed = True
     if changed and not _commit_or_rollback(db):
       raise _PersistFailed("FinishRun did not persist")
     if not cmd.run_token or owner == cmd.run_token:
