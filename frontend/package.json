@@ -48,7 +48,7 @@
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "recharts": "2.15.4",
-    "rolldown": "~1.2.2",
+    "rolldown": "~1.2.3",
     "three": "0.185.1"
   },
   "overrides": {
