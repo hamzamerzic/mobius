@@ -42,7 +42,7 @@ COMPILED_RUNTIME_ABI = 1
 # compiled-runtime change that remains host-compatible. Keep ABI for actual
 # host/runtime incompatibilities: a revision-only rollout is safe while the
 # live checkout and backend process briefly run different generations.
-COMPILED_RUNTIME_ARTIFACT_REVISION = 5
+COMPILED_RUNTIME_ARTIFACT_REVISION = 6
 COMPILED_RUNTIME_GLOBAL = "__mobiusCompiledRuntime"
 COMPILED_RUNTIME_BANNER = (
   f"/* mobius-compiled-runtime-abi:{COMPILED_RUNTIME_ABI};"
@@ -62,7 +62,14 @@ def runtime_node_path() -> Path:
     Path("/app/shell-src/node_modules"),
     Path(__file__).resolve().parents[2] / "frontend" / "node_modules",
   ]
-  return next((path for path in candidates if path.is_dir()), candidates[-1])
+  # A tree qualifies only if it holds the bundler itself: the baked image's
+  # tree can predate a dependency (it exists but cannot compile), while the
+  # live platform clone's tree tracks the current lockfile. Preferring
+  # bare existence turned every app compile into a hard failure there.
+  return next(
+    (path for path in candidates if (path / "rolldown").is_dir()),
+    next((path for path in candidates if path.is_dir()), candidates[-1]),
+  )
 
 
 def mobius_runtime_path() -> Path:

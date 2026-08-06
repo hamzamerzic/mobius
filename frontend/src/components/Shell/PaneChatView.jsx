@@ -27,6 +27,7 @@ function PaneChatView({
   apps,
   runtimeActive = true,
   keepTranscriptPainted = false,
+  focusedPresentation = false,
   paneContentHeight,
   // Shell selects this chat's stable signal before React.memo compares props.
   // An unrelated chat can replace the global signal Map without crossing this
@@ -96,6 +97,13 @@ function PaneChatView({
     acknowledgeAppPreview?.(app, final)
   }, [navTo, paneId, acknowledgeAppPreview])
 
+  // Auto-dismiss (the settled CTA timing out) is the same durable "final"
+  // acknowledgement opening performs, minus the navigation — the button retires
+  // without stealing the pane the partner is actually using.
+  const handleDismissApp = useCallback((app) => {
+    acknowledgeAppPreview?.(app, true)
+  }, [acknowledgeAppPreview])
+
   const handleChatMissing = useCallback((missingId) => {
     onChatMissing?.(missingId, chatId)
   }, [chatId, onChatMissing])
@@ -107,9 +115,9 @@ function PaneChatView({
     // ChatView reports layout readiness before the transcript's first paint.
     // Prepare that frame beneath the outgoing cover before promotion.
     displayReadyCancelRef.current = scheduleAfterBrowserPaint(
-      () => onDisplayReady(paneId, readyChatId),
+      () => onDisplayReady(paneId, readyChatId, focusedPresentation),
     )
-  }, [onDisplayReady, paneId])
+  }, [focusedPresentation, onDisplayReady, paneId])
 
   useEffect(() => () => displayReadyCancelRef.current(), [])
 
@@ -133,6 +141,7 @@ function PaneChatView({
         onChatMissing={handleChatMissing}
         builtApps={builtApps}
         onOpenApp={handleOpenApp}
+        onDismissApp={handleDismissApp}
         onInternalNav={onInternalNav}
         onMessageStart={handleMessageStart}
         onOwnerActivity={handleOwnerActivity}

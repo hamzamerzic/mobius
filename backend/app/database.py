@@ -1329,6 +1329,73 @@ def _add_chat_has_messages(eng) -> None:
       ))
 
 
+def _create_chat_search_tables(eng) -> None:
+  """Install the disposable normalized search schema for each database."""
+  from sqlalchemy import text
+
+  dialect = eng.dialect.name
+  if dialect not in {"sqlite", "postgresql"}:
+    raise RuntimeError(f"unsupported chat-search database: {dialect}")
+
+  # Search rows are derived from chats. Replace the runtime-created generation
+  # once rather than preserving a permanent schema detector in the
+  # request path; the first search repopulates these empty canonical tables.
+  with eng.begin() as conn:
+    if dialect == "sqlite":
+      conn.execute(text("DROP TABLE IF EXISTS chat_search_fts"))
+    for table_name in (
+      "chat_search_docs",
+      "chat_search_state",
+      "chat_search_meta",
+    ):
+      conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+
+    id_type = "INTEGER" if dialect == "sqlite" else "BIGSERIAL"
+    conn.execute(text(
+      "CREATE TABLE chat_search_docs ("
+      f"id {id_type} PRIMARY KEY, "
+      "chat_id VARCHAR(64) NOT NULL, "
+      "msg_idx INTEGER NOT NULL, "
+      "ts BIGINT, "
+      "role VARCHAR(16), "
+      "text TEXT NOT NULL"
+      ")"
+    ))
+    # One composite index owns both row identity and chat-local scans; a
+    # separate chat_id index would duplicate its leftmost prefix.
+    conn.execute(text(
+      "CREATE UNIQUE INDEX ix_chat_search_docs_chat_message "
+      "ON chat_search_docs (chat_id, msg_idx)"
+    ))
+    conn.execute(text(
+      "CREATE TABLE chat_search_state ("
+      "chat_id VARCHAR(64) PRIMARY KEY, "
+      "indexed_updated_at TEXT NOT NULL"
+      ")"
+    ))
+
+    if dialect == "sqlite":
+      conn.execute(text(
+        "CREATE VIRTUAL TABLE chat_search_fts USING fts5("
+        "text, content='chat_search_docs', content_rowid='id', "
+        "tokenize='unicode61 remove_diacritics 2'"
+        ")"
+      ))
+      conn.execute(text(
+        "CREATE TRIGGER chat_search_docs_ai "
+        "AFTER INSERT ON chat_search_docs BEGIN "
+        "INSERT INTO chat_search_fts(rowid, text) VALUES (new.id, new.text); "
+        "END"
+      ))
+      conn.execute(text(
+        "CREATE TRIGGER chat_search_docs_ad "
+        "AFTER DELETE ON chat_search_docs BEGIN "
+        "INSERT INTO chat_search_fts(chat_search_fts, rowid, text) "
+        "VALUES ('delete', old.id, old.text); "
+        "END"
+      ))
+
+
 def _add_connectors_table(eng) -> None:
   """Create the provider-neutral MCP registry without replacing preview rows."""
   from app.models import Connector
@@ -1385,6 +1452,151 @@ def _add_connector_capability_identity(eng) -> None:
       ))
 
 
+def orm_schema_gaps(eng) -> list[str]:
+  """ORM-mapped columns/tables the live database lacks (``table.column``).
+
+  Runs after ``create_all`` + migrations, so any gap is a written-code bug
+  (a declared column with no migration), not a pending upgrade. Such a gap
+  is invisible at boot and fatal at first query — the 2026-08-04 outage
+  hung every chat turn on one missing ``apps`` column while the container
+  reported healthy.
+  """
+  from sqlalchemy import inspect as sa_inspect
+
+  inspector = sa_inspect(eng)
+  live_tables = set(inspector.get_table_names())
+  gaps: list[str] = []
+  for table in Base.metadata.sorted_tables:
+    if table.name not in live_tables:
+      gaps.append(f"{table.name} (missing table)")
+      continue
+    live = {column["name"] for column in inspector.get_columns(table.name)}
+    gaps.extend(
+      f"{table.name}.{column.name}"
+      for column in table.columns
+      if column.name not in live
+    )
+  return gaps
+
+
+def _add_app_connections_manage(eng) -> None:
+  """Grant column for the Connections mini-app's registry access.
+
+  Numbered migration, NOT a ``_converge_legacy_schema`` ALTER: 0001 is a
+  recorded one-shot, so a column added there never reaches a database that
+  already ran it — the exact gap behind the 2026-08-04 silent-turn outage.
+  Schema-gated for the hand-patched production database and for fresh
+  installs whose tables are created from ORM metadata.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  columns = {
+    column["name"] for column in sa_inspect(eng).get_columns("apps")
+  }
+  if "connections_manage" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE apps ADD COLUMN connections_manage BOOLEAN "
+      "NOT NULL DEFAULT FALSE"
+    ))
+
+
+def _add_chat_pending_question_id(eng) -> None:
+  """Add the durable open-AskUserQuestion marker (models.Chat).
+
+  Backfill only chats with a nonterminal durable run and an unanswered question
+  in their latest visible assistant message. That preserves a question parked
+  at upgrade without reviving historical cards on completed chats.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chats" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chats")}
+  if "pending_question_id" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE chats ADD COLUMN pending_question_id VARCHAR(64) NULL"
+    ))
+    tables = set(inspector.get_table_names())
+    if "chat_runs" not in tables or not {"id", "messages"}.issubset(columns):
+      return
+    run_columns = {
+      column["name"] for column in inspector.get_columns("chat_runs")
+    }
+    if not {"chat_id", "status"}.issubset(run_columns):
+      return
+    active_rows = conn.execute(text(
+      "SELECT c.id, c.messages FROM chats c "
+      "WHERE c.pending_question_id IS NULL "
+      + ("AND c.deleted_at IS NULL " if "deleted_at" in columns else "")
+      + "AND EXISTS ("
+      "SELECT 1 FROM chat_runs r WHERE r.chat_id = c.id "
+      "AND r.status IN ('running', 'parked', 'resume_pending'))"
+    )).all()
+    for chat_id, raw_messages in active_rows:
+      try:
+        messages = (
+          json.loads(raw_messages)
+          if isinstance(raw_messages, str)
+          else list(raw_messages or [])
+        )
+      except (TypeError, ValueError, json.JSONDecodeError):
+        continue
+      question_id = None
+      for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("hidden"):
+          continue
+        if message.get("role") != "assistant":
+          break
+        for block in reversed(message.get("blocks") or []):
+          if not isinstance(block, dict):
+            continue
+          candidate = block.get("question_id")
+          if (
+            block.get("type") == "question"
+            and not block.get("answers")
+            and isinstance(candidate, str)
+            and 0 < len(candidate) <= 64
+          ):
+            question_id = candidate
+            break
+        break
+      if question_id is not None:
+        conn.execute(text(
+          "UPDATE chats SET pending_question_id = :question_id "
+          "WHERE id = :chat_id AND pending_question_id IS NULL"
+        ), {"chat_id": chat_id, "question_id": question_id})
+
+
+def _add_delegation_parent_wake(eng) -> None:
+  """Add the delegation parent auto-wake columns (models.Delegation).
+
+  ``notify_parent_on_complete`` (opt-in, default FALSE) and ``parent_woken_at``
+  (nullable retry latch). Existing rows keep the safe defaults: no wake
+  fires for delegations created before the upgrade.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "delegations" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("delegations")}
+  with eng.begin() as conn:
+    if "notify_parent_on_complete" not in columns:
+      conn.execute(text(
+        "ALTER TABLE delegations ADD COLUMN notify_parent_on_complete "
+        "BOOLEAN NOT NULL DEFAULT FALSE"
+      ))
+    if "parent_woken_at" not in columns:
+      conn.execute(text(
+        "ALTER TABLE delegations ADD COLUMN parent_woken_at DATETIME NULL"
+      ))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -1393,6 +1605,10 @@ _SCHEMA_MIGRATIONS = (
   ("0005_connectors", _add_connectors_table),
   ("0006_connector_capability_identity", _add_connector_capability_identity),
   ("0007_chat_has_messages", _add_chat_has_messages),
+  ("0008_chat_search_documents", _create_chat_search_tables),
+  ("0009_app_connections_manage", _add_app_connections_manage),
+  ("0010_chat_pending_question_id", _add_chat_pending_question_id),
+  ("0011_delegation_parent_wake", _add_delegation_parent_wake),
 )
 
 

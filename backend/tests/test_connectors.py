@@ -1,8 +1,9 @@
-"""Provider-neutral MCP connection registry and secret-boundary tests."""
+"""Provider-neutral MCP connection registry and broker-boundary tests."""
 
 import asyncio
 import json
 import os
+import socket
 import tempfile
 import time
 from unittest.mock import AsyncMock
@@ -13,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from app import connectors as core
 from app import models
-from app.database import checked_out_connections
+from app.database import SessionLocal, checked_out_connections
 from app.routes import connectors as connector_routes
 
 
@@ -32,8 +33,18 @@ def test_slug_auth_and_token_helpers_are_provider_consistent():
   }
   assert core.bare_secret("Authorization", "Bearer sk-123") == "sk-123"
   assert core.bare_secret("X-Api-Key", "Bearer sk-123") == "Bearer sk-123"
+  with pytest.raises(core.ConnectorError, match="at least 8"):
+    core.validate_auth_secret("X-Api-Key", "tiny")
+  with pytest.raises(core.ConnectorError, match="at least 8"):
+    core.validate_auth_secret("Authorization", "Bearer a")
   with pytest.raises(core.ConnectorError, match="reserved"):
     core.validate_auth_header("MCP-Protocol-Version")
+  with pytest.raises(core.ConnectorError, match="reserved"):
+    core.validate_auth_header("Last-Event-ID")
+  with pytest.raises(core.ConnectorError, match="reserved"):
+    core.validate_auth_header("Transfer-Encoding")
+  with pytest.raises(core.ConnectorError, match="reserved"):
+    core.validate_auth_header("Mcp-Param-Cursor")
 
 
 @pytest.mark.asyncio
@@ -72,6 +83,24 @@ class _BytesStream(httpx.AsyncByteStream):
 
 
 @pytest.mark.asyncio
+async def test_rpc_parser_skips_empty_keepalive_events():
+  """A leading empty-data keep-alive (Firecrawl) must not fail the parse."""
+  response = httpx.Response(
+    200,
+    headers={"content-type": "text/event-stream"},
+    text=(
+      # An id line then an empty `data:` ping, exactly as Firecrawl sends.
+      'id: ping-1\ndata: \n\n'
+      'event: message\nid: msg-1\n'
+      'data: {"jsonrpc":"2.0","id":3,"result":{"ok":true}}\n\n'
+    ),
+  )
+  matched = await core._matching_rpc(response, 3)
+  assert matched["id"] == 3
+  assert matched["result"] == {"ok": True}
+
+
+@pytest.mark.asyncio
 async def test_rpc_parser_stops_a_live_sse_stream_after_matching_id():
   response = httpx.Response(
     200,
@@ -93,8 +122,6 @@ async def test_handshake_negotiates_session_and_paginates_tools(monkeypatch):
       assert request.headers["mcp-session-id"] == "session-1"
       return httpx.Response(204, request=request)
     body = json.loads(request.content)
-    if body["method"] == "server/discover":
-      return httpx.Response(404, request=request)
     if body["method"] == "initialize":
       return httpx.Response(
         200,
@@ -125,7 +152,9 @@ async def test_handshake_negotiates_session_and_paginates_tools(monkeypatch):
         json={
           "jsonrpc": "2.0",
           "id": 3,
-          "result": {"tools": [{"name": "second"}]},
+          "result": {
+            "tools": [{"name": "second"}, {"description": "no name"}],
+          },
         },
       )
     return httpx.Response(
@@ -159,51 +188,47 @@ async def test_handshake_negotiates_session_and_paginates_tools(monkeypatch):
     "https://mcp.example/mcp", "Authorization", "secret-key",
   )
   assert result["name"] == "Example MCP"
-  assert [tool["name"] for tool in result["tools"]] == ["first", "second"]
+  assert result["tools"] == ["first", "second"]
   assert calls[0].headers["authorization"] == "Bearer secret-key"
   assert calls[-1].method == "DELETE"
 
 
 @pytest.mark.asyncio
-async def test_handshake_prefers_stateless_2026_discovery(monkeypatch):
+async def test_handshake_accepts_a_newer_protocol_version(monkeypatch):
+  """A routine upstream version bump must not become an outage."""
   methods = []
 
   def handler(request: httpx.Request) -> httpx.Response:
     body = json.loads(request.content)
-    method = body["method"]
-    methods.append(method)
-    assert request.headers["mcp-protocol-version"] == "2026-07-28"
-    assert request.headers["mcp-method"] == method
-    metadata = body["params"]["_meta"]
-    assert metadata["io.modelcontextprotocol/protocolVersion"] == "2026-07-28"
-    assert metadata["io.modelcontextprotocol/clientCapabilities"] == {}
-    if method == "server/discover":
-      result = {
-        "resultType": "complete",
-        "supportedVersions": ["2026-07-28"],
-        "capabilities": {"tools": {}},
-        "ttlMs": 60000,
-        "cacheScope": "private",
-        "_meta": {
-          "io.modelcontextprotocol/serverInfo": {
-            "name": "Modern MCP",
-            "version": "2.0",
+    methods.append(body["method"])
+    if body["method"] == "initialize":
+      assert body["params"]["protocolVersion"] == "2025-11-25"
+      assert request.headers["mcp-protocol-version"] == "2025-11-25"
+      return httpx.Response(
+        200,
+        request=request,
+        headers={"content-type": "application/json"},
+        json={
+          "jsonrpc": "2.0",
+          "id": 1,
+          "result": {
+            "protocolVersion": "2026-07-28",
+            "serverInfo": {"name": "Future MCP"},
           },
         },
-      }
-    else:
-      assert method == "tools/list"
-      result = {
-        "resultType": "complete",
-        "tools": [{"name": "modern_lookup"}],
-        "ttlMs": 60000,
-        "cacheScope": "private",
-      }
+      )
+    assert request.headers["mcp-protocol-version"] == "2026-07-28"
+    if body["method"] == "notifications/initialized":
+      return httpx.Response(202, request=request)
     return httpx.Response(
       200,
       request=request,
       headers={"content-type": "application/json"},
-      json={"jsonrpc": "2.0", "id": body["id"], "result": result},
+      json={
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {"tools": [{"name": "future_tool"}]},
+      },
     )
 
   monkeypatch.setattr(
@@ -223,45 +248,56 @@ async def test_handshake_prefers_stateless_2026_discovery(monkeypatch):
   )
 
   result = await core.handshake("https://mcp.example/mcp")
-  assert methods == ["server/discover", "tools/list"]
-  assert result["name"] == "Modern MCP"
-  assert result["protocol_version"] == "2026-07-28"
-  assert [tool["name"] for tool in result["tools"]] == ["modern_lookup"]
+  assert result["name"] == "Future MCP"
+  assert result["tools"] == ["future_tool"]
+  assert result["est_tokens"] > 0
+  assert methods == ["initialize", "notifications/initialized", "tools/list"]
 
 
 @pytest.mark.asyncio
-async def test_modern_probe_distinguishes_protocol_errors_from_legacy_fallback():
-  endpoint = ("https://203.0.113.8/mcp", "mcp.example", "mcp.example")
+@pytest.mark.parametrize("negotiated", ("2024-11-05", "vNext"))
+async def test_handshake_rejects_prefloor_or_malformed_versions(
+  monkeypatch, negotiated,
+):
+  methods = []
 
-  async def probe(error, status=400):
-    def handler(request: httpx.Request) -> httpx.Response:
-      return httpx.Response(
-        status,
-        request=request,
-        headers={"content-type": "application/json"},
-        json={"jsonrpc": "2.0", "id": 1, "error": error},
-      )
+  def handler(request: httpx.Request) -> httpx.Response:
+    body = json.loads(request.content)
+    methods.append(body["method"])
+    assert body["method"] == "initialize"
+    return httpx.Response(
+      200,
+      request=request,
+      headers={"content-type": "application/json"},
+      json={
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+          "protocolVersion": negotiated,
+          "serverInfo": {"name": "Old MCP"},
+        },
+      },
+    )
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-      return await core._modern_rpc(
-        client, endpoint, {}, "server/discover", {}, 1,
-        allow_unsupported=True,
-      )
+  monkeypatch.setattr(
+    core,
+    "_safe_endpoint",
+    lambda _url: ("https://203.0.113.8/mcp", "mcp.example", "mcp.example"),
+  )
+  real_async_client = httpx.AsyncClient
+  monkeypatch.setattr(
+    core.httpx,
+    "AsyncClient",
+    lambda **kwargs: real_async_client(
+      transport=httpx.MockTransport(handler),
+      timeout=kwargs.get("timeout"),
+      follow_redirects=False,
+    ),
+  )
 
-  assert await probe({
-    "code": -32022,
-    "message": "unsupported",
-    "data": {"supported": ["2025-11-25"]},
-  }) is None
-  assert await probe({"code": -32601, "message": "unknown"}, 404) is None
-  with pytest.raises(core.ConnectorError, match="rejected"):
-    await probe({"code": -32020, "message": "header mismatch"})
-  with pytest.raises(core.ConnectorError, match="rejected"):
-    await probe({
-      "code": -32022,
-      "message": "unsupported",
-      "data": {"supported": ["2027-01-01"]},
-    })
+  with pytest.raises(core.ConnectorError, match="unsupported MCP version"):
+    await core.handshake("https://mcp.example/mcp")
+  assert methods == ["initialize"]
 
 
 @pytest.mark.asyncio
@@ -270,8 +306,6 @@ async def test_handshake_redacts_secret_echoes_and_rpc_errors(monkeypatch):
 
   def handler(request: httpx.Request) -> httpx.Response:
     body = json.loads(request.content)
-    if body["method"] == "server/discover":
-      return httpx.Response(404, request=request)
     if body["method"] == "initialize":
       if error_mode:
         return httpx.Response(
@@ -308,7 +342,7 @@ async def test_handshake_redacts_secret_echoes_and_rpc_errors(monkeypatch):
         "id": body["id"],
         "result": {
           "tools": [{
-            "name": "lookup",
+            "name": "echo-secret lookup",
             "description": "Bearer echo-secret",
             "inputSchema": {
               "type": "object",
@@ -336,15 +370,21 @@ async def test_handshake_redacts_secret_echoes_and_rpc_errors(monkeypatch):
   )
 
   result = await core.handshake(
-    "https://mcp.example/mcp", "Authorization", "echo-secret",
+    "https://mcp.example/mcp", "Authorization", "Bearer echo-secret",
   )
+  assert result == {
+    "name": "[redacted] service",
+    "tools": ["[redacted] lookup"],
+    "est_tokens": result["est_tokens"],
+  }
+  assert result["est_tokens"] > 0
+  assert "inputSchema" not in json.dumps(result)
   assert "echo-secret" not in json.dumps(result)
-  assert "[redacted]" in json.dumps(result)
 
   error_mode = True
   with pytest.raises(core.ConnectorError) as raised:
     await core.handshake(
-      "https://mcp.example/mcp", "Authorization", "echo-secret",
+      "https://mcp.example/mcp", "Authorization", "Bearer echo-secret",
     )
   assert "echo-secret" not in str(raised.value)
 
@@ -474,13 +514,24 @@ def _row(row_id, slug, url, auth_header=None, secret=None):
   )
 
 
+def _owner_headers(auth, generation):
+  return {
+    **auth,
+    "X-Mobius-Connector-Generation": generation,
+  }
+
+
 def test_turn_plan_serves_both_providers_without_config_secrets():
   plan_source_rows = [
     _row(4, "docs", "https://docs.example/mcp"),
     _row(9, "search", "https://search.example/mcp", "Authorization", "sk-9"),
     _row(12, "data", "https://data.example/mcp", "X-Api-Key", "key-12"),
   ]
-  plan = core.build_turn_plan(_FakeDb(plan_source_rows))
+  plan = core.build_turn_plan(
+    _FakeDb(plan_source_rows),
+    include_owner_connectors=True,
+  )
+  assert plan is not None
 
   expected_keys = {
     "mobius_connector_4_docs",
@@ -488,12 +539,12 @@ def test_turn_plan_serves_both_providers_without_config_secrets():
     "mobius_connector_12_data",
   }
   assert set(plan.claude_servers) == expected_keys
-  servers = plan.codex_config["mcp_servers"]
-  assert set(servers) == expected_keys
+  assert plan.codex_config is not None
+  codex_servers = plan.codex_config["mcp_servers"]
   for key in expected_keys:
     connector_id = int(key.split("_")[2])
     claude = plan.claude_servers[key]
-    codex = servers[key]
+    codex = codex_servers[key]
     expected_url = f"http://127.0.0.1:9/api/connectors/{connector_id}/broker"
     assert claude["url"] == expected_url
     assert codex["url"] == expected_url
@@ -501,11 +552,23 @@ def test_turn_plan_serves_both_providers_without_config_secrets():
     capability = claude["headers"]["Authorization"].removeprefix("Bearer ")
     row = next(row for row in plan_source_rows if row.id == connector_id)
     core.verify_broker_capability(capability, connector_id, row.capability_id)
+    assert codex["startup_timeout_sec"] == 30
     env_var = codex["bearer_token_env_var"]
     assert plan.codex_env[env_var] == capability
   assert "sk-9" not in repr(plan)
   assert "sk-9" not in repr(plan.codex_config)
   assert "key-12" not in repr(plan.codex_config)
+
+
+def test_turn_plan_requires_explicit_owner_connector_access():
+  class _NoQueryDb:
+    def query(self, *_args, **_kwargs):
+      raise AssertionError("a denied child plan must not read owner connectors")
+
+  assert core.build_turn_plan(
+    _NoQueryDb(),
+    include_owner_connectors=False,
+  ) is None
 
 
 def test_claude_config_is_retired_without_releasing_argv_visible_fd():
@@ -542,9 +605,8 @@ def test_connector_routes_keep_keys_out_of_responses(
 ):
   probe = {
     "name": "Example MCP",
-    "tools": [{"name": "lookup", "description": "Look up a record."}],
-    "est_tokens": 42,
-    "protocol_version": "2025-11-25",
+    "tools": ["lookup"],
+    "est_tokens": 5150,
   }
   probe_pool_counts = []
 
@@ -555,6 +617,32 @@ def test_connector_routes_keep_keys_out_of_responses(
   handshake = AsyncMock(side_effect=probe_without_db_lease)
   monkeypatch.setattr("app.routes.connectors.core.handshake", handshake)
 
+  overlong_secret = "never-echo-overlong-" + ("z" * 4096)
+  overlong = client.post("/api/connectors", headers=auth, json={
+    "url": "https://mcp.example/mcp",
+    "auth_value": overlong_secret,
+  })
+  assert overlong.status_code == 422
+  assert overlong_secret not in overlong.text
+  assert "never-echo-overlong" not in overlong.text
+
+  wrong_type = client.post("/api/connectors", headers=auth, json={
+    "url": "https://mcp.example/mcp",
+    "auth_value": {"secret": "never-echo-object"},
+  })
+  assert wrong_type.status_code == 400
+  assert "never-echo-object" not in wrong_type.text
+  assert handshake.await_count == 0
+
+  short = client.post("/api/connectors", headers=auth, json={
+    "url": "https://mcp.example/mcp",
+    "auth_header": "Authorization",
+    "auth_value": "Bearer a",
+  })
+  assert short.status_code == 422
+  assert "at least 8" in short.text
+  assert handshake.await_count == 0
+
   add_baseline = checked_out_connections()
   created = client.post("/api/connectors", headers=auth, json={
     "url": "https://mcp.example/mcp",
@@ -564,34 +652,379 @@ def test_connector_routes_keep_keys_out_of_responses(
   body = created.json()
   assert body["name"] == "Example MCP"
   assert body["has_auth"] is True
-  assert body["providers"] == ["claude", "codex"]
+  assert set(body) == {
+    "id", "generation", "name", "url", "enabled", "has_auth",
+    "tools", "tool_count", "est_tokens", "status", "status_detail",
+    "auth_kind", "signed_in", "scopes",
+  }
+  assert body["tools"] == ["lookup"]
+  assert body["est_tokens"] == 5150
+  # A static-key connection is not OAuth and carries no sign-in.
+  assert body["auth_kind"] == "key"
+  assert body["signed_in"] is False
+  assert body["scopes"] == []
   assert "top-secret" not in created.text
   assert probe_pool_counts == [add_baseline]
 
   stored = db.query(models.Connector).one()
+  original_identity = stored.capability_id
+  assert body["id"] == stored.id
+  assert body["generation"] == original_identity
   assert stored.auth_value_encrypted != "top-secret"
   assert core.decrypt_secret(stored.auth_value_encrypted) == "top-secret"
+
+  blank_name = client.patch(
+    f"/api/connectors/{stored.id}",
+    headers=_owner_headers(auth, original_identity),
+    json={"name": "   "},
+  )
+  assert blank_name.status_code == 422
+  db.refresh(stored)
+  assert stored.name == "Example MCP"
 
   listed = client.get("/api/connectors", headers=auth)
   assert listed.status_code == 200
   assert "top-secret" not in listed.text
 
   toggled = client.patch(
-    f"/api/connectors/{stored.id}", headers=auth, json={"enabled": False},
+    f"/api/connectors/{stored.id}",
+    headers=_owner_headers(auth, original_identity),
+    json={"enabled": False},
   )
   assert toggled.status_code == 200
   assert toggled.json()["enabled"] is False
+  db.expire_all()
+  disabled_identity = db.query(models.Connector).one().capability_id
+  assert disabled_identity != original_identity
+  assert toggled.json()["generation"] == disabled_identity
 
   # The direct assertion session above owns its own checkout; release it so
   # the refresh probe can prove the request-owned lease is gone independently.
   db.close()
   refresh_baseline = checked_out_connections()
   refreshed = client.post(
-    f"/api/connectors/{stored.id}/refresh", headers=auth,
+    f"/api/connectors/{stored.id}/refresh",
+    headers=_owner_headers(auth, disabled_identity),
   )
   assert refreshed.status_code == 200
   assert handshake.await_count == 2
   assert probe_pool_counts[-1] == refresh_baseline
+
+
+def test_disable_revokes_capability_across_reenable(client, auth, db):
+  row = _row(72, "revoked", "https://remote.example/mcp")
+  db.add(row)
+  db.commit()
+  old_identity = row.capability_id
+  old_capability = core.mint_broker_capability(row.id, old_identity)
+
+  disabled = client.patch(
+    f"/api/connectors/{row.id}",
+    headers=_owner_headers(auth, old_identity),
+    json={"enabled": False},
+  )
+  assert disabled.status_code == 200
+  db.expire_all()
+  new_identity = row.capability_id
+  assert new_identity != old_identity
+  enabled = client.patch(
+    f"/api/connectors/{row.id}",
+    headers=_owner_headers(auth, new_identity),
+    json={"enabled": True},
+  )
+  assert enabled.status_code == 200
+
+  with TestClient(client.app, client=("127.0.0.1", 43100)) as loopback:
+    denied = loopback.get(
+      f"/api/connectors/{row.id}/broker",
+      headers={"Authorization": f"Bearer {old_capability}"},
+    )
+  assert denied.status_code == 401
+
+
+def test_owner_mutations_require_current_connection_generation(
+  client, auth, db,
+):
+  original = _row(76, "original_owner", "https://original.example/mcp")
+  db.add(original)
+  db.commit()
+  stale_generation = original.capability_id
+
+  missing = client.patch(
+    f"/api/connectors/{original.id}",
+    headers=auth,
+    json={"enabled": False},
+  )
+  assert missing.status_code == 428
+
+  db.delete(original)
+  db.commit()
+  replacement = _row(
+    76,
+    "replacement_owner",
+    "https://replacement.example/mcp",
+  )
+  db.add(replacement)
+  db.commit()
+
+  for method, payload in (
+    ("PATCH", {"enabled": False}),
+    ("DELETE", None),
+  ):
+    response = client.request(
+      method,
+      f"/api/connectors/{replacement.id}",
+      headers=_owner_headers(auth, stale_generation),
+      json=payload,
+    )
+    assert response.status_code == 404
+
+  db.expire_all()
+  untouched = db.query(models.Connector).filter_by(id=76).one()
+  assert untouched.slug == "replacement_owner"
+  assert untouched.enabled is True
+
+
+def test_unhealthy_connection_cannot_be_enabled_planned_or_brokered(
+  client, auth, db,
+):
+  row = _row(74, "unhealthy", "https://remote.example/mcp")
+  row.enabled = False
+  row.status = "error"
+  row.status_detail = "Re-check required."
+  db.add(row)
+  db.commit()
+
+  rejected = client.patch(
+    f"/api/connectors/{row.id}",
+    headers=_owner_headers(auth, row.capability_id),
+    json={"enabled": True},
+  )
+  assert rejected.status_code == 409
+
+  row.enabled = True  # Model an older row or a failed refresh while enabled.
+  db.commit()
+  assert core.build_turn_plan(
+    db,
+    include_owner_connectors=True,
+  ) is None
+  capability = core.mint_broker_capability(row.id, row.capability_id)
+  with TestClient(client.app, client=("127.0.0.1", 43100)) as loopback:
+    denied = loopback.get(
+      f"/api/connectors/{row.id}/broker",
+      headers={"Authorization": f"Bearer {capability}"},
+    )
+  assert denied.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_dns_blip_is_transient_but_dead_name_is_definitive(monkeypatch):
+  """DNS happens in the SSRF validator, not httpx; classify it there too."""
+
+  def resolver_blip(host, *_args, **_kwargs):
+    raise socket.gaierror(
+      socket.EAI_AGAIN, "Temporary failure in name resolution",
+    )
+
+  monkeypatch.setattr("app.net_utils.socket.getaddrinfo", resolver_blip)
+  with pytest.raises(core.ConnectorError) as blip:
+    await core.handshake("https://mcp.example/mcp")
+  assert blip.value.transient is True
+
+  def dead_name(host, *_args, **_kwargs):
+    raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+  monkeypatch.setattr("app.net_utils.socket.getaddrinfo", dead_name)
+  with pytest.raises(core.ConnectorError) as gone:
+    await core.handshake("https://mcp.example/mcp")
+  assert gone.value.transient is False
+
+
+def _app_token(client, auth, *, granted):
+  from test_app_fixtures import create_local_app
+
+  app_id = create_local_app(
+    client, auth, name="connections-test", description="t",
+  )["id"]
+  session = SessionLocal()
+  try:
+    app = session.query(models.App).filter(models.App.id == app_id).first()
+    app.connections_manage = granted
+    session.commit()
+  finally:
+    session.close()
+  minted = client.post(
+    "/api/auth/app-token", json={"app_id": app_id}, headers=auth,
+  )
+  assert minted.status_code == 200, minted.text
+  return {"Authorization": f"Bearer {minted.json()['token']}"}
+
+
+def test_app_token_requires_connections_manage(client, auth, db):
+  row = _row(79, "app_managed", "https://remote.example/mcp")
+  db.add(row)
+  db.commit()
+  generation = row.capability_id
+
+  denied = _app_token(client, auth, granted=False)
+  assert client.get("/api/connectors", headers=denied).status_code == 403
+  assert client.patch(
+    f"/api/connectors/{row.id}",
+    headers={**denied, "X-Mobius-Connector-Generation": generation},
+    json={"enabled": False},
+  ).status_code == 403
+
+  managed = _app_token(client, auth, granted=True)
+  listed = client.get("/api/connectors", headers=managed)
+  assert listed.status_code == 200
+  assert [c["id"] for c in listed.json()["connectors"]] == [row.id]
+  toggled = client.patch(
+    f"/api/connectors/{row.id}",
+    headers={**managed, "X-Mobius-Connector-Generation": generation},
+    json={"enabled": False},
+  )
+  assert toggled.status_code == 200
+  assert toggled.json()["enabled"] is False
+
+
+def test_estimate_tokens_scales_with_schema_size():
+  small = [{"name": "a", "inputSchema": {}}]
+  large = [
+    {
+      "name": f"tool_{index}",
+      "inputSchema": {
+        "properties": {key: {"type": "string"} for key in ("one", "two")},
+      },
+    }
+    for index in range(40)
+  ]
+  assert core.estimate_tokens([]) == 0
+  assert 0 < core.estimate_tokens(small) < core.estimate_tokens(large)
+  assert core.estimate_tokens([object()]) == 0
+
+
+def test_refresh_transient_failure_keeps_last_known_health(
+  client, auth, db, monkeypatch,
+):
+  row = _row(78, "flaky", "https://remote.example/mcp")
+  row.tools_json = ["lookup"]
+  row.est_tokens = 1200
+  db.add(row)
+  db.commit()
+  generation = row.capability_id
+
+  async def transient_probe(*_args, **_kwargs):
+    raise core.ConnectorError(
+      "Could not reach the MCP service.", transient=True,
+    )
+
+  monkeypatch.setattr(core, "handshake", transient_probe)
+  refreshed = client.post(
+    f"/api/connectors/{row.id}/refresh",
+    headers=_owner_headers(auth, generation),
+  )
+  assert refreshed.status_code == 200
+  body = refreshed.json()
+  # One transport blip must not latch the connection out of agent turns.
+  assert body["status"] == "ok"
+  assert "Could not reach" in body["status_detail"]
+  assert body["est_tokens"] == 1200
+  db.expire_all()
+  assert core.build_turn_plan(db, include_owner_connectors=True) is not None
+
+  async def definitive_probe(*_args, **_kwargs):
+    raise core.ConnectorError(
+      "The service rejected the key or requires an OAuth sign-in flow.",
+    )
+
+  monkeypatch.setattr(core, "handshake", definitive_probe)
+  rejected = client.post(
+    f"/api/connectors/{row.id}/refresh",
+    headers=_owner_headers(auth, generation),
+  )
+  assert rejected.status_code == 200
+  assert rejected.json()["status"] == "error"
+  db.expire_all()
+  assert core.build_turn_plan(db, include_owner_connectors=True) is None
+
+  # A blip while already latched keeps the definitive diagnosis so the owner
+  # still sees the real reason, not a generic transport message.
+  monkeypatch.setattr(core, "handshake", transient_probe)
+  still_error = client.post(
+    f"/api/connectors/{row.id}/refresh",
+    headers=_owner_headers(auth, generation),
+  )
+  assert still_error.status_code == 200
+  assert still_error.json()["status"] == "error"
+  assert "rejected the key" in still_error.json()["status_detail"]
+
+
+def test_refresh_cannot_overwrite_reused_connector_id(
+  client, auth, db, monkeypatch,
+):
+  original = _row(73, "original", "https://original.example/mcp")
+  original.tools_json = [{"name": "original"}]
+  db.add(original)
+  db.commit()
+  original_identity = original.capability_id
+  db.close()
+
+  async def replace_during_probe(*_args, **_kwargs):
+    with SessionLocal() as concurrent:
+      stored = concurrent.query(models.Connector).filter_by(id=73).one()
+      concurrent.delete(stored)
+      concurrent.commit()
+      replacement = _row(73, "replacement", "https://replacement.example/mcp")
+      replacement.tools_json = [{"name": "replacement"}]
+      concurrent.add(replacement)
+      concurrent.commit()
+    return {
+      "name": "Stale probe",
+      "tools": ["stale"],
+      "est_tokens": 3,
+    }
+
+  monkeypatch.setattr(core, "handshake", replace_during_probe)
+  refreshed = client.post(
+    f"/api/connectors/{original.id}/refresh",
+    headers=_owner_headers(auth, original_identity),
+  )
+  assert refreshed.status_code == 404
+
+  with SessionLocal() as check:
+    replacement = check.query(models.Connector).filter_by(id=73).one()
+    assert replacement.slug == "replacement"
+    assert replacement.tools_json == [{"name": "replacement"}]
+
+
+@pytest.mark.parametrize(("auth_header", "secret"), (
+  ("Authorization", "Bearer a"),
+  ("Transfer-Encoding", "long-enough-key"),
+))
+def test_broker_rejects_legacy_unsafe_key_configuration(
+  client,
+  db,
+  auth_header,
+  secret,
+):
+  row = _row(
+    79,
+    "unsafe_legacy_key",
+    "https://unsafe-key.example/mcp",
+    auth_header,
+    secret,
+  )
+  db.add(row)
+  db.commit()
+  capability = core.mint_broker_capability(row.id, row.capability_id)
+
+  with TestClient(client.app, client=("127.0.0.1", 43100)) as loopback:
+    rejected = loopback.get(
+      f"/api/connectors/{row.id}/broker",
+      headers={"Authorization": f"Bearer {capability}"},
+    )
+
+  assert rejected.status_code == 502
 
 
 def test_broker_requires_loopback_and_connector_scoped_capability(

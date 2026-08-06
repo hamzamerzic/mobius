@@ -1,12 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  POINTER_SLOP, TAB_HOLD_MS, DRAWER_DRAG_HOLD_MS, DRAWER_MENU_HOLD_MS,
+  POINTER_SLOP, PRESS_DRAG_HOLD_MS, PRESS_MENU_HOLD_MS,
   PRE_HOLD_MOVE_PX, RELEASE_IN_PLACE_PX,
   HYSTERESIS_PX, ROOT_EDGE_PX, CARET_W, CARET_H, CENTER_INSET, DRAWER_EXIT_PX,
   CHIP_MOUSE_DX, CHIP_MOUSE_DY, CHIP_TOUCH_ABOVE,
   EDGE_BAND_MIN, EDGE_BAND_FRACTION,
   passedSlop, touchTabMoveIntent, drawerRowMoveIntent, releasedInPlace, chipOffset,
+  flingReleaseVelocity,
   crossedDrawerExit, edgeBands, edgePreviewRect, caretZone, edgeZone, centerZone,
   rootEdgeZone, hitTest, zoneTarget, releaseZone, zoneEq, buildScene,
 } from '../dragController.js'
@@ -69,17 +70,44 @@ test('drawerRowMoveIntent resolves one gesture without competing owners', () => 
     'mouse rows use ordinary drag slop without a hold')
 })
 
+test('flingReleaseVelocity uses the swipe window, not the decelerating last move', () => {
+  const now = 1000
+  // A real thumb: fast across the window, then a slow crawl right before lifting.
+  const samples = [
+    { t: 940, top: 0 },
+    { t: 956, top: 40 },
+    { t: 972, top: 80 },
+    { t: 988, top: 118 },
+    { t: 998, top: 120 }, // decelerating final move — 2px in 10ms
+  ]
+  const v = flingReleaseVelocity(samples, now)
+  // 120px across 58ms ≈ 2.07 px/ms — the swipe's speed, not the ~0.2 of the crawl
+  // that an EMA of the final move would have reported (which killed the glide).
+  assert.ok(v > 1.5 && v < 2.5, `expected the swipe speed, got ${v}`)
+})
+
+test('flingReleaseVelocity drops a paused or too-short release to zero', () => {
+  const now = 1000
+  // Newest sample is stale (finger rested ~220ms before lifting) → no glide.
+  assert.equal(flingReleaseVelocity([{ t: 700, top: 0 }, { t: 780, top: 200 }], now), 0)
+  assert.equal(flingReleaseVelocity([{ t: 995, top: 10 }], now), 0, 'one sample cannot form a velocity')
+  assert.equal(flingReleaseVelocity([], now), 0)
+  // Two fresh samples spanning under minSpanMs cannot measure a stable speed.
+  assert.equal(flingReleaseVelocity([{ t: 998, top: 10 }, { t: 999, top: 14 }], now), 0)
+})
+
 test('releasedInPlace is true only within the release radius', () => {
   assert.equal(releasedInPlace(RELEASE_IN_PLACE_PX, 0), true)
   assert.equal(releasedInPlace(RELEASE_IN_PLACE_PX + 0.1, 0), false)
 })
 
-test('drawer rows expose drag before a stationary hold opens actions', () => {
-  assert.equal(TAB_HOLD_MS, 350)
-  assert.equal(DRAWER_DRAG_HOLD_MS, 180)
-  assert.equal(DRAWER_MENU_HOLD_MS, 400)
-  assert.ok(DRAWER_DRAG_HOLD_MS < TAB_HOLD_MS)
-  assert.ok(DRAWER_MENU_HOLD_MS > TAB_HOLD_MS)
+test('a press exposes drag before a stationary hold opens actions', () => {
+  assert.equal(PRESS_DRAG_HOLD_MS, 180)
+  assert.equal(PRESS_MENU_HOLD_MS, 400)
+  // The drag stage must precede the menu stage, so a short hold moves and only a
+  // longer stationary hold opens actions — the single contract drawer rows,
+  // launcher cards, and workspace tabs all share.
+  assert.ok(PRESS_DRAG_HOLD_MS < PRESS_MENU_HOLD_MS)
 })
 
 test('chipOffset floats above a touch point and trails a mouse', () => {

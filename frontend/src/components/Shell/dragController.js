@@ -33,21 +33,23 @@ import { tabKey } from './tabModel.js'
 // A mouse drag arms once the pointer travels past this from the press point;
 // below it, the press is still a plain click (tab activate / row open).
 export const POINTER_SLOP = 5
-// Touch lift is a long-press. Drawer rows have two deliberate stages: movement
-// can become a drag quickly, while a stationary press must continue longer
-// before opening actions. Keeping both timings here prevents the live pointer
-// owner and launcher cards from inventing their own thresholds.
-export const TAB_HOLD_MS = 350
-export const DRAWER_DRAG_HOLD_MS = 180
+// A touch press-and-hold resolves in two deliberate stages, shared by drawer
+// rows, launcher cards, and workspace tabs so no surface invents its own
+// timing. After the first (short) stage the item becomes draggable — movement
+// picks it up as a reorder/workspace/strip drag — while a press that stays
+// still through the second stage opens that item's actions. A short hold moves,
+// a long hold opens actions, identically everywhere. (Tabs previously diverged
+// with one longer hold whose RELEASE opened the menu; they now share this.)
+export const PRESS_DRAG_HOLD_MS = 180
 // Stay ahead of the platform's own long-press takeover. Some touch browsers
 // cancel the pointer around their native context-menu threshold; opening first
 // keeps the menu on our single Pointer Events path instead of a release-time
 // native contextmenu fallback.
-export const DRAWER_MENU_HOLD_MS = 400
+export const PRESS_MENU_HOLD_MS = 400
 // Movement past this before a hold resolves yields to the source scroller.
 export const PRE_HOLD_MOVE_PX = 8
-// After a touch lift, a release that never moved past this is not a drop. Tabs
-// use that stationary outcome for actions; movement after the hold drags.
+// After a touch lift, a release that never moved past this is not a drop; the
+// menu opens from the hold timer while still held, never from this release.
 export const RELEASE_IN_PLACE_PX = 5
 
 // ── Zone geometry (design §3.2 / §3.3) ───────────────────────────────────────
@@ -134,6 +136,28 @@ export function drawerRowMoveIntent(dx, dy, {
 // After a lift, a release still within this radius did not become a drag.
 export function releasedInPlace(dx, dy, limit = RELEASE_IN_PLACE_PX) {
   return hypot(dx, dy) <= limit
+}
+
+// Release velocity (layout px/ms) for the drawer's momentum glide. The pinned
+// rows scroll under our own pointer owner (touch-action reserves them for the
+// hold-to-reorder gesture), so the browser gives us no native fling — we measure
+// one. A thumb DECELERATES in the last moment before it lifts, so reading only
+// the final move reports "no flick" and kills the glide; instead average the
+// travel across the recent window. `samples` are {t (ms), top (scroll offset)}
+// pushed each move. Returns 0 for a paused release (newest sample stale) or a
+// window too short to measure, so a deliberate stop keeps its exact position.
+export function flingReleaseVelocity(samples, now, { maxAgeMs = 110, minSpanMs = 8 } = {}) {
+  if (!Array.isArray(samples) || samples.length < 2) return 0
+  const newest = samples[samples.length - 1]
+  if (!newest || now - newest.t > maxAgeMs) return 0
+  let oldest = newest
+  for (let i = samples.length - 1; i >= 0; i -= 1) {
+    if (now - samples[i].t > maxAgeMs) break
+    oldest = samples[i]
+  }
+  const span = newest.t - oldest.t
+  if (span < minSpanMs) return 0
+  return (newest.top - oldest.top) / span
 }
 
 // Whether the workspace-root-edge drop zone may arm for this pointer + mode: it

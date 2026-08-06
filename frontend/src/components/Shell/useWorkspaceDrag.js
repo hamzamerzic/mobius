@@ -3,7 +3,8 @@ import * as tabModel from './tabModel.js'
 import {
   buildScene, hitTest, zoneTarget, releaseZone, chipOffset, STRIP_CARET_PAD,
   passedSlop, touchTabMoveIntent, drawerRowMoveIntent, releasedInPlace,
-  TAB_HOLD_MS, DRAWER_DRAG_HOLD_MS, DRAWER_MENU_HOLD_MS,
+  flingReleaseVelocity,
+  PRESS_DRAG_HOLD_MS, PRESS_MENU_HOLD_MS,
   crossedDrawerExit,
   rootEdgeAllowed,
 } from './dragController.js'
@@ -113,6 +114,42 @@ export default function useWorkspaceDrag({
     // Without this boundary, an interrupted drag followed quickly by a tap on
     // the same drawer row made the row look dead for up to 400ms.
     let clearPendingSourceClick = null
+
+    // ── Momentum fling for the JS-owned drawer scroll ─────────────────────────
+    // Pinned drawer rows keep touch-action:pinch-zoom so a held pin can be dragged
+    // to reorder, which means the browser never scrolls those rows natively — the
+    // session pans .drawer__scroll 1:1 with the finger instead (onMove below).
+    // Without a fling that 1:1 pan dead-stops the instant the finger lifts, so on a
+    // tall pinned band the whole list reads as "stuck / something stops the scroll."
+    // This carries the release velocity and decelerates on rAF, reproducing native
+    // momentum. It lives at the effect scope so a glide outlives its pointer session
+    // and a fresh press (or unmount) can halt it. Frame-rate independent: velocity
+    // is layout px/ms and decays by exp(-FRICTION·dt), matching iOS-normal feel.
+    let flingRAF = 0
+    const FLING_FRICTION = 0.002 // per-ms velocity decay (≈ 0.998/ms, iOS normal)
+    const FLING_MIN_V = 0.04 // px/ms — below this the glide has visually stopped
+    function stopFling() {
+      if (flingRAF) { cancelAnimationFrame(flingRAF); flingRAF = 0 }
+    }
+    function startFling(el, velocity) {
+      stopFling()
+      if (!el || !Number.isFinite(velocity) || Math.abs(velocity) < FLING_MIN_V) return
+      let v = velocity
+      let last = performance.now()
+      const step = (now) => {
+        flingRAF = 0
+        const dt = Math.min(32, now - last) // clamp a long/background frame
+        last = now
+        const before = el.scrollTop
+        el.scrollTop = before + v * dt
+        // A short delta versus the request means the scroller hit top/bottom.
+        if (Math.abs(el.scrollTop - before) + 0.5 < Math.abs(v * dt)) return
+        v *= Math.exp(-FLING_FRICTION * dt)
+        if (Math.abs(v) < FLING_MIN_V) return
+        flingRAF = requestAnimationFrame(step)
+      }
+      flingRAF = requestAnimationFrame(step)
+    }
 
     function contentBox() {
       return captureLayoutSpace(contentElRef.current)
@@ -299,6 +336,9 @@ export default function useWorkspaceDrag({
       let scrollEl = null
       let scrollAxis = null
       let scrollSpace = null
+      // Recent {t, top} samples so the lift-off velocity is a short trailing
+      // AVERAGE, not just the final (decelerating) move — see flingReleaseVelocity.
+      let scrollSamples = []
       let curZone = null
       let scene = null
       let drawerEdgeX = null
@@ -366,36 +406,44 @@ export default function useWorkspaceDrag({
         }
       }
 
-      // Tabs and drawer rows share this ONE pointer owner. A tab hold resolves
-      // intent without lifting immediately: movement then drags it, while a
-      // stationary release opens its actions. Drawer rows become draggable after the brief first
-      // stage; if the pointer stays still through the second stage, actions open
-      // immediately. Movement clears the same timer before handing off to reorder,
-      // workspace drag, or scrolling, so no competing gesture lifecycle exists.
+      // Tabs and drawer rows share this ONE pointer owner AND one two-stage
+      // press-and-hold. After the first stage the row/tab becomes draggable, so
+      // movement picks it up (reorder, workspace drag, or a strip drag); if the
+      // pointer instead stays still through the second stage, that item's actions
+      // open immediately, while still held. Movement clears the same timer before
+      // handing off to a drag or to scrolling, so no competing gesture lifecycle
+      // exists — a short hold moves and a long hold opens actions everywhere.
       if (isTouch) {
         holdTimer = setTimeout(() => {
           if (cancelled || cleaned) return
           held = true
           if (navigator.vibrate) { try { navigator.vibrate(8) } catch { /* unsupported */ } }
-          if (sourceKind !== 'drawer') {
-            return
-          }
           holdTimer = setTimeout(() => {
             if (cancelled || cleaned || armed || scrolling) return
-            const handler = drawerGesture()
-            if (!handler?.openMenu) {
-              cleanup()
-              return
-            }
             const point = { ...lastPoint }
             // Keep this pointer session alive until the contact actually ends.
             // Restoring body selection here leaves a small window in which the
             // platform long-press can select whichever menu item appeared under
             // the still-held finger (notably Android's text-selection handles).
-            menuOpened = true
-            handler.openMenu(point)
-          }, DRAWER_MENU_HOLD_MS - DRAWER_DRAG_HOLD_MS)
-        }, sourceKind === 'drawer' ? DRAWER_DRAG_HOLD_MS : TAB_HOLD_MS)
+            if (sourceKind === 'drawer') {
+              const handler = drawerGesture()
+              if (!handler?.openMenu) {
+                cleanup()
+                return
+              }
+              menuOpened = true
+              handler.openMenu(point)
+            } else {
+              const openTabMenu = openTabMenuAtRef?.current
+              if (!openTabMenu) {
+                cleanup()
+                return
+              }
+              menuOpened = true
+              openTabMenu(point.x, point.y, tabFromKey(key), paneId)
+            }
+          }, PRESS_MENU_HOLD_MS - PRESS_DRAG_HOLD_MS)
+        }, PRESS_DRAG_HOLD_MS)
       }
 
       function stopAutoScroll() {
@@ -494,6 +542,13 @@ export default function useWorkspaceDrag({
               previousPoint.y - ev.clientY,
               scrollSpace,
             )
+            // Sample the real scroll position; the lift handler turns the last
+            // ~110ms of these into a release velocity for the glide.
+            const now = performance.now()
+            scrollSamples.push({ t: now, top: scrollEl.scrollTop })
+            while (scrollSamples.length > 2 && now - scrollSamples[0].t > 110) {
+              scrollSamples.shift()
+            }
           }
           return
         }
@@ -510,6 +565,7 @@ export default function useWorkspaceDrag({
               scrolling = true
               scrollEl = srcEl.closest('.drawer__scroll')
               scrollAxis = 'y'
+              scrollSamples = []
               ev.preventDefault?.()
               if (scrollEl) {
                 scrollSpace = captureLayoutSpace(scrollEl)
@@ -517,6 +573,7 @@ export default function useWorkspaceDrag({
                   start.y - ev.clientY,
                   scrollSpace,
                 )
+                scrollSamples.push({ t: performance.now(), top: scrollEl.scrollTop })
               }
               return
             }
@@ -634,17 +691,11 @@ export default function useWorkspaceDrag({
         }
         if (!armed) {
           if (scrolling) {
-            cleanup({ suppressClick: true })
-          } else if (isTouch && held && sourceKind === 'tab') {
-            const dx = ev.clientX - start.x
-            const dy = ev.clientY - start.y
-            if (releasedInPlace(dx, dy)) {
-              openTabMenuAtRef?.current?.(
-                ev.clientX,
-                ev.clientY,
-                tabFromKey(key),
-                paneId,
-              )
+            // Turn the last ~110ms of travel into a release velocity and hand a
+            // still-moving lift to the momentum glide. A finger that paused before
+            // lifting leaves no fresh samples, so it keeps its exact rest position.
+            if (scrollEl && scrollAxis === 'y') {
+              startFling(scrollEl, flingReleaseVelocity(scrollSamples, performance.now()))
             }
             cleanup({ suppressClick: true })
           } else cleanup()
@@ -663,16 +714,8 @@ export default function useWorkspaceDrag({
         const backOverDrawer = sourceKind === 'drawer' && drawerEdgeX != null
           && ev.clientX <= drawerEdgeX && !(isTouch && glided)
         if (isTouch && releasedInPlace(dx, dy)) {
-          // Pointer jitter can lift a held tab without becoming an intentional
-          // move. Keep the stationary-hold contract in that narrow case too.
-          if (sourceKind === 'tab') {
-            openTabMenuAtRef?.current?.(
-              ev.clientX,
-              ev.clientY,
-              tabFromKey(key),
-              paneId,
-            )
-          }
+          // An armed drag lifted essentially in place is a cancel, not a drop —
+          // and never a menu: actions open from the hold timer while still held.
           cleanup({ suppressClick: true })
         } else if (backOverDrawer) {
           // Released back over the drawer = cancel; cleanup reopens it if glided.
@@ -813,6 +856,9 @@ export default function useWorkspaceDrag({
       // stale-session reconciliation so this fresh interaction stays live.
       clearPendingSourceClick?.()
       clearPendingSourceClick = null
+      // Touching the list halts an in-flight momentum glide, the way native
+      // scrolling stops under a finger.
+      stopFling()
       if (activeCleanup) {
         // Pointer ids are routinely REUSED across sequential touch gestures
         // (notably id=1 on mobile). Liveness comes from capture, never identity:
@@ -880,6 +926,7 @@ export default function useWorkspaceDrag({
       window.removeEventListener('pageshow', reconcileStaleSession)
       document.removeEventListener('visibilitychange', onForegroundVisible)
       activeCleanup?.() // tear down an in-flight drag
+      stopFling() // no rAF may outlive the effect
       clearPendingSourceClick?.()
       removeOverlays()
     }

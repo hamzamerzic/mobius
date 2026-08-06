@@ -1,9 +1,8 @@
-/* GlobalSearch is the full-screen, keyboard-openable search surface for chats and installed apps. */
+/* GlobalSearch is the keyboard-openable search dialog for chats and installed apps. */
 import { createPortal } from 'react-dom'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Chat,
-  Grid,
   MagnifyingGlassSearch,
   X,
 } from '@openai/apps-sdk-ui/components/Icon'
@@ -11,14 +10,18 @@ import { api } from '../../api/client.js'
 import { appQueries } from '../../hooks/queries.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { requestChatSearchReveal } from '../../lib/chatSearchReveal.js'
+import AppIcon from '../AppIcon.jsx'
 import {
   SHELL_SHORTCUTS,
   shortcutLabel,
 } from '../../lib/keyboardShortcuts.js'
 import { searchSnippetPresentation } from '../../lib/searchTermHighlight.js'
+import { formatRelativeTime } from '../../lib/relativeTime.js'
 import {
   chatSearchOpenTarget,
   chatSearchResultIsCurrent,
+  readLastSearch,
+  rememberLastSearch,
   searchInstalledApps,
   visibleChatSearchState,
 } from './globalSearchModel.js'
@@ -49,11 +52,14 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
   const dialogRef = useRef(null)
   const inputRef = useRef(null)
   const chatSearchControllerRef = useRef(null)
-  const latestQueryRef = useRef('')
-  const [query, setQuery] = useState('')
-  const [chatState, setChatState] = useState({
-    query: '', status: 'idle', results: [],
-  })
+  // Reopening restores the owner's last search (see rememberLastSearch), so the
+  // in-flight-result guard has to start from that same term rather than '' —
+  // otherwise clicking a restored result before the revalidating fetch lands
+  // would be discarded as stale.
+  const restored = useRef(readLastSearch()).current
+  const latestQueryRef = useRef(restored.query.trim())
+  const [query, setQuery] = useState(restored.query)
+  const [chatState, setChatState] = useState(restored.chatState)
   const appsQuery = appQueries.list.useQuery()
 
   useDialogFocus({
@@ -61,6 +67,17 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
     initialFocusRef: inputRef,
     onClose,
   })
+
+  // A restored term is a starting point, not something to edit around: select
+  // it so the next keystroke replaces it, exactly like reopening a browser's
+  // find bar. Runs once, after useDialogFocus has moved focus to the input.
+  useEffect(() => {
+    if (restored.query) inputRef.current?.select()
+  }, [restored.query])
+
+  useEffect(() => {
+    rememberLastSearch(query, chatState)
+  }, [query, chatState])
 
   useEffect(() => {
     const normalizedQuery = query.trim()
@@ -74,7 +91,16 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
 
     const controller = new AbortController()
     chatSearchControllerRef.current = controller
-    setChatState({ query: normalizedQuery, status: 'loading', results: [] })
+    // Reopening re-runs the query so a chat renamed, added, or deleted since
+    // last time is reflected. Keep the restored results on screen while that
+    // happens: blanking them to "Searching chats…" would undo the point of
+    // restoring them. A genuinely new term has no settled results to hold, so
+    // it still shows the loading state.
+    setChatState(previous => (
+      previous.query === normalizedQuery && previous.status === 'ready'
+        ? previous
+        : { query: normalizedQuery, status: 'loading', results: [] }
+    ))
     const timer = window.setTimeout(async () => {
       try {
         const response = await api.chats.search(normalizedQuery, {
@@ -144,14 +170,20 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
 
   return createPortal(
     <div
-      id="global-search-dialog"
-      ref={dialogRef}
       className="global-search__overlay"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="global-search-title"
+      role="presentation"
+      onPointerDown={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
     >
-      <div className="global-search">
+      <div
+        id="global-search-dialog"
+        ref={dialogRef}
+        className="global-search"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="global-search-title"
+      >
         <header className="global-search__header">
           <div>
             <h2 id="global-search-title" className="global-search__title">Search</h2>
@@ -174,8 +206,8 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
             type="search"
             value={query}
             onChange={event => setQuery(event.target.value)}
-            placeholder="Search chats, apps, and manifests"
-            aria-label="Search chats, apps, and manifests"
+            placeholder="Search chats, apps, and app details"
+            aria-label="Search chats, apps, and app details"
             autoComplete="off"
             spellCheck="false"
           />
@@ -189,7 +221,7 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
                 <MagnifyingGlassSearch width={30} height={30} />
               </span>
               <h3>Find anything you’ve worked on</h3>
-              <p>Search chat titles and conversation text, plus app names and manifest details.</p>
+              <p>Search chat titles and conversation text, plus app names and app details.</p>
             </div>
           )}
 
@@ -206,9 +238,11 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
                         className="global-search__result"
                         onClick={() => openApp(app)}
                       >
-                        <span className="global-search__result-icon" aria-hidden="true">
-                          <Grid width={18} height={18} />
-                        </span>
+                        <AppIcon
+                          item={app}
+                          label={app.name}
+                          className="global-search__result-icon"
+                        />
                         <span className="global-search__result-main">
                           <span className="global-search__result-title">{app.name}</span>
                           <span className="global-search__result-detail">
@@ -237,35 +271,49 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
                 )}
                 {visibleChats.results.length > 0 && (
                   <div className="global-search__results">
-                    {visibleChats.results.map(result => (
-                      <button
-                        key={result.id}
-                        type="button"
-                        className="global-search__result"
-                        onClick={() => openChat(result)}
-                      >
-                        <span className="global-search__result-icon" aria-hidden="true">
-                          <Chat width={18} height={18} />
-                        </span>
-                        <span className="global-search__result-main">
-                          <span className="global-search__result-title">
-                            {result.title || 'Untitled chat'}
+                    {visibleChats.results.map((result) => {
+                      const lastActive = formatRelativeTime(result.last_active)
+                      return (
+                        <button
+                          key={result.id}
+                          type="button"
+                          className="global-search__result"
+                          onClick={() => openChat(result)}
+                        >
+                          <span className="global-search__result-icon" aria-hidden="true">
+                            <Chat width={18} height={18} />
                           </span>
-                          {result.snippet && (
-                            <span className="global-search__result-detail">
-                              {result.snippetParts.map((part, index) => (
-                                part.marked
-                                  ? <mark key={index}>{part.text}</mark>
-                                  : <span key={index}>{part.text}</span>
-                              ))}
+                          <span className="global-search__result-main">
+                            <span className="global-search__result-title">
+                              {result.title || 'Untitled chat'}
                             </span>
-                          )}
-                        </span>
-                        <span className="global-search__match-kind">
-                          {result.anchor_key ? 'Conversation' : 'Title'}
-                        </span>
-                      </button>
-                    ))}
+                            {result.snippet && (
+                              <span className="global-search__result-detail">
+                                {result.snippetParts.map((part, index) => (
+                                  part.marked
+                                    ? <mark key={index}>{part.text}</mark>
+                                    : <span key={index}>{part.text}</span>
+                                ))}
+                              </span>
+                            )}
+                          </span>
+                          <span className="global-search__result-meta">
+                            <span className="global-search__match-kind">
+                              {result.anchor_key ? 'Conversation' : 'Title'}
+                            </span>
+                            {lastActive && (
+                              <time
+                                className="global-search__result-time"
+                                dateTime={result.last_active}
+                                title={`Last active ${new Date(result.last_active).toLocaleString()}`}
+                              >
+                                {lastActive}
+                              </time>
+                            )}
+                          </span>
+                        </button>
+                      )
+                    })}
                   </div>
                 )}
               </section>
@@ -273,7 +321,7 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
               {noResults && (
                 <div className="global-search__empty global-search__empty--results">
                   <h3>No matches</h3>
-                  <p>Try a shorter phrase or a manifest term such as “offline”, “schedule”, or a skill name.</p>
+                  <p>Try a shorter phrase or an app detail such as “offline”, “schedule”, or a skill name.</p>
                 </div>
               )}
             </div>

@@ -2184,6 +2184,7 @@ async def _prepare_app_row(
     github_access=bool(permissions.get("github_access", False)),
     github_connect=bool(permissions.get("github_connect", False)),
     filesystem_access=bool(permissions.get("filesystem_access", False)),
+    connections_manage=bool(permissions.get("connections_manage", False)),
     offline_capable=bool(manifest.get("offline_capable", False)),
     embeds_agent=bool(manifest.get("embeds_agent", False)),
     offline_contract=manifest.get("offline") or None,
@@ -2257,6 +2258,7 @@ async def _activate_install_source(
     app.github_access = bool(permissions.get("github_access", False))
     app.github_connect = bool(permissions.get("github_connect", False))
     app.filesystem_access = bool(permissions.get("filesystem_access", False))
+    app.connections_manage = bool(permissions.get("connections_manage", False))
     if "offline_capable" in manifest:
       app.offline_capable = bool(manifest["offline_capable"])
     if "embeds_agent" in manifest:
@@ -2824,20 +2826,26 @@ async def install_from_manifest(
         # HTTP fetch, are authoritative on this path.
         if not existing and repo_ref is not None:
           repo_url, ref = repo_ref
-          try:
-            app.upstream_commit = await asyncio.to_thread(
-              app_git.clone_upstream, git_source_dir, repo_url, ref,
-            )
-            entry_bytes = (git_source_dir / "index.jsx").read_bytes()
-            upstream_jsx_sha = hashlib.sha256(entry_bytes).hexdigest()
-            source_tree = {"index.jsx": entry_bytes}
-            cloned_install = True
-          except Exception as exc:
-            log.warning(
-              "install: clone from %s at %s failed; falling back to "
-              "fetched source path — %r",
-              repo_url, ref, exc,
-            )
+          # `git clone --branch` accepts branches/tags, not a raw commit SHA.
+          # Commit-pinned manifests already fetched reviewed bytes above, so
+          # skip that known failure and use the unchanged synthetic fallback.
+          if not re.fullmatch(
+            r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", ref,
+          ):
+            try:
+              app.upstream_commit = await asyncio.to_thread(
+                app_git.clone_upstream, git_source_dir, repo_url, ref,
+              )
+              entry_bytes = (git_source_dir / "index.jsx").read_bytes()
+              upstream_jsx_sha = hashlib.sha256(entry_bytes).hexdigest()
+              source_tree = {"index.jsx": entry_bytes}
+              cloned_install = True
+            except Exception as exc:
+              log.warning(
+                "install: clone from %s at %s failed; falling back to "
+                "fetched source path — %r",
+                repo_url, ref, exc,
+              )
         if not cloned_install:
           # record the pristine source tree on `upstream`, then align the
           # local `main` branch to that commit so the working branch starts

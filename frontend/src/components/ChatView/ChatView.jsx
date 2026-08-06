@@ -10,10 +10,12 @@ import {
 import { flushSync } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
+import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
 import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode, {
+  isNearContentBottom,
   remapSavedReadingAnchor,
   retireSavedReadingPosition,
   savedReadingAnchorHasNestedPart,
@@ -99,7 +101,9 @@ import {
   continuationRowsFromPromotedMessage,
   isContinuationMessage,
   isOwnerUserMessage,
+  jumpToLatestShown,
   openAppCtaViewModel,
+  shouldShowOpenAppCta,
   shouldAttachRunningStream,
   shouldRetryStopAfterConfirm,
   stopConfirmedIdle,
@@ -154,6 +158,16 @@ _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
 const STOP_RETRY_DELAYS_MS = [0, 250, 700, 1200]
 const CHAT_FETCH_TIMEOUT_MS = 15000
 const MESSAGE_META_VISIBLE_MS = 5000
+// How long the settled "Open <app>" CTA lingers after a turn ends before it
+// auto-dismisses itself (a durable "final" acknowledgement). An ephemeral nudge,
+// not a permanent chat-foot fixture.
+const OPEN_APP_CTA_AUTO_DISMISS_MS = 8000
+// The floating jump-to-latest control appears once the reader holds a position
+// this far above the CONTENT tail (reserved spacer room is phantom, per the
+// send-snapshot bottom rule). Deliberately wider than the 50px near-bottom
+// band: settling a line or two up must not summon a control, a real upward
+// scroll should.
+const JUMP_TO_LATEST_GAP_PX = 200
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -252,6 +266,7 @@ export default function ChatView({
   onChatMissing,
   builtApps = NO_BUILT_APPS,
   onOpenApp,
+  onDismissApp,
   onInternalNav,
   onMessageStart,
   onOwnerActivity,
@@ -1917,12 +1932,22 @@ export default function ChatView({
       })
 
       // A return with a complete local window is a warm restoration even when
-      // the version changed while away. Apply the authoritative replacement
-      // and readiness in the same React batch; the cold prefix scheduler must
-      // never turn a warm return into a delayed all-at-once burst.
+      // the version changed while away. Apply the authoritative replacement and
+      // readiness in the SAME React batch (the transition callback runs
+      // synchronously); the cold prefix scheduler must never turn a warm return
+      // into a delayed all-at-once burst.
+      //
+      // SWITCH-PERF: defer this apply the same way the cold path below does.
+      // startTransition marks only the render non-urgent, so the heavy transcript
+      // reflow lands OFF the discrete switch tap instead of blocking it (the
+      // ~90ms on-device reflow). This keeps switching responsive at the layer that
+      // owns the transcript, without deferring the shell's nav dispatch — which
+      // raced chat bootstrap/materialization and double-created starter chats.
       if (activationCache && cacheCoversSavedAnchor && !anchorRetired) {
-        applyMessagesToView(refreshed.messages, refreshed.offset)
-        settleRuntime(runtime, refreshed.messages)
+        startTransition(() => {
+          applyMessagesToView(refreshed.messages, refreshed.offset)
+          settleRuntime(runtime, refreshed.messages)
+        })
         return
       }
 
@@ -2078,7 +2103,23 @@ export default function ChatView({
       .catch(() => { loadingOlder.current = false })
   }
 
+  // Jump-to-latest visibility (contract R5a): a pure geometry READ — it never
+  // writes scrollTop, so it lives outside the scroll controller's ownership
+  // gates. Recomputed from every scroll event (gesture or programmatic) and
+  // from every commit via the dependency-less layout effect below: a stream
+  // growing beneath a held ANCHOR_AT emits no scroll event, but each growth
+  // tick re-renders this component. The guarded setState keeps those
+  // recomputes render-free until the boolean actually flips.
+  const [awayFromLatest, setAwayFromLatest] = useState(false)
+  const updateJumpToLatest = useCallback(() => {
+    const el = scrollRef.current
+    const away = !!el && !isNearContentBottom(el, JUMP_TO_LATEST_GAP_PX)
+    setAwayFromLatest(prev => (prev === away ? prev : away))
+  }, [])
+  useLayoutEffect(updateJumpToLatest)
+
   function handleScroll() {
+    updateJumpToLatest()
     const el = scrollRef.current
     if (!el || loadingOlder.current || loading) return
     // Gesture guard: applyMode's programmatic scrolls (e.g., PIN_USER_MSG
@@ -3423,6 +3464,26 @@ export default function ChatView({
   // re-enter FOLLOW_BOTTOM. No-op when the turn isn't active or the tab is hidden.
   // (The fast-forward identity/readiness gates are computed separately below.)
   const turnActive = sending || isStreaming || serverRunning
+
+  // Auto-dismiss the settled "Open <app>" CTA a few seconds after the turn
+  // ends, so it reads as an ephemeral nudge rather than a permanent chat-foot
+  // fixture. Only the settled (post-turn) CTA times out; a live in-turn preview
+  // link stays put while the app is still being built. Dismissal is the same
+  // durable "final" acknowledgement that opening performs — minus the
+  // navigation — so the button never reappears on a later refetch, and a click
+  // that lands first simply advances the same server truth and cancels this.
+  // (Declared here, after `turnActive`, so its dep array is out of the TDZ.)
+  useEffect(() => {
+    if (turnActive || !onDismissApp) return
+    const timers = builtApps
+      .filter(app => shouldShowOpenAppCta(app, false))
+      .map(app => setTimeout(
+        () => onDismissApp(app), OPEN_APP_CTA_AUTO_DISMISS_MS,
+      ))
+    if (timers.length === 0) return
+    return () => timers.forEach(clearTimeout)
+  }, [builtApps, turnActive, onDismissApp])
+
   useEffect(() => {
     if (!turnActive) return
     // Ordinary live turns set this synchronously at their run-start seam. This
@@ -3699,25 +3760,27 @@ export default function ChatView({
   // A pending AskUserQuestion freezes the turn until the user answers,
   // but the card can sit outside the viewport (the user scrolled away,
   // or content streamed in around it) — the chat then just looks hung.
-  // Detect a pending card in whichever surface currently renders it:
-  // the live stream (a question item without answers) or the durable
-  // tail-question invariant on the last visible assistant message (the
-  // same rule MsgContent's blockAnswerable enforces; recovery preserves
-  // that tail question even when the original process was interrupted).
+  // "A question is open" is the chat's durable pending_question_id
+  // (liveQuestionId) — set when the card is asked, cleared when it is answered
+  // or the turn ends, and KEPT across a resumable interruption. Trusting that
+  // marker instead of the card's block position is what lets a still-open card
+  // trailed by parallel output or a terminal error keep blocking the composer.
+  // The live-stream branch covers the window before the question_id persists.
   const pendingQuestionInStream = activeAssistantIsStreaming
     && streamItems.some(it => it.type === 'question' && !it.answers)
-  const pendingQuestionInMessages = (() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].hidden) continue
-      const msg = messages[i]
-      if (msg.role !== 'assistant' || !msg.blocks?.length) return false
-      const tail = msg.blocks[msg.blocks.length - 1]
-      return !!(tail.type === 'question' && !tail.answers
-        && (!liveQuestionId || tail.question_id === liveQuestionId))
-    }
-    return false
-  })()
-  const hasPendingQuestion = pendingQuestionInStream || pendingQuestionInMessages
+  const hasPendingQuestion = pendingQuestionInStream || !!liveQuestionId
+
+  // Answerability id: prefer the durable pending_question_id marker; during the
+  // streaming window BEFORE that marker persists (or reaches the client via a
+  // runtime poll), fall back to the live streamed question's own id so its card
+  // is answerable immediately. This mirrors the composer lock, which already
+  // trusts pendingQuestionInStream. Without it, a freshly-streamed question is
+  // un-answerable until the marker lands — the regression that broke the
+  // AskUserQuestion / Q&A e2e flows.
+  const answerableQuestionId = liveQuestionId
+    || (pendingQuestionInStream
+      ? streamItems.find(it => it.type === 'question' && !it.answers)?.question_id ?? null
+      : null)
 
   // A live question parks Codex's JSON-RPC reader inside request_user_input.
   // turn/steer cannot be acknowledged until that question is released, so a
@@ -3745,7 +3808,9 @@ export default function ChatView({
   // nudge + SR status can name the recovery. A pause is terminal (the turn has
   // ended), so it only ever lives in `messages`, never in a live stream item.
   const pendingResumeBlock = tailResumableBlock(messages)
-  const hasPendingResume = !!pendingResumeBlock
+  // An open question is the single blocker: answering it IS the continuation,
+  // so don't surface a competing Resume (which the backend would now refuse).
+  const hasPendingResume = !!pendingResumeBlock && !hasPendingQuestion
   const pendingLimitResetAt = pendingResumeBlock?.pause?.resets_at || null
   useEffect(() => {
     if (!embedded || !autoResumeEnabled || !pendingLimitResetAt) {
@@ -4141,7 +4206,7 @@ export default function ChatView({
                 }
                 submissionBlocked={providerSwitching}
                 isLastMsg={isLastMsg}
-                liveQuestionId={liveQuestionId}
+                liveQuestionId={answerableQuestionId}
                 suppressedQuestionKeys={streamItemQuestionKeys}
                 pendingQuestionRef={pendingQuestionRef}
                 resumeCardRef={resumeCardRef}
@@ -4177,7 +4242,7 @@ export default function ChatView({
               }
               onAutoResumeChange={handleAutoResumeChange}
               submissionBlocked={providerSwitching}
-              liveQuestionId={liveQuestionId}
+              liveQuestionId={answerableQuestionId}
               // Same publication channel as the durable rows above: while the
               // turn is live THIS surface owns the pending question card, so
               // the offscreen observer follows the handoff automatically.
@@ -4273,6 +4338,26 @@ export default function ChatView({
                 {pendingResumeBlock?.pause?.resets_at
                   ? 'Rate limit reached — tap to resume'
                   : 'Turn paused — tap to resume'}
+              </button>
+            )}
+            {/* Jump-to-latest: same one-shot tail navigation as the nudges
+                (contract R5a — lands as a settled hold, never live-follow),
+                shown once the reader has scrolled away from the end. Yields
+                to a visible nudge, which goes to the same place with more
+                context. */}
+            {jumpToLatestShown({
+              awayFromTail: awayFromLatest,
+              questionNudgeShown: hasPendingQuestion && pendingCardOffscreen,
+              resumeNudgeShown: hasPendingResume && resumeCardOffscreen,
+            }) && (
+              <button
+                type="button"
+                className="chat__jump-latest"
+                aria-label="Jump to the latest message"
+                title="Jump to latest"
+                onClick={revealConversationTail}
+              >
+                <ArrowDown size={18} strokeWidth={2.25} aria-hidden="true" />
               </button>
             )}
           </div>

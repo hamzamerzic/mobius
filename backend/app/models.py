@@ -127,6 +127,14 @@ class Chat(Base):
   # streaming update never rewrites every prior message. Finalize and startup
   # recovery merge this bounded value into `messages`.
   live_assistant = Column(JSON, nullable=True, default=None)
+  # The AskUserQuestion this chat is currently parked on, or NULL. The single
+  # durable source of truth for "a question is open": set when the card is
+  # committed, cleared when it is answered or the turn ends, and KEPT across a
+  # resumable pause (provider limit / planned restart). Position-independent, so
+  # parallel tool/subagent output or a terminal error after the card never
+  # hides that it is still open. Every read surface — including the lightweight
+  # /runtime poll that never loads the transcript — trusts this column.
+  pending_question_id = Column(String(64), nullable=True, default=None)
   pending_messages = Column(JSON, nullable=False, default=list)
   uploads = Column(JSON, nullable=False, default=list)
   deleted_at = Column(DateTime, nullable=True, default=None)
@@ -324,6 +332,16 @@ class Delegation(Base):
   max_budget_usd = Column(Float, nullable=True)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
   cancelled_at = Column(DateTime, nullable=True, default=None)
+  # Opt-in: wake the parent chat with the result when this child settles. Off by
+  # default so pre-existing rows and any pure-poll submitter never get a surprise
+  # turn; the chat-agent subagent path sets it True at submit.
+  notify_parent_on_complete = Column(
+    Boolean, nullable=False, default=False
+  )
+  # Retry latch for the parent wake, stamped after the completion notice starts
+  # or queues. Delivery is intentionally at-least-once across a crash between
+  # those two transactions so a child result is never silently lost.
+  parent_woken_at = Column(DateTime, nullable=True, default=None)
 
 
 class ChatSessionLink(Base):
@@ -684,6 +702,11 @@ class App(Base):
   # surface (still path-confined and secret-denied there). The Editor is the
   # canonical holder. Default false and checked from the live row per request.
   filesystem_access = Column(Boolean, nullable=False, default=False)
+  # Connection-registry management: the owner's /api/connectors surface
+  # (list/add/re-check/toggle/remove). The Connections mini-app is the
+  # canonical holder. Stored keys and broker capabilities never cross this
+  # surface, so the grant manages rows without holding what they protect.
+  connections_manage = Column(Boolean, nullable=False, default=False)
   # Offline capability. The agent opts an app in (default False) only
   # when it's built to run without the network — it uses
   # window.mobius.storage (which queues writes and syncs on reconnect)
@@ -905,6 +928,57 @@ class Connector(Base):
   status_detail = Column(Text, nullable=True)
   created_at = Column(DateTime, default=lambda: now_naive_utc())
   last_checked_at = Column(DateTime, nullable=True)
+
+
+class ConnectorOAuth(Base):
+  """OAuth grant state for one connector (MCP authorization, spec 2026-07-28).
+
+  Discovery fields are cached from the probe's 401 challenge so sign-in and
+  refresh never re-walk the well-known chain on the hot path. Token fields
+  are Fernet-encrypted with their own salt and are write-only: they never
+  appear in any API response — the registry exposes only ``signed_in`` and
+  the granted scopes. Rows are keyed 1:1 to the connector and die with it.
+  """
+
+  __tablename__ = "connector_oauth"
+
+  connector_id = Column(
+    Integer,
+    ForeignKey("connectors.id", ondelete="CASCADE"),
+    primary_key=True,
+  )
+  # Discovery (RFC 9728 protected-resource metadata → RFC 8414/OIDC).
+  resource = Column(String(2048), nullable=False)  # canonical MCP URL (RFC 8707)
+  issuer = Column(String(512), nullable=False)
+  authorization_endpoint = Column(String(2048), nullable=False)
+  token_endpoint = Column(String(2048), nullable=False)
+  registration_endpoint = Column(String(2048), nullable=True)
+  revocation_endpoint = Column(String(2048), nullable=True)
+  scopes_advertised = Column(JSON, nullable=False, default=list)
+  # Grant state (all write-only; encrypted with the oauth Fernet salt).
+  access_token_encrypted = Column(Text, nullable=True)
+  refresh_token_encrypted = Column(Text, nullable=True)
+  access_expires_at = Column(DateTime, nullable=True)
+  scopes_granted = Column(JSON, nullable=False, default=list)
+  connected_at = Column(DateTime, nullable=True)
+
+
+class OAuthClientRegistration(Base):
+  """This instance's OAuth client identity at one authorization server.
+
+  The spec requires client credentials to be keyed by AS issuer and never
+  reused across servers. ``mode`` records how the identity was obtained:
+  ``cimd`` (the instance's client-metadata URL — no stored secret) or
+  ``dcr`` (RFC 7591 registration; secret encrypted when one was issued).
+  """
+
+  __tablename__ = "oauth_client_registrations"
+
+  issuer = Column(String(512), primary_key=True)
+  mode = Column(String(16), nullable=False)
+  client_id = Column(String(512), nullable=False)
+  client_secret_encrypted = Column(Text, nullable=True)
+  registered_at = Column(DateTime, default=lambda: now_naive_utc())
 
 
 class ThinkingTrace(Base):

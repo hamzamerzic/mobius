@@ -45,7 +45,7 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
     'ChatView must report layout readiness before its transcript can be promoted')
   assert.match(
     paneChatView,
-    /scheduleAfterBrowserPaint\(\s*\(\) => onDisplayReady\(paneId, readyChatId\),\s*\)/,
+    /scheduleAfterBrowserPaint\(\s*\(\) => onDisplayReady\(paneId, readyChatId, focusedPresentation\),\s*\)/,
     'the pane boundary must prepare one real destination paint before promotion',
   )
   assert.match(
@@ -116,7 +116,7 @@ test('activation holds an unchanged running transcript until stream catch-up', (
     /cacheIsSafeFallback[\s\S]*CHAT_READING_ANCHOR_NOT_FOUND[\s\S]*applyMessagesToView\(\[\], 0\)[\s\S]*setLoadError\(!cacheIsSafeFallback\)/,
     'an incomplete or contradictory cache must be cleared before the error surface paints')
   assert.match(scrollMode,
-    /modeRef\.current\.kind === 'INITIAL'[\s\S]*initialEntryPhaseRef\.current === 'cache-validating'[\s\S]*const saved = _scrollModes\[chatId\][\s\S]*const resolved =[\s\S]*onCachedCoordinateReady\?\.\(\)/,
+    /mode\?\.kind !== 'INITIAL'[\s\S]*phase === 'cache-validating' && !resolved[\s\S]*action: 'wait'[\s\S]*initialEntryPhaseRef\.current === 'cache-validating'[\s\S]*onCachedCoordinateReady\?\.\(\)/,
     'the scroll controller admits a nested cache only after the exact DOM part resolves')
   assert.match(scrollMode,
     /savedLocationUnresolvedRef\.current[\s\S]*Object\.hasOwn\(_scrollModes, chatId\)/,
@@ -195,7 +195,7 @@ test('each pane holds one outgoing chat over one staging chat', () => {
 test('only the painted workspace world can expose its handoff layers', () => {
   assert.match(
     shell,
-    /const paneActiveKey = paneModel\.activeKeyForOwner\(workspace, paneId\) \|\| tabKey/,
+    /const layoutPaneId = presentationPaneId \?\? paneId[\s\S]*const paneActiveKey = paneModel\.activeKeyForOwner\(workspace, layoutPaneId\) \|\| tabKey/,
     'handoff visibility must follow the owner current content, including the synthetic single-screen owner',
   )
   assert.match(
@@ -243,11 +243,19 @@ test('direct chat actions hand focus to the destination composer', () => {
   assert.match(shell,
     /if \(!startupChatComposerFocusPendingRef\.current\) return[\s\S]*activeView !== 'chat' \|\| activeChatId == null[\s\S]*startupChatComposerFocusPendingRef\.current = false[\s\S]*focusDesktopChatPaneComposer\(activeChatId\)/,
     'restored chat focus must be one-shot rather than following later mode changes')
-  const ownerNewChatCalls = shell.match(
-    /newChat\(\{ forceNew: true, focusComposer: true, recordHistory: true \}\)/g,
-  ) || []
-  assert.equal(ownerNewChatCalls.length, 2,
-    'desktop rail and mobile drawer must both allocate and focus a fresh chat')
+  const startUserChat = shell.match(
+    /function startUserChat\(\) \{([\s\S]*?)\n  \}/,
+  )?.[1] || ''
+  assert.match(startUserChat,
+    /const forceNew = workspaceStateRef\.current\.ws\.viewMode === 'panes'/,
+    'only Builder makes the owner-facing New chat action additive')
+  assert.match(startUserChat,
+    /newChat\(\{ forceNew, focusComposer: true, recordHistory: true \}\)/,
+    'the mode-scoped action must still focus the destination composer')
+  assert.match(shell, /onClick=\{startUserChat\}/,
+    'the desktop rail must use the shared mode-scoped action')
+  assert.match(shell, /onNewChat=\{startUserChat\}/,
+    'the mobile drawer must use the shared mode-scoped action')
   assert.match(shell,
     /beginTouchComposerFocusLease\([\s\S]*?await resolveNewChatId/,
     'New chat must reserve phone keyboard focus before its first async boundary')
@@ -282,6 +290,8 @@ test('direct chat actions hand focus to the destination composer', () => {
 test('the held chat is an opaque layer above staging until the atomic swap', () => {
   assert.match(ruleBody('.shell__chat-view'), /background:\s*var\(--bg\)/,
     'the cover must be opaque so hidden incoming content cannot leak through')
+  assert.match(ruleBody('.shell__chat-view'), /isolation:\s*isolate/,
+    'chat-owned z-index layers must not escape above shell-owned presentations')
   assert.match(ruleBody('.shell__chat-view--staging'), /visibility:\s*visible/)
   assert.match(ruleBody('.shell__chat-view--staging'), /z-index:\s*1/)
   assert.match(ruleBody('.shell__chat-view--held'), /visibility:\s*visible/)

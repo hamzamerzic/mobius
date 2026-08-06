@@ -1480,36 +1480,15 @@ def _claim_limit_auto_resume_slot(now: float | None = None) -> bool:
 
 
 def _has_unanswered_question(chat: models.Chat | None) -> bool:
-  """Whether the durable tail is waiting for an owner answer.
+  """Whether the chat is parked on an open AskUserQuestion.
 
-  A restart pause is appended after the question while draining, so ignore that
-  one product-owned tail block before applying the same tail-question invariant
-  as the transcript UI. This is read-only and bounded to the latest assistant
-  row; it never scans tool output or historical questions.
+  Reads the durable `pending_question_id` marker (models.Chat) — the
+  position-independent source of truth, set when the card is asked and cleared
+  when it is answered or the turn ends. A resumable pause (provider limit /
+  planned restart) keeps it, so an interrupted-but-open question still blocks
+  auto-resume here instead of being resumed past and orphaned.
   """
-  if chat is None:
-    return False
-  try:
-    from app.chat_transcript import materialized_messages
-    messages = materialized_messages(chat)
-  except Exception:
-    messages = list(chat.messages or [])
-  if not messages or messages[-1].get("role") != "assistant":
-    return False
-  blocks = list(messages[-1].get("blocks") or [])
-  while blocks:
-    tail = blocks[-1]
-    if not (
-      tail.get("type") == "error"
-      and (tail.get("pause") or {}).get("kind") == "restart"
-    ):
-      break
-    blocks.pop()
-  return bool(
-    blocks
-    and blocks[-1].get("type") == "question"
-    and not blocks[-1].get("answers")
-  )
+  return chat is not None and chat.pending_question_id is not None
 
 
 async def _auto_resume_chat(
@@ -3373,6 +3352,43 @@ async def run_chat(
       run_token=run_token,
     )
     runtime_settled = True
+  except asyncio.CancelledError:
+    raise
+  except Exception as exc:
+    # A setup-time exception in this detached task previously vanished
+    # ("Task exception was never retrieved"): the run row stayed 'running',
+    # the broadcast never settled, and every send presented as an eternal
+    # spinner while the container reported healthy — the 2026-08-04
+    # missing-column outage. Surface the terminal failure exactly like the
+    # other failure paths and durably fail the run. The queue marker keeps
+    # its FAILED_LEAVE_MARKER default above, so reconciliation still sees
+    # the evidence it needs.
+    _get_logger().exception(
+      "chat turn failed before the agent started chat_id=%s", chat_id,
+    )
+    bc = get_broadcast(chat_id) if chat_id else None
+    if bc is not None:
+      bc.publish({
+        "type": "error",
+        "message": (
+          "This turn failed before the agent could start "
+          f"({type(exc).__name__}). Your message is saved; the full error "
+          "is in the server log."
+        ),
+      })
+      bc.publish({"type": "done"})
+      bc.mark_completed()
+    if chat_id:
+      _publish_chat_run_finished(chat_id)
+      try:
+        await _finish_run_strict(
+          chat_id, run_token or "", terminal_status="failed",
+        )
+      except Exception:
+        _get_logger().warning(
+          "setup-failure FinishRun did not persist chat_id=%s "
+          "(reconciliation will repair)", chat_id, exc_info=True,
+        )
   finally:
     stopped_gen = _clear_after_terminal_generation.get(chat_id)
     clear_stopped_run = run_gen is not None and stopped_gen == run_gen
@@ -3505,6 +3521,27 @@ async def run_chat(
         )
     except Exception:
       _get_logger().debug("chat-note guarantee skipped", exc_info=True)
+
+    # Auto-wake a delegation's parent chat when the child subagent settles.
+    # Gated to durable, non-resuming terminals; runs after the reply is sent and
+    # is best-effort (like the chat-note guarantee above) so it can never affect
+    # this turn. A non-delegation chat is a single indexed miss and returns fast.
+    try:
+      if chat_id and disposition in _DELEGATION_WAKE_DISPOSITIONS:
+        from app.delegations import wake_parent_after_child_settled
+        await wake_parent_after_child_settled(chat_id)
+    except Exception:
+      _get_logger().debug("delegation parent-wake skipped", exc_info=True)
+
+
+# The durable, settled, non-resuming terminals where a delegation child's
+# result is final and its ChatRun terminal status has committed (FinishRun ran
+# inside drain_and_release before the disposition returned). FAILED_LEAVE_MARKER
+# is excluded — the terminal isn't durable there; the boot reconcile covers it.
+_DELEGATION_WAKE_DISPOSITIONS = frozenset({
+  chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED,
+  chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED,
+})
 
 
 def _chat_note_mtime(data_dir: str, chat_id: str) -> float:
@@ -4240,7 +4277,32 @@ async def _run_chat_impl_with_db(
   # provider's native tools instead of breaking chat.
   try:
     from app.connectors import build_turn_plan
-    connector_turn_plan = build_turn_plan(db)
+    # Connections follow the owner's own chats. A delegated child run or an
+    # app-attributed chat (embedded app panels, headless scheduled runs) must
+    # not inherit the owner's remote services; a per-app grant can opt in at
+    # this call site if a background app ever genuinely needs one. When the
+    # run has a chat_id but its row could not be loaded, attribution is
+    # unknown — fail closed rather than grant.
+    include_owner_connectors = (
+      run_policy is None
+      and (
+        not chat_id
+        or (chat_row is not None and chat_row.created_by_app_id is None)
+      )
+    )
+    if not include_owner_connectors:
+      reason = (
+        "delegated run policy" if run_policy is not None
+        else "chat attribution unavailable" if chat_row is None
+        else "app-attributed chat"
+      )
+      log.info(
+        "owner MCP connections withheld (%s) chat_id=%s", reason, chat_id,
+      )
+    connector_turn_plan = build_turn_plan(
+      db,
+      include_owner_connectors=include_owner_connectors,
+    )
   except Exception:
     log.warning(
       "MCP connection snapshot skipped chat_id=%s",

@@ -8,6 +8,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { mockPendingQuestionState } from './_mockPendingQuestion.mjs'
 import { applyApp } from './app-source.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
@@ -353,6 +354,7 @@ test.describe('Message rendering', () => {
     const sentBodies = []
     let answerSubmitted = false
     let followupStreamServed = false
+    let pendingQuestion
     const questionBlock = {
       type: 'question',
       question_id: 'q-color',
@@ -371,7 +373,10 @@ test.describe('Message rendering', () => {
       if (route.request().method() !== 'POST') return route.continue()
       const body = route.request().postDataJSON()
       sentBodies.push(body)
-      if (body.answers) answerSubmitted = true
+      if (body.answers) {
+        answerSubmitted = true
+        pendingQuestion.markAnswered()
+      }
       return fulfillStartedPost(route)
     })
     await page.route(/\/api\/chats\/[0-9a-f-]+\/question-answers$/, route =>
@@ -411,6 +416,7 @@ test.describe('Message rendering', () => {
         })
       }
     })
+    pendingQuestion = await mockPendingQuestionState(page, questionBlock.question_id)
 
     await page.setViewportSize({ width: 412, height: 915 })
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
@@ -464,9 +470,12 @@ test.describe('Message rendering', () => {
     // Regression: hidden flag must be passed through sendMessage
     // to the backend so question answers don't show as user bubbles.
     const sentBodies = []
+    let pendingQuestion
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
       if (route.request().method() !== 'POST') return route.continue()
-      sentBodies.push(route.request().postDataJSON())
+      const body = route.request().postDataJSON()
+      sentBodies.push(body)
+      if (body.answers) pendingQuestion.markAnswered()
       return fulfillStartedPost(route)
     })
     await page.route(/\/api\/chats\/[0-9a-f-]+\/question-answers$/, route =>
@@ -492,6 +501,7 @@ test.describe('Message rendering', () => {
             ].join(''),
       })
     })
+    pendingQuestion = await mockPendingQuestionState(page, 'q-pick-one-hidden')
 
     await page.setViewportSize({ width: 412, height: 915 })
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
@@ -520,8 +530,8 @@ test.describe('Message rendering', () => {
     await page.route('**/api/chat/stop', route =>
       route.fulfill({ status: 200, body: '{}' })
     )
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route =>
-      route.fulfill({
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route => {
+      return route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
         body: [
@@ -532,7 +542,8 @@ test.describe('Message rendering', () => {
           'data: {"type":"done"}\n\n',
         ].join(''),
       })
-    )
+    })
+    await mockPendingQuestionState(page, 'q-real-question')
 
     await page.setViewportSize({ width: 412, height: 915 })
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
