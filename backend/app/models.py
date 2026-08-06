@@ -332,6 +332,16 @@ class Delegation(Base):
   max_budget_usd = Column(Float, nullable=True)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
   cancelled_at = Column(DateTime, nullable=True, default=None)
+  # Opt-in: wake the parent chat with the result when this child settles. Off by
+  # default so pre-existing rows and any pure-poll submitter never get a surprise
+  # turn; the chat-agent subagent path sets it True at submit.
+  notify_parent_on_complete = Column(
+    Boolean, nullable=False, default=False
+  )
+  # Retry latch for the parent wake, stamped after the completion notice starts
+  # or queues. Delivery is intentionally at-least-once across a crash between
+  # those two transactions so a child result is never silently lost.
+  parent_woken_at = Column(DateTime, nullable=True, default=None)
 
 
 class ChatSessionLink(Base):
