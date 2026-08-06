@@ -20,9 +20,8 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
-from app import database, legacy_platform_apps, models
-from app.config import get_settings
-from app.install import _is_historical_platform_app_source_dir, install_from_manifest
+from app import models
+from app.install import install_from_manifest
 
 log = logging.getLogger("mobius.bootstrap")
 
@@ -48,7 +47,15 @@ BOOTSTRAP_SKILLS_MANIFEST_URL = (
   "113210883ddab380a01da1443e61600439d23b2a/mobius.json"
 )
 
-LEGACY_PLATFORM_APP_MANIFEST_URLS = legacy_platform_apps.MANIFEST_URLS
+BOOTSTRAP_MEMORY_MANIFEST_URL = (
+  "https://raw.githubusercontent.com/mobius-os/app-memory/main/mobius.json"
+)
+BOOTSTRAP_REFLECTION_MANIFEST_URL = (
+  "https://raw.githubusercontent.com/mobius-os/app-reflection/main/mobius.json"
+)
+BOOTSTRAP_CONNECTIONS_MANIFEST_URL = (
+  "https://raw.githubusercontent.com/mobius-os/app-connections/main/mobius.json"
+)
 
 
 @dataclass(frozen=True)
@@ -63,9 +70,15 @@ _BOOTSTRAP_APPS = (
   # Skills is NOT the recovery surface — an owner uninstall is respected, and
   # the Store remains the way back.
   _BootstrapApp("skills", BOOTSTRAP_SKILLS_MANIFEST_URL, False),
-  _BootstrapApp("memory", LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"], False),
+  _BootstrapApp("memory", BOOTSTRAP_MEMORY_MANIFEST_URL, False),
   _BootstrapApp(
-    "reflection", LEGACY_PLATFORM_APP_MANIFEST_URLS["reflection"], False,
+    "reflection", BOOTSTRAP_REFLECTION_MANIFEST_URL, False,
+  ),
+  # Connections manages owner MCP connections — the only management surface
+  # since the Settings section moved into the app. An owner uninstall is
+  # respected; the Store remains the way back.
+  _BootstrapApp(
+    "connections", BOOTSTRAP_CONNECTIONS_MANIFEST_URL, False,
   ),
 )
 
@@ -73,82 +86,6 @@ _BOOTSTRAP_APPS = (
 # the live GitHub URL. Set in docker-compose.test.yml's `pytest`
 # service environment block.
 _SKIP_ENV = "MOEBIUS_SKIP_BOOTSTRAP"
-
-
-def _is_legacy_platform_row(app: models.App) -> bool:
-  """True for active old rows whose source matches retired baked-app shapes.
-
-  The historical /data/apps/<slug> shape additionally requires an empty
-  manifest_url: once a migration stamps the canonical identity the row is on the
-  catalog model and must NOT be re-migrated on the next boot. Re-migrating
-  re-fetched the catalog from GitHub every restart and, when upstream had
-  advanced with no local edits, silently fast-forwarded the app past owner
-  review. The platform-core shape (`is_legacy_source_dir`) needs no such gate —
-  a migrated row moves out of /data/platform/core-apps, so it stops matching on
-  the source path alone.
-  """
-  data_dir = get_settings().data_dir
-  return legacy_platform_apps.is_legacy_source_dir(
-    app.source_dir, data_dir, app.slug,
-  ) or _is_historical_platform_app_source_dir(
-    app.source_dir, app.manifest_url, data_dir, app.slug,
-  )
-
-
-_LEGACY_PLATFORM_APPS_MIGRATION = "data_0001_legacy_platform_apps"
-
-
-async def _migrate_legacy_platform_apps(db: Session) -> None:
-  """Move old built-in rows forward by installing their trusted catalog entry.
-
-  This only runs when an active row from an older image is already present and
-  still points at the retired platform-core source tree.
-
-  ONE-SHOT, recorded durably. The row-shape predicate alone cannot tell an
-  un-migrated historical row from an app the OWNER creates later at the same
-  path with the same slug — `app_apply` writes exactly that shape (slug from the
-  manifest id, source_dir /data/apps/<slug>, no manifest_url). Without this
-  marker, an owner building a local app called `memory`, `reflection`, or
-  `beat-machine` would match on the next boot and have the catalog manifest
-  installed over their work. The ledger closes the window permanently once the
-  migration has had its chance.
-  """
-  eng = db.get_bind()
-  if database.migration_applied(eng, _LEGACY_PLATFORM_APPS_MIGRATION):
-    return
-  rows = (
-    db.query(models.App)
-    .filter(
-      models.App.deleted_at.is_(None),
-      models.App.slug.in_(tuple(LEGACY_PLATFORM_APP_MANIFEST_URLS)),
-    )
-    .all()
-  )
-  for row in rows:
-    if not _is_legacy_platform_row(row):
-      continue
-    manifest_url = LEGACY_PLATFORM_APP_MANIFEST_URLS[row.slug]
-    log.info(
-      "bootstrap: migrating legacy platform app %s from %s",
-      row.slug, row.source_dir,
-    )
-    try:
-      await install_from_manifest(
-        db,
-        manifest_url=manifest_url,
-        manifest=None,
-        raw_base=None,
-        source="bootstrap",
-      )
-    except Exception as exc:
-      log.exception(
-        "bootstrap: legacy platform app migration failed for %s — %s",
-        row.slug, exc,
-      )
-      # Leave the marker unset so a transient catalog/network failure retries on
-      # the next boot rather than stranding a genuinely un-migrated row.
-      return
-  database.record_migration(eng, _LEGACY_PLATFORM_APPS_MIGRATION)
 
 
 async def ensure_bootstrap_apps_installed(db: Session) -> None:
@@ -171,42 +108,32 @@ async def ensure_bootstrap_apps_installed(db: Session) -> None:
     log.info("bootstrap: %s=1, skipping bootstrap app installs", _SKIP_ENV)
     return
 
-  await _migrate_legacy_platform_apps(db)
-
-  # Manifest installs store the canonical identity key
-  # (`<base>#manifest-id=<id>`, with a trailing `/mobius.json` stripped from the
-  # base), not the bare URL.
-  from app.install import _canonical_base, _trusted_catalog_repo_base
+  # Bootstrap uses the same resolver as preview and install so all three paths
+  # agree on persisted identities, moved refs, and proven legacy origins.
+  from app.install import _find_install_identity_row
 
   for bootstrap_app in _BOOTSTRAP_APPS:
-    # A trusted mobius-os catalog app's identity is its REPO, not the pinned
-    # `<ref>`: match any revision so a pin bump (or the original branch install)
-    # resolves to the SAME row. Without this the presence check keys on the new
-    # commit's base, misses a row installed at an older ref, and either
-    # duplicates the app or — for a `reinstall_after_uninstall=False` app whose
-    # owner uninstalled it — misses the tombstone and silently reinstalls.
-    repo_base = _trusted_catalog_repo_base(bootstrap_app.manifest_url)
-    if repo_base is not None:
-      pattern = repo_base + "/%#manifest-id=%"
-    else:
-      pattern = _canonical_base(bootstrap_app.manifest_url) + "#manifest-id=%"
-    query = db.query(models.App).filter(models.App.manifest_url.like(pattern))
-    if bootstrap_app.reinstall_after_uninstall:
-      # The store is the recovery surface, so it must return after uninstall;
-      # owner uninstalls of the other bootstrap apps are respected (the query is
-      # otherwise tombstone-agnostic, so a tombstone counts as "present").
-      query = query.filter(models.App.deleted_at.is_(None))
-    # Re-verify in Python: SQL LIKE treats `_` as a wildcard, and a ref may
-    # contain one; the repo-base check rejects any incidental over-match.
-    existing = None
-    for row in query.all():
-      if repo_base is None or _trusted_catalog_repo_base(row.manifest_url) == repo_base:
-        existing = row
-        break
-    if existing is not None:
+    # Use the installer's identity resolver here too: bootstrap and an explicit
+    # Store action must agree across ref moves and legacy rows whose matching
+    # catalog origin predates persisted manifest identity.
+    existing = _find_install_identity_row(
+      db,
+      source_url=bootstrap_app.manifest_url,
+      manifest_id=bootstrap_app.name,
+    )
+    existing_id = existing.id if existing is not None else None
+    already_installed = existing is not None and (
+      existing.deleted_at is None
+      or not bootstrap_app.reinstall_after_uninstall
+    )
+    # The identity query autobegins a read transaction. Do not retain its
+    # connection while the installer performs serial network fetches and
+    # compilation; install_from_manifest starts and owns the next transaction.
+    db.rollback()
+    if already_installed:
       log.info(
         "bootstrap: %s already installed (app id=%s)",
-        bootstrap_app.name, existing.id,
+        bootstrap_app.name, existing_id,
       )
       continue
     log.info(

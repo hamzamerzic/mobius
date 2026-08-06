@@ -1,11 +1,18 @@
 import { useEffect } from 'react'
 import * as tabModel from './tabModel.js'
-import { STRIP_H } from './paneModel.js'
 import {
   buildScene, hitTest, zoneTarget, releaseZone, chipOffset, STRIP_CARET_PAD,
-  passedSlop, touchTabMoveIntent, releasedInPlace, TAB_HOLD_MS, crossedDrawerExit,
-  rootEdgeAllowed, clientPointToLocal,
+  passedSlop, touchTabMoveIntent, drawerRowMoveIntent, releasedInPlace,
+  flingReleaseVelocity,
+  PRESS_DRAG_HOLD_MS, PRESS_MENU_HOLD_MS,
+  crossedDrawerExit,
+  rootEdgeAllowed,
 } from './dragController.js'
+import {
+  captureLayoutSpace,
+  clientLengthToLayout,
+  clientPointToLayout,
+} from '../../lib/layoutSpace.js'
 
 // The thin React binding for the workspace drag controller (design §3). It owns
 // only the side-effects the pure dragController.js cannot: pointer capture, the
@@ -18,11 +25,8 @@ import {
 // document identifies a drag source by its `data-drag-key` (strip tabs in the
 // chrome AND the single-pane top strip, rows in the drawer) and geometrically
 // hit-tests against projectLayout rects — never DOM-event bubbling, because
-// iframes swallow events and the drawer is inert. Everything is gated behind
-// `enabled` (WORKSPACE_SPLITS_ENABLED); with the flag off the listener never
-// installs and the shell is unchanged.
+// iframes swallow events and the drawer is inert.
 
-const STRIP_ZONE_H = STRIP_H + STRIP_CARET_PAD
 const AUTO_SCROLL_EDGE = 32 // px from a strip's scroll edge that arms auto-scroll
 const AUTO_SCROLL_STEP = 6 // px/frame
 
@@ -70,7 +74,6 @@ function suppressNextSourceClick(sourceEl) {
 }
 
 export default function useWorkspaceDrag({
-  enabled,
   contentElRef,
   sceneInputsRef, // ref → { projection, mode, contentRect }
   workspaceStateRef, // ref → { ws, undo } (advanced synchronously by Shell's dispatch)
@@ -78,25 +81,26 @@ export default function useWorkspaceDrag({
   labelForTabRef, // ref → (tab) => string
   dragActiveRef, // shared flag the Drawer's swipe-close handlers stand down on
   drawerOpenRef,
+  drawerRowGesturesRef, // key -> ref({ openMenu, beginReorder }) registered by Drawer rows
   closeDrawer,
   openDrawer,
+  openTabMenuAtRef, // ref -> (clientX, clientY, tab, paneId) => void
   onPreviewBuilder, // (active, { committed }) => void — enter/leave the LIVE
   // builder preview a single-mode drag unfolds (point 15: dragging IS
   // building). Render-only: the reducer viewMode stays 'single' until the drop
   // commits 'panes', so ONE undo reverts both the tree AND the mode. The leave
-  // call carries the outcome — committed:true means the drop's OPEN_TAB_AT
-  // flipped the tree, so the descriptor must drag-commit (not cancel) in the
-  // same batch. (Settings needs no conversion across the flip — its tab survives;
+  // call carries the outcome for drawer restoration. Presentation does not
+  // predict that outcome: OPEN_TAB_AT owns the durable mode and Shell mirrors
+  // its actual result in the same batch. (Settings needs no conversion across the flip — its tab survives;
   // single mode paints its own slot, never a forced takeover.)
 }) {
   useEffect(() => {
-    if (!enabled) return undefined
-
     // ── Reusable overlay DOM (created lazily on the first arm) ────────────────
     let shieldEl = null
     let chipEl = null
     let chipWidth = 0
     let previewEl = null
+    let fixedSpace = null
     // The one in-flight session's teardown, so an unmount / disable can tear a
     // live drag down cleanly — no orphaned shield. activePointerId / activeSrcEl
     // travel with it so the next-interaction reconcile (below) can tell whether the
@@ -111,15 +115,51 @@ export default function useWorkspaceDrag({
     // the same drawer row made the row look dead for up to 400ms.
     let clearPendingSourceClick = null
 
+    // ── Momentum fling for the JS-owned drawer scroll ─────────────────────────
+    // Pinned drawer rows keep touch-action:pinch-zoom so a held pin can be dragged
+    // to reorder, which means the browser never scrolls those rows natively — the
+    // session pans .drawer__scroll 1:1 with the finger instead (onMove below).
+    // Without a fling that 1:1 pan dead-stops the instant the finger lifts, so on a
+    // tall pinned band the whole list reads as "stuck / something stops the scroll."
+    // This carries the release velocity and decelerates on rAF, reproducing native
+    // momentum. It lives at the effect scope so a glide outlives its pointer session
+    // and a fresh press (or unmount) can halt it. Frame-rate independent: velocity
+    // is layout px/ms and decays by exp(-FRICTION·dt), matching iOS-normal feel.
+    let flingRAF = 0
+    const FLING_FRICTION = 0.002 // per-ms velocity decay (≈ 0.998/ms, iOS normal)
+    const FLING_MIN_V = 0.04 // px/ms — below this the glide has visually stopped
+    function stopFling() {
+      if (flingRAF) { cancelAnimationFrame(flingRAF); flingRAF = 0 }
+    }
+    function startFling(el, velocity) {
+      stopFling()
+      if (!el || !Number.isFinite(velocity) || Math.abs(velocity) < FLING_MIN_V) return
+      let v = velocity
+      let last = performance.now()
+      const step = (now) => {
+        flingRAF = 0
+        const dt = Math.min(32, now - last) // clamp a long/background frame
+        last = now
+        const before = el.scrollTop
+        el.scrollTop = before + v * dt
+        // A short delta versus the request means the scroller hit top/bottom.
+        if (Math.abs(el.scrollTop - before) + 0.5 < Math.abs(v * dt)) return
+        v *= Math.exp(-FLING_FRICTION * dt)
+        if (Math.abs(v) < FLING_MIN_V) return
+        flingRAF = requestAnimationFrame(step)
+      }
+      flingRAF = requestAnimationFrame(step)
+    }
+
     function contentBox() {
-      const host = contentElRef.current
-      return host?.getBoundingClientRect() || { left: 0, top: 0 }
+      return captureLayoutSpace(contentElRef.current)
     }
     function toLocal(clientX, clientY, box = contentBox()) {
-      return clientPointToLocal({ x: clientX, y: clientY }, box)
+      return clientPointToLayout({ x: clientX, y: clientY }, box)
     }
 
     function ensureOverlays() {
+      fixedSpace = captureLayoutSpace(document.documentElement)
       if (!shieldEl) {
         shieldEl = document.createElement('div')
         shieldEl.className = 'workspace__drag-shield'
@@ -134,7 +174,7 @@ export default function useWorkspaceDrag({
       if (!previewEl) {
         previewEl = document.createElement('div')
         previewEl.className = 'workspace__drop-preview'
-        contentElRef.current?.appendChild(previewEl)
+        document.body.appendChild(previewEl)
       }
     }
     // Pre-glow nodes are appended separately from the shield/chip/preview and
@@ -154,6 +194,7 @@ export default function useWorkspaceDrag({
       shieldEl?.remove(); shieldEl = null
       chipEl?.remove(); chipEl = null; chipWidth = 0
       previewEl?.remove(); previewEl = null
+      fixedSpace = null
       clearPreGlow()
     }
 
@@ -167,28 +208,40 @@ export default function useWorkspaceDrag({
         chipEl.hidden = false
         chipWidth = chipEl.offsetWidth || 0
       }
-      const { left, top } = chipOffset({ x: clientX, y: clientY }, isTouch)
+      const viewport = fixedSpace || captureLayoutSpace(document.documentElement)
+      const point = clientPointToLayout({ x: clientX, y: clientY }, viewport)
+      const { left, top } = chipOffset(point, isTouch)
       // V5 (vizreview): clamp the chip within the viewport so its label never clips
       // at the right edge (the +12 offset pushed a right-edge drag off-screen).
       const margin = 8
-      const viewportWidth = document.documentElement.clientWidth
-        || window.innerWidth
+      const viewportWidth = viewport.width || window.innerWidth
       const maxLeft = Math.max(margin, viewportWidth - chipWidth - margin)
       chipEl.style.left = `${Math.max(margin, Math.min(left, maxLeft))}px`
       chipEl.style.top = `${top}px`
     }
 
-    // Render (or clear) the drop preview for a zone. Geometry is written inline
-    // (content-local px); appearance + morph transitions come from the CSS.
-    function renderPreview(zone) {
+    // Render (or clear) the drop preview for a zone. The geometry engine speaks
+    // content-local pixels, including a negative y for the shell-level one-pane
+    // strip. Translate once to viewport coordinates so the fixed preview can
+    // paint both inside content and over that sibling strip without clipping.
+    function renderPreview(zone, box) {
       if (!previewEl) return
       if (!zone) { previewEl.classList.remove('is-visible'); return }
       previewEl.classList.toggle('workspace__drop-preview--caret', zone.type === 'strip')
       const { rect } = zone
-      previewEl.style.left = `${rect.x}px`
-      previewEl.style.top = `${rect.y}px`
-      previewEl.style.width = `${rect.w}px`
-      previewEl.style.height = `${rect.h}px`
+      const viewport = fixedSpace || captureLayoutSpace(document.documentElement)
+      const contentOrigin = clientPointToLayout({
+        x: box.clientLeft,
+        y: box.clientTop,
+      }, viewport)
+      const toViewportLength = value => clientLengthToLayout(
+        value * box.zoom,
+        viewport,
+      )
+      previewEl.style.left = `${contentOrigin.x + toViewportLength(rect.x)}px`
+      previewEl.style.top = `${contentOrigin.y + toViewportLength(rect.y)}px`
+      previewEl.style.width = `${toViewportLength(rect.w)}px`
+      previewEl.style.height = `${toViewportLength(rect.h)}px`
       previewEl.classList.add('is-visible')
     }
 
@@ -215,24 +268,57 @@ export default function useWorkspaceDrag({
       }
     }
 
-    // Measure a pane's strip tab rects (content-local) for the caret index.
-    function measureTabs(paneId, box = contentBox()) {
-      const host = contentElRef.current
-      const strip = host?.querySelector(`[data-pane-strip="${cssEscape(paneId)}"]`)
-      if (!strip) return []
-      return [...strip.querySelectorAll('.shell__tab')].map((el) => {
-        const r = el.getBoundingClientRect()
-        return {
-          left: toLocal(r.left, r.top, box).x,
-          right: toLocal(r.right, r.bottom, box).x,
-        }
-      })
+    function findStrip(paneId) {
+      const selector = `[data-pane-strip="${cssEscape(paneId)}"]`
+      const shell = contentElRef.current?.closest?.('.shell')
+        || contentElRef.current?.parentElement
+      return shell?.querySelector?.(selector) || null
+    }
+
+    // Measure one pane's whole strip contract. Most strips are content children;
+    // the one-pane Builder strip is a shell sibling above content, so its local y
+    // is negative. Keeping rect + tabs together prevents hit-testing, previews,
+    // and auto-scroll from inventing different ideas of where the strip lives.
+    function measureStrip(paneId, box = contentBox()) {
+      const strip = findStrip(paneId)
+      if (!strip) return null
+      const stripBox = strip.getBoundingClientRect()
+      const origin = clientPointToLayout({ x: stripBox.left, y: stripBox.top }, box)
+      return {
+        rect: {
+          x: origin.x,
+          y: origin.y,
+          w: clientLengthToLayout(stripBox.width, box),
+          h: clientLengthToLayout(stripBox.height, box),
+        },
+        tabs: [...strip.querySelectorAll('.shell__tab')].map((el) => {
+          const r = el.getBoundingClientRect()
+          return {
+            left: toLocal(r.left, r.top, box).x,
+            right: toLocal(r.right, r.bottom, box).x,
+          }
+        }),
+      }
+    }
+
+    function refreshSceneStrips(activeScene, box = contentBox()) {
+      if (!activeScene) return
+      for (const pane of activeScene.panes) {
+        const measured = measureStrip(pane.paneId, box)
+        if (!measured) continue
+        pane.stripRect = measured.rect
+        pane.tabs = measured.tabs
+      }
     }
 
     function buildSceneNow(source, allowRootEdge) {
       const { projection, mode, contentRect } = sceneInputsRef.current
       const ws = workspaceStateRef.current.ws
-      return buildScene(ws, projection, mode, contentRect, source, allowRootEdge, measureTabs)
+      const box = contentBox()
+      return buildScene(
+        ws, projection, mode, contentRect, source, allowRootEdge,
+        paneId => measureStrip(paneId, box),
+      )
     }
 
     // ── One drag session ──────────────────────────────────────────────────────
@@ -243,10 +329,16 @@ export default function useWorkspaceDrag({
       let armed = false
       let cancelled = false
       let cleaned = false
+      let menuOpened = false
       let holdTimer = null
       let held = false
       let scrolling = false
-      let scrollStripEl = null
+      let scrollEl = null
+      let scrollAxis = null
+      let scrollSpace = null
+      // Recent {t, top} samples so the lift-off velocity is a short trailing
+      // AVERAGE, not just the final (decelerating) move — see flingReleaseVelocity.
+      let scrollSamples = []
       let curZone = null
       let scene = null
       let drawerEdgeX = null
@@ -266,6 +358,7 @@ export default function useWorkspaceDrag({
           ? (workspaceStateRef.current.ws.panes[paneId]?.tabs.length || 0)
           : 0,
       })
+      const drawerGesture = () => drawerRowGesturesRef?.current?.get(key)?.current
 
       // iOS callout/selection suppression begins NOW (pointerdown), scoped to the
       // source, for the WHOLE hold window — not at arm, when the magnifier has
@@ -305,22 +398,52 @@ export default function useWorkspaceDrag({
         preGlow(scene)
         if (isTouch && !held && navigator.vibrate) { try { navigator.vibrate(10) } catch { /* unsupported */ } }
         if (sourceKind === 'drawer') {
-          drawerEdgeX = document.getElementById('navigation-drawer')?.getBoundingClientRect().right ?? null
+          const drawer = document.getElementById('navigation-drawer')
+          if (drawer) {
+            const drawerSpace = captureLayoutSpace(drawer)
+            drawerEdgeX = drawerSpace.clientLeft + drawerSpace.width * drawerSpace.zoom
+          }
         }
       }
 
-      // Tabs use one unambiguous touch contract across their whole surface:
-      // movement before the hold belongs to strip scrolling; surviving the short
-      // hold lifts the tab so a following move drags it. Drawer touch rows never
-      // enter this controller: Drawer owns their menu/reorder gesture as one
-      // interaction, so a held finger cannot also glide navigation closed.
+      // Tabs and drawer rows share this ONE pointer owner AND one two-stage
+      // press-and-hold. After the first stage the row/tab becomes draggable, so
+      // movement picks it up (reorder, workspace drag, or a strip drag); if the
+      // pointer instead stays still through the second stage, that item's actions
+      // open immediately, while still held. Movement clears the same timer before
+      // handing off to a drag or to scrolling, so no competing gesture lifecycle
+      // exists — a short hold moves and a long hold opens actions everywhere.
       if (isTouch) {
         holdTimer = setTimeout(() => {
           if (cancelled || cleaned) return
           held = true
           if (navigator.vibrate) { try { navigator.vibrate(8) } catch { /* unsupported */ } }
-          arm()
-        }, TAB_HOLD_MS)
+          holdTimer = setTimeout(() => {
+            if (cancelled || cleaned || armed || scrolling) return
+            const point = { ...lastPoint }
+            // Keep this pointer session alive until the contact actually ends.
+            // Restoring body selection here leaves a small window in which the
+            // platform long-press can select whichever menu item appeared under
+            // the still-held finger (notably Android's text-selection handles).
+            if (sourceKind === 'drawer') {
+              const handler = drawerGesture()
+              if (!handler?.openMenu) {
+                cleanup()
+                return
+              }
+              menuOpened = true
+              handler.openMenu(point)
+            } else {
+              const openTabMenu = openTabMenuAtRef?.current
+              if (!openTabMenu) {
+                cleanup()
+                return
+              }
+              menuOpened = true
+              openTabMenu(point.x, point.y, tabFromKey(key), paneId)
+            }
+          }, PRESS_MENU_HOLD_MS - PRESS_DRAG_HOLD_MS)
+        }, PRESS_DRAG_HOLD_MS)
       }
 
       function stopAutoScroll() {
@@ -337,9 +460,9 @@ export default function useWorkspaceDrag({
         let dir = 0
         let pid = null
         for (const pane of scene.panes) {
-          const r = pane.rect
-          if (xL < r.x || xL > r.x + r.w || yL < r.y || yL > r.y + STRIP_ZONE_H) continue
-          const el = contentElRef.current?.querySelector(`[data-pane-strip="${cssEscape(pane.paneId)}"]`)
+          const r = pane.stripRect
+          if (xL < r.x || xL > r.x + r.w || yL < r.y || yL > r.y + r.h + STRIP_CARET_PAD) continue
+          const el = findStrip(pane.paneId)
           pid = pane.paneId
           if (el && el.scrollWidth > el.clientWidth + 1) {
             const sb = el.getBoundingClientRect()
@@ -360,9 +483,13 @@ export default function useWorkspaceDrag({
         autoStripEl.scrollLeft += autoDir * AUTO_SCROLL_STEP
         const box = contentBox()
         const p = scene?.panes.find(pp => pp.paneId === autoPaneId)
-        if (p) p.tabs = measureTabs(autoPaneId, box) // re-measure the scrolled strip
+        const measured = measureStrip(autoPaneId, box)
+        if (p && measured) {
+          p.stripRect = measured.rect
+          p.tabs = measured.tabs
+        }
         const next = hitTest(toLocal(lastPoint.x, lastPoint.y, box), scene, curZone)
-        renderPreview(next)
+        renderPreview(next, box)
         curZone = next
         autoRAF = requestAnimationFrame(autoStep)
       }
@@ -378,58 +505,124 @@ export default function useWorkspaceDrag({
         const { x: cx, y: cy } = lastPoint
         // While the drawer still covers the panes, show no preview (the glide-close
         // crossing is handled synchronously in onMove).
-        if (sourceKind === 'drawer' && drawerOpenRef.current && !glided) {
+        if (sourceKind === 'drawer' && !glided) {
           positionChip(cx, cy, isTouch, key)
           curZone = null; renderPreview(null); stopAutoScroll(); return
         }
         const box = contentBox()
+        // Arming a single-mode drag changes the rendered strip owner. Refresh
+        // after that React commit (and after any subsequent layout change) so
+        // hit-testing follows the strip that is actually mounted this frame.
+        refreshSceneStrips(scene, box)
         updateAutoScroll(cx, cy, box)
         const next = hitTest(toLocal(cx, cy, box), scene, curZone)
         positionChip(cx, cy, isTouch, key)
-        renderPreview(next)
+        renderPreview(next, box)
         curZone = next
       }
       const onMove = (ev) => {
         if (ev.pointerId !== pointerId) return // ignore a second finger
+        if (menuOpened) {
+          ev.preventDefault?.()
+          return
+        }
         const previousPoint = lastPoint
         lastPoint = { x: ev.clientX, y: ev.clientY }
         const dx = ev.clientX - start.x
         const dy = ev.clientY - start.y
         if (scrolling) {
           ev.preventDefault?.()
-          if (scrollStripEl) scrollStripEl.scrollLeft += previousPoint.x - ev.clientX
+          if (scrollEl && scrollAxis === 'x') {
+            scrollEl.scrollLeft += clientLengthToLayout(
+              previousPoint.x - ev.clientX,
+              scrollSpace,
+            )
+          } else if (scrollEl && scrollAxis === 'y') {
+            scrollEl.scrollTop += clientLengthToLayout(
+              previousPoint.y - ev.clientY,
+              scrollSpace,
+            )
+            // Sample the real scroll position; the lift handler turns the last
+            // ~110ms of these into a release velocity for the glide.
+            const now = performance.now()
+            scrollSamples.push({ t: now, top: scrollEl.scrollTop })
+            while (scrollSamples.length > 2 && now - scrollSamples[0].t > 110) {
+              scrollSamples.shift()
+            }
+          }
           return
         }
         if (!armed) {
-          if (isTouch) {
-            const intent = touchTabMoveIntent(dx, dy)
+          if (sourceKind === 'drawer') {
+            const intent = drawerRowMoveIntent(dx, dy, {
+              held,
+              isTouch,
+              pinned: srcEl.hasAttribute('data-pinned-key'),
+            })
+            if (intent === 'pending') return
             if (intent === 'scroll') {
               clearTimeout(holdTimer)
-              // The tab reserves one-finger panning so the browser cannot
-              // reclaim a post-hold horizontal move and cancel a live drag.
-              // Until the hold wins, mirror the strip's one-to-one pan here.
-              // Whitespace and close buttons remain native pan-x.
               scrolling = true
-              scrollStripEl = srcEl.closest('.shell__tabstrip')
+              scrollEl = srcEl.closest('.drawer__scroll')
+              scrollAxis = 'y'
+              scrollSamples = []
               ev.preventDefault?.()
-              if (scrollStripEl) scrollStripEl.scrollLeft += start.x - ev.clientX
+              if (scrollEl) {
+                scrollSpace = captureLayoutSpace(scrollEl)
+                scrollEl.scrollTop += clientLengthToLayout(
+                  start.y - ev.clientY,
+                  scrollSpace,
+                )
+                scrollSamples.push({ t: performance.now(), top: scrollEl.scrollTop })
+              }
               return
             }
+            if (intent === 'reorder') {
+              const handler = drawerGesture()
+              ev.preventDefault?.()
+              cancelled = true
+              cleanup()
+              handler?.beginReorder?.({ pointerId, start, moveEvent: ev })
+              return
+            }
+            if (intent === 'workspace') arm()
+            else {
+              cancelled = true
+              cleanup()
+            }
             if (!armed) return
-          } else {
-            if (sourceKind === 'drawer') {
-              // Drawer rows have two orthogonal mouse gestures: a deliberate
-              // rightward pull leaves navigation for the workspace, while a
-              // vertical drag belongs to pinned-item reordering. The previous
-              // any-axis arm contradicted that contract and stole vertical
-              // movement before the drawer could reorder it.
-              if (Math.abs(dy) > Math.abs(dx) && passedSlop(dx, dy)) {
-                cancelled = true
-                cleanup()
+          } else if (isTouch) {
+            if (held && passedSlop(dx, dy)) arm()
+            if (armed) {
+              // Continue below so the move that first proves drag intent also
+              // positions the chip and preview; no second move is required.
+            } else if (held) {
+              return
+            } else {
+              const intent = touchTabMoveIntent(dx, dy)
+              if (intent === 'scroll') {
+                clearTimeout(holdTimer)
+                // The tab reserves one-finger panning so the browser cannot
+                // reclaim a post-hold horizontal move and cancel a live drag.
+                // Until the hold wins, mirror the strip's one-to-one pan here.
+                // Whitespace and close buttons remain native pan-x.
+                scrolling = true
+                scrollEl = srcEl.closest('.shell__tabstrip')
+                scrollAxis = 'x'
+                ev.preventDefault?.()
+                if (scrollEl) {
+                  scrollSpace = captureLayoutSpace(scrollEl)
+                  scrollEl.scrollLeft += clientLengthToLayout(
+                    start.x - ev.clientX,
+                    scrollSpace,
+                  )
+                }
                 return
               }
-              if (dx > 0 && Math.abs(dx) >= Math.abs(dy) && passedSlop(dx, dy)) arm()
-            } else if (passedSlop(dx, dy)) arm()
+              if (!armed) return
+            }
+          } else {
+            if (passedSlop(dx, dy)) arm()
             if (!armed) return
           }
         }
@@ -437,8 +630,7 @@ export default function useWorkspaceDrag({
         // Drawer drag-out glide-close must fire SYNCHRONOUSLY (it dispatches
         // closeDrawer and stands the OS gesture down); the heavy hit-test/preview
         // work is deferred to the coalesced rAF pass above (design §3.1).
-        if (sourceKind === 'drawer' && drawerOpenRef.current
-            && drawerEdgeX != null && !glided
+        if (sourceKind === 'drawer' && drawerEdgeX != null && !glided
             && crossedDrawerExit(ev.clientX, drawerEdgeX)) {
           glided = true
           closeDrawer?.()
@@ -493,8 +685,18 @@ export default function useWorkspaceDrag({
 
       const onUp = (ev) => {
         if (ev.pointerId !== pointerId) return // ignore a second finger
+        if (menuOpened) {
+          cleanup({ suppressClick: true })
+          return
+        }
         if (!armed) {
           if (scrolling) {
+            // Turn the last ~110ms of travel into a release velocity and hand a
+            // still-moving lift to the momentum glide. A finger that paused before
+            // lifting leaves no fresh samples, so it keeps its exact rest position.
+            if (scrollEl && scrollAxis === 'y') {
+              startFling(scrollEl, flingReleaseVelocity(scrollSamples, performance.now()))
+            }
             cleanup({ suppressClick: true })
           } else cleanup()
           return
@@ -512,8 +714,8 @@ export default function useWorkspaceDrag({
         const backOverDrawer = sourceKind === 'drawer' && drawerEdgeX != null
           && ev.clientX <= drawerEdgeX && !(isTouch && glided)
         if (isTouch && releasedInPlace(dx, dy)) {
-          // A lifted tab released in place cancels cleanly; its hold is reserved
-          // for drag.
+          // An armed drag lifted essentially in place is a cancel, not a drop —
+          // and never a menu: actions open from the hold timer while still held.
           cleanup({ suppressClick: true })
         } else if (backOverDrawer) {
           // Released back over the drawer = cancel; cleanup reopens it if glided.
@@ -532,7 +734,7 @@ export default function useWorkspaceDrag({
       // ARMED (§9): otherwise the compat click after an Escape / lost-capture /
       // blur / visibility cancel can still navigate to the source row.
       const onCancel = (ev) => {
-        if (ev.pointerId === pointerId) cleanup({ suppressClick: armed || scrolling })
+        if (ev.pointerId === pointerId) cleanup({ suppressClick: menuOpened || armed || scrolling })
       }
       const onKey = (ev) => { if (ev.key === 'Escape' && armed) { ev.preventDefault(); cleanup({ suppressClick: true }) } }
       // Touch pointers already have implicit capture, and Chromium may release and
@@ -542,29 +744,25 @@ export default function useWorkspaceDrag({
       const onLostCapture = (ev) => {
         if (ev.pointerId === pointerId && !isTouch) cleanup({ suppressClick: armed })
       }
-      const onWinBlur = () => cleanup({ suppressClick: armed || scrolling })
+      const onWinBlur = () => cleanup({ suppressClick: menuOpened || armed || scrolling })
       const onVisibility = () => {
-        if (document.visibilityState === 'hidden') cleanup({ suppressClick: armed || scrolling })
+        if (document.visibilityState === 'hidden') cleanup({ suppressClick: menuOpened || armed || scrolling })
       }
       // BFCache freeze / bfcache navigation can be the ONLY interruption event some
       // browsers fire — no pointercancel, no blur, and (on older Safari) no
       // visibilitychange-hidden first. Without this, a drag frozen mid-flight and
       // then restored would keep its render-only builder preview, wedging the
       // workspace tiled. pagehide cancels the drag as the page is frozen/unloaded.
-      const onPageHide = () => cleanup({ suppressClick: armed || scrolling })
+      const onPageHide = () => cleanup({ suppressClick: menuOpened || armed || scrolling })
 
       function cleanup({ suppressClick = false, committed = false } = {}) {
         if (cleaned) return
         cleaned = true
-        // Leave the live builder preview, telling the mode machine WHICH way it
-        // ended. On a COMMITTED drop the reducer is now in 'panes' (OPEN_TAB_AT
-        // flipped it) and the descriptor must commit in the SAME pointerup batch
-        // (drag-commit → committedMode 'panes'; INV 7 one-transaction) — routing
-        // a successful drop through drag-cancel left one committed render where
-        // the tree said 'panes' but the descriptor painted single (preview
-        // collapse + logo untwist) until the passive sync-committed net caught
-        // up. On CANCEL the reducer never left 'single', so the cancel reverts
-        // the render with no mutation.
+        // Leave the live builder preview. This callback can retire transient
+        // preview state only. On a committed drop OPEN_TAB_AT has already
+        // changed the workspace and Shell's actual-transition synchronizer has
+        // committed presentation; on cancel the workspace never changed and
+        // the preview simply folds away.
         onPreviewBuilder?.(false, { committed })
         clearTimeout(holdTimer)
         if (moveRAF) { cancelAnimationFrame(moveRAF); moveRAF = 0 }
@@ -658,6 +856,9 @@ export default function useWorkspaceDrag({
       // stale-session reconciliation so this fresh interaction stays live.
       clearPendingSourceClick?.()
       clearPendingSourceClick = null
+      // Touching the list halts an in-flight momentum glide, the way native
+      // scrolling stops under a finger.
+      stopFling()
       if (activeCleanup) {
         // Pointer ids are routinely REUSED across sequential touch gestures
         // (notably id=1 on mobile). Liveness comes from capture, never identity:
@@ -685,10 +886,6 @@ export default function useWorkspaceDrag({
       const strip = srcEl.closest('[data-pane-strip]')
       const sourceKind = inDrawer ? 'drawer' : (strip ? 'tab' : null)
       if (!sourceKind) return
-      // Touch drawer rows have a different, local contract: stationary hold
-      // opens their contextual menu and held vertical movement reorders a pin.
-      // Never create a second workspace-drag session for that same pointer.
-      if (sourceKind === 'drawer' && e.pointerType !== 'mouse') return
       const paneId = strip ? strip.dataset.paneStrip : null
       startSession(e, srcEl, sourceKind, key, paneId)
     }
@@ -729,11 +926,11 @@ export default function useWorkspaceDrag({
       window.removeEventListener('pageshow', reconcileStaleSession)
       document.removeEventListener('visibilitychange', onForegroundVisible)
       activeCleanup?.() // tear down an in-flight drag
+      stopFling() // no rAF may outlive the effect
       clearPendingSourceClick?.()
       removeOverlays()
     }
-    // enabled is a module-load constant and every volatile input arrives through
-    // a ref, so the listener installs exactly once.
+    // Every volatile input arrives through a ref, so the listener installs once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled])
+  }, [])
 }

@@ -39,7 +39,7 @@ async function bootShell(page, viewport) {
 }
 
 // Mock a chat GET so a seeded chat pane mounts a ChatView without a network error,
-// then seed a persisted workspace blob into sessionStorage before boot.
+// then seed a persisted workspace blob into durable browser storage before boot.
 async function bootSeededWorkspace(page, viewport, ws) {
   await page.setViewportSize(viewport)
   await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, r => r.fulfill({ status: 202, body: '{}' }))
@@ -51,7 +51,7 @@ async function bootSeededWorkspace(page, viewport, ws) {
   })
   const blob = paneModel.serializeWorkspace(ws)
   await page.addInitScript(([key, raw]) => {
-    try { sessionStorage.setItem(key, raw); sessionStorage.setItem('mobius-open-tabs', '[]') } catch { /* private mode */ }
+    try { localStorage.setItem(key, raw) } catch { /* private mode */ }
   }, [paneModel.STORAGE_KEY, blob])
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('.shell', { timeout: 10000 })
@@ -203,7 +203,7 @@ for (const [name, viewport] of [
     const before = await builderActive(page)
     await toggleMode(page)
     await expect.poll(() => builderActive(page)).toBe(!before)
-    const entered = await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), paneModel.STORAGE_KEY)
+    const entered = await page.evaluate(key => JSON.parse(localStorage.getItem(key)), paneModel.STORAGE_KEY)
     expect(entered.panes[entered.focusedPaneId].tabs.map(tabModel.tabKey)).toEqual(['chat:aaa'])
     // The beat settles: no transient class lingers.
     await expect.poll(() => transientClassCount(page), { timeout: 2000 }).toBe(0)
@@ -474,7 +474,7 @@ test('round4-3: a persisted NULL single slot stays New Chat even with historical
   await bootSeededWorkspace(page, WIDE, ws)
 
   await expect.poll(() => page.evaluate(
-    key => JSON.parse(sessionStorage.getItem(key))?.singleScreen?.id || null,
+    key => JSON.parse(localStorage.getItem(key))?.singleScreen?.id || null,
     paneModel.STORAGE_KEY,
   ), { timeout: 3000 }).toBe('freshboot')
   expect(createCount, 'boot materializes one new row instead of selecting chats[0]').toBe(1)
@@ -521,7 +521,7 @@ test('round4-3: a superseding NULL-slot request drains after the older POST with
   releaseFirstCreate()
 
   await expect.poll(() => page.evaluate(
-    key => JSON.parse(sessionStorage.getItem(key))?.singleScreen?.id || null,
+    key => JSON.parse(localStorage.getItem(key))?.singleScreen?.id || null,
     paneModel.STORAGE_KEY,
   ), { timeout: 4000 }).toBe('fresh-race-1')
   expect(createCount, 'the newer request reuses the already-created untouched row').toBe(1)
@@ -566,7 +566,7 @@ test('v2 auto-return flips the descriptor and the tree atomically (no lagging fr
   // The emptied builder auto-returned to single.
   await expect.poll(() => builderActive(page)).toBe(false)
   await expect.poll(() => page.evaluate(
-    key => JSON.parse(sessionStorage.getItem(key))?.viewMode, paneModel.STORAGE_KEY,
+    key => JSON.parse(localStorage.getItem(key))?.viewMode, paneModel.STORAGE_KEY,
   ), { timeout: 3000 }).toBe('single')
 })
 

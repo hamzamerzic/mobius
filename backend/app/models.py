@@ -17,11 +17,11 @@ import secrets
 from datetime import UTC, datetime
 
 from sqlalchemy import (
-  Boolean, Column, DateTime, Float, ForeignKey, Integer, JSON, LargeBinary,
-  String, Text, event, false, or_, true,
+  Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey, Integer, JSON,
+  LargeBinary, String, Text, UniqueConstraint, event, false, or_, true,
 )
 
-from sqlalchemy.orm import column_property
+from sqlalchemy.orm import column_property, validates
 
 from app.database import Base
 from app.timeutil import now_naive_utc
@@ -116,10 +116,25 @@ class Chat(Base):
   # drops back to the agent summary / first message and gets re-derived.
   title_locked = Column(Boolean, nullable=False, default=False)
   messages = Column(JSON, nullable=False, default=list)
+  # Drawer/list reads need only to know whether a transcript is empty. Keeping
+  # that fact beside the blob prevents every chat-list request from scanning
+  # every stored transcript. All runtime transcript writes flow through normal
+  # ORM assignment or the two explicit bulk paths in chat_writer.
+  has_messages = Column(
+    Boolean, nullable=False, default=False, server_default=false()
+  )
   # Current in-flight assistant state is separate from immutable history so a
   # streaming update never rewrites every prior message. Finalize and startup
   # recovery merge this bounded value into `messages`.
   live_assistant = Column(JSON, nullable=True, default=None)
+  # The AskUserQuestion this chat is currently parked on, or NULL. The single
+  # durable source of truth for "a question is open": set when the card is
+  # committed, cleared when it is answered or the turn ends, and KEPT across a
+  # resumable pause (provider limit / planned restart). Position-independent, so
+  # parallel tool/subagent output or a terminal error after the card never
+  # hides that it is still open. Every read surface — including the lightweight
+  # /runtime poll that never loads the transcript — trusts this column.
+  pending_question_id = Column(String(64), nullable=True, default=None)
   pending_messages = Column(JSON, nullable=False, default=list)
   uploads = Column(JSON, nullable=False, default=list)
   deleted_at = Column(DateTime, nullable=True, default=None)
@@ -173,13 +188,18 @@ class Chat(Base):
   )
   # Advances ONLY when the OWNER sends a message into this chat (initial
   # send, a queued send, or a fast-forward/steer send). This is the drawer
-  # ordering key, deliberately decoupled from `updated_at` — which bumps on
-  # EVERY row write via onupdate (run markers, session id, streamed
-  # transcript, the agent's auto-retitle) and would otherwise re-sort the
-  # chat to the top on activity the owner did not initiate. No onupdate here.
+  # ordering key, deliberately decoupled from `updated_at` — which usually
+  # bumps on row writes (run markers, session id, the agent's auto-retitle)
+  # and would otherwise re-sort the chat to the top on activity the owner did
+  # not initiate. No onupdate here.
   activity_at = Column(
     DateTime, nullable=True, default=lambda: datetime.now(UTC)
   )
+
+  @validates("messages")
+  def _sync_has_messages(self, _key, value):
+    self.has_messages = bool(value)
+    return value
 
 
 class ChatRun(Base):
@@ -203,6 +223,14 @@ class ChatRun(Base):
 
   # The run_token, verbatim — one durable identity for the turn.
   id = Column(String(64), primary_key=True)
+  # Stable identity for one logical turn across physical restart/resume runs.
+  # A fresh turn points at itself; durable continuation markers inherit the
+  # first physical run's id. Provider processes may come and go while this
+  # value remains the join key used by delegation idempotency + Workflows.
+  root_run_id = Column(
+    String(64), nullable=True, index=True,
+    default=lambda context: context.get_current_parameters().get("id"),
+  )
   chat_id = Column(
     String(64), ForeignKey("chats.id"), nullable=False, index=True
   )
@@ -262,6 +290,58 @@ class ChatRun(Base):
   # authorizes replay when the frozen supervisor's root-owned boot ledger binds
   # the same nonce + exact run id to the current boot.
   restart_nonce = Column(String(128), nullable=True, default=None)
+
+
+class Delegation(Base):
+  """Immutable control plane for one durable delegated task.
+
+  The child conversation is an ordinary hidden app-owned ``Chat`` and its
+  physical execution state remains authoritative in ``ChatRun``. This row
+  stores only the immutable intent/policy needed to attach retries, constrain
+  the SDK runner, and relate the child back to its parent logical run. Status is
+  deliberately NOT duplicated here: every read derives it from the child run.
+  """
+
+  __tablename__ = "delegations"
+  __table_args__ = (
+    UniqueConstraint(
+      "parent_root_run_id", "task_key",
+      name="uq_delegations_parent_root_task",
+    ),
+  )
+
+  id = Column(String(64), primary_key=True)
+  app_id = Column(Integer, ForeignKey("apps.id"), nullable=False, index=True)
+  parent_chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=False, index=True
+  )
+  # References the first physical run by value. Kept free of an FK so durable
+  # audit history can outlive an unusual run-row repair without orphaning the
+  # child chat or weakening the idempotency key.
+  parent_root_run_id = Column(String(64), nullable=False, index=True)
+  task_key = Column(String(128), nullable=False)
+  child_chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=False, unique=True, index=True
+  )
+  provider = Column(String(32), nullable=False)
+  model = Column(String(256), nullable=True)
+  effort = Column(String(32), nullable=True)
+  scope = Column(String(16), nullable=False)
+  cwd = Column(String(1024), nullable=False)
+  prompt_sha256 = Column(String(64), nullable=False)
+  max_budget_usd = Column(Float, nullable=True)
+  created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+  cancelled_at = Column(DateTime, nullable=True, default=None)
+  # Opt-in: wake the parent chat with the result when this child settles. Off by
+  # default so pre-existing rows and any pure-poll submitter never get a surprise
+  # turn; the chat-agent subagent path sets it True at submit.
+  notify_parent_on_complete = Column(
+    Boolean, nullable=False, default=False
+  )
+  # Retry latch for the parent wake, stamped after the completion notice starts
+  # or queues. Delivery is intentionally at-least-once across a crash between
+  # those two transactions so a child result is never silently lost.
+  parent_woken_at = Column(DateTime, nullable=True, default=None)
 
 
 class ChatSessionLink(Base):
@@ -447,10 +527,40 @@ class ChatEmbedGrant(Base):
   revoked_at = Column(DateTime, nullable=True, default=None, index=True)
 
 
+class InstallPassGrant(Base):
+  """Opaque, one-use bridge into an iOS Home Screen app.
+
+  Only a SHA-256 digest of the browser-visible random secret is stored. The
+  row binds that secret to one app and owner epoch; redemption atomically
+  stamps ``consumed_at`` before a fresh short session is minted. A restart
+  therefore cannot make a spent pass usable again.
+
+  This is a new table, so ``create_all`` adds it to existing installations.
+  """
+
+  __tablename__ = "install_pass_grants"
+
+  id = Column(Integer, primary_key=True, autoincrement=True)
+  token_hash = Column(String(64), nullable=False, unique=True, index=True)
+  app_id = Column(Integer, ForeignKey("apps.id"), nullable=False, index=True)
+  owner_epoch = Column(Integer, nullable=False)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  expires_at = Column(DateTime, nullable=False, index=True)
+  consumed_at = Column(DateTime, nullable=True, default=None, index=True)
+
+
 class App(Base):
   """A mini-app created and managed by the agent."""
 
   __tablename__ = "apps"
+  __table_args__ = (
+    CheckConstraint(
+      "length(trim(slug)) > 0", name="ck_apps_slug_nonempty",
+    ),
+    CheckConstraint(
+      "length(trim(source_dir)) > 0", name="ck_apps_source_dir_nonempty",
+    ),
+  )
 
   id = Column(Integer, primary_key=True, index=True)
   name = Column(String(128), nullable=False)
@@ -465,7 +575,7 @@ class App(Base):
   # the slug pins the install identity (manifest `id`), and changing
   # it after a user has installed the standalone PWA would orphan
   # their home-screen icon.
-  slug = Column(String(128), nullable=True, unique=True, index=True)
+  slug = Column(String(128), nullable=False, unique=True, index=True)
   # Per-app secret stamped into every app-scoped token at mint and
   # verified on each request (deps._enforce_app_scope). It rotates with
   # the row: a freshly-created app gets a fresh random nonce, so a token
@@ -517,18 +627,11 @@ class App(Base):
   # A game declares "fullscreen" so the installed PWA launches with no OS
   # status bar and paints under the phone notch/cutout.
   display = Column(String(16), nullable=True, default=None)
-  # Accepted package icon normalized from the manifest declaration. Legacy
-  # rows also keep their pre-split effective icon here.
+  # Accepted package icon normalized from the manifest declaration.
   icon_png = Column(LargeBinary, nullable=True, default=None)
   # Owner-chosen home-screen artwork is an explicit override, not a second
   # writer racing the manifest-owned package icon.
   icon_override_png = Column(LargeBinary, nullable=True, default=None)
-  # True once legacy effective-icon bytes have been classified as accepted
-  # package artwork or an explicit owner override. The additive migration gives
-  # existing rows FALSE; ordinary ORM-created rows start already split.
-  icon_ownership_split = Column(
-    Boolean, nullable=False, default=True, server_default=false(),
-  )
   # Lightweight response projection: advertise a canonical icon reference
   # without hydrating either blob into drawer/catalog queries.
   has_icon = column_property(or_(
@@ -546,8 +649,7 @@ class App(Base):
   # Absolute directory holding this app's source files. Editable app source lives
   # under `/data/apps/<dirname>`. Stored explicitly so source apply can map a
   # directory back to its DB row without slugify-guessing the name.
-  # Null for apps created before this column existed.
-  source_dir = Column(String(512), nullable=True, default=None)
+  source_dir = Column(String(512), nullable=False, unique=True, index=True)
   # Chat that last created or modified this app.  Null for apps created
   # before this column was added.  Used to route app errors back to the
   # correct chat so the agent can fix them.
@@ -600,6 +702,11 @@ class App(Base):
   # surface (still path-confined and secret-denied there). The Editor is the
   # canonical holder. Default false and checked from the live row per request.
   filesystem_access = Column(Boolean, nullable=False, default=False)
+  # Connection-registry management: the owner's /api/connectors surface
+  # (list/add/re-check/toggle/remove). The Connections mini-app is the
+  # canonical holder. Stored keys and broker capabilities never cross this
+  # surface, so the grant manages rows without holding what they protect.
+  connections_manage = Column(Boolean, nullable=False, default=False)
   # Offline capability. The agent opts an app in (default False) only
   # when it's built to run without the network — it uses
   # window.mobius.storage (which queues writes and syncs on reconnect)
@@ -794,6 +901,84 @@ class ToolOutput(Base):
   tool_use_id = Column(String(128), primary_key=True)
   output = Column(CompressedToolOutputText(), nullable=False, default="")
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
+
+
+class Connector(Base):
+  """Owner-managed remote MCP endpoint shared by both agent providers."""
+
+  __tablename__ = "connectors"
+
+  id = Column(Integer, primary_key=True, index=True)
+  # Stable authorization identity. SQLite may reuse an INTEGER PRIMARY KEY
+  # after deletion, so broker capabilities must never authorize by ``id``
+  # alone or an old turn could reach a later connector that reused the row id.
+  capability_id = Column(
+    String(64), nullable=False, unique=True, index=True,
+    default=lambda: secrets.token_hex(32),
+  )
+  slug = Column(String(64), nullable=False, unique=True, index=True)
+  name = Column(String(128), nullable=False)
+  url = Column(String(2048), nullable=False)
+  auth_header = Column(String(64), nullable=True)
+  auth_value_encrypted = Column(Text, nullable=True)
+  enabled = Column(Boolean, nullable=False, default=True, server_default=true())
+  tools_json = Column(JSON, nullable=False, default=list)
+  est_tokens = Column(Integer, nullable=False, default=0, server_default="0")
+  status = Column(String(16), nullable=False, default="ok", server_default="ok")
+  status_detail = Column(Text, nullable=True)
+  created_at = Column(DateTime, default=lambda: now_naive_utc())
+  last_checked_at = Column(DateTime, nullable=True)
+
+
+class ConnectorOAuth(Base):
+  """OAuth grant state for one connector (MCP authorization, spec 2026-07-28).
+
+  Discovery fields are cached from the probe's 401 challenge so sign-in and
+  refresh never re-walk the well-known chain on the hot path. Token fields
+  are Fernet-encrypted with their own salt and are write-only: they never
+  appear in any API response — the registry exposes only ``signed_in`` and
+  the granted scopes. Rows are keyed 1:1 to the connector and die with it.
+  """
+
+  __tablename__ = "connector_oauth"
+
+  connector_id = Column(
+    Integer,
+    ForeignKey("connectors.id", ondelete="CASCADE"),
+    primary_key=True,
+  )
+  # Discovery (RFC 9728 protected-resource metadata → RFC 8414/OIDC).
+  resource = Column(String(2048), nullable=False)  # canonical MCP URL (RFC 8707)
+  issuer = Column(String(512), nullable=False)
+  authorization_endpoint = Column(String(2048), nullable=False)
+  token_endpoint = Column(String(2048), nullable=False)
+  registration_endpoint = Column(String(2048), nullable=True)
+  revocation_endpoint = Column(String(2048), nullable=True)
+  scopes_advertised = Column(JSON, nullable=False, default=list)
+  # Grant state (all write-only; encrypted with the oauth Fernet salt).
+  access_token_encrypted = Column(Text, nullable=True)
+  refresh_token_encrypted = Column(Text, nullable=True)
+  access_expires_at = Column(DateTime, nullable=True)
+  scopes_granted = Column(JSON, nullable=False, default=list)
+  connected_at = Column(DateTime, nullable=True)
+
+
+class OAuthClientRegistration(Base):
+  """This instance's OAuth client identity at one authorization server.
+
+  The spec requires client credentials to be keyed by AS issuer and never
+  reused across servers. ``mode`` records how the identity was obtained:
+  ``cimd`` (the instance's client-metadata URL — no stored secret) or
+  ``dcr`` (RFC 7591 registration; secret encrypted when one was issued).
+  """
+
+  __tablename__ = "oauth_client_registrations"
+
+  issuer = Column(String(512), primary_key=True)
+  mode = Column(String(16), nullable=False)
+  client_id = Column(String(512), nullable=False)
+  client_secret_encrypted = Column(Text, nullable=True)
+  registered_at = Column(DateTime, default=lambda: now_naive_utc())
 
 
 class ThinkingTrace(Base):

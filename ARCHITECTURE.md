@@ -49,7 +49,7 @@ docker-compose.yml    Self-hosted: Caddy (TLS) + app; on-demand recovery profile
 └── recovery profile  stopped-app root target + read-only worker on loopback
 ```
 
-The image bundles everything the agent needs at runtime (the Claude and Codex CLIs, esbuild, Node) so the platform works out of the box. To join an existing Caddy setup instead of the bundled one, use `docker-compose.override.example.yml`.
+The image bundles everything the agent needs at runtime (the Claude and Codex CLIs, Rolldown, Node) so the platform works out of the box. To join an existing Caddy setup instead of the bundled one, use `docker-compose.override.example.yml`.
 
 ### Frontend serving priority
 
@@ -72,22 +72,35 @@ Möbius is meant to be self-hosted on a user-provisioned host — a managed plat
 
 Two invariants follow. (1) **Möbius never patches the kernel from inside the container** — it only *surfaces* "host reboot pending / kernel CVE outstanding" to the owner; the platform/OS applies it. (2) **The in-container agent cannot recreate its own container** (the swap would kill its own process), so the shape is *propose-in* (agent scans → bumps → tests → commits) / *dispose-out* (a host-driven `deploy-prod.sh`, or blue-green, does the rebuild+recreate). Detection is the agent's leverage on every tier: `pip-audit` + `npm audit` + an image scanner (Trivy / `docker scout`) over the built image → triage → bump → test → deploy (tier 1) or surface a reboot window (tiers 2/3).
 
-**The in-product platform updater does not update host deployment files.**
-Settings advances the served `/data/platform` clone inside the app volume; the
-bundled self-hosted Caddy service instead reads `./Caddyfile` from the host
-checkout, and image/dependency changes likewise need a host rebuild/recreate.
-An incoming change to `Caddyfile`, `docker-compose.yml`, `Dockerfile`, or a
-dependency manifest therefore carries a separate host action (and may require a
-particular ordering) even when the live clone rebases cleanly. Never describe
-Apply + server restart alone as activating those files.
+**The in-product updater owns source reconciliation, not the deployment control
+plane.** `backend/app/platform_activation.py` is the single ordered contract
+used by update preview, Apply/status, and the image-dependency fingerprint:
+
+| Impact | Typical source | Activation |
+|---|---|---|
+| `live` | frontend source, tests, docs | frontend is rebuilt or source is read on demand |
+| `server_restart` | `backend/app/`, `skill/core.md` | restart the FastAPI process |
+| `proxy_reload` | `Caddyfile` | self-hosted host checkout + Caddy reload |
+| `container_recreate` | Compose topology or `railway.toml` | recreate services or trigger a managed deployment |
+| `image_rebuild` | Dockerfile, dependency locks, baked scripts/supervisors/recovery | rebuild the image and replace the app container |
+| `host_maintenance` | host-operated deployment/recovery tooling | update and act from the host |
+
+Rules can be deployment-scoped: Railway does not pretend to reload Caddy, and a
+self-hosted install does not pretend to apply `railway.toml`. Mixed updates keep
+every applicable reason and order by the highest action. Settings shows this
+impact before Apply and never offers **Restart to finish** for a higher level.
+The backend records external activation remainders but never invokes Docker,
+Caddy, Railway, or host package/kernel tools. In-container sudo cannot make
+those changes durable, and mounting a Docker socket would weaken the recovery
+boundary rather than solve the ownership problem.
 
 **lodash is pinned to 4.18.1 via `overrides`.** `@openai/apps-sdk-ui` pulls lodash transitively — only through its `Slider` component, which the shell does not import. The 4.17.x line sat unfixed against several advisories for a long stretch; 4.18.x restored maintenance and patched them, so `frontend/package.json` `overrides` forces the transitive lodash to 4.18.1 (`npm audit` is clean). As defense-in-depth, `frontend/src/lib/__tests__/appsSdkLodash.test.js` also fails if the shell ever imports `Slider`, which keeps lodash tree-shaken out of the shipped bundle regardless of the pin.
 
-## Self-update model — `upstream` / `main`, replay on update
+## Self-update model — `upstream` / `main`, preserve local changes on update
 
 Möbius is the rare app whose own agent edits its live code: the in-product agent customizes its mini-apps (`/data/apps/<slug>`) and the whole platform repo (`/data/platform`, a real clone of `mobius-os/mobius`, including the frontend) while the platform runs. A deploy then ships a *new pristine version* of that same code. One small model keeps every such surface up to date without clobbering the owner's customizations and without a deploy ever silently dropping them.
 
-**Two branches per surface, and the update is a rebase.** Each updatable surface is a git repo with:
+**Mini-app updates are rebase-shaped.** Each updatable mini-app is a git repo with:
 
 - **`upstream`** — pristine history (`A → B → …`). The exact bytes of each *released* version, committed only by the installer / image, never the agent.
 - **`main`** — the owner/agent's edits (`X`), and what the surface actually serves. It sits on top of the `upstream` version it was last updated to.
@@ -101,10 +114,12 @@ rebase the local edits onto it:                    A → B → X
 
 The owner's customizations end up *on top of* the current release, as if they'd just been made against it. Mechanically: commit any stray working-tree changes onto `main` first (`app_git.commit_local`, so the merge has a committed base), advance `upstream` to `B`, then compute the three-way verdict with `git merge-tree --write-tree` (`app_git.merge_upstream`) and, when clean, write the merged tree back and replay it as a single-parent commit on the new `upstream` tip — rebase-shaped linear history (`A → B → X`) without ever running `git rebase`.
 
-- **Clean merge** → the merged tree is replayed as a single-parent commit on the new `upstream` tip and the surface recompiles (apps) or restarts (backend) onto the new code.
+- **Clean merge** → the merged tree is replayed as a single-parent commit on the new `upstream` tip and the app recompiles onto the new code.
 - **Conflict** (the release and the local edits touched the same lines) → an **owner-clicked agent chat** resolves it. The update attempt records the new upstream plus a durable receipt bound to every fetched source/static/icon/seed byte, and leaves live files untouched. When the owner chooses "Resolve in chat", apps materialize standard conflict markers (`start_conflict_merge`, a `git merge --no-commit --no-ff upstream`) for the agent to edit; the platform updater leaves the live tree untouched and the resolver chat runs the merge itself. Saving marker-free source records a *single-parent replay* — `--no-ff` points `MERGE_HEAD` at the upstream tip and the commit takes only that one parent, so even a resolved conflict stays linear (`A → B → X`), never the 2-parent commit a plain `git merge` would leave. The canonical installer then verifies the receipt and promotes source, bundle, static files, DB metadata, icon, seeds, cron, and skills through its normal lifecycle. If fetch/materialization fails after the source commit, the previous app remains served and the receipt survives for startup/user retry. Both app and platform conflicts are click-gated: the update surfaces `mode=conflict` / conflict paths or a Settings conflict state, and the owner chooses "Resolve in chat" before an agent turn starts. The owner never hand-merges; back out with `git merge --abort`.
 
-**"Update available" is an ancestry question, not a version-string compare:** an update is available iff `upstream`'s tip is **not yet an ancestor of `main`** (a new release hasn't been rebased in). This is the content question — "does my working tree already contain this release" — that a `image_sha != recorded_sha` proxy can't answer on a customized instance, and it's what eliminates phantom "update available" rows after a deploy that changed nothing the owner hadn't already.
+The platform clone differs: it fetches the selected origin target and either fast-forwards local `main` or merges that target once, preserving both histories without rewriting local commits.
+
+**"Update available" is an ancestry question, not a version-string compare:** an update is available iff `upstream`'s tip is **not yet an ancestor of `main`** (a new release has not been incorporated). This is the content question — "does my working tree already contain this release" — that a `image_sha != recorded_sha` proxy can't answer on a customized instance, and it's what eliminates phantom "update available" rows after a deploy that changed nothing the owner hadn't already.
 
 ### Baked boot infrastructure is outside the served clone
 
@@ -124,9 +139,9 @@ worker container to update it. There is no in-process recovery updater.
 | Surface | Repo | On the model | Engine |
 |---------|------|------------------|--------|
 | **Mini-apps** (`/data/apps/<slug>`) | `.git` per app (installed apps; agent-built bespoke apps have no upstream to track) | yes — whole source tree on `upstream`, single-parent replay, so **multi-file apps update cleanly** | `backend/app/app_git.py` + `install.py` |
-| **Platform** (`/data/platform` — backend *and* frontend) | `.git` | yes — clone-native `git fetch origin` + rebase of local `main` onto `origin/main` (commit-stray-edits-first, conflict-abort, post-rebase import probe with rollback); ancestry availability (`origin/main` not yet an ancestor of local `main`) | `backend/app/platform_update.py` |
+| **Platform** (`/data/platform` — backend *and* frontend) | `.git` | yes — clone-native `git fetch origin`, then fast-forward or merge the selected target into local `main` (commit-stray-edits-first, conflict-abort, post-merge import probe with rollback); ancestry availability (`origin/main` not yet an ancestor of local `main`) | `backend/app/platform_update.py` |
 
-Mini-apps use **one** small tree-aware engine (`app_git.py`): `record_upstream` commits the *whole source tree* on `upstream`, `merge_upstream` verdicts a clean-vs-conflict via `git merge-tree`, and a clean apply replays the merged tree as a **single-parent** commit on top of `upstream` (linear `A→B→X`). Mini-apps are thin callers of that primitive — they pass their own source tree. The platform (backend + frontend, one served clone) is clone-native instead: it uses `git fetch origin` plus a rebase of local `main` onto `origin/main`, with ancestry-based availability (`origin/main` not yet an ancestor of local `main`). Mini-app update discovery is different: the store compares the catalog manifest version against the installed `App.version` (the new release lives in the remote catalog, so a local ancestry check can't see it). There is no per-surface protected-file scaffolding.
+Mini-apps use **one** small tree-aware engine (`app_git.py`): `record_upstream` commits the *whole source tree* on `upstream`, `merge_upstream` verdicts a clean-vs-conflict via `git merge-tree`, and a clean apply replays the merged tree as a **single-parent** commit on top of `upstream` (linear `A→B→X`). Mini-apps are thin callers of that primitive — they pass their own source tree. The platform (backend + frontend, one served clone) is clone-native instead: it uses `git fetch origin` plus a fast-forward or merge of the selected target into local `main`, with ancestry-based availability (`origin/main` not yet an ancestor of local `main`). Mini-app update discovery is different: the store compares the catalog manifest version against the installed `App.version` (the new release lives in the remote catalog, so a local ancestry check can't see it). There is no per-surface protected-file scaffolding.
 
 ## Backend (`backend/app/`)
 
@@ -136,7 +151,8 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 
 | File | Role |
 |------|------|
-| `main.py` | App factory: CORS, rate limiting, security headers (`_SecurityHeadersMiddleware` — authoritative on every response, strips-and-replaces same-named route headers; deliberately no CSP, see SECURITY.md), router mounting, static file serving; resolves `_static_dir` at load (`main.py:1000`); serves `GET /api/version` (image + served-platform identity) |
+| `main.py` | App factory: CORS, rate limiting, origin-owned standard headers and document CSP selection (`_SecurityHeadersMiddleware`), router mounting, static file serving, and `GET /api/version` identity |
+| `response_policy.py` | Validated origin sources plus the shell, embedded-chat, opaque app-frame, packaged-document, and published-site policies shared by direct and proxied deployments |
 | `frontend_watcher.py` | Polling watcher that auto-rebuilds the served frontend clone (`/data/platform/frontend`) on edit — debounced `vite build`, atomic `.dist-next`→`dist` swap |
 | `config.py` | `Settings` via pydantic-settings; reads `.env` |
 | `database.py` | SQLAlchemy engine, `SessionLocal`, `Base`, `get_db`, and `run_migrations()` (idempotent boot-time additive `ALTER TABLE`s) |
@@ -144,7 +160,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `schemas.py` | Pydantic request/response models |
 | `auth.py` | bcrypt hashing, JWT creation/decoding, Fernet encryption |
 | `deps.py` | FastAPI auth dependencies: `get_current_owner` (owner-only), `get_current_owner_or_app` (owner + app token), `get_principal`, `require_app_permission`, and `reject_cross_site` (CSRF) |
-| `compiler.py` | `compile_jsx()` — calls the esbuild CLI to compile a JSX string into an ES module |
+| `compiler.py` | `compile_jsx()` — calls the Rolldown adapter to compile a JSX string into an ES module |
 | `providers.py` | `BaseProvider` adapters (`ClaudeProvider`, `CodexProvider`) + the `PROVIDERS` registry; identity/auth/env shaping for the SDK runners (`build_env`), and `get_skill_path()`. |
 | `claude_sdk_runner.py` | Claude SDK turn runner; passes `cli_path="/usr/local/bin/claude"` so the SDK drives the same pinned binary recovery + cron use |
 | `codex_sdk_runner.py` | Codex SDK turn runner (Thread/TurnHandle + steer) |
@@ -184,7 +200,6 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 |------|------|
 | `memory.py` | `build_memory_block()` — assembles only bounded recent-chat Digests; graph/app data is never injected here |
 | `skills.py` | Skill enumeration (flat `<name>.md` + external-convention `<name>/SKILL.md` dirs), dependency-free frontmatter parsing, provenance labels (`seed`/`agent`/`app:<slug>`/`installed:<source>`), and `write_index()` — the generated `shared/skills/skills-index.md` both providers Read (regenerated on boot, app-skill sync, and skill install/uninstall) |
-| `reflection_checkpoint.py` | Reflection's last-run marker (what to review tonight) |
 | `activity.py` | Append-only JSONL platform-activity log (app_open, app_install, storage_write, …) |
 | `self_reminders.py` | Agent self-scheduling: append-only store of relational check-ins |
 | `theme.py` | Theme CSS management and HTML injection |
@@ -359,6 +374,30 @@ they are not ordinary standalone mini-apps.
 
 React + Vite. Entry is `main.jsx` → `App.jsx`. `App.jsx` checks setup status and renders one of `SetupWizard` (first boot), `LoginForm` (no token), or `Shell` (authenticated). `Shell` owns drawer state and system-event handling; navigation and theme are extracted to hooks (`useNavigation`, `useTheme`).
 
+### Desktop density and coordinate spaces
+
+Desktop web (the `min-width: 1024px` shell) intentionally uses document-level
+`zoom: 0.9`; narrower layouts stay at `1`. Scaling the whole interface is both
+more complete and easier to maintain than hundreds of component-specific font,
+spacing, hit-area, and pane overrides.
+
+Author zoom creates one boundary. Painted pointer/touch coordinates, DOMRects,
+and VisualViewport measurements are in **client space**; element client/offset/
+scroll dimensions and CSS lengths are in unscaled **layout space**. Custom JavaScript
+that crosses this boundary uses `frontend/src/lib/layoutSpace.js`: capture the
+owning space once, convert layout geometry once, then keep models and writes in
+layout space. Gesture slop, swipe, and dismiss thresholds intentionally remain
+physical client pixels so density does not change how far a finger must travel.
+
+Do not replace the root zoom with `transform: scale(...)`: transforms do not
+relayout the viewport and reintroduce gutters, clipping, and hit-test problems.
+Do not pass shell density into mini-app frames; the browser maps a scaled host
+frame into each app's native document. `currentCSSZoom` is preferred, with
+the document root's computed zoom as the older-browser fallback. The document
+root uses offset geometry because its client dimensions can remain painted-size
+under author zoom. Layout-space unit tests and the desktop-density browser test
+protect this policy.
+
 ### Top-level components (`frontend/src/components/`)
 
 | Component (dir) | Role |
@@ -432,7 +471,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | `frontend/src/sw-cache-policy.js` | Authoritative cache-route policy (see *Service worker + offline* below) |
 | `frontend/src/lib/` | Cross-cutting helpers: `appToken.js`, `chatEmbed.js`, `themeService.js`, `onlineStatus.js`, `navHistory.js`, `errorLog.js`, etc. |
 
-**Mini-app modules are self-contained.** `app_compile_contract.py` points esbuild at the pinned production dependencies in `frontend/package.json`, injects React plus `mobius-runtime`, and bundles every used static import into one ESM artifact. The opaque frame asks its exact controlled parent to fetch and transfer that artifact, so a cold offline load performs no dependency subrequests. A compiler banner carries both a host ABI and an artifact revision: bump the revision to rebuild installed bundles for additive runtime changes, and bump the ABI only when old and new hosts are incompatible. Public `/vendor/` files remain only for true browser assets that code refers to by URL (currently the pdf.js worker, KaTeX CSS/fonts, and the D3/Pixi classic scripts); they are not a package resolver.
+**Mini-app modules are self-contained.** `app_compile_contract.py` points Rolldown at the pinned production dependencies in `frontend/package.json`, injects React plus `mobius-runtime`, and bundles every used static import into one ESM artifact. Production minification intentionally does not preserve JavaScript function/class names; apps must use explicit labels and stable keys instead of `Function.name`. The opaque frame asks its exact controlled parent to fetch and transfer that artifact, so a cold offline load performs no dependency subrequests. A compiler banner carries both a host ABI and an artifact revision: bump the revision to rebuild installed bundles for additive runtime changes, and bump the ABI only when old and new hosts are incompatible. Public `/vendor/` files remain only for true browser assets that code refers to by URL (currently the pdf.js worker, KaTeX CSS/fonts, and the D3/Pixi classic scripts); they are not a package resolver.
 
 ## Where do I make a change?
 
@@ -452,7 +491,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | Add a supported app package | Pin it in `frontend/package.json`, add it to `BUNDLED_RUNTIME_LIBS`, and run the compiler/offline-frame contracts |
 | Change offline / SW behavior | `frontend/src/sw.js` + `frontend/src/sw-cache-policy.js` (read *Service worker + offline* below first) |
 | Change the in-product agent's instructions | `skill/core.md` (constitution) or `backend/scripts/seed-skills/*.md` (per-task skills) — see below |
-| Add/install a skill | Ecosystem installs go through `POST /api/skills/install` (`routes/skills.py`; the Skills app + `finding-skills.md` seed drive it); new platform seeds go in `backend/scripts/seed-skills/` + a `SEED_VERSION` bump in `init_skills.py`; the index (`skills-index.md`) is generated — never hand-edit it |
+| Add/install a skill | Ecosystem installs go through `POST /api/skills/install` (`routes/skills.py`; the Skills app + `finding-skills.md` seed drive it); new platform seeds go in `backend/scripts/seed-skills/`; edits that must reach existing untouched copies register their predecessor digest in `init_skills.py`; the index (`skills-index.md`) is generated — never hand-edit it |
 | Change a bootstrap app (Store / Memory / Reflection) | Change its catalog repository (`mobius-os/app-<slug>`). `backend/app/bootstrap.py` installs the canonical manifest on first boot; afterward the app is an ordinary owner-editable app under `/data/apps/<slug>` |
 | Theme CSS / tokens | `backend/app/theme.py` + `routes/theme.py` + `frontend/src/hooks/useTheme.js` |
 
@@ -465,7 +504,7 @@ The in-product agent is a first-class reader of this code, and its behavior has 
 ```
 /data/
 ├── db/ultimate.db          SQLite database
-├── compiled/app-*-<sha256>.js  immutable esbuild output selected by each App row
+├── compiled/app-*-<sha256>.js  immutable Rolldown output selected by each App row
 ├── apps/<slug>/index.jsx   agent-editable JSX source (keyed by app slug)
 ├── apps/<slug>/...          per-app runtime data + per-app git repo
 ├── app-secrets/<id>/       encrypted app-scoped credentials (outside app repos)
@@ -489,11 +528,11 @@ are gitignored (db, compiled, app-secrets, cli-auth).
 
 **Updates** flow through git. `backend/app/platform_update.py` is clone-native:
 `/data/platform` is a real `git clone` of the canonical repo, so an update
-`git fetch origin`s and rebases the local `main` (the agent's edits) onto the new
-`origin/main` — committing any stray working-tree edits first so the rebase can
-only replay them, aborting back to the last-served commit on conflict, and
-running a post-rebase `import app.main` probe that rolls back rather than serve a
-broken tree. (It reuses `app_git`'s isolated git env + `commit_local` but drops
+fetches `origin/main`, commits any stray working-tree edits, and then
+fast-forwards or merges that target into local `main`. A conflict aborts back to
+the last-served commit, and a post-merge `import app.main` probe rolls back
+rather than serving a broken tree. (It reuses `app_git`'s isolated git env +
+`commit_local` but drops
 the pre-slice-B baked-floor `upstream`-record model; card refs below point at the
 maintainers' local `.pm/` backlog, gitignored and absent from a fresh clone.) The
 served bundle is `/data/platform/frontend/dist` if a complete build exists else
@@ -532,19 +571,18 @@ root repair through the authenticated target but cannot access the host control
 plane. Finishing recovery removes both recovery containers, recreates normal
 Mobius, and verifies `/api/health`.
 
-Every self-host lifecycle action takes one bounded installation lock.
-`scripts/mobiusctl update` refuses while isolated recovery state/services are
-present, recreates the normal stack, and passes health before retiring the old
-embedded `mobius-recoveryd`. Recovery start/reopen performs the same retirement
-after the external services launch. Cleanup is never a broad orphan sweep: the
-helper resolves the current app's Compose project and removes only the exact
-`mobius-recoveryd` name with matching project and `recoveryd` service labels.
-An identity mismatch leaves the old container untouched for operator review.
+Every self-host recovery action takes one bounded installation lock. Start and
+reopen pull the latest worker, keep the ordinary app stopped, and retire an old
+embedded `mobius-recoveryd` before launching the isolated services. Cleanup is
+never a broad orphan sweep: it removes only that exact name with the current
+Compose project's matching `recoveryd` service label. An identity mismatch
+leaves the old container untouched. Finish removes both isolated services,
+recreates the ordinary app, and verifies its health.
 
 Normal platform boot serves `/data/platform/backend` directly after an import
-probe. It fetches `origin/main`, commits stray local edits, and rebases them onto
-the update; a conflict or failed post-rebase import returns to the exact
-pre-reconcile commit and leaves a visible flag. An invalid existing clone serves
+probe. It fetches `origin/main`, commits stray local edits, and merges that target
+into local `main` (fast-forwarding when possible); a conflict or failed post-merge
+probe returns to the exact pre-reconcile commit and leaves a visible flag. An invalid existing clone serves
 the baked backend without overwriting the broken tree. Independently, three
 consecutive boots that never reach `/api/health` quarantine the served clone and
 reseed it on the next attempt. These mechanisms recover code; owner-data disaster
@@ -553,7 +591,7 @@ automatically armed by installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.13 (2026-08-01).** This section is the
+**Owner-authoritative contract — v1.18 (2026-08-04).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -567,24 +605,29 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
 `backend/tests/test_chats_stream_steer`) encode this:
 
 - **R0 — Two modes; two explicit auto-scroll entrances.** A chat is either in **auto-scroll**
-  (`FOLLOW_BOTTOM`, following the real-content tail as the reply streams) or **hold**
+  (`FOLLOW_BOTTOM`, following the physical scroll tail as the reply streams) or **hold**
   (`PIN_USER_MSG` or `ANCHOR_AT`, staying at a pinned prompt or frozen reading
   position). Auto-scroll engages only through (a) the gesture-gated scroll handler
-  after the user manually reaches an ordinary bottom with no reservation remaining,
+  after the user manually reaches or explicitly swipes toward the physical bottom,
   or (b) the live-send pin handoff when the streaming reply has consumed its exact
-  reserved room. Only a send may create `PIN_USER_MSG`. The physical bottom while
-  reservation remains is an exact reader-owned `ANCHOR_AT` position—including a
-  negative row offset when the viewport is inside reserved reply room—not a pin or
-  the real-content tail. Reaching it must preserve that exact physical position and
-  must never manufacture the pin's spacer-exhaustion handoff. A viewport /
-  keyboard change, foreground return, mount, or chat restoration must never create
-  auto-scroll.
+  reserved room. Only a send may create `PIN_USER_MSG`. Reservation does not create
+  a second kind of bottom: when `FOLLOW_BOTTOM` is active, it follows the physical
+  tail including any remaining room. Real output first consumes that room without
+  advancing the tail; after the room reaches zero, the same tail advances with the
+  stream. A viewport/keyboard change, foreground return, mount, or chat restoration
+  must never create follow intent; a resize may only complete an already-armed
+  live-send handoff when its responsive reservation reaches zero.
 - **R1 — Stable latest-turn reservation.** Dynamic bottom spacer derives from the
   latest user row and the real tail geometry, independent of whether that row has
   already entered the viewport. It reserves exactly enough room for that row to
-  reach the viewport top and shrinks as reply, tool, image, or other content fills
-  the deficit. The full range must exist before a downward gesture approaches the
-  final turn: crossing the latest-user viewport boundary must never extend
+  reach the active scroll viewport's top and shrinks as reply, tool, image, or
+  other content fills the deficit. When a mobile keyboard reduces the visible
+  scroll box, now-hidden blank room is removed from the spacer first. In
+  `FOLLOW_BOTTOM` this keeps the visible content fixed while room remains; after
+  the spacer reaches zero, only the overflow that no longer fits moves upward.
+  Closing the keyboard restores the exact larger-screen deficit. The full range
+  for the current visible viewport must exist before a downward gesture approaches
+  the final turn: crossing the latest-user viewport boundary must never extend
   `scrollHeight` after momentum settles. The remaining room survives turn
   completion when the reply is short. Expanding content consumes it; collapsing
   the same content restores the exact deficit. Scroll mode does not own the
@@ -603,10 +646,10 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   authoritative because `ScrollMode` can lag an input/layout frame; requiring both
   made identical bottom sends behave inconsistently. A real user scroll after
   submission invalidates an automatic delayed queue promotion (a tap without
-  scrolling does not). Explicit fast-forward is itself the visibility action, so it
-  captures fresh bottom geometry when pressed; a real scroll during its request
-  invalidates that snapshot. Missing delayed intent degrades to hold, never to an
-  inferred pin.
+  scrolling does not). Explicit fast-forward reuses that snapshot through tray
+  reflow while its reader generation remains current; after a real scroll it
+  captures current geometry instead. Another scroll during the request invalidates
+  that snapshot. Missing delayed intent degrades to hold, never to an inferred pin.
 - **R3 — Pin holds until the reservation is filled.** A legitimate live pin
   transitions to `PIN_USER_MSG`, not immediately to `FOLLOW_BOTTOM`; the response
   first grows below the prompt without moving it. Exactly when the streaming reply
@@ -615,14 +658,14 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   is retired only after committed geometry is stable across consecutive layout
   frames, and the prompt stays pinned; a one-frame terminal check cannot disarm
   just before final buffered text fills the reservation. Later idle layout changes
-  cannot create follow. A non-pinning send preserves the exact reading anchor. `PIN_USER_MSG`
-  survives the complete
-  mobile-keyboard open/close cycle even though the full-height reservation makes its
-  scroll position temporarily look away from the physical bottom; viewport geometry
-  is not reader intent, so apart from the explicit filled-reservation handoff, only a
-  gesture-gated reader scroll may retire the pin. A retired or saved pin restores
-  only as an ordinary `ANCHOR_AT`; pin ownership is never reconstructed by layout,
-  lifecycle restoration, or a reader gesture.
+  cannot create follow. A non-pinning send preserves the exact reading anchor.
+  A settled `PIN_USER_MSG` survives the complete mobile-keyboard open/close
+  cycle. An armed live pin keeps the sent row fixed while the resized active
+  reservation remains; if the smaller visible viewport reduces that exact
+  reservation to zero, the ordinary filled-reservation handoff enters
+  `FOLLOW_BOTTOM` so covered live output moves into view and continues following.
+  A retired or saved pin restores only as an ordinary `ANCHOR_AT`; pin ownership
+  is never reconstructed by layout, lifecycle restoration, or a reader gesture.
   Terminal promotion makes this decision against the committed settled DOM,
   before paint, so a final browser clamp cannot race the pin or its exact
   filled-reservation handoff.
@@ -638,6 +681,19 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   Exactness is bounded by real content: if a viewport growth or content collapse
   makes the saved target unreachable, clamp it to the nearest real conversation
   position, then apply R1 only if that viewport shows the latest user row.
+  The durable reading coordinate belongs to the logical chat, not to every
+  retained DOM copy. When Standard and Builder retain separate physical
+  `ChatView`s for the same chat, only the surface participating in the active
+  handoff owns that coordinate. Its visible-to-hidden edge freezes once and
+  relinquishes persistence authority; an initially hidden owner writes nothing.
+  The incoming owner re-enters through `INITIAL` and consumes the shared saved
+  coordinate before it can paint. Hidden owners register no page-lifecycle
+  persistence and cannot overwrite the active owner during reload. A settled
+  `ANCHOR_AT` transfers by its existing semantic address rather than being
+  re-measured after workspace geometry changes; only live follow/pin state is
+  frozen from physical geometry. Retained Builder owners keep their projected
+  pane rectangle while Standard paints, so even that required live-state freeze
+  reads the geometry the outgoing owner actually displayed.
 - **R5 — Reader owns gestures and layout-only sends.** From the first wheel/touch/key
   input until its scroll event lands, no layout path may write `scrollTop`: stream
   resize, spacer handoff, terminal promotion, catch-up, and viewport/keyboard resize
@@ -648,7 +704,8 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   after submit opens fresh reader ownership and still wins. Queueing behind a live
   turn adds no transcript row, so it
   freezes the visible message before the queue tray/composer/keyboard reflow; the
-  separately captured submit snapshot still controls the row when it is promoted.
+  separately captured submit snapshot still controls the row when it is promoted
+  or explicitly fast-forwarded, unless a newer real reader scroll replaced it.
   Never replace the input-to-first-scroll handoff with a fixed short window: under
   rendering load the browser may deliver that scroll later. Ownership begins only for
   inputs whose default action can scroll the transcript; ordinary typing, Enter, and
@@ -657,10 +714,14 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   input gets that early release only when its direction is exactly clamped at the
   matching scroll edge. An elapsed frame is not evidence that an in-range wheel was a
   no-op: renderer/compositor load can update geometry before the main-thread `scroll`
-  handler runs. After a real scroll lands, reader ownership remains active through a
-  short trailing-edge quiet window. The hot scroll handler records intent and current
-  tail proximity only; final anchor discovery, spacer sizing, mode transition, and
-  persistence run once when momentum settles. Exact physical-tail intent belongs to
+  handler runs. A meaningful touch swipe toward the end may enter `FOLLOW_BOTTOM`
+  once even when the browser is already clamped at the physical tail and therefore
+  emits no scroll event; coordinate comparison is the per-move hot path and physical
+  geometry is read at most once for that gesture. After a real scroll lands,
+  reader ownership remains active through a short trailing-edge quiet window. The
+  hot scroll handler records intent and physical-tail arrival only; final anchor
+  discovery, spacer sizing, mode transition, and persistence run once when momentum
+  settles. Exact physical-tail intent belongs to
   the scroll event's geometry: reply growth during the quiet window cannot erase that
   the reader reached bottom. Deferred layout work may resume only after that final
   semantic location is committed, so a stale follow/pin cannot write in the handoff
@@ -696,7 +757,31 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   control must not manufacture future live-follow intent. Both actions route
   through the scroll controller instead of calling `scrollIntoView`, because
   viewport intersection alone cannot detect that the absolutely-positioned
-  composer is covering the target.
+  composer is covering the target. The floating jump-to-latest control
+  (owner ask, 2026-08-04) is the same explicit one-shot action through the
+  identical controller tail reveal, with the same settled `ANCHOR_AT` outcome.
+  Its visibility is a pure geometry read outside the controller's ownership
+  gates: it renders only while the reader holds a position away from the
+  content tail, where reserved spacer room is phantom per R2's send-snapshot
+  bottom rule — so a fresh live-send reservation never summons it. It yields
+  to a visible attention nudge, which navigates to the same tail with strictly
+  more context.
+- **R5b — One keyboard geometry signal; reservation-responsive resize.** Shell alone
+  reconciles a browser's visual viewport into the visible shell frame. The chat
+  does not race Shell with a second direct visual-viewport listener: its own
+  scroll-box `ResizeObserver` is the sole downstream signal that keyboard layout
+  has actually landed. A resize recalculates the latest-turn spacer from the
+  active scroll-box height, then reapplies the mode that already owns the chat.
+  `PIN_USER_MSG` keeps the sent row at its pinned offset while reservation remains,
+  `ANCHOR_AT` keeps the same row offset, and `FOLLOW_BOTTOM` follows the resized
+  physical tail without moving through blank room. The only ordinary mode change
+  is R3's existing armed-pin handoff when the responsive spacer reaches zero; a
+  settled pin never gains follow from resize geometry. The R6 question-submission
+  release and focused native-caret rebase remain the two explicit editing rules,
+  not a general keyboard heuristic. Open/close cycles therefore repeat the same
+  idempotent operation every time. Browser clamps and controller writes may emit
+  `scroll` while the box is changing, but only a gesture-owned scroll may change
+  the reader's semantic mode.
 - **R6 — One lossless active assistant row.** Live stream items, a persisted partial,
   and the settled transcript are alternate sources for one active assistant row, not
   separate answers. The answer response declares this ownership independently as
@@ -742,16 +827,16 @@ path means routing it through the same entries rather than inventing another rul
 | First direct/queued/steered user row becomes visible | any | `PIN_USER_MSG` | New row to top |
 | Later send submitted at real-content tail (mode may be one frame stale) | any | `PIN_USER_MSG` | New row to top |
 | Later send submitted anywhere else | hold or stale follow | `ANCHOR_AT`/existing hold | None |
-| Reader reaches physical bottom while latest-user reservation remains | any | exact `ANCHOR_AT` | User-owned; preserve the numeric physical position, including negative anchor offset |
-| Reader reaches bottom with no reservation remaining | any | `FOLLOW_BOTTOM` | User-owned |
+| Reader reaches or explicitly swipes toward physical bottom | any | `FOLLOW_BOTTOM` | User-owned; follow the one physical tail, including remaining reservation |
 | Reader scrolls manually away from bottom | any | `ANCHOR_AT` | User-owned |
 | Reply grows while an armed live pin still has reserved room | pin hold | same pin hold | Keep prompt fixed |
-| Streaming reply consumes the armed pin reservation | pin hold | `FOLLOW_BOTTOM` | Follow real-content tail |
+| Streaming reply consumes the armed pin reservation | pin hold | `FOLLOW_BOTTOM` | Follow physical tail |
 | Short reply settles before consuming the reservation | armed pin hold | settled pin hold | Keep prompt fixed; retire automatic handoff |
 | Other layout grows/collapses while latest user is visible | any hold | same hold | Consume/restore exact R1 deficit |
 | Latest user leaves the viewport | any | same reader mode | Collapse spacer to zero |
-| Viewport/keyboard changes | `PIN_USER_MSG` | same `PIN_USER_MSG` | Reapply pin after resize; never infer intent from keyboard-open geometry |
-| Viewport/keyboard changes | follow or anchor hold | same follow if still at tail, otherwise hold anchor | Never creates follow |
+| Viewport/keyboard changes | armed `PIN_USER_MSG` | same pin while responsive room remains; `FOLLOW_BOTTOM` if it reaches zero | Shrink blank reservation first; reapply pin or perform R3's ordinary filled-reservation handoff |
+| Viewport/keyboard changes | settled `PIN_USER_MSG` | same `PIN_USER_MSG` | Reapply the same pin; geometry never reclassifies it |
+| Viewport/keyboard changes | follow or anchor hold | same mode | Resize reservation to the visible scroll box, then reapply the physical tail or exact anchor; never create or retire follow |
 | Chat exits/backgrounds/returns | any | `ANCHOR_AT` | Restore exact saved anchor |
 | In-process question is answered | any | transient `ANCHOR_AT` over the prior mode; same active assistant row | Hold exact visible anchor through same-viewport card reflow and resumed output |
 | Viewport/keyboard changes after question submission | transient question anchor | pre-submit unanswered-card mode | Apply ordinary viewport behavior; answering adds no extra movement |
@@ -764,21 +849,30 @@ Controller structure is part of the contract, not an implementation detail:
 - `ChatView` may read `modeRef` for a submit snapshot but must not assign it.
   It emits send, queue, pagination, and lifecycle events through the semantic
   methods returned by `useScrollMode`.
+- `ChatView` declares whether its physical surface owns the chat's durable
+  reading coordinate. `useScrollMode` alone transfers that authority, persists
+  the outgoing coordinate, and resets the incoming owner for restoration.
+  Hidden retained owners may keep DOM geometry but are never persistence
+  writers; do not reintroduce a second freeze call in `ChatView`.
 - Every live mode mutation goes through `transitionMode`, whose entry guard permits
-  new pins only from send and new follow only from an unreserved-bottom gesture or
+  new pins only from send and new follow only from a physical-bottom gesture or
   an already-armed pin's filled-reservation handoff. Every mode-owned `scrollTop`
   write goes through `writeMode`. The exported `applyMode` executor is for the
   controller and pure unit tests, not a second live writer.
 - `useScrollMode` is the sole writer of `.spacer-dynamic` height and the
   composer-clearance CSS geometry. Those indirect writes and every `writeMode`
   call share R5's reader-generation commit gate. Spacer height is
-  derived from the latest user row and exact tail deficit;
+  derived from the latest user row, active scroll-box height, and exact tail deficit;
   disclosure helpers and renderers may preserve an on-screen anchor but may never
   prime, enlarge, or unwind spacer themselves.
 - The gesture-gated `scroll` event reads physical-bottom geometry directly.
   Do not reintroduce a sentinel or asynchronous observer as a second bottom
   authority: its delayed state can contradict the viewport that caused the
   event.
+- Shell owns the browser visual-viewport subscription. The chat observes only
+  its resulting scroll-box size; do not add a second direct visual-viewport
+  listener to the scroll controller or keyboard ordering becomes registration-
+  dependent again.
 - `window.__mobiusChatScrollTrace` keeps bounded, content-free transition and
   actual-write history for diagnosis. It records mode kinds, armed state, and
   geometry only—never message text, keys, or cids.
@@ -868,11 +962,14 @@ presentation, never restart-cause evidence.
 Eligibility is rechecked under the per-chat transition lock immediately before
 promotion. Provider-limit retries are staggered one at a time; an authenticated
 planned restart restores the exact set that was already concurrent, so its
-eligible batch may start together. An app-initiated restart continuation carries
-the same app id into the next durable run unless a newer owner send is already
-queued and becomes the next run's actor; provider-limit retries remain
-owner-only, and app work queued after a park is never absorbed. The provider
-still receives a synthetic user `continue`, but the durable row is tagged
+eligible chats launch in small batches. While each pass makes progress, the
+supervisor promptly drains the durable remainder without waiting for launched
+turns to finish; a no-progress pass falls back to the ordinary retry cadence.
+An app-initiated restart continuation carries the same app id into the next
+durable run unless a newer owner send is already queued and becomes the next
+run's actor; provider-limit retries remain owner-only, and app work queued after
+a park is never absorbed. The provider still receives a synthetic user
+`continue`, but the durable row is tagged
 `kind="auto_continuation"` with reason `restart` or `usage_limit`; the UI, copy
 behavior, title selection, time context, compaction, provider-switch handoff,
 chat-note summarization, and redacted chat logs treat it as a product marker
@@ -880,10 +977,11 @@ rather than owner speech.
 
 The sweep is cheap: one indexed due-row query immediately at boot, on
 `chat_run_finished`, and on a 60-second fallback. Startup captures the boot
-authorization once and threads that exact value through reconciliation and the
-pre-yield sweep, so a second ledger read cannot make the two phases disagree;
-later sweeps perform one bounded local ledger read only when due restart rows
-exist. It does not create per-chat workers or poll at a short interval. Paid
+authorization once and threads that exact value through reconciliation and
+every supervisor sweep, so a later ledger read cannot disagree with the boot.
+When a successful pass leaves a restart remainder, the same supervisor follows
+up after two seconds; a no-progress pass returns to the event/60-second cadence.
+It creates neither per-chat workers nor a permanent short poll. Paid
 provider-limit continuation (`auto_resume_on_limit`) initially defaults off;
 planned-restart continuation (`auto_resume_on_restart`) initially defaults on.
 Each chat stores both choices independently, and changing either choice seeds
@@ -1041,11 +1139,12 @@ the same reference for no-op transitions.
 
 `useWorkspaceSession.js` is the live state owner. It composes reducer transitions
 through a synchronous ref boundary, persists the sole versioned
-`mobius-workspace` session value, owns focused-pane presentation, and projects
-content geometry. A missing or invalid workspace value fails closed to a fresh
-empty workspace; retained active-destination keys can then restore the current
-chat or app through the normal navigation path. There is no parallel flat-tab
-persistence format.
+`mobius-workspace` local value, owns focused-pane presentation, and projects
+content geometry. The durable snapshot restores the focused tab, pane layout,
+and Standard/Builder world after a fully closed PWA is relaunched. A missing or
+invalid workspace value fails closed to a fresh empty workspace; retained
+active-destination keys can then restore the current chat or app through the
+normal navigation path. There is no parallel flat-tab persistence format.
 
 The render path walks the projected leaves. Each visible chat pane owns its own
 retained `ChatView` surface and scroll controller. App frames remain in the
@@ -1060,6 +1159,14 @@ such as `placement: 'beside-source'`, `activation: 'background'`, or the interna
 `live-preview` activation. `resolveWorkspaceRequests` combines those requests
 with the current model and device projection. App-build previews therefore use
 the same path whether they arrive live or are reconstructed after reconnect.
+A live preview never gives keyboard or Back ownership to the preview, nor does
+it replace the active tab in the pane that owns that focus. A missing app opens
+in a safe companion pane, an app already in an unfocused companion switches
+there, and an app parked beside the focused chat moves out before it is
+revealed. When Standard is showing the building chat, entering Builder may
+retarget `focusedPaneId` to the pane that owns that same chat; this preserves
+the focused content rather than focusing the preview. When no companion is
+feasible, the app stays parked rather than interrupting the focused surface.
 
 Tab drag/drop, edge splitting, divider resizing, maximized-pane presentation,
 Builder/Standard mode changes, and undo all dispatch through the workspace
@@ -1110,7 +1217,13 @@ can deliver it untagged or not at all, which left the chat image viewer open
 with a permanently dead close button. A browser Back/swipe instead reaches the
 registered dismissal through `handleBack`; both navigation-event paths
 recognize a `dismissible` source BEFORE their phantom guard and before the
-Navigation API's `canIntercept` gate, and neither pops `navStackRef`. Forward traversal deliberately leaves a
+Navigation API's `canIntercept` gate, and neither pops `navStackRef`. Each
+registration captures the tagged shell cursor it was pushed from, so an
+untagged iframe landing restores that cursor rather than leaving it pointed at
+the consumed sentinel. Explicit-close traversals are also correlated with the
+entry that issued them: if delayed bookkeeping crosses a newer surface's
+sentinel, it never dismisses that surface and the navigation owner re-arms the
+same logical sentinel at the committed cursor. Forward traversal deliberately leaves a
 dismissed transient closed and treats its physical entry as a no-op sentinel;
 reopening it pushes a fresh entry and naturally truncates that stale Forward
 branch. Do not add component-local `popstate` listeners for these surfaces —

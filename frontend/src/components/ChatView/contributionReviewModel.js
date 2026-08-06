@@ -41,9 +41,6 @@ export function actionableRecords(payload) {
  */
 export function sendBlocker(record, { connected } = {}) {
   if (!record || record.status !== 'prepared') return null
-  if (record.contribution_disabled_reason) {
-    return record.contribution_disabled_reason
-  }
   if (record.stack || record.is_stack) {
     return 'This is one layer of a stacked set — review and send the whole chain in Contribute.'
   }
@@ -115,6 +112,26 @@ export function diffStatSummary(value) {
   if (typeof value !== 'string') return ''
   const lines = value.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
   return lines.at(-1) || ''
+}
+
+/**
+ * The failure this card should currently explain, or null when there is none.
+ *
+ * A send that failed is a fact about the record, not about this render: the
+ * card must still explain it after a reload, and must never keep showing the
+ * previous attempt's reason while a new one is in flight. `attempt` is this
+ * card's own latest outcome and always wins; otherwise the stored one speaks.
+ */
+export function submitFailure(record, { attempt = null, sending = false } = {}) {
+  if (sending) return null
+  const source = attempt || {
+    message: record?.last_submit_error,
+    detail: record?.last_submit_error_detail,
+  }
+  const message = typeof source.message === 'string' ? source.message.trim() : ''
+  if (!message) return null
+  const detail = typeof source.detail === 'string' ? source.detail.trim() : ''
+  return { message, detail }
 }
 
 /** Copy for the grouped panel while it still has pending work. */
@@ -288,9 +305,6 @@ export function visibleReviewItems(payload, storage) {
         return !sendBlocker(item.record, {
           connected: payload?.connected !== false,
         })
-      }
-      if (item.kind === 'stack') {
-        return !item.records.some(record => record?.contribution_disabled_reason)
       }
       return true
     },

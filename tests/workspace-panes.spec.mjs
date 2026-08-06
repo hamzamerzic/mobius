@@ -12,15 +12,15 @@
  *   (d) close-only tab actions remain available while model split caps hold;
  *   (e) a projection flip to phone preserves the persisted tree and pane focus;
  *
- * The flag is enabled per-test (localStorage 'mobius:workspace-splits' = '1')
- * and a 2-pane workspace blob is seeded in sessionStorage before the shell
- * boots, exactly like tabs.spec seeds the flat workspace. Agent + apps routes
- * are intercepted so no agent tokens are consumed.
+ * A 2-pane workspace blob is seeded in localStorage before the shell boots,
+ * exactly like tabs.spec seeds the canonical workspace. Agent + apps routes are
+ * intercepted so no agent tokens are consumed.
  *
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/workspace-panes.spec.mjs --project=tests
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { mockAcceptedMessages } from './_mockAcceptedMessages.mjs'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
@@ -60,7 +60,7 @@ async function replaceStreamRoute(page, events) {
  *  seeds the workspace and re-navigates. */
 async function boot(page, viewport = WIDE) {
   await page.setViewportSize(viewport)
-  await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, r => r.fulfill({ status: 202, body: '{}' }))
+  await mockAcceptedMessages(page)
   await page.route('**/api/chat/stop', r => r.fulfill({ status: 200, body: '{}' }))
   await replaceStreamRoute(page, EMPTY_STREAM)
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
@@ -74,7 +74,15 @@ async function boot(page, viewport = WIDE) {
 async function ensureNavigationOpen(page) {
   const toggle = page.getByLabel('Toggle navigation')
   if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click()
-  await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
+  const drawer = page.locator('.drawer.drawer--open')
+  await expect(drawer).toBeVisible({ timeout: 3000 })
+  // A visible modal drawer may still be translating in from the edge. Gesture
+  // geometry belongs to the settled panel the user can deliberately drag from,
+  // not an arbitrary animation frame captured between the click and pointerdown.
+  await expect.poll(() => drawer.evaluate((element) => getComputedStyle(element).transform), {
+    timeout: 3000,
+    message: 'navigation panel has reached its open position',
+  }).toMatch(/^(none|matrix\(1, 0, 0, 1, 0, 0\))$/)
 }
 
 /** Press-and-HOLD the logo past HOLD_MS (450ms) so the rAF completion fires — the
@@ -130,9 +138,10 @@ async function mockApps(page, apps) {
   for (const a of apps) {
     await page.route(new RegExp(`/api/apps/${a.id}/frame`), route => route.fulfill({
       status: 200, contentType: 'text/html',
-      body: '<!doctype html><html><body style="margin:0">'
-        + '<div id="probe">app</div>'
-        + '<script>window.__fi = 0;'
+      body: '<!doctype html><html><body style="margin:0;min-height:100vh" '
+        + 'onclick="window.__clicks += 1">'
+        + '<button id="probe">app</button>'
+        + '<script>window.__fi = 0; window.__clicks = 0;'
         + 'addEventListener("message", e => {'
         + ' if (e && e.data && e.data.type === "moebius:frame-init") window.__fi += 1;'
         + '});</script>'
@@ -149,36 +158,29 @@ async function mockApps(page, apps) {
   return state
 }
 
-/** Seed a workspace blob (authoritative) + the legacy flat mirror + the splits
- *  flag, all before the shell bundle evaluates on the next navigation. */
+/** Seed the canonical workspace before the shell bundle evaluates. */
 async function seedWorkspace(page, ws) {
   const blob = paneModel.serializeWorkspace(ws)
-  const legacy = JSON.stringify(paneModel.flatten(ws).map(t => ({ kind: t.kind, id: t.id })))
-  await page.addInitScript(([flagKey, wsKey, wsBlob, legKey, leg]) => {
+  await page.addInitScript(([wsKey, wsBlob]) => {
     try {
-      localStorage.setItem(flagKey, '1')
-      sessionStorage.setItem(wsKey, wsBlob)
-      sessionStorage.setItem(legKey, leg)
+      localStorage.setItem(wsKey, wsBlob)
     } catch { /* private mode */ }
-  }, ['mobius:workspace-splits', paneModel.STORAGE_KEY, blob, 'mobius-open-tabs', legacy])
+  }, [paneModel.STORAGE_KEY, blob])
 }
 
-/** Seed one explicit Builder leaf while keeping the legacy strip mirror empty.
- *  Fresh workspaces now intentionally start in Standard; this fixture owns the
- *  older "one chat, strip never engaged" Builder state directly. */
+/** Seed one explicit Builder leaf. Fresh workspaces intentionally start in
+ *  Standard, so this fixture owns the Builder state directly. */
 async function seedBuilderSingleLeaf(page, chatId) {
   const ws = paneModel.setViewMode(
     paneModel.seedFromFlatTabs([{ kind: 'chat', id: chatId }]),
     'panes',
   )
   const blob = paneModel.serializeWorkspace(ws)
-  await page.addInitScript(([flagKey, workspaceKey, workspaceBlob]) => {
+  await page.addInitScript(([workspaceKey, workspaceBlob]) => {
     try {
-      localStorage.setItem(flagKey, '1')
-      sessionStorage.setItem(workspaceKey, workspaceBlob)
-      sessionStorage.setItem('mobius-open-tabs', '[]') // empty legacy -> strip not engaged
+      localStorage.setItem(workspaceKey, workspaceBlob)
     } catch { /* private mode */ }
-  }, ['mobius:workspace-splits', paneModel.STORAGE_KEY, blob])
+  }, [paneModel.STORAGE_KEY, blob])
 }
 
 /** Two chat panes side by side: p0 = chatA (focused), p1 = chatB. */
@@ -334,7 +336,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
     }
   })
 
-  test('(a) a pinned user message keeps its position across a divider drag', async ({ page }) => {
+  test('(a) the divider follows physical drag travel without moving a pinned message', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'wpA')
     const b = await createTaggedChat(page, 'wpB')
@@ -364,6 +366,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
     // Drag the vertical divider right — changes pane WIDTHS. A short top-pinned
     // message must not move vertically.
     const box = await page.locator('.workspace__divider').boundingBox()
+    const dividerCenterBefore = box.x + box.width / 2
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
     await page.mouse.down()
     await page.mouse.move(box.x + box.width / 2 + 140, box.y + box.height / 2, { steps: 6 })
@@ -372,6 +375,9 @@ test.describe('Workspace panes (PR2 gate)', () => {
       requestAnimationFrame(() => requestAnimationFrame(r))))
 
     const after = await readTop()
+    const movedBox = await page.locator('.workspace__divider').boundingBox()
+    const dividerCenterAfter = movedBox.x + movedBox.width / 2
+    expect(Math.abs(dividerCenterAfter - dividerCenterBefore - 140)).toBeLessThanOrEqual(1)
     expect(after, 'pinned message still measurable after drag').not.toBeNull()
     // Vertical position held (width change must not re-scroll the pin).
     expect(Math.abs(after - before)).toBeLessThanOrEqual(16)
@@ -641,6 +647,57 @@ test.describe('Workspace panes (PR2 gate)', () => {
     await page.getByRole('menuitem', { name: 'Close all other tabs' }).click()
     await expect.poll(async () => (await readWs(page)).panes.p1.tabs
       .map(tab => `${tab.kind}:${tab.id}`)).toEqual([keptKey])
+
+    const box = await activeTab.boundingBox()
+    const touchPoint = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+    await activeTab.dispatchEvent('pointerdown', {
+      pointerId: 41,
+      pointerType: 'touch',
+      isPrimary: true,
+      button: 0,
+      buttons: 1,
+      clientX: touchPoint.x,
+      clientY: touchPoint.y,
+    })
+    await page.waitForTimeout(450)
+    await activeTab.dispatchEvent('pointerup', {
+      pointerId: 41,
+      pointerType: 'touch',
+      isPrimary: true,
+      button: 0,
+      buttons: 0,
+      clientX: touchPoint.x,
+      clientY: touchPoint.y,
+    })
+    await expect(page.getByRole('menu', { name: 'Tab actions' })).toBeVisible()
+    await page.keyboard.press('Escape')
+  })
+
+  test('(d2) a physical app-frame click dismisses tab actions and reaches the app', async ({ page }) => {
+    await boot(page, WIDE)
+    const chat = await createTaggedChat(page, 'wpFrameMenu')
+    const appId = 990102
+    await mockApps(page, [{ id: appId, name: 'Menu Target', chatId: chat.id }])
+    let ws = builderSeed([
+      { kind: 'chat', id: chat.id },
+      { kind: 'app', id: appId },
+    ])
+    ws = paneModel.moveTab(ws, `app:${appId}`, { root: true, edge: 'right' })
+    await seedWorkspace(page, ws)
+    await page.goto(`${BASE}/shell/?app=${appId}`, { waitUntil: 'domcontentloaded' })
+    await waitTiled(page)
+
+    const activeTab = page.locator(`.shell__tab-open[data-drag-key="app:${appId}"]`)
+    await activeTab.click({ button: 'right' })
+    await expect(page.getByRole('menu', { name: 'Tab actions' })).toBeVisible()
+
+    const appFrame = page.locator(`iframe[data-app-id="${appId}"]`)
+    const frame = page.frameLocator(`iframe[data-app-id="${appId}"]`)
+    const box = await appFrame.boundingBox()
+    expect(box).not.toBeNull()
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+    await expect(page.getByRole('menu', { name: 'Tab actions' })).toHaveCount(0)
+    await expect.poll(() => frame.locator('body').evaluate(() => window.__clicks)).toBe(1)
   })
 
   test('(e) a projection flip to phone preserves the persisted tree and pane focus', async ({ page }) => {
@@ -654,7 +711,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
 
     // Baseline = the normalized blob the shell persisted after boot (a resize
     // must not rewrite it — geometry is projection, not persisted state).
-    const beforeBlob = await page.evaluate(k => sessionStorage.getItem(k), paneModel.STORAGE_KEY)
+    const beforeBlob = await page.evaluate(k => localStorage.getItem(k), paneModel.STORAGE_KEY)
     expect(beforeBlob, 'workspace blob persisted').toBeTruthy()
 
     // Flip the projection: wide → phone.
@@ -662,11 +719,11 @@ test.describe('Workspace panes (PR2 gate)', () => {
     await page.evaluate(() => new Promise(r =>
       requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 200)))))
 
-    const afterBlob = await page.evaluate(k => sessionStorage.getItem(k), paneModel.STORAGE_KEY)
+    const afterBlob = await page.evaluate(k => localStorage.getItem(k), paneModel.STORAGE_KEY)
     expect(afterBlob, 'the persisted tree is unchanged across the projection flip').toBe(beforeBlob)
     // The tree still parses to two panes (projection changed, tree did not).
     const leaves = await page.evaluate((k) => {
-      const ws = JSON.parse(sessionStorage.getItem(k))
+      const ws = JSON.parse(localStorage.getItem(k))
       return Object.keys(ws.panes).length
     }, paneModel.STORAGE_KEY)
     expect(leaves).toBe(2)
@@ -678,7 +735,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
     await expect(otherStrip).toBeVisible({ timeout: 4000 })
     await otherStrip.click()
     await expect.poll(
-      () => page.evaluate((k) => JSON.parse(sessionStorage.getItem(k)).focusedPaneId,
+      () => page.evaluate((k) => JSON.parse(localStorage.getItem(k)).focusedPaneId,
         paneModel.STORAGE_KEY),
       { timeout: 3000, message: 'phone projection still commits pane focus' },
     ).toBe('p1')
@@ -728,7 +785,33 @@ function whichPaneHas(ws, tabKey) {
 }
 
 async function readWs(page) {
-  return page.evaluate(k => JSON.parse(sessionStorage.getItem(k)), paneModel.STORAGE_KEY)
+  return page.evaluate(k => JSON.parse(localStorage.getItem(k)), paneModel.STORAGE_KEY)
+}
+
+async function expectCaretAligned(page, caret, target, label) {
+  const zoom = await page.evaluate(() => Number(getComputedStyle(document.documentElement).zoom) || 1)
+  // Visibility begins as soon as opacity rises above zero, while the preview's
+  // left/top/size transition is still moving. Wait for that owned animation
+  // boundary, then sample final geometry exactly once: polling coordinates can
+  // accidentally accept a transient crossing before the caret drifts onward.
+  await caret.evaluate(async (element) => {
+    await Promise.all(element.getAnimations().map(animation => animation.finished))
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+  })
+  const [caretBox, targetGeometry] = await Promise.all([
+    caret.boundingBox(),
+    target.evaluate((element) => {
+      const tabBox = element.closest('.shell__tab').getBoundingClientRect()
+      const stripBox = element.closest('[data-pane-strip]').getBoundingClientRect()
+      return { tabX: tabBox.x, stripY: stripBox.y }
+    }),
+  ])
+  expect(caretBox.x, `${label} final x matches the measured strip target`)
+    .toBeCloseTo(targetGeometry.tabX - zoom, 0)
+  expect(caretBox.y, `${label} final y matches the measured strip target`)
+    .toBeCloseTo(targetGeometry.stripY + 5 * zoom, 0)
+  expect(caretBox.width, `${label} has a real fixed-space width`).toBeGreaterThan(0)
+  expect(caretBox.height, `${label} has a real fixed-space height`).toBeGreaterThan(0)
 }
 
 /** Press on a source element, arm past slop, glide to a target point, release —
@@ -750,7 +833,7 @@ async function touchDrag(
   sourceLocator,
   toX,
   toY,
-  { firstDx = 0, firstDy = 12, holdMs = 0 } = {},
+  { firstDx = 0, firstDy = 12, holdMs = 0, release = true } = {},
 ) {
   const box = await sourceLocator.boundingBox()
   const sx = box.x + box.width / 2
@@ -773,8 +856,29 @@ async function touchDrag(
       ),
     })
   }
-  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
-  await cdp.detach()
+  if (release) {
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    await cdp.detach()
+    return null
+  }
+  let current = { x: toX, y: toY }
+  return {
+    async moveTo(x, y) {
+      const from = current
+      for (let i = 1; i <= 10; i += 1) {
+        const t = i / 10
+        await cdp.send('Input.dispatchTouchEvent', {
+          type: 'touchMove',
+          touchPoints: point(from.x + (x - from.x) * t, from.y + (y - from.y) * t),
+        })
+      }
+      current = { x, y }
+    },
+    async release() {
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+      await cdp.detach()
+    },
+  }
 }
 
 async function bootThreeTab(page, tag, workspaceFixture = twoPanesThreeTabs, expectTiled = true) {
@@ -796,6 +900,96 @@ async function bootThreeTab(page, tag, workspaceFixture = twoPanesThreeTabs, exp
 }
 
 test.describe('Workspace drag (PR3)', () => {
+  async function bootSingleModeDrawerDrag(page, tag, viewport) {
+    await boot(page, viewport)
+    const a = await createTaggedChat(page, `${tag}A`)
+    const b = await createTaggedChat(page, `${tag}B`)
+    const c = await createTaggedChat(page, `${tag}C`)
+    await mockApps(page, [])
+    await exposeChatsInDrawer(page, [a.id, b.id, c.id])
+    await seedWorkspace(page, paneModel.setViewMode(
+      paneModel.seedFromFlatTabs([{ kind: 'chat', id: c.id }]),
+      'single',
+    ))
+    await page.goto(`${BASE}/shell/?chat=${c.id}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
+    await expect(page.locator('[data-pane-strip="p0"]')).toHaveCount(0)
+    await expect(page.locator('.workspace__chrome')).toHaveCount(0)
+    await ensureNavigationOpen(page)
+    return { a, b, c }
+  }
+
+  test('90%-zoom desktop follows the fresh Builder strip and commits its caret landing', async ({ page }) => {
+    const { b, c } = await bootSingleModeDrawerDrag(page, 'singleFlipZoom', WIDE)
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).zoom), {
+      timeout: 3000, message: 'desktop density applies the 90% layout space',
+    }).toBe('0.9')
+
+    const source = page.locator(`.drawer__item[data-drag-key="chat:${b.id}"]`)
+    const content = await page.locator('.shell__content').boundingBox()
+    const drawerBox = await page.locator('#navigation-drawer').boundingBox()
+    await mouseDrag(
+      page, source,
+      drawerBox.x + drawerBox.width + 30,
+      content.y + content.height / 2,
+      { release: false },
+    )
+    // Desktop navigation is a persistent, reserved sidebar rather than the
+    // history-backed modal drawer. Crossing its inner edge releases preview
+    // suppression, but a committed workspace drop must not collapse the user's
+    // saved sidebar preference.
+    await expect(page.locator('.drawer.drawer--persistent.drawer--open')).toBeVisible()
+    await expect(page.locator('[data-pane-strip="p0"]')).toBeVisible({ timeout: 3000 })
+
+    const freshTarget = page.locator(
+      `[data-pane-strip="p0"] [data-drag-key="chat:${c.id}"]`,
+    )
+    const targetBox = await freshTarget.boundingBox()
+    await page.mouse.move(targetBox.x + 2, targetBox.y + targetBox.height / 2, { steps: 10 })
+    const caret = page.locator('.workspace__drop-preview--caret.is-visible')
+    await expect(caret).toBeVisible()
+    await expectCaretAligned(page, caret, freshTarget, 'desktop caret')
+    await page.mouse.up()
+    await expect(page.locator('.drawer.drawer--persistent.drawer--open')).toBeVisible()
+
+    await expect.poll(async () => (await readWs(page)).panes.p0.tabs
+      .map(tab => `${tab.kind}:${tab.id}`), {
+      timeout: 3000, message: 'the previewed caret position is the committed order',
+    }).toEqual([`chat:${b.id}`, `chat:${c.id}`])
+    expect((await readWs(page)).viewMode).toBe('panes')
+  })
+
+  test('phone geometry follows the strip mounted by the single-to-Builder preview flip', async ({ page }) => {
+    const { b, c } = await bootSingleModeDrawerDrag(page, 'singleFlipPhone', PHONE)
+    const source = page.locator(`.drawer__item[data-drag-key="chat:${b.id}"]`)
+    const content = await page.locator('.shell__content').boundingBox()
+    const drawerBox = await page.locator('#navigation-drawer').boundingBox()
+    const touch = await touchDrag(
+      page, source,
+      drawerBox.x + drawerBox.width + 30,
+      content.y + content.height / 2,
+      { firstDx: 12, firstDy: 0, holdMs: 250, release: false },
+    )
+    await expect(page.locator('.drawer.drawer--open')).toHaveCount(0)
+    await expect(page.locator('[data-pane-strip="p0"]')).toBeVisible({ timeout: 3000 })
+
+    const freshTarget = page.locator(
+      `[data-pane-strip="p0"] [data-drag-key="chat:${c.id}"]`,
+    )
+    const targetBox = await freshTarget.boundingBox()
+    await touch.moveTo(targetBox.x + 2, targetBox.y + targetBox.height / 2)
+    const caret = page.locator('.workspace__drop-preview--caret.is-visible')
+    await expect(caret).toBeVisible()
+    await expectCaretAligned(page, caret, freshTarget, 'phone caret')
+    await touch.release()
+
+    await expect.poll(async () => (await readWs(page)).panes.p0.tabs
+      .map(tab => `${tab.kind}:${tab.id}`), {
+      timeout: 3000, message: 'phone commits against the strip that mounted after arm',
+    }).toEqual([`chat:${b.id}`, `chat:${c.id}`])
+    expect((await readWs(page)).viewMode).toBe('panes')
+  })
+
   test('dragging a tab to a pane edge splits (one new pane)', async ({ page }) => {
     const { c, b } = await bootThreeTab(page, 'dragEdge')
     const p1 = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()
@@ -916,7 +1110,10 @@ test.describe('Workspace drag (PR3)', () => {
     const target = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()
     const src = page.locator(`[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`)
     await touchDrag(page, src, target.x + target.width / 2, target.y + target.height / 2, {
-      holdMs: 450,
+      // Move after the shared 180ms drag stage but before the 400ms stationary
+      // menu stage. Waiting through the menu threshold correctly opens actions
+      // and therefore must not be used to model this short-hold drag.
+      holdMs: 250,
     })
     await expect.poll(
       async () => whichPaneHas(await readWs(page), `chat:${c.id}`),
@@ -935,7 +1132,7 @@ test.describe('Workspace drag (PR3)', () => {
     )
     await expect(page.locator('.shell__tab-drag-handle')).toHaveCount(0)
     await touchDrag(page, src, target.x + 2, target.y + target.height / 2, {
-      firstDx: -12, firstDy: 0, holdMs: 450,
+      firstDx: -12, firstDy: 0, holdMs: 250,
     })
     await expect.poll(async () => (await readWs(page)).panes.p0.tabs
       .map(t => `${t.kind}:${t.id}`), {
@@ -1180,6 +1377,118 @@ test.describe('Workspace view-mode toggle', () => {
     })
   })
 
+  test('a Standard round trip preserves Builder reading ownership and geometry', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'vmReadingA')
+    const b = await createTaggedChat(page, 'vmReadingB')
+    await mockApps(page, [])
+
+    const token = await page.evaluate(() => localStorage.getItem('token'))
+    const now = Date.now()
+    const messages = Array.from({ length: 36 }, (_, index) => ({
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `Workspace reading row ${index}. ${'Stable width-sensitive text. '.repeat(20)}`,
+      ts: now + index,
+      cid: index % 2 === 0 ? `workspace-reading-${index}` : undefined,
+      blocks: index % 2 === 0
+        ? []
+        : [{
+            type: 'text',
+            content: `Workspace reading row ${index}. ${'Stable width-sensitive text. '.repeat(20)}`,
+          }],
+    }))
+    const seeded = await page.request.put(`${BASE}/api/chats/${a.id}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { messages },
+      failOnStatusCode: false,
+    })
+    expect(seeded.ok()).toBe(true)
+
+    const builder = twoChatPanes(a.id, b.id)
+    await seedWorkspace(page, {
+      ...builder,
+      viewMode: 'single',
+      singleScreen: { kind: 'chat', id: String(a.id) },
+    })
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    const standardSurface = page.locator(
+      `[data-chat-world="standard"][data-chat-id="${a.id}"]`,
+    )
+    const builderSurface = page.locator(
+      `[data-chat-world="builder"][data-chat-id="${a.id}"]`,
+    )
+    await expect(standardSurface.locator('.chat__scroll')).toBeVisible({ timeout: 15000 })
+
+    // The parked Builder owner must keep the rect it will paint. Expanding it
+    // to Standard's box before its ownership cleanup changes wrapping and makes
+    // a lifecycle capture describe content the reader was not looking at.
+    const [parkedBuilderWidth, standardWidth] = await Promise.all([
+      builderSurface.evaluate(element => element.getBoundingClientRect().width),
+      standardSurface.evaluate(element => element.getBoundingClientRect().width),
+    ])
+    expect(parkedBuilderWidth).toBeLessThan(standardWidth - 100)
+
+    const brand = page.getByRole('button', { name: 'Toggle navigation' })
+    await brand.focus()
+    await page.keyboard.press('Shift+Enter')
+    await waitTiled(page)
+    const builderScroll = builderSurface.locator('.chat__scroll')
+    await expect(builderScroll).toBeVisible({ timeout: 15000 })
+
+    const previousWriteAt = await page.evaluate(
+      id => JSON.parse(localStorage.getItem('chat-reading-position') || '{}')[id]?.at || 0,
+      String(a.id),
+    )
+    await builderScroll.evaluate((scroll) => {
+      scroll.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        pointerType: 'mouse',
+      }))
+      scroll.scrollTop = Math.floor(scroll.scrollHeight / 3)
+      scroll.dispatchEvent(new PointerEvent('pointerup', {
+        bubbles: true,
+        pointerType: 'mouse',
+      }))
+    })
+    await page.waitForFunction(({ id, after }) => (
+      (JSON.parse(localStorage.getItem('chat-reading-position') || '{}')[id]?.at || 0) > after
+    ), { id: String(a.id), after: previousWriteAt })
+
+    const readBuilderState = () => page.evaluate((id) => {
+      const scroll = document.querySelector(
+        `[data-chat-world="builder"][data-chat-id="${id}"] .chat__scroll`,
+      )
+      const { at: _at, ...saved } =
+        JSON.parse(localStorage.getItem('chat-reading-position') || '{}')[id]
+      const wrapper = scroll.closest('[data-chat-world="builder"]')
+      return {
+        top: scroll.scrollTop,
+        saved,
+        width: wrapper.getBoundingClientRect().width,
+      }
+    }, String(a.id))
+    const before = await readBuilderState()
+
+    await brand.focus()
+    await page.keyboard.press('Shift+Enter')
+    await expect(standardSurface.locator('.chat__scroll'))
+      .toHaveAttribute('data-scroll-mode', 'ANCHOR_AT', { timeout: 15000 })
+    await expect(page.locator('.workspace__chrome')).toHaveCount(0)
+
+    const afterExit = await readBuilderState()
+    expect(afterExit.saved).toEqual(before.saved)
+    expect(Math.abs(afterExit.width - before.width)).toBeLessThanOrEqual(1)
+
+    await brand.focus()
+    await page.keyboard.press('Shift+Enter')
+    await waitTiled(page)
+    await expect(builderScroll).toHaveAttribute('data-scroll-mode', 'ANCHOR_AT', {
+      timeout: 15000,
+    })
+    expect(Math.abs((await builderScroll.evaluate(scroll => scroll.scrollTop)) - before.top))
+      .toBeLessThanOrEqual(8)
+  })
+
   // Regression (item 0): a genuine MULTI-PANE exit via the real POINTER-HOLD
   // completion path — the path the single-leaf keyboard verification missed — must
   // collapse the tiled workspace and STAY collapsed, and a rapid re-enter within
@@ -1379,11 +1688,7 @@ test.describe('Workspace view-mode toggle', () => {
     await page.mouse.up()
   })
 
-  // Regression (item 0): the splits KILL SWITCH must collapse a persisted 'panes'
-  // blob to single on restore. The tiled render is flag-independent but both exit
-  // controls are flag-gated, so a rolled-back client (splits off, panes blob) would
-  // otherwise restore TILED with no way to reach single — un-exitable, across reload.
-  test('(item 0) splits kill-switch collapses a persisted panes blob to single, never un-exitable tiled', async ({ page }) => {
+  test('a persisted Builder workspace restores canonically and remains exit-able', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'killA')
     const b = await createTaggedChat(page, 'killB')
@@ -1391,18 +1696,19 @@ test.describe('Workspace view-mode toggle', () => {
     const blob = paneModel.serializeWorkspace(twoChatPanes(a.id, b.id)) // viewMode 'panes'
     await page.addInitScript((wsBlob) => {
       try {
-        localStorage.setItem('mobius:workspace-splits', '0') // KILL SWITCH OFF
-        sessionStorage.setItem('mobius-workspace', wsBlob)
+        localStorage.setItem('mobius-workspace', wsBlob)
       } catch { /* private mode */ }
     }, blob)
     await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
-    await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
-    // Restored SINGLE despite the persisted 'panes' viewMode: no tiled chrome/panes.
+    await expect(page.locator('.workspace__chrome')).toHaveCount(1, { timeout: 8000 })
+    expect((await readWs(page)).viewMode).toBe('panes')
+    const brand = page.getByRole('button', { name: 'Toggle navigation' })
+    await expect(brand).toHaveClass(/shell__brand--builder/)
+
+    await brand.focus()
+    await page.keyboard.press('Shift+Enter')
+    await expect.poll(() => readWs(page).then(ws => ws.viewMode)).toBe('single')
     await expect(page.locator('.workspace__chrome')).toHaveCount(0)
-    await expect(page.locator('.shell__view--paned')).toHaveCount(0)
-    expect((await readWs(page)).viewMode).toBe('single')
-    // The logo carries no builder state either (there is no builder mode with splits off).
-    await expect(page.getByRole('button', { name: 'Toggle navigation' })).not.toHaveClass(/shell__brand--builder/)
   })
 
   // single-mode + ONE leaf: dragging stays enabled; the drop's shape decides

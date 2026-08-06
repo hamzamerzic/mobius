@@ -3,6 +3,40 @@ function normalizedId(value) {
 }
 
 /**
+ * Whether an immediate New Chat surface still owns what the user is seeing.
+ *
+ * Allocation is allowed to finish only while the route generation, layout
+ * world, and drawer-history ownership captured by the tap are unchanged. Once
+ * the destination exists, the concrete chat route is the simpler authority:
+ * it owns the cover until that ChatView reports a painted frame.
+ */
+export function newChatPresentationIsCurrent(presentation, {
+  navigationEpoch,
+  viewMode,
+  drawerEntryOpen,
+  activeView,
+  activeChatId,
+} = {}) {
+  if (!presentation || presentation.viewMode !== viewMode) return false
+  if (presentation.chatId != null) {
+    if (activeView !== 'chat') return false
+    // The concrete chat route owns the cover once it exists — but navTo bumps
+    // the epoch and commits `activeChatId` a render later, so the route is still
+    // catching up to the resolved chat for one commit. Treat that in-flight
+    // window as current: `activeChatId` already matches, OR no navigation has
+    // happened since the cover resolved (epoch unchanged). A real supersede
+    // (Back, another chat, an app) bumps the epoch past the resolved value and
+    // retires the cover. Without this the cover retires over the OUTGOING chat
+    // mid-transition, flashing it between the New chat surface and its
+    // destination.
+    return normalizedId(activeChatId) === normalizedId(presentation.chatId)
+      || presentation.navigationEpoch === navigationEpoch
+  }
+  return presentation.navigationEpoch === navigationEpoch
+    && presentation.drawerEntryOpen === !!drawerEntryOpen
+}
+
+/**
  * True only for the edge into the first-class empty single-screen surface.
  *
  * Keeping this at the workspace-dispatch boundary means every reducer action
@@ -11,9 +45,9 @@ function normalizedId(value) {
  * edge check is important: actions while the landing is already visible must
  * not manufacture new request tokens.
  */
-export function enteredEmptySingleScreen(previous, next, splitsEnabled = true) {
-  const previousSingle = !splitsEnabled || previous?.viewMode === 'single'
-  const nextSingle = !splitsEnabled || next?.viewMode === 'single'
+export function enteredEmptySingleScreen(previous, next) {
+  const previousSingle = previous?.viewMode === 'single'
+  const nextSingle = next?.viewMode === 'single'
   return nextSingle
     && next?.singleScreen == null
     && (!previousSingle || previous?.singleScreen != null)
@@ -113,11 +147,13 @@ export function createdChatDetailCache(created) {
   const detail = created?.detail
   if (!detailIsUntouchedEmptyChat(detail)) return null
   if (typeof detail.provider !== 'string') return null
+  if (!Number.isInteger(detail.offset) || detail.offset !== 0) return null
   if (!detail.effective_agent_settings
       || typeof detail.effective_agent_settings !== 'object') return null
   if (typeof detail.has_assistant_turns !== 'boolean') return null
 
   return {
+    restorationWindowComplete: true,
     updated_at: typeof detail.updated_at === 'string'
       ? detail.updated_at
       : null,

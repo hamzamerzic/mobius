@@ -8,6 +8,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { mockPendingQuestionState } from './_mockPendingQuestion.mjs'
 import { applyApp } from './app-source.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
@@ -79,7 +80,7 @@ async function waitForChatMode(page, chatId, kind, timeout = 3000) {
     () => page.evaluate(id => {
       let mode = null
       try {
-        mode = JSON.parse(sessionStorage.getItem('chat-mode') || '{}')[id] || null
+        mode = JSON.parse(localStorage.getItem('chat-reading-position') || '{}')[id] || null
       } catch {}
       return {
         kind: mode?.kind || null,
@@ -353,6 +354,7 @@ test.describe('Message rendering', () => {
     const sentBodies = []
     let answerSubmitted = false
     let followupStreamServed = false
+    let pendingQuestion
     const questionBlock = {
       type: 'question',
       question_id: 'q-color',
@@ -371,7 +373,10 @@ test.describe('Message rendering', () => {
       if (route.request().method() !== 'POST') return route.continue()
       const body = route.request().postDataJSON()
       sentBodies.push(body)
-      if (body.answers) answerSubmitted = true
+      if (body.answers) {
+        answerSubmitted = true
+        pendingQuestion.markAnswered()
+      }
       return fulfillStartedPost(route)
     })
     await page.route(/\/api\/chats\/[0-9a-f-]+\/question-answers$/, route =>
@@ -411,6 +416,7 @@ test.describe('Message rendering', () => {
         })
       }
     })
+    pendingQuestion = await mockPendingQuestionState(page, questionBlock.question_id)
 
     await page.setViewportSize({ width: 412, height: 915 })
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
@@ -464,9 +470,12 @@ test.describe('Message rendering', () => {
     // Regression: hidden flag must be passed through sendMessage
     // to the backend so question answers don't show as user bubbles.
     const sentBodies = []
+    let pendingQuestion
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
       if (route.request().method() !== 'POST') return route.continue()
-      sentBodies.push(route.request().postDataJSON())
+      const body = route.request().postDataJSON()
+      sentBodies.push(body)
+      if (body.answers) pendingQuestion.markAnswered()
       return fulfillStartedPost(route)
     })
     await page.route(/\/api\/chats\/[0-9a-f-]+\/question-answers$/, route =>
@@ -492,6 +501,7 @@ test.describe('Message rendering', () => {
             ].join(''),
       })
     })
+    pendingQuestion = await mockPendingQuestionState(page, 'q-pick-one-hidden')
 
     await page.setViewportSize({ width: 412, height: 915 })
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
@@ -520,8 +530,8 @@ test.describe('Message rendering', () => {
     await page.route('**/api/chat/stop', route =>
       route.fulfill({ status: 200, body: '{}' })
     )
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route =>
-      route.fulfill({
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route => {
+      return route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
         body: [
@@ -532,7 +542,8 @@ test.describe('Message rendering', () => {
           'data: {"type":"done"}\n\n',
         ].join(''),
       })
-    )
+    })
+    await mockPendingQuestionState(page, 'q-real-question')
 
     await page.setViewportSize({ width: 412, height: 915 })
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
@@ -657,7 +668,7 @@ test.describe('Scroll position', () => {
     // Scroll restore is only meaningful for content that survives navigation.
     // The shared POST stub creates optimistic rows only, so this test serves
     // the persisted transcript directly and keeps the invariant under test
-    // focused on the chat-mode save/restore path.
+    // focused on the durable reading-position save/restore path.
     await page.route(new RegExp(`/api/chats/${chatId}\\?limit=`), route => {
       if (route.request().method() !== 'GET') return route.continue()
       return route.fulfill({
@@ -909,7 +920,7 @@ test.describe('Scroll position', () => {
       .toBeVisible({ timeout: 10000 })
     await page.getByRole('button', { name: 'Load earlier messages' }).click()
     await page.waitForFunction(
-      () => document.querySelector('[data-key="user-1700000200010"]'),
+      () => document.querySelector('[data-key="history-cid-10"]'),
       { timeout: 5000 },
     )
     // loadOlderMessages keeps its pagination guard raised until the commit's
@@ -924,14 +935,14 @@ test.describe('Scroll position', () => {
     // this exact row+offset rather than a programmatic position.
     await page.evaluate(() => {
       const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-      const target = document.querySelector('[data-key="user-1700000200010"]')
+      const target = document.querySelector('[data-key="history-cid-10"]')
       if (!el || !target) throw new Error('missing paginated anchor target')
       el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
       el.scrollTop = target.offsetTop + 12
     })
     await page.waitForFunction(
-      id => JSON.parse(sessionStorage.getItem('chat-mode') || '{}')[id]?.key
-        === 'user-1700000200010',
+      id => JSON.parse(localStorage.getItem('chat-reading-position') || '{}')[id]?.key
+        === 'history-cid-10',
       chatId,
       { timeout: 3000 },
     )
@@ -955,7 +966,7 @@ test.describe('Scroll position', () => {
 
     const restored = await page.evaluate(() => {
       const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-      const target = document.querySelector('[data-key="user-1700000200010"]')
+      const target = document.querySelector('[data-key="history-cid-10"]')
       return {
         keyStillMounted: !!target,
         offset: target && el ? target.offsetTop - el.scrollTop : null,
@@ -967,7 +978,7 @@ test.describe('Scroll position', () => {
     expect(restored.scrollTop).toBeGreaterThan(0)
   })
 
-  test('10d. Previous-chat entry reveals authoritative history before catch-up and stays visually fixed', async ({ page }) => {
+  test('10d. Previous-chat entry stays held until catch-up, then settles without movement', async ({ page }) => {
     await setup(page, { width: 900, height: 760 })
     await newChat(page)
 
@@ -977,6 +988,8 @@ test.describe('Scroll position', () => {
     let returning = false
     let streamCount = 0
     let catchUpServed = false
+    let releaseCatchUp
+    const catchUpGate = new Promise(resolve => { releaseCatchUp = resolve })
     let returnImageServed = false
     const squarePng = Buffer.from(
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nWQAAAAASUVORK5CYII=',
@@ -1030,7 +1043,7 @@ test.describe('Scroll position', () => {
     await page.route(new RegExp(`/api/chats/${chatId}/stream$`), async route => {
       streamCount += 1
       if (streamCount > 1) return route.fulfill({ status: 204, body: '' })
-      await new Promise(resolve => setTimeout(resolve, 1200))
+      await catchUpGate
       catchUpServed = true
       return route.fulfill({
         status: 200,
@@ -1048,8 +1061,16 @@ test.describe('Scroll position', () => {
       const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       const img = document.querySelector('[data-chat-surface="painted"] .md-image')
       return !!el && getComputedStyle(el).visibility !== 'hidden'
-        && !!img?.complete && !!document.querySelector('[data-key="entry-anchor"]')
-    }, { timeout: 10000 })
+        && !!img && !!document.querySelector('[data-key="entry-anchor"]')
+    }, undefined, { timeout: 10000 })
+    // This fixture image sits after a deliberately tall prefix and therefore
+    // remains outside Chromium's native lazy-load range at the initial tail.
+    // Bring it into range before recording the settled reading coordinate.
+    await page.locator('[data-chat-surface="painted"] .md-image').scrollIntoViewIfNeeded()
+    await page.waitForFunction(() => {
+      const img = document.querySelector('[data-chat-surface="painted"] .md-image')
+      return !!img?.complete && img.naturalWidth > 0
+    }, undefined, { timeout: 10000 })
     await page.evaluate(() => {
       const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       const target = document.querySelector('[data-key="entry-anchor"]')
@@ -1062,7 +1083,7 @@ test.describe('Scroll position', () => {
       el.dispatchEvent(new Event('scroll', { bubbles: true }))
     })
     await page.waitForFunction(
-      id => JSON.parse(sessionStorage.getItem('chat-mode') || '{}')[id]?.key
+      id => JSON.parse(localStorage.getItem('chat-reading-position') || '{}')[id]?.key
         === 'entry-anchor',
       chatId,
       { timeout: 3000 },
@@ -1114,18 +1135,23 @@ test.describe('Scroll position', () => {
       history.back()
     })
 
+    await page.waitForFunction(
+      id => localStorage.getItem('moebius_active_chat') === id,
+      chatId,
+      { timeout: 3000 },
+    )
+    await expect(page.locator('.shell__chat-view--held')).toHaveCount(1)
+    expect(catchUpServed).toBe(false)
+    releaseCatchUp()
+    await expect.poll(() => catchUpServed, { timeout: 3000 }).toBe(true)
+
     await page.waitForFunction(() => {
       const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       const img = document.querySelector('[data-chat-surface="painted"] .md-image')
       return !!el && getComputedStyle(el).visibility !== 'hidden'
-        // The retained ChatView deliberately reveals its already-settled DOM
-        // immediately. Do not mistake the still-complete initial image for the
-        // delayed authoritative return image we are exercising here.
         && !!img?.src.includes('entry-image-return.png') && !!img.complete
         && !!document.querySelector('[data-key="entry-anchor"]')
     }, { timeout: 10000 })
-    expect(catchUpServed).toBe(false)
-    await expect.poll(() => catchUpServed, { timeout: 3000 }).toBe(true)
 
     const trajectory = await page.evaluate(() => window.__entryTrajectory || [])
     const visibleRows = trajectory.filter(row => row.visible)

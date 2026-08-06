@@ -55,14 +55,12 @@ test('the sole spacer owner still exists (guard is not vacuous)', () => {
     return src.includes('.spacer-dynamic') && SPACER_HEIGHT_WRITE.test(src)
   }).map(f => f.name).sort()
   assert.deepEqual(writers, [OWNER])
-})
 
-test('only the scroll owner publishes composer clearance geometry', () => {
   const write = /style\.setProperty\(\s*['"]--composer-h['"]/
-  const writers = sourceFiles(chatViewDir).filter(({ full }) => (
+  const clearanceWriters = sourceFiles(chatViewDir).filter(({ full }) => (
     write.test(readFileSync(full, 'utf8'))
   )).map(f => f.name).sort()
-  assert.deepEqual(writers, [OWNER],
+  assert.deepEqual(clearanceWriters, [OWNER],
     'composer clearance can clamp scrollTop indirectly, so route it through '
     + 'the same reader-authority gate as spacer and direct scroll writes')
 })
@@ -82,19 +80,18 @@ test('gesture scroll frames defer anchor, spacer, and persistence work until set
   )
   assert.match(
     hotPath,
-    /if \(!hasNativeScrollEnd\)[\s\S]*?setTimeout\(settleReaderScroll, GESTURE_SETTLE_MS\)/,
-    'older engines should schedule exactly one trailing-edge settlement path',
+    /clearTimeout\(readerSettleTimer\)[\s\S]*?setTimeout\(settleReaderScroll, GESTURE_SETTLE_MS\)/,
+    'every browser should have one guaranteed trailing-edge settlement path',
   )
+  assert.doesNotMatch(hotPath, /hasNativeScrollEnd/,
+    'feature detection must not trust browsers to deliver an advertised scrollend')
   assert.match(
     ownerSource,
     /addEventListener\('scrollend', settleReaderScroll/,
-    'supporting engines should settle from the browser scroll lifecycle',
+    'native scrollend should complete the same settlement path early',
   )
-  assert.match(
-    hotPath,
-    /readerScrollAtBottom\s*=\s*distanceToBottom\s*<\s*PHYSICAL_BOTTOM_EPSILON_PX/,
-    'the event must preserve explicit tail intent before live output can move it',
-  )
+  assert.match(hotPath, /atBottom:\s*distanceToBottom\s*<\s*PHYSICAL_BOTTOM_EPSILON_PX/,
+    'the intent reducer must receive each scroll frame\'s physical-tail geometry')
 
   const settleStart = ownerSource.indexOf('const settleReaderScroll = () => {')
   const settleEnd = ownerSource.indexOf(
@@ -106,7 +103,9 @@ test('gesture scroll frames defer anchor, spacer, and persistence work until set
     'reader settlement path must remain discoverable')
   assert.match(settlePath, /anchorModeFromScroll/)
   assert.match(settlePath, /modeAfterReaderGesture/)
-  assert.match(settlePath, /hasReservedTail:\s*spacerH\s*>\s*1/)
+  assert.match(settlePath, /reachedBottom:\s*settledAtBottom/)
+  assert.doesNotMatch(settlePath, /spacerH|hasReservedTail/,
+    'physical-bottom intent must not branch on invisible reservation')
   assert.match(settlePath, /persistMode\(\)/)
   assert.match(settlePath, /sizeSpacer\(currentAuthority\(\)\)/)
   assert.doesNotMatch(settlePath, /PIN_USER_MSG|contentHoldModeFromScroll/,
@@ -118,7 +117,7 @@ test('gesture scroll frames defer anchor, spacer, and persistence work until set
   )
 })
 
-test('every automatic geometry owner shares the reader-generation gate', () => {
+test('automatic geometry owners and newer semantic actions share reader authority', () => {
   const writeStart = ownerSource.indexOf('const writeMode = useCallback(')
   const writeEnd = ownerSource.indexOf('const persistMode =', writeStart)
   const writePath = ownerSource.slice(writeStart, writeEnd)
@@ -147,14 +146,14 @@ test('every automatic geometry owner shares the reader-generation gate', () => {
   assert.match(terminalPath, /scrollAuthorityAllowsCommit/,
     'terminal rAF work must reject a later reader generation')
 
-  const hotStart = ownerSource.indexOf('const onScroll = () => {')
-  const hotEnd = ownerSource.indexOf(
+  const readerHotStart = ownerSource.indexOf('const onScroll = () => {')
+  const readerHotEnd = ownerSource.indexOf(
     "scrollEl.addEventListener('scroll', onScroll",
-    hotStart,
+    readerHotStart,
   )
-  const hotPath = ownerSource.slice(hotStart, hotEnd)
+  const readerHotPath = ownerSource.slice(readerHotStart, readerHotEnd)
   assert.match(
-    hotPath,
+    readerHotPath,
     /readerIntentAfterScroll\(\{/,
     'actual scrolls must claim generations by input sequence, not quiet batch',
   )
@@ -163,9 +162,7 @@ test('every automatic geometry owner shares the reader-generation gate', () => {
   assert.match(terminalPath, /requestAnimationFrame\(inspectCommittedLayout\)/,
     'terminal settlement must wait through a no-scroll tap instead of retiring pin')
   assert.doesNotMatch(terminalPath, /terminal:reader-owns/)
-})
 
-test('newer semantic actions cannot be overwritten by an older quiet settlement', () => {
   const supersedeStart = ownerSource.indexOf(
     'const supersedePendingReaderGesture =',
   )
@@ -217,4 +214,22 @@ test('newer semantic actions cannot be overwritten by an older quiet settlement'
   const hotPath = ownerSource.slice(hotStart, hotEnd)
   assert.match(hotPath, /if \(disclosureInputOwnsGesture\) return/,
     'layout scrolls caused by a disclosure must not create a stale reader settle')
+  assert.match(
+    ownerSource,
+    /const onPointerCancelInput = \(\) => \{[\s\S]*?disclosureInputOwnsGesture = false[\s\S]*?addEventListener\('pointercancel', onPointerCancelInput/,
+    'a disclosure press promoted to a native pan must become reader-owned scroll',
+  )
+
+  const composerStart = ownerSource.indexOf('const runComposerTailIntent =')
+  const composerEnd = ownerSource.indexOf('const noteScrollStart =', composerStart)
+  const composerPath = ownerSource.slice(composerStart, composerEnd)
+  assert.ok(composerStart >= 0 && composerEnd > composerStart,
+    'composer tail intent must remain inside the scroll owner')
+  assert.match(composerPath, /composerTailIntentRequestsFollow\(event, scrollEl\)/,
+    'composer focus/edit may follow only after checking pre-resize tail geometry')
+  assert.ok(
+    composerPath.indexOf('supersedePendingReaderGesture()')
+      < composerPath.indexOf("transitionMode({ kind: 'FOLLOW_BOTTOM' }"),
+    'composer intent must retire an older gesture before keyboard follow begins',
+  )
 })

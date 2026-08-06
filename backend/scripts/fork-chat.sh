@@ -51,7 +51,7 @@ proj_dir="-$(echo "$DATA_DIR" | sed 's#^/##; s#/#-#g')"
 transcript_exists() { [[ -n "$1" && -f "$CLAUDE_CONFIG_DIR/projects/$proj_dir/$1.jsonl" ]]; }
 
 # The chat's recent transcript tail (last N messages), the seed for the
-# reseed fallbacks. (python3; the container has no sqlite3 CLI.)
+# reseed fallbacks. Python keeps the message-boundary handling explicit.
 #
 # Boundary-safe by construction: the old `tail -c 8000` sliced the messages
 # JSON mid-object / mid-UTF-8 while labeling the result "recent messages as

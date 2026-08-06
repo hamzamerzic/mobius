@@ -28,7 +28,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import app_git
+from app import app_git, platform_activation
 from app import platform_update as pu
 from app import release_channel
 
@@ -1060,6 +1060,15 @@ async def test_apply_restarts_and_rebuilds_when_update_touches_backend(
 
   monkeypatch.setattr(pu, "_reconcile_under_lock", fake_reconcile)
   monkeypatch.setattr(pu, "_rebuild_frontend_after_update_if_needed", fake_rebuild)
+  # Owner Apply is independent of an image-managed boot channel. A missing
+  # build-info file would make any accidental release-channel lookup fail.
+  monkeypatch.setenv(
+    release_channel.PLATFORM_RELEASE_REF_ENV,
+    "refs/heads/release/external-recovery",
+  )
+  monkeypatch.setattr(
+    release_channel, "BUILD_INFO_PATH", platform / "missing-build-info.json",
+  )
 
   res = await pu.apply_platform_update(
     SimpleNamespace(), **_apply_plan(served, new, platform),
@@ -1068,6 +1077,7 @@ async def test_apply_restarts_and_rebuilds_when_update_touches_backend(
   # A backend change (mixed with frontend) still restarts AND rebuilds.
   assert res["state"] == pu.PlatformUpdateState.RESTART_NEEDED.value
   assert res["needs_restart"] is True
+  assert res["activation"]["level"] == "server_restart"
   assert calls == [(platform, new)]
 
 
@@ -1111,7 +1121,17 @@ async def test_platform_conflict_resolver_chat_is_click_gated(
   origin, platform = clone_env
   target = _advance_origin(origin, edits={"backend/app/main.py":
     _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'UPSTREAM'")})
-  pu._write_conflict_flag(target, ["backend/app/main.py"])
+  pu._fetch(platform)
+  # Legacy/incomplete flags fall back to moving origin/main even when boot is
+  # managed. No baked build identity is needed on this owner-triggered path.
+  pu._write_conflict_flag(None, ["backend/app/main.py"])
+  monkeypatch.setenv(
+    release_channel.PLATFORM_RELEASE_REF_ENV,
+    "refs/heads/release/external-recovery",
+  )
+  monkeypatch.setattr(
+    release_channel, "BUILD_INFO_PATH", platform / "missing-build-info.json",
+  )
   calls = []
 
   async def fake_spawn(db, paths, target_sha, merge_base):
@@ -1221,39 +1241,37 @@ async def test_apply_marks_restart_when_disk_already_ahead_of_running_backend(
 
   assert res["state"] == pu.PlatformUpdateState.RESTART_NEEDED.value
   assert res["needs_restart"] is True
-  assert pu.RESTART_NEEDED_FLAG.read_text() == head
+  assert pu._read_activation_marker() == {
+    "target_sha": head,
+    "paths": ["backend/app/main.py"],
+  }
 
 
-# --- path-aware restart classifier (backend/app change → restart; else not) --
+# --- path-aware activation classifier ---------------------------------------
 
-def test_paths_need_restart_classifier():
-  assert pu._paths_need_restart(["backend/app/main.py"]) is True
-  assert pu._paths_need_restart(["backend/app/routes/apps.py", "docs/x.md"]) is True
-  # a backend RUNTIME file outside backend/app/ (root module, deps) also restarts
-  assert pu._paths_need_restart(["backend/config_helper.py"]) is True
-  assert pu._paths_need_restart(["backend/requirements.txt"]) is True
-  assert pu._paths_need_restart(["backend/requirements.lock"]) is True
-  # the platform constitution is process-cached even though it is not Python
-  assert pu._paths_need_restart(["skill/core.md"]) is True
-  # a rename OUT of backend/app (with --no-renames the delete side shows) restarts
-  assert pu._paths_need_restart(
-    ["docs/admin.py", "backend/app/routes/admin.py"]) is True
-  # non-backend-runtime paths never force a restart of the served uvicorn
-  assert pu._paths_need_restart([
-    "frontend/src/App.jsx", "tests/foo.spec.mjs", "backend/tests/test_x.py",
-    "backend/scripts/memory_search.py", "backend/recovery_target/targetd.py",
-    "backend/runtime/restart_ledger.py",
-    "backend/memeval/systems.py", "docs/y.md", "README.md",
-  ]) is False
-  assert pu._paths_need_restart([]) is False
-  # a path merely CONTAINING backend/app/ but not under it is not runtime code
-  assert pu._paths_need_restart(["docs/backend/app/notes.md"]) is False
-  assert pu._paths_need_restart(["skill/building-apps.md"]) is False
+def test_platform_update_uses_explicit_activation_levels():
+  classify = platform_activation.classify_activation
+  assert classify(["backend/app/main.py"])["level"] == \
+    "server_restart"
+  assert classify(["backend/config_helper.py"])["level"] == \
+    "server_restart"
+  assert classify(["skill/core.md"])["level"] == \
+    "server_restart"
+  assert classify(["backend/requirements.txt"])["level"] == \
+    "image_rebuild"
+  assert classify(["backend/scripts/entrypoint.sh"])["level"] == \
+    "image_rebuild"
+  assert classify(["Caddyfile"])["level"] == "proxy_reload"
+  assert classify(["frontend/src/App.jsx"])["level"] == "live"
+  assert classify(["backend/tests/test_x.py"])["level"] == "live"
+  assert classify(["docs/backend/app/notes.md"])["level"] == "live"
 
 
 def test_import_probe_classifier_excludes_constitution_only_change():
-  assert pu._paths_need_import_probe(["skill/core.md"]) is False
-  assert pu._paths_need_import_probe([
+  assert platform_activation.backend_import_probe_required(
+    ["skill/core.md"]
+  ) is False
+  assert platform_activation.backend_import_probe_required([
     "skill/core.md", "backend/app/chat.py",
   ]) is True
 
@@ -1286,7 +1304,7 @@ def test_changed_paths_no_renames_surfaces_deleted_backend(clone_env):
 
   paths = pu._changed_paths(platform, before, after)
   assert "backend/app/main.py" in paths  # delete side present
-  assert pu._tree_change_needs_restart(platform, before, after) is True
+  assert platform_activation.classify_activation(paths)["level"] == "server_restart"
 
 
 def test_empty_commit_does_not_force_restart(clone_env):
@@ -1297,18 +1315,18 @@ def test_empty_commit_does_not_force_restart(clone_env):
 
   assert before != after
   assert pu._changed_paths(platform, before, after) == []  # genuine empty diff
-  assert pu._tree_change_needs_restart(platform, before, after) is False
+  assert pu._activation_paths_between(platform, before, after) == []
 
 
-def test_tree_change_needs_restart_fails_closed_on_missing_sha(clone_env):
+def test_activation_paths_fail_closed_on_missing_sha(clone_env):
   origin, platform = clone_env
   served = _served_sha(platform)
   # one side unknown → can't prove no backend change → restart (fail closed)
-  assert pu._tree_change_needs_restart(platform, served, None) is True
-  assert pu._tree_change_needs_restart(platform, None, served) is True
+  assert pu._activation_paths_between(platform, served, None) == ["backend/app"]
+  assert pu._activation_paths_between(platform, None, served) == ["backend/app"]
   # both missing / equal → nothing changed
-  assert pu._tree_change_needs_restart(platform, None, None) is False
-  assert pu._tree_change_needs_restart(platform, served, served) is False
+  assert pu._activation_paths_between(platform, None, None) == []
+  assert pu._activation_paths_between(platform, served, served) == []
 
 
 def test_status_no_restart_when_only_frontend_changed(clone_env):
@@ -1341,11 +1359,44 @@ def test_status_no_restart_when_only_tests_changed(clone_env):
   assert status["state"] == pu.PlatformUpdateState.UP_TO_DATE.value
 
 
+def test_status_requires_image_instead_of_offering_restart_for_dependencies(
+  clone_env,
+):
+  _, platform = clone_env
+  served = _served_sha(platform)
+  pu.SERVING_SOURCE_FILE.write_text("platform\n")
+  pu.SERVING_SHA_FILE.write_text(served + "\n")
+  _local_commit(platform, edits={"backend/requirements.txt": "new-package==1\n"})
+
+  status = pu.platform_status(platform)
+
+  assert status["state"] == pu.PlatformUpdateState.ACTIVATION_NEEDED.value
+  assert status["needs_restart"] is False
+  assert status["activation"]["level"] == "image_rebuild"
+
+
+def test_boot_clears_restart_but_preserves_unverified_image_work(clone_env):
+  _, platform = clone_env
+  target = _served_sha(platform)
+  pu.mark_activation_needed(
+    target,
+    ["backend/app/main.py", "backend/requirements.lock"],
+  )
+
+  res = pu.reconcile_clone(platform, at_boot=True)
+
+  assert res.status == "up_to_date"
+  assert pu._read_activation_marker() == {
+    "target_sha": target,
+    "paths": ["backend/requirements.lock"],
+  }
+
+
 # --- restart flag lifecycle -------------------------------------------------
 
 def test_boot_reconcile_clears_restart_flag(clone_env):
   origin, platform = clone_env
-  pu.mark_restart_needed("some-sha")
+  pu.mark_activation_needed("some-sha", ["backend/app"])
   assert pu.RESTART_NEEDED_FLAG.exists()
   # A boot with no new deploy is up_to_date; a boot IS the restart the flag asks
   # for, so it clears (the fresh process serves the on-disk code).
@@ -1356,7 +1407,7 @@ def test_boot_reconcile_clears_restart_flag(clone_env):
 
 def test_non_boot_reconcile_keeps_restart_flag(clone_env):
   origin, platform = clone_env
-  pu.mark_restart_needed("some-sha")
+  pu.mark_activation_needed("some-sha", ["backend/app"])
   # An owner-apply reconcile (at_boot=False) must NOT clear the flag on an
   # up-to-date pass — the running process is unchanged.
   res = pu.reconcile_clone(platform, at_boot=False)
@@ -1372,7 +1423,7 @@ def test_non_boot_reconcile_keeps_restart_flag(clone_env):
 
 def test_offline_boot_clears_stale_restart_flag(clone_env):
   origin, platform = clone_env
-  pu.mark_restart_needed("some-sha")
+  pu.mark_activation_needed("some-sha", ["backend/app"])
   assert pu.RESTART_NEEDED_FLAG.exists()
   # Force the fetch to fail so the reconcile returns 'offline' BEFORE reaching any
   # success/up-to-date branch — the flag must still clear (the boot IS the restart
@@ -1507,6 +1558,23 @@ def test_update_preview_clean_fast_forward(clone_env):
   assert "backend/app/main.py" in changed
   assert "LINE_C = 300" in preview["diff"]
   assert preview["diff_truncated"] is False
+  assert preview["activation"]["level"] == "server_restart"
+
+
+def test_update_preview_warns_before_dependency_update_is_applied(clone_env):
+  origin, platform = clone_env
+  _advance_origin(
+    origin,
+    edits={"backend/requirements.lock": "locked dependency bytes\n"},
+    msg="change image dependency",
+  )
+  pu._fetch(platform)
+
+  preview = pu.platform_update_preview(platform)
+
+  assert preview["activation"]["level"] == "image_rebuild"
+  assert "Restart cannot" not in " ".join(preview["activation"]["guidance"])
+  assert "rebuild the image" in " ".join(preview["activation"]["guidance"])
 
 
 def test_update_preview_excludes_local_edits(clone_env):
@@ -1706,7 +1774,10 @@ async def test_frontend_build_failure_rolls_back_source_and_is_not_success(
 
   assert result["state"] == pu.PlatformUpdateState.ROLLED_BACK.value
   assert result["phase"] == pu.PlatformUpdatePhase.BLOCKED.value
-  assert result["needs_restart"] is False
+  # The failed newer release does not erase activation already pending before
+  # this Apply attempt.
+  assert result["needs_restart"] is True
+  assert result["activation"]["level"] == "server_restart"
   assert result["upstream_commit"] == target
   assert result["merge_commit"] is None
   assert _served_sha(platform) == before
@@ -1723,7 +1794,8 @@ async def test_frontend_build_failure_rolls_back_source_and_is_not_success(
   assert "frontend_build_failed" in progress["error"]
 
 
-def test_stack_release_migrates_persisted_main_to_baked_sha_and_keeps_local_edits(
+@pytest.mark.asyncio
+async def test_stack_release_boot_is_exact_while_owner_updates_follow_main(
   clone_env, monkeypatch, tmp_path,
 ):
   origin, platform = clone_env
@@ -1777,20 +1849,56 @@ def test_stack_release_migrates_persisted_main_to_baked_sha_and_keeps_local_edit
   assert not pu._is_ancestor(platform, newer_sha, "main")
   assert "managed_release[ready]" in pu.managed_release_ready_sync()
 
+  # The release channel above is a boot-only constraint. Owner status follows
+  # origin/main, which is already contained in the release-derived local tree.
   status = pu.platform_status(platform)
-  assert status["contained_upstream_sha"] == baked_sha
-  assert status["updates_disabled"] is True
-  assert status["release_ref"] == release_ref
-  with pytest.raises(
-    pu.PlatformUpdateError,
-    match="platform_updates_managed_by_release_channel",
-  ):
-    pu.check_for_updates(platform)
-  with pytest.raises(
-    pu.PlatformUpdateError,
-    match="platform_updates_managed_by_release_channel",
-  ):
-    pu.platform_update_preview(platform)
+  original_main = pu._rev(platform, pu.DEFAULT_TARGET_REF)
+  assert status["contained_upstream_sha"] == original_main
+  assert status["available"] is False
+  assert "updates_disabled" not in status
+
+  # A later main release is visible, reviewable, and applicable without
+  # changing the managed image's exact boot target. Model the real protected
+  # stack clone: its configured default fetch refspec does not include main, so
+  # the owner check must request main explicitly.
+  _git(platform, "config", "--unset-all", "remote.origin.fetch")
+  _git(
+    platform, "config", "--add", "remote.origin.fetch",
+    f"+{release_ref}:refs/remotes/origin/{release_branch}",
+  )
+  _git(work, "checkout", "-q", "main")
+  owner_target = _advance_origin(
+    origin,
+    edits={"owner-update.txt": "available from Settings\n"},
+    msg="owner-visible main update",
+  )
+  checked = pu.check_for_updates(platform)
+  assert pu._rev(platform, pu.DEFAULT_TARGET_REF) == owner_target
+  assert checked["available"] is True
+  assert checked["contained_upstream_sha"] == baked_sha
+
+  preview = pu.platform_update_preview(platform)
+  assert preview["available"] is True
+  assert preview["target_sha"] == owner_target
+  result = await pu.apply_platform_update(
+    SimpleNamespace(),
+    plan_id=preview["plan_id"],
+    current_sha=preview["current_sha"],
+    target_sha=preview["target_sha"],
+    repo=platform,
+  )
+
+  assert result["state"] in {
+    pu.PlatformUpdateState.UP_TO_DATE.value,
+    pu.PlatformUpdateState.RESTART_NEEDED.value,
+  }
+  assert (platform / "owner-update.txt").read_text() == (
+    "available from Settings\n"
+  )
+  assert pu._is_ancestor(platform, owner_target, "main")
+  assert pu._is_ancestor(platform, baked_sha, "main")
+  assert pu.recorded_upstream_sha(platform) == owner_target
+  assert "managed_release[ready]" in pu.managed_release_ready_sync()
 
 
 def test_release_channel_rejects_baked_sha_outside_fetched_ref_without_mutation(

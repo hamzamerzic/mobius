@@ -48,14 +48,100 @@ esac
 . /app/scripts/agent_sudo.sh
 configure_agent_sudo "${MOBIUS_AGENT_SUDO:-1}" || exit $?
 
-# Stop cron on container shutdown so it doesn't orphan processes.
-cleanup() { kill "$(cat /var/run/crond.pid 2>/dev/null)" 2>/dev/null; }
+# Stop boot-time background services if the shell is terminated before it
+# hands pid 1 to the application server.
+cleanup() {
+  kill "$(cat /var/run/crond.pid 2>/dev/null)" 2>/dev/null
+  if [ -n "${_live_recovery_target_pid:-}" ]; then
+    kill "$_live_recovery_target_pid" 2>/dev/null
+  fi
+  if [ -n "${_live_recovery_attach_ready_file:-}" ]; then
+    rm -f -- "$_live_recovery_attach_ready_file"
+  fi
+}
 trap cleanup TERM INT
 
 # Ensure /data and key subdirectories exist and are writable by mobius.
 # Railway (and similar platforms) mount a fresh volume at /data owned by
 # root — the dirs from the Dockerfile are replaced by the empty mount.
 mkdir -p /data/db /data/apps /data/app-secrets /data/compiled /data/shared /data/logs /data/cron-logs /data/cli-auth /data/agent-browser-profiles /data/platform /data/run
+
+# When the launcher provisions its Ed25519 verifier, attach the immutable
+# recovery target to this normal boot on the private target port. The ordinary
+# Mobius app continues booting below; signed, short-lived request capabilities
+# authorize recovery without changing MOBIUS_BOOT_MODE or restarting it into a
+# mutually exclusive recovery container.
+if [ -n "${MOBIUS_RECOVERY_CAPABILITY_PUBLIC_KEY:-}" ]; then
+  _live_recovery_target_port=${MOBIUS_RECOVERY_TARGET_PORT:-18002}
+  _live_recovery_target_enabled=1
+  _live_recovery_target_disable_reason="invalid or public-conflicting port"
+  case "$_live_recovery_target_port" in
+    ''|*[!0-9]*) _live_recovery_target_enabled=0 ;;
+    *)
+      if [ "${#_live_recovery_target_port}" -gt 5 ]; then
+        _live_recovery_target_enabled=0
+      elif [ "$_live_recovery_target_port" -lt 1 ] \
+        || [ "$_live_recovery_target_port" -gt 65535 ]; then
+        _live_recovery_target_enabled=0
+      elif [ "$_live_recovery_target_port" -eq "${PORT:-8000}" ] 2>/dev/null \
+        || { [ -n "${MOBIUS_PORT:-}" ] \
+          && [ "$_live_recovery_target_port" -eq "$MOBIUS_PORT" ] 2>/dev/null; }; then
+        _live_recovery_target_enabled=0
+      fi
+      ;;
+  esac
+  if [ "$_live_recovery_target_enabled" -eq 1 ]; then
+    _live_recovery_boot_id=$(python3 -I -c \
+      'import secrets; print(secrets.token_urlsafe(24))') \
+      || _live_recovery_target_enabled=0
+    case "${_live_recovery_boot_id:-}" in
+      *[!A-Za-z0-9_-]*|'') _live_recovery_target_enabled=0 ;;
+    esac
+    if [ "${#_live_recovery_boot_id}" -ne 32 ]; then
+      _live_recovery_target_enabled=0
+    fi
+    if [ "$_live_recovery_target_enabled" -eq 1 ]; then
+      _live_recovery_attach_ready_file=$(mktemp \
+        /tmp/mobius-recovery-attach-ready.XXXXXX) \
+        || _live_recovery_target_enabled=0
+    fi
+    if [ "$_live_recovery_target_enabled" -ne 1 ]; then
+      _live_recovery_target_disable_reason="could not allocate boot attachment identity"
+    fi
+  fi
+  # The verifier is public, but the application and agent do not need it.
+  # Retain it only until the target has inherited its startup environment.
+  if [ "$_live_recovery_target_enabled" -eq 1 ]; then
+    # Do not leak app/SSO/provider secrets (or restored empty legacy recovery
+    # variables) into the privileged target's initial /proc environment.
+    env -i \
+      HOME=/root \
+      PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+      LANG="${LANG:-C.UTF-8}" \
+      DATA_DIR=/data \
+      MOBIUS_BOOT_MODE=normal \
+      MOBIUS_RECOVERY_CAPABILITY_PUBLIC_KEY="$MOBIUS_RECOVERY_CAPABILITY_PUBLIC_KEY" \
+      MOBIUS_RECOVERY_TARGET_PORT="$_live_recovery_target_port" \
+      MOBIUS_RECOVERY_BOOT_ID="$_live_recovery_boot_id" \
+      MOBIUS_RECOVERY_ATTACH_READY_FILE="$_live_recovery_attach_ready_file" \
+      MOBIUS_INSTANCE_ID="${MOBIUS_INSTANCE_ID:-}" \
+      RAILWAY_DEPLOYMENT_ID="${RAILWAY_DEPLOYMENT_ID:-}" \
+      python3 -I /app/recovery-target/targetd.py &
+    _live_recovery_target_pid=$!
+  else
+    if [ -n "${_live_recovery_attach_ready_file:-}" ]; then
+      rm -f -- "$_live_recovery_attach_ready_file"
+      unset _live_recovery_attach_ready_file
+    fi
+    unset _live_recovery_boot_id
+    echo "WARNING: live recovery target disabled: ${_live_recovery_target_disable_reason}; normal Möbius boot will continue." >&2
+  fi
+  unset MOBIUS_RECOVERY_CAPABILITY_PUBLIC_KEY MOBIUS_RECOVERY_BOOT_ID
+  unset MOBIUS_RECOVERY_ATTACH_READY_FILE
+  unset _live_recovery_target_disable_reason _live_recovery_target_enabled
+  unset _live_recovery_target_port
+fi
+
 # Retire embedded-recovery authority before any persisted platform code can be
 # imported. These credentials and the pending sentinel have no consumer after
 # the external cutover; preserving them would leave dormant authority on old
@@ -1132,6 +1218,7 @@ agent-browser-profiles/
 generated/
 logs/
 cron-logs/
+/run/
 # Memory is an optional system app, but while installed it owns a durable Git
 # repository here. Keep the outer /data safety-net repo from treating that
 # repository as an untracked submodule; Memory owns its history directly.
@@ -1392,6 +1479,17 @@ else
   _start_cmd="umask 022 && export PYTHONDONTWRITEBYTECODE=1"
   _start_cmd="$_start_cmd && cd $_serve_workdir"
   _start_cmd="$_start_cmd && exec $_env_scrub uvicorn app.main:app $_uvicorn_flags"
+fi
+
+# Entrypoint initialization is complete. Publish the exact per-container boot
+# identity immediately before handing pid 1 to uvicorn. This releases repair
+# attachment even if the application later starts degraded or fails its health
+# endpoint, while still preventing repair from racing boot-time mutations.
+if [ -n "${_live_recovery_attach_ready_file:-}" ]; then
+  if ! printf 'ready:%s\n' "$_live_recovery_boot_id" \
+    > "$_live_recovery_attach_ready_file"; then
+    echo "WARNING: live recovery attach readiness could not be published." >&2
+  fi
 fi
 
 exec su -s /bin/sh mobius -c \

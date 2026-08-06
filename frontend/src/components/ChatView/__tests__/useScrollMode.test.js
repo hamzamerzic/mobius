@@ -11,19 +11,19 @@ import {
   _scrollModeForDiagnostics,
   _validateSavedMode,
   applyMode,
+  anchorModeFromScroll,
   bottomAnchorModeFromScroll,
   contentHoldModeFromScroll,
+  composerTailIntentRequestsFollow,
+  delayedSendWillPin,
   gestureLayoutRetryDelay,
   isNearContentBottom,
-  isNearScrollBottom,
   layoutMayOwnScroll,
   modeForChatExit,
   modeForDisclosureToggle,
   modeForForegroundReturn,
   modeForQuestionSubmission,
-  modeForQuestionEditingViewportChange,
   modeForQueuedSubmission,
-  modeForViewportChange,
   modeAfterReaderGesture,
   modeAfterSpacerResize,
   modeAfterTerminalLayout,
@@ -151,6 +151,36 @@ test('shouldPinSend trusts bottom geometry even when mode is a stale hold', () =
   }), true)
 })
 
+test('delayed visibility preserves queue-time pin intent until the reader moves', () => {
+  const bottomAtQueueTime = {
+    willPin: true,
+    readerIntentVersion: 7,
+  }
+  assert.equal(delayedSendWillPin({
+    previousIntent: bottomAtQueueTime,
+    readerIntentVersion: 7,
+    // Opening the tray changed the viewport and made a later geometry snapshot
+    // look away from the tail, but the reader did not move.
+    willPinNow: false,
+  }), true)
+
+  assert.equal(delayedSendWillPin({
+    previousIntent: { willPin: false, readerIntentVersion: 7 },
+    readerIntentVersion: 7,
+    // Tray collapse can also make old content appear near the tail; layout
+    // alone must not manufacture a pin for somebody reading above it.
+    willPinNow: true,
+  }), false)
+
+  assert.equal(delayedSendWillPin({
+    previousIntent: bottomAtQueueTime,
+    // A real scroll advanced the generation, so Fast-forward-time geometry is
+    // now the newer intent and must win over the queued snapshot.
+    readerIntentVersion: 8,
+    willPinNow: false,
+  }), false)
+})
+
 test('layout writes yield from first input through gesture settlement', () => {
   assert.equal(layoutMayOwnScroll(Number.POSITIVE_INFINITY, 999_999), false,
     'a delayed first scroll or active momentum keeps reader ownership')
@@ -173,6 +203,42 @@ test('only scrolling keys claim reader ownership', () => {
   assert.equal(readerInputMayScroll('keydown', 'Tab'), true)
   assert.equal(readerInputMayScroll('wheel'), true)
   assert.equal(readerInputMayScroll('touchmove'), true)
+})
+
+test('a composer press or direct edit requests follow only at the physical tail', () => {
+  const composer = { matches: selector => selector === 'textarea.chat__input' }
+  const otherControl = { matches: () => false }
+  const atTail = makeScrollEl({
+    scrollHeight: 2000,
+    scrollTop: 1200,
+    clientHeight: 800,
+  })
+  const aboveTail = makeScrollEl({
+    scrollHeight: 2000,
+    scrollTop: 1000,
+    clientHeight: 800,
+  })
+
+  assert.equal(composerTailIntentRequestsFollow({
+    type: 'pointerdown', button: 0, target: composer,
+  }, atTail), true)
+  assert.equal(composerTailIntentRequestsFollow({
+    type: 'input', target: composer,
+  }, atTail), true, 'paste/typing can express tail intent without a new pointer event')
+  assert.equal(composerTailIntentRequestsFollow({
+    type: 'input', target: composer,
+  }, aboveTail), false,
+    'composer focus must preserve an older reading position')
+  assert.equal(composerTailIntentRequestsFollow({
+    type: 'pointerdown', button: 1, target: composer,
+  }, atTail), false,
+    'non-primary presses do not express writing intent')
+  assert.equal(composerTailIntentRequestsFollow({
+    type: 'input', target: otherControl,
+  }, atTail), false)
+  assert.equal(composerTailIntentRequestsFollow({
+    type: 'change', target: composer,
+  }, atTail), false, 'unrelated form events do not claim scroll ownership')
 })
 
 test('disclosure activation is recognized as an anchor-latching reading action', () => {
@@ -289,7 +355,7 @@ test('only provably clamped wheel and keyboard input gets a next-frame release',
   assert.equal(readerInputNeedsFrameRelease('touchmove'), false)
 })
 
-test('touch input never reads scroll geometry, so it cannot force a layout', () => {
+test('the no-scroll release classifier never reads touch geometry', () => {
   // The geometry thunk performs layout-forcing DOM reads (scrollHeight on an
   // unvirtualized transcript). Only the wheel branch consumes them, so any
   // input type that short-circuits before that branch must never invoke it.
@@ -333,6 +399,15 @@ test('reader-input tracing never measures the transcript at gesture start', () =
     scrollModeSource,
     /reader:scroll-start', \{ captureGeometry: false \}/,
     'the first compositor scroll frame must not force transcript layout',
+  )
+  const onScroll = scrollModeSource.slice(
+    scrollModeSource.indexOf('const onScroll = () =>'),
+    scrollModeSource.indexOf("scrollEl.addEventListener('scroll', onScroll"),
+  )
+  assert.ok(
+    onScroll.indexOf('if (!userDriven)')
+      < onScroll.indexOf('const distanceToBottom'),
+    'browser clamps must return before measuring reader-owned tail intent',
   )
 })
 
@@ -465,21 +540,10 @@ test('isNearContentBottom uses the same phantom-spacer bottom contract', () => {
     spacerHeight: 400,
   })
   assert.equal(isNearContentBottom(scrollEl), true)
-  assert.equal(isNearScrollBottom(scrollEl), false,
-    'middle of reserved spacer is not true scroll bottom')
-})
-
-test('physical-bottom geometry uses only a rounding epsilon', () => {
-  assert.equal(isNearScrollBottom(makeScrollEl({
-    scrollHeight: 2000,
-    scrollTop: 1497,
-    clientHeight: 500,
-  }), 4), true)
-  assert.equal(isNearScrollBottom(makeScrollEl({
-    scrollHeight: 2000,
-    scrollTop: 1495,
-    clientHeight: 500,
-  }), 4), false)
+  assert.ok(
+    scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight > 50,
+    'the meaningful content tail does not require traversing reserved room',
+  )
 })
 
 test('pin reapply is needed when the first pin was clamped but spacer now makes the target reachable', () => {
@@ -586,6 +650,26 @@ test('anchor reapply fires when the anchor row shifted since the last apply', ()
   )
 })
 
+test('a promoted assistant still resolves its live transcript-position alias', () => {
+  const row = { offsetTop: 1000 }
+  const scrollEl = {
+    scrollHeight: 2000,
+    scrollTop: 500,
+    clientHeight: 700,
+    querySelector(selector) {
+      return selector === '[data-anchor-key="assistant-12"]' ? row : null
+    },
+  }
+
+  assert.equal(_anchorReapplyNeeded(
+    scrollEl,
+    { kind: 'ANCHOR_AT', key: 'assistant-12', offset: 40 },
+    1000,
+  ), true, 'terminal layout can repair the held viewport through the alias')
+  applyMode(scrollEl, { kind: 'ANCHOR_AT', key: 'assistant-12', offset: 40 })
+  assert.equal(scrollEl.scrollTop, 960)
+})
+
 test('anchor reapply fires when scrollTop was clamped short but the target is now reachable', () => {
   // target = 1000 - 40 = 960; maxScrollTop = 2000 - 700 = 1300 ≥ 960 reachable;
   // scrollTop 500 < 960 → clamped short.
@@ -640,51 +724,26 @@ test('anchor reapply is inert for non-anchor modes and unresolved keys', () => {
   )
 })
 
-test('viewport resize never turns a pin into auto-scroll without a gesture', () => {
-  const stalePin = { kind: 'PIN_USER_MSG', cid: 'c-123' }
-  assert.equal(
-    modeForViewportChange(stalePin, true),
-    stalePin,
+test('viewport resize reapplies the current mode without reclassifying it', () => {
+  assert.match(
+    scrollModeSource,
+    /applyLayoutMode\('layout:viewport-change', authorityVersion\)/,
+    'keyboard geometry keeps the existing pin, follow, or exact anchor',
   )
-})
-
-test('question editing rebases only an ordinary held viewport to native caret movement', () => {
-  const staleHold = { kind: 'ANCHOR_AT', key: 'before-edit', offset: 20 }
-  const caretHold = { kind: 'ANCHOR_AT', key: 'question-row', offset: 84 }
-  assert.equal(
-    modeForQuestionEditingViewportChange(staleHold, caretHold),
-    caretHold,
-    'the visible caret-adjusted position becomes the new ordinary hold',
+  assert.doesNotMatch(
+    scrollModeSource,
+    /transitionMode\(\s*modeRef\.current,\s*'layout:viewport-change'/,
+    'geometry must not manufacture a semantic no-op transition',
   )
-
-  for (const strongerMode of [
-    { kind: 'PIN_USER_MSG', cid: 'c-1' },
-    { kind: 'HOLD_RESERVED_TAIL', cid: 'c-1' },
-    { kind: 'FOLLOW_BOTTOM' },
-    {
-      kind: 'ANCHOR_AT',
-      key: 'question-row',
-      offset: 84,
-      questionSubmitViewportH: 600,
-      questionSubmitBaseMode: { kind: 'FOLLOW_BOTTOM' },
-    },
-  ]) {
-    assert.equal(
-      modeForQuestionEditingViewportChange(strongerMode, caretHold),
-      strongerMode,
-      `${strongerMode.kind} must keep its existing ownership contract`,
-    )
-  }
-  assert.equal(
-    modeForQuestionEditingViewportChange(staleHold, null),
-    staleHold,
-    'an unresolved visible anchor never invents a new location',
+  assert.doesNotMatch(
+    scrollModeSource,
+    /modeForViewportChange/,
+    'viewport layout has no second semantic mode-derivation path',
   )
-  const settledHold = { kind: 'ANCHOR_AT', key: 'question-row', offset: 84 }
-  assert.equal(
-    modeForQuestionEditingViewportChange(settledHold, { ...settledHold }),
-    settledHold,
-    'an unchanged caret hold does not manufacture a mode transition',
+  assert.doesNotMatch(
+    scrollModeSource,
+    /visualViewport\.addEventListener/,
+    'chat observes its actual resized box instead of racing Shell for the browser event',
   )
 })
 
@@ -698,25 +757,28 @@ test('an armed live pin holds until its exact spacer is filled, then follows', (
   assert.deepEqual(modeAfterSpacerResize(livePin, 0), { kind: 'FOLLOW_BOTTOM' })
 })
 
-test('reader settlement preserves reserved room and follows only real content', () => {
+test('reader settlement follows the physical tail even while reservation remains', () => {
   const exactHold = {
     kind: 'ANCHOR_AT', key: 'user-c-123', offset: -320,
   }
-  assert.equal(modeAfterReaderGesture({
-    reachedPhysicalBottom: true,
-    hasReservedTail: true,
-    holdMode: exactHold,
-  }), exactHold, 'reserved room remains the reader\'s exact anchor')
   assert.deepEqual(modeAfterReaderGesture({
-    reachedPhysicalBottom: true,
-    hasReservedTail: false,
+    reachedBottom: true,
     holdMode: exactHold,
   }), { kind: 'FOLLOW_BOTTOM' })
   assert.equal(modeAfterReaderGesture({
-    reachedPhysicalBottom: false,
-    hasReservedTail: false,
+    reachedBottom: false,
     holdMode: exactHold,
   }), exactHold)
+
+  const scrollEl = makeScrollEl({
+    scrollHeight: 2000,
+    scrollTop: 1000,
+    clientHeight: 560,
+    spacerHeight: 400,
+  })
+  applyMode(scrollEl, { kind: 'FOLLOW_BOTTOM' })
+  assert.equal(scrollEl.scrollTop, 1440,
+    'follow owns the one physical tail instead of jumping back before reservation')
 })
 
 test('a short settled pin retires automatic follow but keeps its identity', () => {
@@ -747,27 +809,6 @@ test('terminal pin follows immediately when final committed geometry fills the s
   assert.deepEqual(
     modeAfterTerminalLayout(livePin, 0, false),
     { kind: 'FOLLOW_BOTTOM' },
-  )
-})
-
-test('keyboard close preserves pin identity even when keyboard-open geometry is away from the physical bottom', () => {
-  const pin = { kind: 'PIN_USER_MSG', cid: 'c-123' }
-  const temporaryAnchor = { kind: 'ANCHOR_AT', key: 'user-1', offset: 4 }
-
-  assert.equal(
-    modeForViewportChange(pin, false, temporaryAnchor),
-    pin,
-    'only a real reader scroll may retire PIN_USER_MSG',
-  )
-})
-
-test('viewport resize in reserved spacer anchors instead of snapping to bottom', () => {
-  const staleFollow = { kind: 'FOLLOW_BOTTOM' }
-  const anchor = { kind: 'ANCHOR_AT', key: 'user-1', offset: -240 }
-
-  assert.equal(
-    modeForViewportChange(staleFollow, false, anchor),
-    anchor,
   )
 })
 
@@ -1049,6 +1090,20 @@ test('a saved partially-visible anchor remains exact', () => {
   }
   assert.equal(_validateSavedMode(saved, [], scrollEl), saved,
     'an anchor whose row still intersects its restored viewport is preserved')
+  const aliasedRow = {
+    offsetTop: 500,
+    offsetHeight: 220,
+    dataset: { key: 'server-row', cid: 'client-row' },
+  }
+  const aliased = { kind: 'ANCHOR_AT', key: 'client-row', offset: -100 }
+  const aliasedScrollEl = {
+    clientHeight: 700,
+    querySelector(selector) {
+      return selector === '[data-cid="client-row"]' ? aliasedRow : null
+    },
+  }
+  assert.equal(_validateSavedMode(aliased, [], aliasedScrollEl), aliased,
+    'cached-phase restore resolves the cid before passive canonical remapping')
 })
 
 test('question-only viewport overlay is never restored as durable reader state', () => {
@@ -1270,7 +1325,6 @@ test('spacer reservation belongs to the latest user row in any mode', () => {
       scrollEl,
       listEl,
       lastUserMsgEl,
-      600,
       { kind: 'PIN_USER_MSG', cid: 'c-1' },
     ),
     396,
@@ -1280,7 +1334,6 @@ test('spacer reservation belongs to the latest user row in any mode', () => {
       scrollEl,
       listEl,
       lastUserMsgEl,
-      600,
       { kind: 'ANCHOR_AT', key: 'a-1', offset: 0 },
     ),
     396,
@@ -1291,7 +1344,6 @@ test('spacer reservation belongs to the latest user row in any mode', () => {
       scrollEl,
       listEl,
       lastUserMsgEl,
-      600,
       { kind: 'PIN_USER_MSG', cid: 'different-row' },
     ),
     396,
@@ -1314,7 +1366,6 @@ test('off-screen latest user pre-reserves one stable downward scroll range', () 
       scrollEl,
       listEl,
       latestUserMsgEl,
-      600,
       { kind: 'ANCHOR_AT', key: 'older-user', offset: 0 },
     ),
     96,
@@ -1334,11 +1385,11 @@ test('crossing the latest-user viewport boundary cannot create a second-stage bo
 
   scrollEl.scrollTop = 0
   const beforeApproach = _computeSpacerH(
-    scrollEl, listEl, latestUserMsgEl, 600, mode,
+    scrollEl, listEl, latestUserMsgEl, mode,
   )
   scrollEl.scrollTop = 700
   const afterLatestUserAppears = _computeSpacerH(
-    scrollEl, listEl, latestUserMsgEl, 600, mode,
+    scrollEl, listEl, latestUserMsgEl, mode,
   )
 
   assert.equal(beforeApproach, 96)
@@ -1366,7 +1417,6 @@ test('an older applied anchor does not make tail scrollHeight grow later', () =>
       scrollEl,
       { offsetHeight: 1000 },
       latestUserMsgEl,
-      600,
       { kind: 'ANCHOR_AT', key: 'older-anchor', offset: 0 },
     ),
     296,
@@ -1394,7 +1444,6 @@ test('applied anchor may reserve before current geometry reaches its visible lat
       scrollEl,
       { offsetHeight: 900 },
       latestUserMsgEl,
-      600,
       { kind: 'ANCHOR_AT', key: 'latest-anchor', offset: 100 },
     ),
     396,
@@ -1402,24 +1451,56 @@ test('applied anchor may reserve before current geometry reaches its visible lat
   )
 })
 
-test('keyboard-closed height keeps permanent tail reservation stable', () => {
-  const scrollEl = makeSpacerScrollEl({ clientHeight: 400 })
+test('keyboard height shrinks blank reservation before moving followed content', () => {
+  const scrollEl = makeSpacerScrollEl({ clientHeight: 800 })
   const latestUserMsgEl = {
     offsetTop: 500,
     offsetHeight: 80,
     dataset: { cid: 'latest' },
   }
+  const listEl = { offsetHeight: 700 }
+  const mode = { kind: 'FOLLOW_BOTTOM' }
+  const closedSpacer = _computeSpacerH(
+    scrollEl, listEl, latestUserMsgEl, mode,
+  )
+  scrollEl.clientHeight = 500
+  const openSpacer = _computeSpacerH(
+    scrollEl, listEl, latestUserMsgEl, mode,
+  )
 
+  assert.equal(closedSpacer, 596)
+  assert.equal(openSpacer, 296)
   assert.equal(
-    _computeSpacerH(
-      scrollEl,
-      { offsetHeight: 700 },
-      latestUserMsgEl,
-      800,
-      { kind: 'INITIAL' },
-    ),
-    596,
-    'the full-height reservation exists before the hidden row is approached',
+    listEl.offsetHeight + closedSpacer - 800,
+    listEl.offsetHeight + openSpacer - 500,
+    'removing 300px of visible height first removes 300px of blank spacer',
+  )
+})
+
+test('keyboard overflow lifts only content that no longer fits', () => {
+  const scrollEl = makeSpacerScrollEl({ clientHeight: 800 })
+  const latestUserMsgEl = {
+    offsetTop: 500,
+    offsetHeight: 80,
+    dataset: { cid: 'latest' },
+  }
+  const listEl = { offsetHeight: 1050 }
+  const mode = { kind: 'FOLLOW_BOTTOM' }
+  const closedSpacer = _computeSpacerH(
+    scrollEl, listEl, latestUserMsgEl, mode,
+  )
+  scrollEl.clientHeight = 500
+  const openSpacer = _computeSpacerH(
+    scrollEl, listEl, latestUserMsgEl, mode,
+  )
+
+  assert.equal(closedSpacer, 246)
+  assert.equal(openSpacer, 0)
+  assert.equal(
+    (listEl.offsetHeight + openSpacer - 500)
+      - (listEl.offsetHeight + closedSpacer - 800),
+    54,
+    'after reservation reaches zero, only the remaining overflow moves the tail',
   )
 })
 
@@ -1433,13 +1514,13 @@ test('tool expansion consumes reservation and collapse restores the exact defici
   const mode = { kind: 'ANCHOR_AT', key: 'latest-user', offset: 4 }
 
   const collapsed = _computeSpacerH(
-    scrollEl, { offsetHeight: 500 }, lastUserMsgEl, 915, mode,
+    scrollEl, { offsetHeight: 500 }, lastUserMsgEl, mode,
   )
   const expanded = _computeSpacerH(
-    scrollEl, { offsetHeight: 1300 }, lastUserMsgEl, 915, mode,
+    scrollEl, { offsetHeight: 1300 }, lastUserMsgEl, mode,
   )
   const collapsedAgain = _computeSpacerH(
-    scrollEl, { offsetHeight: 500 }, lastUserMsgEl, 915, mode,
+    scrollEl, { offsetHeight: 500 }, lastUserMsgEl, mode,
   )
 
   assert.equal(collapsed, 611)
@@ -1451,7 +1532,7 @@ test('spacer reservation returns zero before there is a user message', () => {
   const scrollEl = makeSpacerScrollEl({ clientHeight: 600 })
   const listEl = { offsetHeight: 200 }
 
-  assert.equal(_computeSpacerH(scrollEl, listEl, null, 600), 0)
+  assert.equal(_computeSpacerH(scrollEl, listEl, null), 0)
 })
 
 test('ordinary question-answer anchor keeps the stable latest-turn tail range', () => {
@@ -1469,7 +1550,6 @@ test('ordinary question-answer anchor keeps the stable latest-turn tail range', 
       scrollEl,
       { offsetHeight: 1500 },
       { offsetTop: 1100, offsetHeight: 80, dataset: { cid: 'c-1' } },
-      960,
       mode,
     ),
     556,
@@ -1500,11 +1580,12 @@ test('question submission reserves the exact room that keeps its anchor reachabl
   }
 
   assert.equal(
-    _computeSpacerH(scrollEl, listEl, latestUser, 600, mode),
+    _computeSpacerH(scrollEl, listEl, latestUser, mode),
     340,
   )
+  scrollEl.clientHeight = 700
   assert.equal(
-    _computeSpacerH(scrollEl, listEl, latestUser, 700, mode),
+    _computeSpacerH(scrollEl, listEl, latestUser, mode),
     440,
     'the same-viewport overlay keeps the exact anchor until resize releases it',
   )
@@ -1534,16 +1615,16 @@ test('answered question uses the unanswered card spacer when the keyboard closes
   }
 
   assert.equal(
-    _computeSpacerH(scrollEl, listEl, latestUser, 700, heldMode),
+    _computeSpacerH(scrollEl, listEl, latestUser, heldMode),
     440,
     'without release the answered card would remain locked',
   )
   const released = releaseQuestionSubmissionForViewport(heldMode, 700)
   const answeredSpacer = _computeSpacerH(
-    scrollEl, listEl, latestUser, 700, released,
+    scrollEl, listEl, latestUser, released,
   )
   const unansweredSpacer = _computeSpacerH(
-    scrollEl, listEl, latestUser, 700, baseMode,
+    scrollEl, listEl, latestUser, baseMode,
   )
   assert.equal(answeredSpacer, unansweredSpacer)
   assert.equal(answeredSpacer, 396)
@@ -1571,7 +1652,6 @@ test('an off-content legacy anchor clamps to content then reserves for its visib
       scrollEl,
       { offsetHeight: 700 },
       { offsetTop: 100, offsetHeight: 80, dataset: { cid: 'c-1' } },
-      700,
       mode,
     ),
     96,
@@ -1598,24 +1678,15 @@ test('queued tray does not shorten spacer reservation', () => {
       scrollEl,
       listEl,
       lastUserMsgEl,
-      600,
       { kind: 'PIN_USER_MSG', cid: 'c-1' },
     ),
     396,
   )
 })
 
-// R5 regression contract: a send while at the bottom must pin the new user
-// message to the TOP, which requires the dynamic spacer to reserve enough
-// bottom room that the pin target is actually REACHABLE (maxScrollTop >=
-// pinTarget). By default it reserves EXACTLY that — no extra cushion — so
-// maxScrollTop == pinTarget and the row rests flush at the top. When
-// fullViewH is stale-SMALL (the keyboard-open height used after the keyboard
-// has already closed and grown clientHeight), the spacer is undersized, the
-// pin clamps short, and the message lands mid-viewport. The fix keeps
-// fullViewHRef >= clientHeight at every sizeSpacer() call (grow guard), so
-// this asserts the math the fix preserves.
-function pinReachable({ fullViewH, clientHeight, listH, lastUserTop }) {
+// R5 regression contract: spacer sizing reads the active scroll box directly,
+// so callers cannot preserve a stale keyboard-open height after it grows.
+function pinReachable({ clientHeight, listH, lastUserTop }) {
   const scrollEl = makeScrollEl({
     scrollHeight: 0, scrollTop: 0, clientHeight,
   })
@@ -1628,7 +1699,6 @@ function pinReachable({ fullViewH, clientHeight, listH, lastUserTop }) {
     scrollEl,
     listEl,
     lastUserMsgEl,
-    fullViewH,
     { kind: 'PIN_USER_MSG', cid: 'pin-row' },
   )
   const scrollHeight = listH + spacerH
@@ -1637,22 +1707,11 @@ function pinReachable({ fullViewH, clientHeight, listH, lastUserTop }) {
   return { spacerH, maxScrollTop, pinTarget, reachable: maxScrollTop >= pinTarget }
 }
 
-test('R5: spacer keeps the pin reachable when fullViewH tracks the (grown) clientHeight', () => {
-  // Keyboard just closed: clientHeight grew back to 700. With the grow guard,
-  // fullViewH is >= clientHeight, so the pin target is reachable → top pin.
-  const r = pinReachable({ fullViewH: 700, clientHeight: 700, listH: 1040, lastUserTop: 1000 })
-  assert.equal(r.reachable, true, 'message can reach the top when fullViewH >= clientHeight')
+test('R5: the active viewport keeps the pin exactly reachable', () => {
+  const r = pinReachable({ clientHeight: 700, listH: 1040, lastUserTop: 1000 })
+  assert.equal(r.reachable, true, 'message can reach the top after keyboard close')
   assert.equal(r.maxScrollTop, r.pinTarget, 'spacer reserves exactly enough to reach the pin — no extra cushion')
   assert.equal(r.maxScrollTop - r.pinTarget, 0, 'no reservable blank below the pinned message by default')
-})
-
-test('R5: a stale-small fullViewH undersizes the spacer and strands the pin mid-viewport (the bug)', () => {
-  // The pre-fix path: visualViewport fired sizeSpacer with the keyboard-open
-  // height (400) after clientHeight had already grown to 700.
-  const r = pinReachable({ fullViewH: 400, clientHeight: 700, listH: 1040, lastUserTop: 1000 })
-  assert.equal(r.reachable, false, 'stale-small fullViewH leaves the pin target unreachable')
-  assert.ok(r.pinTarget - r.maxScrollTop > 80,
-    'the message is still stranded far below the top — visually mid-viewport')
 })
 
 
@@ -1757,7 +1816,6 @@ test('F2: an idle-mounted short chat reserves for its visible latest user', () =
     scrollEl,
     listEl,
     lastUserMsgEl,
-    915,
     { kind: 'ANCHOR_AT', key: 'a-1', offset: 0 },
   )
   assert.equal(spacerH, 851)
@@ -1771,7 +1829,6 @@ test('F2: a saved pin restores as the same physical ordinary anchor', () => {
     { clientHeight },
     { offsetHeight: shortList },
     { offsetTop: lowUserTop, offsetHeight: 60, dataset: { cid: 'c-1' } },
-    clientHeight,
     { kind: 'PIN_USER_MSG', cid: 'c-1' },
   )
   const restored = makePinnableScrollEl({ listH: shortList, spacerH, clientHeight, userTop: lowUserTop, cid: 'c-1' })
@@ -1800,10 +1857,161 @@ test('F4: foreground return freezes as an anchor even at the tail', () => {
     scrollHeight: 1400, scrollTop: 685, clientHeight: 700,   // near the tail
     querySelectorAll(sel) { return sel === '.chat__msg[data-key]' ? [tailItem] : [] },
   }
-  assert.equal(isNearScrollBottom(scrollEl), true, 'precondition: at the tail')
+  assert.ok(
+    scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 50,
+    'precondition: at the tail',
+  )
 
   const restored = modeForForegroundReturn(scrollEl)
   assert.equal(restored.kind, 'ANCHOR_AT',
     'return freezes as an anchor, not the grown tail')
   assert.equal(restored.key, 'a-9')
+})
+
+// --- Sub-message reading resolution (R4) -----------------------------------
+// One settled agentic turn in the owner's chats renders 73,721px — 77 viewport
+// heights in a single message row. A whole-message anchor therefore cannot say
+// WHERE in that turn the reader was, and any re-render height change threw them
+// thousands of pixels away. These lock the part-level address that fixes it.
+
+function partedRow(key, top, partHeights) {
+  const row = {
+    offsetTop: top,
+    offsetHeight: partHeights.reduce((sum, h) => sum + h, 0),
+    dataset: { key },
+  }
+  let cursor = top
+  row.children = partHeights.map(height => {
+    const child = { offsetTop: cursor, offsetHeight: height }
+    cursor += height
+    return child
+  })
+  return row
+}
+
+function partedScrollEl(row, { scrollTop, clientHeight = 900, spacer = 0 }) {
+  const scrollHeight = row.offsetTop + row.offsetHeight + spacer
+  const scrollEl = {
+    scrollTop,
+    clientHeight,
+    scrollHeight,
+    getBoundingClientRect: () => ({ top: 0 }),
+    querySelector(selector) {
+      if (selector === '.spacer-dynamic') return { offsetHeight: spacer }
+      return selector.includes(row.dataset.key) ? row : null
+    },
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [row] : []
+    },
+  }
+  // Every real element has a rect, and rects are what the shipping code
+  // measures with. Give the fixture the geometry a browser would report so
+  // these tests exercise that arithmetic rather than a test-only fallback.
+  const attachRect = node => {
+    node.getBoundingClientRect = () => ({ top: node.offsetTop - scrollEl.scrollTop })
+    node.children?.forEach(attachRect)
+  }
+  attachRect(row)
+  return scrollEl
+}
+
+test('a reading position inside one enormous turn addresses the part, not the turn', () => {
+  // 300 worklog parts of 240px = a 72,000px single message.
+  const row = partedRow('assistant-huge', 0, Array(300).fill(240))
+  const scrollEl = partedScrollEl(row, { scrollTop: 48_000 })
+
+  const mode = anchorModeFromScroll(scrollEl)
+
+  assert.equal(mode.kind, 'ANCHOR_AT')
+  assert.equal(mode.key, 'assistant-huge')
+  assert.deepEqual(mode.part, [200],
+    'the addressed part is the one under the viewport top')
+  assert.equal(mode.offset, 0)
+})
+
+test('restoring an enormous turn survives a height change elsewhere in that turn', () => {
+  const saved = anchorModeFromScroll(
+    partedScrollEl(partedRow('assistant-huge', 0, Array(300).fill(240)), {
+      scrollTop: 48_000,
+    }),
+  )
+
+  // The same turn re-renders with earlier parts taller (expanded tool output,
+  // late syntax highlighting, swapped webfonts): every part below shifts down.
+  const grown = partedRow('assistant-huge', 0, [
+    ...Array(100).fill(600), ...Array(200).fill(240),
+  ])
+  const grownEl = partedScrollEl(grown, { scrollTop: 0 })
+  applyMode(grownEl, saved)
+
+  const target = grown.children[saved.part[0]]
+  assert.equal(grownEl.scrollTop, target.offsetTop,
+    'the reader lands on the same part they were reading, wherever it moved to')
+  assert.equal(grownEl.scrollTop, 84_000)
+})
+
+test('an unresolvable saved location falls back to real content, not the top of the chat', () => {
+  // The row is absent from this visit's committed window. That is a retrieval
+  // failure; the automatic tail shown instead must not become the stored
+  // location, or one bad return breaks every later return.
+  const tail = partedRow('assistant-tail', 0, [400])
+  const scrollEl = partedScrollEl(tail, { scrollTop: 0 })
+
+  const restored = _validateSavedMode(
+    { kind: 'ANCHOR_AT', key: 'assistant-absent', part: [12], offset: -30 },
+    [],
+    scrollEl,
+  )
+
+  assert.equal(restored.defaultTail, true,
+    'the visit still shows real content rather than a blank viewport')
+  assert.notEqual(restored.key, 'assistant-absent')
+})
+
+test('a part that is itself taller than the viewport resolves to a deeper path', () => {
+  // The descent is not one level: a single worklog part can itself be
+  // thousands of pixels, which is the whole reason `part` is a PATH.
+  const row = partedRow('assistant-nested', 0, [1200, 3000, 1200])
+  const middle = row.children[1]
+  let cursor = middle.offsetTop
+  middle.children = Array.from({ length: 10 }, () => {
+    const kid = { offsetTop: cursor, offsetHeight: 300 }
+    cursor += 300
+    return kid
+  })
+  const scrollEl = partedScrollEl(row, { scrollTop: 1800 })
+
+  const mode = anchorModeFromScroll(scrollEl)
+
+  assert.deepEqual(mode.part, [1, 2],
+    'descends into the oversized part, not just the oversized row')
+  assert.equal(mode.offset, 0)
+
+  applyMode(scrollEl, mode)
+  assert.equal(scrollEl.scrollTop, 1800,
+    'restores to the nested sub-part the reader was actually on')
+})
+
+test('a part path that no longer resolves fails the restore rather than jumping to the top of the turn', () => {
+  const saved = anchorModeFromScroll(
+    partedScrollEl(partedRow('assistant-huge', 0, Array(300).fill(240)), {
+      scrollTop: 48_000,
+    }),
+  )
+  assert.deepEqual(saved.part, [200])
+
+  // The turn comes back with far fewer parts (a sliced cold render), so part
+  // 200 does not exist. Degrading to the ROW would keep the part-relative
+  // offset and drop the reader at the top of a 72,000px turn.
+  const shrunk = partedRow('assistant-huge', 0, Array(30).fill(240))
+  const scrollEl = partedScrollEl(shrunk, { scrollTop: 0 })
+
+  const restored = _validateSavedMode(saved, [], scrollEl)
+
+  assert.equal(restored.defaultTail, true,
+    'a partially resolving path is an unresolved location, not a clamp')
+
+  applyMode(scrollEl, restored)
+  assert.equal(scrollEl.scrollTop, 6300,
+    'lands on real content at the tail instead of scrollTop 0')
 })

@@ -151,11 +151,7 @@ def _build_app_context(
       return None, {}
     identities = []
     for linked_app in linked:
-      source_dir = (
-        Path(linked_app.source_dir)
-        if linked_app.source_dir
-        else data_root / "apps" / (linked_app.slug or str(linked_app.id))
-      )
+      source_dir = Path(linked_app.source_dir)
       identities.append({
         "app_id": linked_app.id,
         "name": linked_app.name,
@@ -191,9 +187,7 @@ def _build_app_context(
   if app is None:
     return None, {}
 
-  source_dir = Path(app.source_dir) if app.source_dir else (
-    data_root / "apps" / (app.slug or str(app.id))
-  )
+  source_dir = Path(app.source_dir)
   storage_dir = data_root / "apps" / str(app.id)
   # Per-project scoping (feature 135): when this chat carries a project_id in
   # agent_settings_json (the per-project-chat contract), the agent's workspace
@@ -235,6 +229,7 @@ def _build_app_context(
     f"Registered chat id: {app.chat_id or ''}",
     f"Available app scripts: {', '.join(scripts) if scripts else 'none detected'}",
     "When changing this app, edit files under the source directory and use the existing register/build workflow.",
+    "Owner-managed MCP connections are not available in app-attributed chats.",
     "</app_context>",
   ])
   env = {

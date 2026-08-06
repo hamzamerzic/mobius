@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { apiFetch } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import {
+  getInstallObservedSnapshot,
   getInstallPromptSnapshot,
   requestInstall,
   subscribeInstallPrompt,
@@ -15,32 +15,6 @@ import {
   standaloneInstallCompleted,
 } from '../../lib/standaloneBoot.js'
 
-async function fileToSquarePng(file, size = 512) {
-  const bmp = await createImageBitmap(file)
-  try {
-    const side = Math.min(bmp.width, bmp.height)
-    const canvas = document.createElement('canvas')
-    canvas.width = canvas.height = size
-    canvas.getContext('2d').drawImage(
-      bmp,
-      (bmp.width - side) / 2,
-      (bmp.height - side) / 2,
-      side,
-      side,
-      0,
-      0,
-      size,
-      size,
-    )
-    return await new Promise((resolve, reject) => canvas.toBlob(
-      blob => blob ? resolve(blob) : reject(new Error('encode failed')),
-      'image/png',
-    ))
-  } finally {
-    bmp.close?.()
-  }
-}
-
 function wasDismissed(slug) {
   try { return sessionStorage.getItem(`mobius:install-dismissed:${slug}`) === '1' }
   catch { return false }
@@ -51,28 +25,38 @@ function rememberDismissed(slug) {
   catch { /* session storage is optional */ }
 }
 
-export default function StandaloneInstallCard({ app, forceOpen, onClose, onIconUpdated }) {
+export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
   const installState = useSyncExternalStore(
     subscribeInstallPrompt,
     getInstallPromptSnapshot,
     getInstallPromptSnapshot,
   )
+  // Only an install this page actually watched happen may be announced. iOS
+  // reports standalone display mode inside the in-app browser it opens from a
+  // PWA, so the boot-time guess said "installed" to someone who was mid-install.
+  const installObserved = useSyncExternalStore(
+    subscribeInstallPrompt,
+    getInstallObservedSnapshot,
+    getInstallObservedSnapshot,
+  )
   const platform = detectInstallPlatform()
-  const copy = installCopyForPlatform(platform, installState === 'installed', app.name)
+  const copy = installCopyForPlatform(platform, installObserved, app.name)
   const [open, setOpen] = useState(() => initiallyOpenStandaloneInstallCard({
     installState,
     forceOpen,
     dismissed: wasDismissed(app.slug),
   }))
+  // iOS has no install API, so its steps are the whole answer rather than an
+  // extra detail — always show them on arrival. They stay correct whether or
+  // not the app is already on the home screen (adding twice is harmless),
+  // which is exactly why they are safe to show without knowing. Other
+  // platforms keep the native prompt primary and reveal steps only if it fails.
   const [showInstructions, setShowInstructions] = useState(
-    () => installState === 'manual' && forceOpen,
+    () => platform.ios || (installState === 'manual' && forceOpen),
   )
-  const [uploading, setUploading] = useState(false)
-  const [message, setMessage] = useState('')
-  const [iconVersion, setIconVersion] = useState(app.updated_at || '0')
   const dialogRef = useRef(null)
   const primaryRef = useRef(null)
-  const fileRef = useRef(null)
+  const closeRef = useRef(null)
   const previousInstallStateRef = useRef(installState)
 
   useEffect(() => {
@@ -98,47 +82,37 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose, onIconU
     onClose?.()
   }
 
-  async function chooseIcon(event) {
-    const file = event.target.files?.[0]
-    event.target.value = ''
-    if (!file) return
-    setUploading(true)
-    setMessage('')
-    try {
-      const png = await fileToSquarePng(file)
-      const response = await apiFetch(`/apps/${app.id}/icon`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'image/png' },
-        body: png,
-      })
-      if (!response.ok) throw new Error(`icon upload ${response.status}`)
-      const version = String(Date.now())
-      setIconVersion(version)
-      setMessage('Icon updated')
-      onIconUpdated?.(version)
-    } catch {
-      setMessage("That image couldn't be saved. Try a PNG or JPEG.")
-    } finally {
-      setUploading(false)
-    }
-  }
-
   async function install() {
-    if (installState === 'installed') {
+    if (installObserved) {
       close('installed')
       return
     }
+    // `showAction` gates this button out once instructions are on screen, so
+    // the only reachable case here is revealing them for the first time.
     if (installState !== 'ready') {
-      if (showInstructions) {
-        close('instructions-read')
-        return
-      }
-      setShowInstructions(true)
+      revealInstructions()
       return
     }
     const result = await requestInstall()
-    if (result.outcome !== 'accepted') setShowInstructions(true)
+    if (result.outcome !== 'accepted') revealInstructions()
   }
+
+  // Revealing instructions unmounts the button that was just activated —
+  // `showAction` flips false. Focus would land on <body> while the dialog is
+  // open and its siblings are inert, stranding keyboard and screen-reader
+  // users outside a trap whose Tab handler matches neither edge. Hand focus to
+  // the control that survives.
+  function revealInstructions() {
+    setShowInstructions(true)
+    queueMicrotask(() => closeRef.current?.focus())
+  }
+
+  // The action button earns its place only when it can DO something: fire a
+  // native install prompt, or reveal guidance not yet on screen. On iPhone
+  // neither is ever true — there is no install API and the steps show on
+  // arrival — so the card ends at the sentence rather than at a button whose
+  // only effect is to close a dialog that already has a close.
+  const showAction = installState === 'ready' || !showInstructions
 
   if (!open) return null
 
@@ -152,7 +126,18 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose, onIconU
         aria-labelledby="standalone-install-title"
         onClick={event => event.stopPropagation()}
       >
-        {installState === 'installed' ? (
+        {!installObserved && (
+          <button
+            ref={closeRef}
+            className="standalone-install__close"
+            type="button"
+            aria-label="Close"
+            onClick={() => close('dismiss')}
+          >
+            ×
+          </button>
+        )}
+        {installObserved ? (
           <>
             <div className="standalone-install__success" aria-hidden="true">✓</div>
             <h1 id="standalone-install-title">{app.name} is on your home screen</h1>
@@ -168,52 +153,44 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose, onIconU
         ) : (
           <>
             <div className="standalone-install__identity">
-              <button
-                className="standalone-install__icon-button"
-                type="button"
-                aria-label="Change app icon"
-                disabled={uploading}
-                onClick={() => fileRef.current?.click()}
-              >
-                <img
-                  src={`/apps/${encodeURIComponent(app.slug)}/icon-192.png?v=${encodeURIComponent(iconVersion)}`}
-                  alt=""
-                />
-                <span aria-hidden="true">✎</span>
-              </button>
-              <div>
-                <h1 id="standalone-install-title">Install {app.name}</h1>
-                <p>Keep it one tap away, without opening the Möbius workspace first.</p>
-              </div>
+              <img
+                className="standalone-install__icon"
+                src={`/apps/${encodeURIComponent(app.slug)}/icon-192.png?v=${encodeURIComponent(app.updated_at || '0')}`}
+                alt=""
+              />
+              <h1 id="standalone-install-title">Install {app.name}</h1>
             </div>
-            <p className="standalone-install__hint">
-              Tap the icon to customise it, or keep the current one.
-            </p>
-            {showInstructions && (
+            {showInstructions && (platform.iosSafari && !platform.ipad ? (
+              // On iPhone the sentence IS the card, so it gets no box of its
+              // own — a bordered panel inside a bordered card is nesting that
+              // buys nothing. This document's manifest is the app's, so Add to
+              // Home Screen here produces the app, and the arrow points down
+              // at the real Share button in Safari's toolbar.
+              <p className="standalone-install__steps" role="status">
+                Tap the <strong>Share</strong> button below, then choose{' '}
+                <strong>Add to Home Screen</strong>.
+              </p>
+            ) : (
               <div className="standalone-install__instructions" role="status">
                 <strong>{copy.summary}</strong>
                 <span>{copy.body}</span>
               </div>
+            ))}
+            {platform.ios && showInstructions && (
+              <span className="standalone-install__arrow" aria-hidden="true">↓</span>
             )}
-            {message && <div className="standalone-install__message" role="status">{message}</div>}
-            <div className="standalone-install__actions">
-              <button type="button" onClick={() => close('later')}>Maybe later</button>
-              <button
-                ref={primaryRef}
-                className="standalone-install__primary"
-                type="button"
-                onClick={install}
-              >
-                {installState === 'ready' ? 'Install' : (showInstructions ? 'Got it' : copy.ctaLabel)}
-              </button>
-            </div>
-            <input
-              ref={fileRef}
-              type="file"
-              accept="image/png,image/jpeg,image/webp"
-              hidden
-              onChange={chooseIcon}
-            />
+            {showAction && (
+              <div className="standalone-install__actions">
+                <button
+                  ref={primaryRef}
+                  className="standalone-install__primary"
+                  type="button"
+                  onClick={install}
+                >
+                  {installState === 'ready' ? 'Install' : copy.ctaLabel}
+                </button>
+              </div>
+            )}
           </>
         )}
       </section>

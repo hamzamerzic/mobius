@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Immutable root repair target used only by an external recovery worker.
 
-This module is deliberately stdlib-only and is launched by the baked entrypoint
-before any path below /data is imported.  It is not a recovery user interface or
-an agent runner: it is a small, bearer-authenticated capability endpoint for the
-separate recovery service.
+The legacy stopped-app mode is launched by the baked entrypoint before any path
+below /data is imported.  Normal Mobius boots may also attach this target as a
+private sidecar process.  It is not a recovery user interface or an agent
+runner: it is a small, bearer-authenticated capability endpoint for the separate
+recovery service.
 """
 
 from __future__ import annotations
@@ -55,6 +56,21 @@ _RESOLVE_NO_XDEV = 0x01
 _RESOLVE_NO_MAGICLINKS = 0x02
 _RESOLVE_BENEATH = 0x08
 _TOKEN_DIGEST_DOMAIN = b"mobius-recovery-target/v1 bearer\x00"
+CAPABILITY_PUBLIC_KEY_ENV = "MOBIUS_RECOVERY_CAPABILITY_PUBLIC_KEY"
+CAPABILITY_TOKEN_PREFIX = "mrc1"
+CAPABILITY_ISSUER = "mobius.you"
+CAPABILITY_AUDIENCE = "mobius-recovery-target"
+MAX_CAPABILITY_TOKEN_BYTES = 512
+MAX_PROBE_CAPABILITY_LIFETIME_SECONDS = 60
+MAX_SESSION_CAPABILITY_LIFETIME_SECONDS = 60 * 60
+CAPABILITY_CLOCK_SKEW_SECONDS = 30
+MAX_CAPABILITY_ID_BYTES = 128
+BOOT_ID_ENV = "MOBIUS_RECOVERY_BOOT_ID"
+ATTACH_READY_FILE_ENV = "MOBIUS_RECOVERY_ATTACH_READY_FILE"
+MAX_CONCURRENT_REQUESTS = 16
+MAX_REVOKED_SESSIONS = 4096
+HEADER_TIMEOUT_SECONDS = 5.0
+BODY_TIMEOUT_SECONDS = 30.0
 # An 8 MiB decoded payload expands to about 10.67 MiB as base64 before the JSON
 # envelope is counted. Keep the wire budget large enough for the advertised
 # file/stdin boundary while still rejecting unbounded request bodies.
@@ -70,20 +86,33 @@ MAX_ENV_BYTES = 256 * 1024
 MAX_CONCURRENT_EXEC = 2
 MAX_TARGET_LIFETIME_SECONDS = 24 * 60 * 60
 _EXEC_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_EXEC)
-_ACTIVE_SUPERVISORS: set[int] = set()
+_REQUEST_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
+# pid -> (owning live-session id, original /proc starttime). Recording the
+# kernel starttime prevents revocation cleanup from acting on a reused PID.
+_ACTIVE_SUPERVISORS: dict[int, tuple[str | None, int]] = {}
 _ACTIVE_SUPERVISORS_LOCK = threading.Lock()
+_REVOKED_SESSIONS: dict[str, int] = {}
+_REVOKED_SESSIONS_LOCK = threading.Lock()
 _STARTUP_TOKEN_DIGEST: bytes | None = None
 _TARGET_EXPIRES_AT: int | None = None
+_CAPABILITY_PUBLIC_KEY: Any | None = None
+_LOCAL_INSTANCE_ID: str | None = None
+_LOCAL_DEPLOYMENT_ID: str | None = None
+_LOCAL_BOOT_ID: str | None = None
+_ATTACH_READY_FILE: Path | None = None
+_ATTACH_READY = threading.Event()
+_AUTH_MODE = "legacy"
+_SECURITY_INITIALIZED = False
 _TARGET_EXPIRED = threading.Event()
 _TARGET_REVOCATION_LOCK = threading.Lock()
 _TARGET_SHUTDOWN_STARTED = False
 _BUILD_REVISION = "unknown"
 _DATA_ROOT = Path(os.environ.get("DATA_DIR", "/data"))
 # Convenience file operations are deliberately narrower than root exec. They
-# run inside target PID1 and therefore must never act as a confused deputy for
-# /proc memory. Recovery data, baked app sources, and scratch paths are
-# sufficient for inspection; only stopped-instance data and scratch are
-# writable. openat2 enforces these roots against symlink and mount races.
+# run inside the privileged target and therefore must never act as a confused
+# deputy for /proc memory. Recovery data, baked app sources, and scratch paths
+# are sufficient for inspection; only instance data and scratch are writable.
+# openat2 enforces these roots against symlink and mount races.
 _FS_READ_ROOTS = (_DATA_ROOT, Path("/app"), Path("/tmp"))
 _FS_WRITE_ROOTS = (_DATA_ROOT, Path("/tmp"))
 
@@ -142,6 +171,363 @@ def _token_digest(value: bytes | bytearray | memoryview) -> bytes:
   return verifier.digest()
 
 
+def _base64url_decode_unpadded(
+  value: str, *, field: str, expected_bytes: int | None = None,
+) -> bytes:
+  """Decode one canonical base64url segment without accepting aliases."""
+  if (
+    not value
+    or "=" in value
+    or any(
+      not (
+        "A" <= char <= "Z"
+        or "a" <= char <= "z"
+        or "0" <= char <= "9"
+        or char in "-_"
+      )
+      for char in value
+    )
+  ):
+    raise ValueError(f"{field} is not unpadded base64url")
+  try:
+    decoded = base64.b64decode(
+      value + "=" * (-len(value) % 4), altchars=b"-_", validate=True,
+    )
+  except (binascii.Error, ValueError) as exc:
+    raise ValueError(f"{field} is not unpadded base64url") from exc
+  canonical = base64.urlsafe_b64encode(decoded).rstrip(b"=").decode("ascii")
+  if canonical != value:
+    raise ValueError(f"{field} is not canonical base64url")
+  if expected_bytes is not None and len(decoded) != expected_bytes:
+    raise ValueError(f"{field} has the wrong length")
+  return decoded
+
+
+def _validate_capability_identifier(value: Any, field: str) -> str:
+  if not isinstance(value, str):
+    raise ValueError(f"{field} must be a string")
+  try:
+    encoded = value.encode("ascii")
+  except UnicodeEncodeError as exc:
+    raise ValueError(f"{field} must be ASCII") from exc
+  if (
+    not 1 <= len(encoded) <= MAX_CAPABILITY_ID_BYTES
+    or any(byte < 0x21 or byte > 0x7E for byte in encoded)
+  ):
+    raise ValueError(f"{field} is invalid")
+  return value
+
+
+def _read_capability_public_key() -> Any:
+  """Load an unpadded-base64url raw Ed25519 public key from the environment."""
+  encoded = os.environ.pop(CAPABILITY_PUBLIC_KEY_ENV, "")
+  try:
+    raw = _base64url_decode_unpadded(
+      encoded, field=CAPABILITY_PUBLIC_KEY_ENV, expected_bytes=32,
+    )
+  except ValueError as exc:
+    raise RuntimeError(
+      f"{CAPABILITY_PUBLIC_KEY_ENV} must be an unpadded base64url "
+      "32-byte Ed25519 public key"
+    ) from exc
+  try:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+      Ed25519PublicKey,
+    )
+  except ImportError as exc:
+    raise RuntimeError(
+      "recovery capability verification requires cryptography"
+    ) from exc
+  try:
+    return Ed25519PublicKey.from_public_bytes(raw)
+  except ValueError as exc:
+    raise RuntimeError("recovery capability public key is invalid") from exc
+
+
+def _read_local_identity(name: str) -> str | None:
+  value = os.environ.get(name)
+  if value is None or value == "":
+    return None
+  try:
+    return _validate_capability_identifier(value, name)
+  except ValueError as exc:
+    raise RuntimeError(
+      f"{name} must contain 1-{MAX_CAPABILITY_ID_BYTES} printable ASCII bytes"
+    ) from exc
+
+
+def _read_required_local_identity(name: str) -> str:
+  value = _read_local_identity(name)
+  if value is None:
+    raise RuntimeError(f"{name} is required for live recovery")
+  return value
+
+
+def _read_boot_id() -> str:
+  value = os.environ.pop(BOOT_ID_ENV, "")
+  if (
+    len(value) != 32
+    or any(
+      not (
+        "A" <= char <= "Z"
+        or "a" <= char <= "z"
+        or "0" <= char <= "9"
+        or char in "-_"
+      )
+      for char in value
+    )
+  ):
+    raise RuntimeError(f"{BOOT_ID_ENV} must be a 32-character base64url id")
+  return value
+
+
+def _read_attach_ready_file() -> Path:
+  raw = os.environ.pop(ATTACH_READY_FILE_ENV, "")
+  path = Path(raw)
+  if (
+    not raw
+    or path.parent != Path("/tmp")
+    or not path.name.startswith("mobius-recovery-attach-ready.")
+    or len(path.name) > 128
+  ):
+    raise RuntimeError(
+      f"{ATTACH_READY_FILE_ENV} must name a private /tmp signal file"
+    )
+  try:
+    info = path.lstat()
+  except OSError as exc:
+    raise RuntimeError(f"{ATTACH_READY_FILE_ENV} is unavailable") from exc
+  if (
+    not stat.S_ISREG(info.st_mode)
+    or info.st_uid != os.geteuid()
+    or info.st_nlink != 1
+    or (info.st_mode & 0o777) != 0o600
+    or info.st_size not in {0, 39}
+  ):
+    raise RuntimeError(f"{ATTACH_READY_FILE_ENV} is insecure")
+  return path
+
+
+def _attach_is_ready() -> bool:
+  if _AUTH_MODE != "capability":
+    return True
+  if _ATTACH_READY.is_set():
+    return True
+  path = _ATTACH_READY_FILE
+  boot_id = _LOCAL_BOOT_ID
+  if path is None or boot_id is None:
+    return False
+  flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+  fd: int | None = None
+  try:
+    fd = os.open(path, flags)
+    info = os.fstat(fd)
+    if (
+      not stat.S_ISREG(info.st_mode)
+      or info.st_uid != os.geteuid()
+      or info.st_nlink != 1
+      or (info.st_mode & 0o777) != 0o600
+    ):
+      return False
+    value = os.read(fd, 40)
+  except OSError:
+    return False
+  finally:
+    if fd is not None:
+      os.close(fd)
+  expected = f"ready:{boot_id}\n".encode("ascii")
+  if not hmac.compare_digest(value, expected):
+    return False
+  _ATTACH_READY.set()
+  try:
+    path.unlink()
+  except OSError:
+    pass
+  return True
+
+
+def _invalid_capability(*, expired: bool = False) -> RequestError:
+  if expired:
+    return RequestError(
+      "auth_expired",
+      "recovery target capability has expired",
+      HTTPStatus.UNAUTHORIZED,
+    )
+  return RequestError(
+    "unauthorized", "invalid bearer token", HTTPStatus.UNAUTHORIZED,
+  )
+
+
+def _attach_not_ready() -> RequestError:
+  return RequestError(
+    "attach_not_ready",
+    "normal Mobius entrypoint initialization has not completed",
+    HTTPStatus.SERVICE_UNAVAILABLE,
+  )
+
+
+def _insufficient_scope() -> RequestError:
+  return RequestError(
+    "insufficient_scope",
+    "this recovery capability does not authorize the requested operation",
+    HTTPStatus.FORBIDDEN,
+  )
+
+
+def _revoked_capability() -> RequestError:
+  return RequestError(
+    "auth_revoked",
+    "recovery session has been revoked",
+    HTTPStatus.UNAUTHORIZED,
+  )
+
+
+def _prune_revoked_sessions_locked(now: int) -> None:
+  for session_id, expires_at in list(_REVOKED_SESSIONS.items()):
+    if expires_at <= now:
+      del _REVOKED_SESSIONS[session_id]
+
+
+def _session_is_revoked(session_id: str) -> bool:
+  now = int(time.time())
+  with _REVOKED_SESSIONS_LOCK:
+    _prune_revoked_sessions_locked(now)
+    return _REVOKED_SESSIONS.get(session_id, 0) > now
+
+
+def _revoke_capability_session(claims: dict[str, Any]) -> dict[str, Any]:
+  session_id = str(claims["sid"])
+  expires_at = int(claims["exp"])
+  now = int(time.time())
+  with _REVOKED_SESSIONS_LOCK:
+    _prune_revoked_sessions_locked(now)
+    existing = _REVOKED_SESSIONS.get(session_id)
+    if existing is None and len(_REVOKED_SESSIONS) >= MAX_REVOKED_SESSIONS:
+      raise RequestError(
+        "revocation_capacity",
+        "recovery session revocation capacity is temporarily exhausted",
+        HTTPStatus.SERVICE_UNAVAILABLE,
+      )
+    _REVOKED_SESSIONS[session_id] = max(existing or 0, expires_at)
+  _retire_session_supervisors(session_id)
+  return {
+    "status": "revoked",
+    "deployment_id": str(claims["dep"]),
+    "session_id": session_id,
+  }
+
+
+def _verify_capability_token(value: str) -> dict[str, Any]:
+  """Verify a compact, Ed25519-signed recovery bearer capability.
+
+  The exact wire form is ``mrc1.<payload>.<signature>``. ``payload`` is
+  unpadded base64url of UTF-8 JSON serialized with sorted keys and compact
+  separators. ``signature`` is unpadded base64url of the 64-byte Ed25519
+  signature over the ASCII bytes ``mrc1.<payload>``.
+  """
+  try:
+    raw_token = value.encode("ascii")
+  except (AttributeError, UnicodeEncodeError) as exc:
+    raise _invalid_capability() from exc
+  if not 1 <= len(raw_token) <= MAX_CAPABILITY_TOKEN_BYTES:
+    raise _invalid_capability()
+  parts = value.split(".")
+  if len(parts) != 3 or parts[0] != CAPABILITY_TOKEN_PREFIX:
+    raise _invalid_capability()
+  payload_segment, signature_segment = parts[1], parts[2]
+  try:
+    payload_raw = _base64url_decode_unpadded(
+      payload_segment, field="capability payload",
+    )
+    signature = _base64url_decode_unpadded(
+      signature_segment, field="capability signature", expected_bytes=64,
+    )
+  except ValueError as exc:
+    raise _invalid_capability() from exc
+
+  public_key = _CAPABILITY_PUBLIC_KEY
+  if public_key is None:
+    raise _invalid_capability()
+  signed = f"{CAPABILITY_TOKEN_PREFIX}.{payload_segment}".encode("ascii")
+  try:
+    public_key.verify(signature, signed)
+  except Exception as exc:
+    # Ed25519 verification deliberately has one externally visible failure.
+    raise _invalid_capability() from exc
+
+  try:
+    claims = json.loads(payload_raw.decode("utf-8"))
+  except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    raise _invalid_capability() from exc
+  if not isinstance(claims, dict):
+    raise _invalid_capability()
+  canonical = json.dumps(
+    claims, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+  ).encode("utf-8")
+  if not hmac.compare_digest(canonical, payload_raw):
+    raise _invalid_capability()
+
+  common = {"v", "iss", "aud", "sub", "dep", "scp", "iat", "nbf", "exp"}
+  scope = claims.get("scp")
+  if scope == "probe":
+    required = common
+    maximum_lifetime = MAX_PROBE_CAPABILITY_LIFETIME_SECONDS
+  elif scope == "session":
+    required = common | {"sid", "bid"}
+    maximum_lifetime = MAX_SESSION_CAPABILITY_LIFETIME_SECONDS
+  else:
+    raise _invalid_capability()
+  if set(claims) != required:
+    raise _invalid_capability()
+  if (
+    type(claims["v"]) is not int
+    or claims["v"] != 1
+    or claims["iss"] != CAPABILITY_ISSUER
+    or claims["aud"] != CAPABILITY_AUDIENCE
+  ):
+    raise _invalid_capability()
+  try:
+    subject = _validate_capability_identifier(claims["sub"], "sub")
+    deployment = _validate_capability_identifier(claims["dep"], "dep")
+    if scope == "session":
+      _validate_capability_identifier(claims["sid"], "sid")
+      boot_id = _validate_capability_identifier(claims["bid"], "bid")
+    else:
+      boot_id = None
+  except ValueError as exc:
+    raise _invalid_capability() from exc
+  if _LOCAL_INSTANCE_ID is None or subject != _LOCAL_INSTANCE_ID:
+    raise _invalid_capability()
+  if _LOCAL_DEPLOYMENT_ID is None or deployment != _LOCAL_DEPLOYMENT_ID:
+    raise _invalid_capability()
+  if scope == "session" and (
+    _LOCAL_BOOT_ID is None or boot_id != _LOCAL_BOOT_ID
+  ):
+    raise _invalid_capability()
+
+  timestamps = (claims["iat"], claims["nbf"], claims["exp"])
+  if any(
+    type(timestamp) is not int or not 0 < timestamp <= 9_999_999_999
+    for timestamp in timestamps
+  ):
+    raise _invalid_capability()
+  issued_at, not_before, expires_at = timestamps
+  if (
+    not issued_at <= not_before < expires_at
+    or expires_at - issued_at > maximum_lifetime
+  ):
+    raise _invalid_capability()
+  now = int(time.time())
+  if expires_at <= now:
+    raise _invalid_capability(expired=True)
+  if (
+    issued_at > now + CAPABILITY_CLOCK_SKEW_SECONDS
+    or not_before > now + CAPABILITY_CLOCK_SKEW_SECONDS
+  ):
+    raise _invalid_capability()
+  return claims
+
+
 def _capability_state(
   libc: ctypes.CDLL,
 ) -> tuple[_CapabilityHeader, Any]:
@@ -163,8 +549,8 @@ def _drop_recovery_escape_capabilities() -> None:
     raise RuntimeError("recovery target requires Linux capability controls")
 
   # A root repair command must not capture a later Authorization header,
-  # ptrace target PID1, or create a nested mount that bypasses filesystem-root
-  # policy. None of these powers are needed to repair the stopped /data tree.
+  # ptrace the target or application, or create a nested mount that bypasses
+  # filesystem-root policy. None of these powers are needed to repair /data.
   # Remove them from every mutable set and the bounding set before listening.
   header, data = _capability_state(libc)
   for capability in _BLOCKED_CAPABILITIES:
@@ -227,11 +613,11 @@ def _set_process_nondumpable() -> None:
 
 
 def _set_child_subreaper() -> None:
-  """Keep every orphaned repair process below this immutable PID1.
+  """Keep every orphaned repair process below the immutable target.
 
-  PID 1 is already the final reparenting point in a container PID namespace,
-  but setting and verifying the Linux subreaper bit makes that dependency
-  explicit and gives the per-exec supervisor the same fail-closed primitive.
+  The legacy target is PID 1; the live attachment is not. Setting and verifying
+  the Linux subreaper bit gives both modes and each per-exec supervisor the same
+  fail-closed process-tree ownership primitive.
   """
   libc = ctypes.CDLL(None, use_errno=True)
   prctl = getattr(libc, "prctl", None)
@@ -324,6 +710,8 @@ def _read_target_expiry() -> int:
 
 
 def _target_is_expired() -> bool:
+  if _AUTH_MODE == "capability":
+    return False
   expires_at = _TARGET_EXPIRES_AT
   if _TARGET_EXPIRED.is_set() or expires_at is None:
     return True
@@ -352,23 +740,44 @@ def _load_baked_build_revision() -> str:
   return value
 
 
-def _initialize_startup_security(*, require_pid_one: bool = True) -> None:
-  """Loads immutable identity + bearer before any request can be accepted."""
-  global _BUILD_REVISION, _STARTUP_TOKEN_DIGEST, _TARGET_EXPIRES_AT
+def _initialize_startup_security(
+  *, require_pid_one: bool = True, auth_mode: str = "legacy",
+) -> None:
+  """Load immutable identity and request authentication before listening."""
+  global _AUTH_MODE, _BUILD_REVISION, _CAPABILITY_PUBLIC_KEY
+  global _ATTACH_READY_FILE, _LOCAL_BOOT_ID
+  global _LOCAL_DEPLOYMENT_ID, _LOCAL_INSTANCE_ID
+  global _SECURITY_INITIALIZED
+  global _STARTUP_TOKEN_DIGEST, _TARGET_EXPIRES_AT
   if require_pid_one and os.getpid() != 1:
     raise RuntimeError(
       "recovery target must be container pid 1 so no parent retains its bearer"
     )
-  if _STARTUP_TOKEN_DIGEST is not None:
+  if _SECURITY_INITIALIZED:
     raise RuntimeError("recovery target startup security was already initialized")
+  if auth_mode not in {"legacy", "capability"}:
+    raise RuntimeError("recovery target authentication mode is invalid")
   _assert_clean_initial_environment()
   _assert_fs_policy_supported()
   _drop_recovery_escape_capabilities()
   _set_process_nondumpable()
   _set_child_subreaper()
-  _TARGET_EXPIRES_AT = _read_target_expiry()
-  _STARTUP_TOKEN_DIGEST = _read_startup_token_digest()
+  if auth_mode == "legacy":
+    _TARGET_EXPIRES_AT = _read_target_expiry()
+    _STARTUP_TOKEN_DIGEST = _read_startup_token_digest()
+  else:
+    _CAPABILITY_PUBLIC_KEY = _read_capability_public_key()
+    _LOCAL_INSTANCE_ID = _read_required_local_identity("MOBIUS_INSTANCE_ID")
+    _LOCAL_DEPLOYMENT_ID = _read_required_local_identity(
+      "RAILWAY_DEPLOYMENT_ID"
+    )
+    _LOCAL_BOOT_ID = _read_boot_id()
+    _ATTACH_READY_FILE = _read_attach_ready_file()
+    _TARGET_EXPIRES_AT = None
+    _STARTUP_TOKEN_DIGEST = None
   _BUILD_REVISION = _load_baked_build_revision()
+  _AUTH_MODE = auth_mode
+  _SECURITY_INITIALIZED = True
 
 
 def _startup_token_digest() -> bytes:
@@ -677,17 +1086,45 @@ def _force_kill_supervisor(process: subprocess.Popen[bytes]) -> None:
 def _retire_active_supervisors(*, force: bool) -> None:
   """Stop every in-flight root command when the capability expires."""
   with _ACTIVE_SUPERVISORS_LOCK:
-    active = list(_ACTIVE_SUPERVISORS)
-  for pid in active:
-    record = _process_record(pid)
-    if record is None:
+    active = [
+      (pid, starttime)
+      for pid, (_owner, starttime) in _ACTIVE_SUPERVISORS.items()
+    ]
+  for pid, starttime in active:
+    current = _process_record(pid)
+    if current is None or current[1] != starttime:
       continue
-    _ppid, starttime = record
     if force:
+      # Freeze the exact recorded supervisor before walking its descendants.
+      # A stale mapping must never turn a reused PID into a cleanup root.
+      _signal_recorded_process(pid, starttime, signal.SIGSTOP)
+      current = _process_record(pid)
+      if current is None or current[1] != starttime:
+        continue
       _stop_and_kill_descendants(pid)
       _signal_recorded_process(pid, starttime, signal.SIGKILL)
     else:
       _signal_recorded_process(pid, starttime, signal.SIGTERM)
+
+
+def _retire_session_supervisors(session_id: str) -> None:
+  """Immediately retire only commands owned by one revoked live session."""
+  with _ACTIVE_SUPERVISORS_LOCK:
+    active = [
+      (pid, starttime)
+      for pid, (owner, starttime) in _ACTIVE_SUPERVISORS.items()
+      if owner == session_id
+    ]
+  for pid, starttime in active:
+    current = _process_record(pid)
+    if current is None or current[1] != starttime:
+      continue
+    _signal_recorded_process(pid, starttime, signal.SIGSTOP)
+    current = _process_record(pid)
+    if current is None or current[1] != starttime:
+      continue
+    _stop_and_kill_descendants(pid)
+    _signal_recorded_process(pid, starttime, signal.SIGKILL)
 
 
 def _revoke_target(server: Any) -> None:
@@ -796,8 +1233,34 @@ def _exec_supervisor_main(raw_fd: str) -> int:
   return returncode
 
 
-def _run_exec(body: dict[str, Any]) -> dict[str, Any]:
+def _run_exec(
+  body: dict[str, Any], *, capability_expires_at: int | None = None,
+  capability_session_id: str | None = None,
+) -> dict[str, Any]:
   _require_active_target()
+  if capability_session_id is not None:
+    try:
+      _validate_capability_identifier(capability_session_id, "sid")
+    except ValueError as exc:
+      raise RequestError(
+        "internal_error",
+        "recovery target capability session is invalid",
+        HTTPStatus.INTERNAL_SERVER_ERROR,
+      ) from exc
+    if _session_is_revoked(capability_session_id):
+      raise _revoked_capability()
+  capability_deadline: float | None = None
+  if capability_expires_at is not None:
+    if type(capability_expires_at) is not int:
+      raise RequestError(
+        "internal_error",
+        "recovery target capability deadline is invalid",
+        HTTPStatus.INTERNAL_SERVER_ERROR,
+      )
+    remaining_capability = capability_expires_at - time.time()
+    if remaining_capability <= 0:
+      raise _invalid_capability(expired=True)
+    capability_deadline = time.monotonic() + remaining_capability
   argv = body.get("argv")
   if (
     not isinstance(argv, list)
@@ -888,6 +1351,11 @@ def _run_exec(body: dict[str, Any]) -> dict[str, Any]:
   config_read_fd: int | None = None
   config_write_fd: int | None = None
   try:
+    if (
+      capability_deadline is not None
+      and time.monotonic() >= capability_deadline
+    ):
+      raise _invalid_capability(expired=True)
     try:
       config_read_fd, config_write_fd = os.pipe()
       supervisor_env = {
@@ -899,6 +1367,11 @@ def _run_exec(body: dict[str, Any]) -> dict[str, Any]:
         "DATA_DIR": os.environ.get("DATA_DIR", "/data"),
       }
       with _ACTIVE_SUPERVISORS_LOCK:
+        if (
+          capability_session_id is not None
+          and _session_is_revoked(capability_session_id)
+        ):
+          raise _revoked_capability()
         process = subprocess.Popen(
           [
             sys.executable, "-I", str(Path(__file__).resolve()),
@@ -912,7 +1385,16 @@ def _run_exec(body: dict[str, Any]) -> dict[str, Any]:
           start_new_session=True,
           pass_fds=(config_read_fd,),
         )
-        _ACTIVE_SUPERVISORS.add(process.pid)
+        process_record = _process_record(process.pid)
+        if process_record is None:
+          raise RequestError(
+            "exec_failed",
+            "recovery exec supervisor identity is unavailable",
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+          )
+        _ACTIVE_SUPERVISORS[process.pid] = (
+          capability_session_id, process_record[1],
+        )
       os.close(config_read_fd)
       config_read_fd = None
       config_payload = json.dumps({
@@ -948,10 +1430,33 @@ def _run_exec(body: dict[str, Any]) -> dict[str, Any]:
     output = {"stdout": bytearray(), "stderr": bytearray()}
     truncated = False
     timed_out = False
+    capability_expired = False
+    session_revoked = False
     termination_requested_at: float | None = None
     process_exited_at: float | None = None
     while selector.get_map():
-      if _target_is_expired() and termination_requested_at is None:
+      now_monotonic = time.monotonic()
+      if (
+        capability_session_id is not None
+        and _session_is_revoked(capability_session_id)
+      ):
+        session_revoked = True
+        if termination_requested_at is None:
+          termination_requested_at = now_monotonic
+        if process.poll() is None:
+          _force_kill_supervisor(process)
+      elif (
+        capability_deadline is not None
+        and now_monotonic >= capability_deadline
+        and process.poll() is None
+      ):
+        capability_expired = True
+        if termination_requested_at is None:
+          termination_requested_at = now_monotonic
+        # Capability expiry is an authorization boundary, not a friendly
+        # command timeout. Retire the full supervised process tree at once.
+        _force_kill_supervisor(process)
+      elif _target_is_expired() and termination_requested_at is None:
         termination_requested_at = time.monotonic()
         _request_supervisor_termination(process)
       remaining = timeout - (time.monotonic() - started)
@@ -961,7 +1466,13 @@ def _run_exec(body: dict[str, Any]) -> dict[str, Any]:
           termination_requested_at = time.monotonic()
           _request_supervisor_termination(process)
         remaining = 0.1
-      events = selector.select(min(max(remaining, 0.01), 0.25))
+      wait_for = min(max(remaining, 0.01), 0.25)
+      if capability_deadline is not None and not capability_expired:
+        wait_for = min(
+          wait_for,
+          max(capability_deadline - time.monotonic(), 0.001),
+        )
+      events = selector.select(wait_for)
       for key, _mask in events:
         stream = key.fileobj
         kind = key.data
@@ -1028,6 +1539,16 @@ def _run_exec(body: dict[str, Any]) -> dict[str, Any]:
           "repair process supervisor could not be retired",
           HTTPStatus.INTERNAL_SERVER_ERROR,
         ) from final_exc
+    if (
+      session_revoked
+      or (
+        capability_session_id is not None
+        and _session_is_revoked(capability_session_id)
+      )
+    ):
+      raise _revoked_capability()
+    if capability_expired:
+      raise _invalid_capability(expired=True)
     elapsed_ms = round((time.monotonic() - started) * 1000)
     return {
       "exit_code": exit_code,
@@ -1056,7 +1577,7 @@ def _run_exec(body: dict[str, Any]) -> dict[str, Any]:
           pass
     if process is not None:
       with _ACTIVE_SUPERVISORS_LOCK:
-        _ACTIVE_SUPERVISORS.discard(process.pid)
+        _ACTIVE_SUPERVISORS.pop(process.pid, None)
     _retire_untracked_target_children()
     _EXEC_SLOTS.release()
 
@@ -1244,6 +1765,52 @@ class _Handler(BaseHTTPRequestHandler):
   protocol_version = "HTTP/1.1"
   server_version = "MobiusRecoveryTarget/1"
 
+  def setup(self) -> None:
+    super().setup()
+    self._header_timer: threading.Timer | None = None
+    self._header_expired: threading.Event | None = None
+    self.connection.settimeout(HEADER_TIMEOUT_SECONDS)
+
+  def _expire_read(self, expired: threading.Event) -> None:
+    expired.set()
+    try:
+      self.connection.shutdown(socket.SHUT_RD)
+    except OSError:
+      pass
+
+  def _read_timer(
+    self, seconds: float, expired: threading.Event,
+  ) -> threading.Timer:
+    timer = threading.Timer(seconds, self._expire_read, args=(expired,))
+    timer.daemon = True
+    timer.start()
+    return timer
+
+  def handle_one_request(self) -> None:
+    expired = threading.Event()
+    self._header_expired = expired
+    self._header_timer = self._read_timer(HEADER_TIMEOUT_SECONDS, expired)
+    try:
+      super().handle_one_request()
+    finally:
+      if self._header_timer is not None:
+        self._header_timer.cancel()
+        self._header_timer = None
+
+  def parse_request(self) -> bool:
+    try:
+      parsed = super().parse_request()
+      if self._header_expired is not None and self._header_expired.is_set():
+        self.close_connection = True
+        return False
+      return parsed
+    finally:
+      # The timer began before raw_requestline, so it bounds the complete
+      # request-line + header parse instead of each individual socket read.
+      if self._header_timer is not None:
+        self._header_timer.cancel()
+        self._header_timer = None
+
   def log_message(self, fmt: str, *args: object) -> None:
     print(f"recovery-target: {self.address_string()} {fmt % args}", flush=True)
 
@@ -1266,19 +1833,37 @@ class _Handler(BaseHTTPRequestHandler):
     )
 
   def _authorized(self) -> bool:
+    values = self.headers.get_all("Authorization", failobj=[]) or []
+    self._request_expires_at = None
+    self._request_claims = None
+
+    if _AUTH_MODE == "capability":
+      if len(values) != 1 or not values[0].startswith("Bearer "):
+        values.clear()
+        self._error(_invalid_capability())
+        return False
+      try:
+        claims = _verify_capability_token(values[0][7:])
+      except RequestError as exc:
+        self._error(exc)
+        return False
+      finally:
+        values.clear()
+      self._request_expires_at = int(claims["exp"])
+      self._request_claims = claims
+      if (
+        claims["scp"] == "session"
+        and self.path != "/v1/revoke"
+        and _session_is_revoked(str(claims["sid"]))
+      ):
+        self._error(_revoked_capability())
+        return False
+      return True
+
     if _target_is_expired():
       _revoke_target(self.server)
-      self._send(
-        HTTPStatus.UNAUTHORIZED,
-        {
-          "error": {
-            "code": "auth_expired",
-            "message": "recovery target capability has expired",
-          }
-        },
-      )
+      self._error(_invalid_capability(expired=True))
       return False
-    values = self.headers.get_all("Authorization", failobj=[]) or []
     supplied_buffer: bytearray | None = None
     authorized = False
     if len(values) == 1 and values[0].startswith("Bearer "):
@@ -1303,22 +1888,12 @@ class _Handler(BaseHTTPRequestHandler):
     # adjustment cannot make a revoked capability valid again.
     if _target_is_expired():
       _revoke_target(self.server)
-      self._send(
-        HTTPStatus.UNAUTHORIZED,
-        {
-          "error": {
-            "code": "auth_expired",
-            "message": "recovery target capability has expired",
-          }
-        },
-      )
+      self._error(_invalid_capability(expired=True))
       return False
     if not authorized:
-      self._send(
-        HTTPStatus.UNAUTHORIZED,
-        {"error": {"code": "unauthorized", "message": "invalid bearer token"}},
-      )
+      self._error(_invalid_capability())
       return False
+    self._request_expires_at = _TARGET_EXPIRES_AT
     return True
 
   def _body(self) -> dict[str, Any]:
@@ -1336,7 +1911,52 @@ class _Handler(BaseHTTPRequestHandler):
         f"request exceeds {MAX_REQUEST_BYTES} bytes",
         HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
       )
-    raw = self.rfile.read(length)
+    body_window = BODY_TIMEOUT_SECONDS
+    token_limited = False
+    if self._request_expires_at is not None:
+      token_remaining = self._request_expires_at - time.time()
+      if token_remaining <= 0:
+        raise _invalid_capability(expired=True)
+      if token_remaining <= body_window:
+        body_window = token_remaining
+        token_limited = True
+    deadline = time.monotonic() + body_window
+    expired = threading.Event()
+    timer = self._read_timer(body_window, expired)
+    raw = bytearray()
+    read_error: OSError | None = None
+    try:
+      while len(raw) < length:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+          expired.set()
+          break
+        self.connection.settimeout(max(remaining, 0.001))
+        try:
+          chunk = self.rfile.read(min(64 * 1024, length - len(raw)))
+        except OSError as exc:
+          read_error = exc
+          break
+        if not chunk:
+          break
+        raw.extend(chunk)
+    finally:
+      timer.cancel()
+    deadline_reached = expired.is_set() or time.monotonic() >= deadline
+    if deadline_reached:
+      if token_limited:
+        raise _invalid_capability(expired=True)
+      raise RequestError(
+        "request_timeout",
+        "request body deadline exceeded",
+        HTTPStatus.REQUEST_TIMEOUT,
+      )
+    if read_error is not None:
+      raise RequestError(
+        "request_timeout",
+        "request body read failed",
+        HTTPStatus.REQUEST_TIMEOUT,
+      ) from read_error
     if len(raw) != length:
       raise RequestError("invalid_framing", "request body ended early")
     try:
@@ -1350,19 +1970,62 @@ class _Handler(BaseHTTPRequestHandler):
   def do_GET(self) -> None:  # noqa: N802
     if not self._authorized():
       return
+    if not _attach_is_ready():
+      self._error(_attach_not_ready())
+      return
     if self.path != "/v1/health":
       self._error(RequestError("not_found", "endpoint not found", HTTPStatus.NOT_FOUND))
       return
-    self._send(HTTPStatus.OK, {
+    payload = {
       "protocol": PROTOCOL,
       "target": "mobius",
-      "mode": "recovery",
       "build_sha": _BUILD_REVISION,
-      "expires_at": _TARGET_EXPIRES_AT,
-    })
+    }
+    if _AUTH_MODE == "capability":
+      payload.update({
+        "mode": "normal",
+        "attachment": "live",
+        "expires_at": self._request_expires_at,
+        "deployment_id": _LOCAL_DEPLOYMENT_ID,
+        "boot_id": _LOCAL_BOOT_ID,
+      })
+    else:
+      payload.update({
+        "mode": "recovery",
+        "expires_at": _TARGET_EXPIRES_AT,
+      })
+    self._send(HTTPStatus.OK, payload)
 
   def do_POST(self) -> None:  # noqa: N802
     if not self._authorized():
+      return
+    if (
+      _AUTH_MODE == "capability"
+      and self._request_claims is not None
+      and self._request_claims["scp"] != "session"
+    ):
+      self._error(_insufficient_scope())
+      return
+    if self.path == "/v1/revoke":
+      if _AUTH_MODE != "capability" or self._request_claims is None:
+        self._error(RequestError(
+          "not_found", "endpoint not found", HTTPStatus.NOT_FOUND,
+        ))
+        return
+      try:
+        body = self._body()
+        if body:
+          raise RequestError(
+            "invalid_request", "revoke body must be an empty JSON object",
+          )
+        result = _revoke_capability_session(self._request_claims)
+      except RequestError as exc:
+        self._error(exc)
+        return
+      self._send(HTTPStatus.OK, result)
+      return
+    if not _attach_is_ready():
+      self._error(_attach_not_ready())
       return
     handlers = {
       "/v1/exec": _run_exec,
@@ -1375,7 +2038,35 @@ class _Handler(BaseHTTPRequestHandler):
       self._error(RequestError("not_found", "endpoint not found", HTTPStatus.NOT_FOUND))
       return
     try:
-      result = operation(self._body())
+      body = self._body()
+      if (
+        _AUTH_MODE == "capability"
+        and (
+          self._request_expires_at is None
+          or time.time() >= self._request_expires_at
+        )
+      ):
+        raise _invalid_capability(expired=True)
+      if (
+        _AUTH_MODE == "capability"
+        and self._request_claims is not None
+        and _session_is_revoked(str(self._request_claims["sid"]))
+      ):
+        raise _revoked_capability()
+      if self.path == "/v1/exec":
+        result = operation(
+          body, capability_expires_at=(
+            self._request_expires_at
+            if _AUTH_MODE == "capability" else None
+          ),
+          capability_session_id=(
+            str(self._request_claims["sid"])
+            if _AUTH_MODE == "capability"
+            and self._request_claims is not None else None
+          ),
+        )
+      else:
+        result = operation(body)
     except RequestError as exc:
       self._error(exc)
       return
@@ -1387,19 +2078,54 @@ class _Handler(BaseHTTPRequestHandler):
     self._send(HTTPStatus.OK, result)
 
 
-class _DualStackServer(ThreadingHTTPServer):
-  address_family = socket.AF_INET6
+class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
   daemon_threads = True
   allow_reuse_address = True
+
+  _BUSY_RESPONSE = (
+    b"HTTP/1.1 503 Service Unavailable\r\n"
+    b"Content-Length: 0\r\nConnection: close\r\n\r\n"
+  )
+
+  def __init__(self, *args: Any, **kwargs: Any) -> None:
+    self._request_slots = _REQUEST_SLOTS
+    super().__init__(*args, **kwargs)
+
+  def process_request(self, request: socket.socket, client_address: Any) -> None:
+    if not self._request_slots.acquire(blocking=False):
+      try:
+        request.settimeout(0.25)
+        request.sendall(self._BUSY_RESPONSE)
+      except OSError:
+        pass
+      finally:
+        self.shutdown_request(request)
+      return
+    try:
+      super().process_request(request, client_address)
+    except BaseException:
+      self._request_slots.release()
+      raise
+
+  def process_request_thread(
+    self, request: socket.socket, client_address: Any,
+  ) -> None:
+    try:
+      super().process_request_thread(request, client_address)
+    finally:
+      self._request_slots.release()
+
+
+class _DualStackServer(_BoundedThreadingHTTPServer):
+  address_family = socket.AF_INET6
 
   def server_bind(self) -> None:
     self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
     super().server_bind()
 
 
-class _IPv4Server(ThreadingHTTPServer):
-  daemon_threads = True
-  allow_reuse_address = True
+class _IPv4Server(_BoundedThreadingHTTPServer):
+  pass
 
 
 def _create_server(port: int) -> ThreadingHTTPServer:
@@ -1446,12 +2172,23 @@ def _park_expired_target() -> None:
 
 
 def main() -> None:
-  if os.environ.get("MOBIUS_BOOT_MODE") != "recovery":
-    raise SystemExit("recovery target refuses to run outside recovery boot mode")
+  boot_mode = os.environ.get("MOBIUS_BOOT_MODE", "normal")
+  if boot_mode == "recovery":
+    auth_mode = "legacy"
+    require_pid_one = True
+  elif boot_mode == "normal" and os.environ.get(CAPABILITY_PUBLIC_KEY_ENV):
+    auth_mode = "capability"
+    require_pid_one = False
+  else:
+    raise SystemExit(
+      "recovery target requires recovery boot mode or a capability public key"
+    )
   if os.geteuid() != 0:
     raise SystemExit("recovery target must run as root")
   try:
-    _initialize_startup_security()
+    _initialize_startup_security(
+      require_pid_one=require_pid_one, auth_mode=auth_mode,
+    )
   except RuntimeError as exc:
     raise SystemExit(f"recovery target security initialization failed: {exc}") from exc
   raw_port = os.environ.get("MOBIUS_RECOVERY_TARGET_PORT", str(DEFAULT_PORT))
@@ -1465,17 +2202,22 @@ def main() -> None:
   # launchers therefore clear provider-level unauthenticated health checks and
   # probe /v1/health themselves before handing the worker to the owner.
   server = _create_server(port)
+  attachment = "stopped" if auth_mode == "legacy" else "live"
   print(
-    f"Mobius recovery target {PROTOCOL} listening privately on [::]:{port}",
+    f"Mobius recovery target {PROTOCOL} ({attachment}) listening privately "
+    f"on [::]:{port}",
     flush=True,
   )
-  expiry_timer = _schedule_target_expiry(server)
+  expiry_timer = (
+    _schedule_target_expiry(server) if auth_mode == "legacy" else None
+  )
   try:
     server.serve_forever(poll_interval=0.25)
   finally:
-    expiry_timer.cancel()
+    if expiry_timer is not None:
+      expiry_timer.cancel()
     server.server_close()
-  if _TARGET_EXPIRED.is_set():
+  if auth_mode == "legacy" and _TARGET_EXPIRED.is_set():
     print(
       "recovery-target: capability expired; listener closed and PID1 parked",
       flush=True,

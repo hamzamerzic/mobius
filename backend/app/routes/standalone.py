@@ -26,6 +26,8 @@ offline cache is opted into separately for offline-capable apps.
 import io
 import json
 import re
+from html import escape
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
@@ -214,7 +216,9 @@ def _get_app_by_slug(db: Session, slug: str) -> models.App:
 
 
 @router.get("/apps/{slug}/manifest.json")
-def standalone_manifest(slug: str, db: Session = Depends(get_db)):
+def standalone_manifest(
+  slug: str, request: Request, db: Session = Depends(get_db)
+):
   """Per-app web app manifest.
 
   `id` is the stable install identity (`/apps/<slug>/`). `scope` and
@@ -233,13 +237,23 @@ def standalone_manifest(slug: str, db: Session = Depends(get_db)):
   v = int(app.updated_at.timestamp() * 1_000_000) if app.updated_at else 0
   bg = _app_background_color(app)
   theme = _app_theme_color(app)
+  # A one-time install pass supplied by the installing page rides through to
+  # `start_url` so the installed app's FIRST launch can redeem the owner
+  # session and skip a login it could not otherwise avoid (iOS gives each
+  # home-screen web app its own empty storage). This route never mints a pass
+  # — it only forwards one the caller already holds — so an anonymous fetch
+  # gets the plain start_url and the ordinary login.
+  install_pass = request.query_params.get("pass") or ""
+  start_url = (
+    f"{base}?pass={quote(install_pass, safe='')}" if install_pass else base
+  )
   return JSONResponse(
     {
       "id": base,
       "name": app.name,
       "short_name": app.name[:12] if app.name else slug,
       "description": app.description or "",
-      "start_url": base,
+      "start_url": start_url,
       "scope": base,
       # Per-app display mode (mobius.json `display`); defaults to
       # "standalone". Games declare "fullscreen" so the installed PWA
@@ -267,8 +281,12 @@ def standalone_manifest(slug: str, db: Session = Depends(get_db)):
     # Revalidate on every fetch so a freshly-renamed app never serves a
     # stale name/short_name/icon to the OS at install time. The body is
     # tiny; `no-cache` keeps it cheap (304 when unchanged) without
-    # letting the browser pin an old manifest.
-    headers={"Cache-Control": "no-cache, must-revalidate"},
+    # letting the browser pin an old manifest. A manifest carrying an
+    # install pass holds a credential, so that variant is never stored.
+    headers={
+      "Cache-Control": "no-store" if install_pass else "no-cache, must-revalidate",
+      **({"Referrer-Policy": "no-referrer"} if install_pass else {}),
+    },
   )
 
 
@@ -365,7 +383,7 @@ async def standalone_icon(
   app_id = app.id
   icon_png = app.effective_icon_png
   name = app.name
-  app_slug = app.slug or slug
+  app_slug = app.slug
   bg_inputs = (app.background_color, app.theme_color)
 
   def _compute() -> bytes:
@@ -440,16 +458,19 @@ def _standalone_boot_payload(app: models.App) -> dict:
   }
 
 
-def _standalone_index_html(app: models.App) -> str:
+def _standalone_index_html(app: models.App, install_pass: str = "") -> str:
   """Compose app identity into the ordinary signed frontend entry document.
 
   Only platform code executes at the top-level owner origin. The mini-app is
   selected by a JSON boot slot and mounted later by the shared AppCanvas inside
   the response-CSP sandboxed /api/apps/{id}/frame document.
-  """
-  from html import escape
-  from urllib.parse import quote
 
+  `install_pass` is forwarded onto the manifest URL so the OS reads a manifest
+  whose `start_url` carries it, and the installed app's first launch can redeem
+  the opaque server-stored grant. Rendering it server-side
+  rather than patching the link from JS means the manifest the OS fetches at
+  Add-to-Home time is the right one on the first read.
+  """
   try:
     html = _frontend_index_path().read_text(encoding="utf-8")
   except FileNotFoundError:
@@ -459,8 +480,8 @@ def _standalone_index_html(app: models.App) -> str:
       headers={"Retry-After": "1"},
     )
 
-  slug = quote(app.slug or "", safe="")
-  name = escape(app.name or app.slug or "App", quote=True)
+  slug = quote(app.slug, safe="")
+  name = escape(app.name or app.slug, quote=True)
   description = escape(app.description or "", quote=True)
   version = int(app.updated_at.timestamp() * 1_000_000) if app.updated_at else 0
   app_bg = _app_background_color(app)
@@ -479,7 +500,8 @@ def _standalone_index_html(app: models.App) -> str:
   html = _replace_html_text(
     html,
     '<link rel="manifest" href="/manifest.webmanifest" />',
-    f'<link rel="manifest" href="/apps/{slug}/manifest.json" />',
+    f'<link rel="manifest" href="/apps/{slug}/manifest.json'
+    f'{"?pass=" + quote(install_pass, safe="") if install_pass else ""}" />',
   )
   html = _replace_html_text(
     html,
@@ -531,7 +553,9 @@ def _standalone_index_html(app: models.App) -> str:
 
 @router.get("/apps/{slug}/", response_class=HTMLResponse)
 @router.get("/apps/{slug}", response_class=HTMLResponse)
-def standalone_shell(slug: str, db: Session = Depends(get_db)):
+def standalone_shell(
+  slug: str, request: Request, db: Session = Depends(get_db)
+):
   """Serve one installable app as a minimal trusted host around AppCanvas.
 
   The route remains public so browsers can discover its manifest and complete
@@ -541,7 +565,20 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   AppCanvas supplies only an app-scoped token through its verified handshake.
   """
   app = _get_app_by_slug(db, slug)
-  headers = {"Cache-Control": "no-cache, must-revalidate"}
-  if app.offline_capable:
+  # Forwarded, never minted here: this route is public, so it can only echo a
+  # pass the caller already had. A document carrying one is never stored.
+  install_pass = request.query_params.get("pass") or ""
+  headers = {
+    "Cache-Control": "no-store" if install_pass else "no-cache, must-revalidate"
+  }
+  if install_pass:
+    headers["Referrer-Policy"] = "no-referrer"
+  # An older controlling service worker decides whether to store this response
+  # from this header and ignores Cache-Control. Never opt a pass-bearing body
+  # into that cache: its manifest link echoes the secret.
+  if app.offline_capable and not install_pass:
     headers["X-Mobius-Offline"] = "1"
-  return HTMLResponse(content=_standalone_index_html(app), headers=headers)
+  return HTMLResponse(
+    content=_standalone_index_html(app, install_pass=install_pass),
+    headers=headers,
+  )

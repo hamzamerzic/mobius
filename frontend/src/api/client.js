@@ -7,6 +7,7 @@ import { del as idbDel } from 'idb-keyval'
 import * as setupSession from '../lib/setupSession.js'
 import { clearLatchedTokens } from '../lib/appToken.js'
 import { clearOwnerDraftStorage } from '../lib/ownerDraftStorage.js'
+import { clearReadingPositions } from '../components/ChatView/useScrollMode.js'
 import { clearDurableComposerDrafts } from '../components/ChatView/composerDraft.js'
 import { verifyConnectivity } from '../lib/connectivityStore.js'
 import { SHELL_DATA_CACHE } from '../sw-cache-policy.js'
@@ -102,6 +103,11 @@ export function clearToken() {
   // owner hasn't seen the walkthrough, and the server stamp should
   // reflect their own dismissal, not a stale browser flag.
   try { localStorage.removeItem('mobius:walkthrough-completed') } catch {}
+  // Reading positions became durable so they survive a PWA relaunch, which
+  // also means they now outlive a session unless cleared here. Where the owner
+  // had scrolled to in each conversation is owner-scoped, so it leaves with
+  // the rest of their persisted state.
+  try { clearReadingPositions() } catch {}
 }
 
 // Wipes persisted client state on logout / token expiry: the
@@ -147,14 +153,22 @@ export function clearQueryCache() {
 // offline work. The runtime owns the IndexedDB schemas, so keep the record
 // traversal there rather than duplicating it in bundled code.
 export async function clearAppRuntimeData(appId) {
+  const cleanups = []
   try {
     const runtimeUrl = `${BASE}/mobius-runtime.js`
     const runtime = await import(/* @vite-ignore */ runtimeUrl)
-    await runtime.purgeAppRuntimeData?.(appId)
+    cleanups.push(runtime.purgeAppRuntimeData?.(appId))
   } catch {
     // The server-side wipe already succeeded. Local cleanup is best-effort and
     // the rotated installation nonce still prevents stale record reuse.
   }
+  try {
+    const deviceAssets = await import('../lib/deviceAssetCache.js')
+    cleanups.push(deviceAssets.purgeDeviceAssetCache?.(appId))
+  } catch {
+    // Browser support and module loading are best-effort during data removal.
+  }
+  await Promise.allSettled(cleanups)
 }
 
 // The offline outbox and signal queue (mobius-runtime.js) are their OWN
@@ -366,6 +380,20 @@ export const api = {
       ),
       consume: () => apiFetch('/auth/sso/session', { method: 'POST' }),
     },
+    // One-time sign-in pass for an app being added to the iOS home screen,
+    // where the new web app gets its own empty storage container. `mint`
+    // needs the current session; `redeem` runs in the installed app, which
+    // by definition has none yet.
+    installPass: {
+      mint: (slug) => apiFetch('/auth/install-pass', {
+        method: 'POST',
+        body: JSON.stringify({ slug }),
+      }),
+      redeem: (installPass, slug) => apiFetch('/auth/install-pass/redeem', {
+        method: 'POST',
+        body: JSON.stringify({ install_pass: installPass, slug }),
+      }),
+    },
     setup: {
       status: () => apiFetch('/auth/setup/status'),
       create: (payload) => apiFetch('/auth/setup', {
@@ -395,6 +423,10 @@ export const api = {
   },
   chats: {
     list: (options = {}) => apiFetch('/chats', options),
+    search: (query, options = {}) => apiFetch(
+      `/chats/search?q=${encodeURIComponent(query)}`,
+      { timeoutMs: 10000, ...options },
+    ),
     create: (payload, options = {}) => listAffectingMutation('chats', '/chats', {
       ...options,
       method: 'POST',
@@ -405,10 +437,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
-    detail: (chatId, { limit, compact, signal, timeoutMs } = {}) => {
+    detail: (chatId, { limit, compact, anchor, signal, timeoutMs } = {}) => {
       const params = new URLSearchParams()
       if (limit !== undefined) params.set('limit', String(limit))
       if (compact !== undefined) params.set('compact', compact ? '1' : '0')
+      if (anchor) params.set('anchor', String(anchor))
       const query = params.toString()
       return apiFetch(
         `/chats/${chatId}${query ? `?${query}` : ''}`,

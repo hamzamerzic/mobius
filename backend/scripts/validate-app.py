@@ -35,11 +35,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.app_source_check import check_manifest_tree  # noqa: E402
 from app.app_compile_contract import (  # noqa: E402
-  ESBUILD_TIMEOUT_SECS,
-  esbuild_command,
-  esbuild_environment,
-  esbuild_metafile_contract_error,
+  ROLLDOWN_TIMEOUT_SECS,
+  rolldown_command,
+  rolldown_report_contract_error,
 )
+from app.build_admission import build_lease  # noqa: E402
 from app.manifest_contract import (  # noqa: E402
   ENTRY_MAX_BYTES,
   ICON_MAX_BYTES,
@@ -96,31 +96,34 @@ def _compile(
       target = staged_root / "static" / dest
       target.parent.mkdir(parents=True, exist_ok=True)
       shutil.copy2(root / source_path, target)
-    metadata_path = Path(tmp) / "meta.json"
-    command = esbuild_command(
-      staged_root / entry, Path(tmp) / "app.js", metafile=metadata_path,
+    report_path = Path(tmp) / "report.json"
+    command = rolldown_command(
+      staged_root / entry, Path(tmp) / "app.js", report=report_path,
     )
     try:
-      result = subprocess.run(
-        command, capture_output=True, text=True,
-        timeout=ESBUILD_TIMEOUT_SECS, check=False,
-        env=esbuild_environment(),
-      )
+      # In a running container this is the same lease shell Vite and mini-app
+      # compilation take; without a runtime directory it is a no-op, so the
+      # CLI stays zero-configuration in a developer checkout.
+      with build_lease():
+        result = subprocess.run(
+          command, capture_output=True, text=True,
+          timeout=ROLLDOWN_TIMEOUT_SECS, check=False,
+        )
     except FileNotFoundError:
       return (
-        "esbuild is not installed or not on PATH; install it before "
-        "validating an app"
+        "Node.js is not installed or not on PATH; install it before validating "
+        "an app"
       )
     except subprocess.TimeoutExpired:
-      return f"esbuild timed out after {ESBUILD_TIMEOUT_SECS} seconds"
+      return f"Rolldown timed out after {ROLLDOWN_TIMEOUT_SECS} seconds"
     if result.returncode != 0:
       detail = " ".join(result.stderr.strip().splitlines())
-      return detail or f"esbuild exited {result.returncode}"
+      return detail or f"Rolldown exited {result.returncode}"
     try:
-      metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+      report = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-      return f"cannot read esbuild metadata: {exc}"
-    return esbuild_metafile_contract_error(metadata)
+      return f"cannot read Rolldown report: {exc}"
+    return rolldown_report_contract_error(report)
 
 
 def _symlink_component(root: Path, rel: str) -> Path | None:

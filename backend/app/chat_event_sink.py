@@ -39,7 +39,9 @@ from app.events import (
   tool_output_exit_code,
   undo_question_scrub,
 )
-from app.memory_recall import recall_from_command, settle_recall
+from app.memory_recall import (
+  RecallBinding, recall_from_command, settle_recall,
+)
 from app.runtime_types import ChatEvent
 
 
@@ -56,7 +58,7 @@ def _pause_note(
   """Build the ONE error-block/event shape every pause producer emits.
 
   A pause folds its whole classification into a single `pause` descriptor on
-  the block: `kind` names the family ('restart' | 'stall' | 'rate_limit' |
+  the block: `kind` names the family ('restart' | 'rate_limit' |
   'usage_limit'), and `resets_at` (an explicit-UTC ISO string, present only
   for the limit kinds) is the reset time the card renders. Absorbing the reset
   reason into `kind` keeps the wire at two block keys — `resumable` + `pause` —
@@ -88,6 +90,22 @@ def register_active_sink(chat_id: str, sink: "ChatEventSink") -> None:
 def get_active_sink(chat_id: str) -> "ChatEventSink | None":
   """Return the live sink for `chat_id`, or None when no turn is streaming."""
   return _active_sinks.get(chat_id)
+
+
+def active_sink_stream_snapshot(chat_id: str, broadcast) -> list[dict] | None:
+  """Freeze the current assistant items for one snapshot-capable subscriber.
+
+  The sink is the reduction authority for a running turn: every content event
+  reaches ``assistant_blocks`` before it reaches the broadcast.  Pairing by
+  broadcast identity prevents a late sink from seeding a successor turn (or a
+  successor sink from seeding a completed broadcast during teardown). ``None``
+  means the caller must use ordinary event-log replay; an empty list is a valid
+  live snapshot before the assistant has produced its first item.
+  """
+  sink = get_active_sink(chat_id)
+  if sink is None or sink.bc is not broadcast:
+    return None
+  return copy.deepcopy(sink.assistant_blocks)
 
 
 def unregister_active_sink(chat_id: str, sink: "ChatEventSink") -> None:
@@ -226,9 +244,21 @@ class ChatEventSink:
     {"tool_start", "tool_end", "task_start", "task_done", "error"}
   )
 
-  def __init__(self, bc, chat_id: str, run_token: str | None = None):
+  def __init__(
+    self,
+    bc,
+    chat_id: str,
+    run_token: str | None = None,
+    *,
+    recall_binding: RecallBinding,
+  ):
     self.bc = bc
     self.chat_id = chat_id
+    # Which app's recall receipts this turn will honor, resolved ONCE by the
+    # caller while its session is live. Required rather than defaulted: a sink
+    # that silently fell back to "no provider" would drop every citation for
+    # the turn and look identical to "the agent never looked".
+    self._recall_binding = recall_binding
     # Per-turn run identity, allocated by the scheduler and threaded in
     # via `_run_chat_impl`. The sink stamps it on every writer-actor
     # command so the actor coalesces/fences this turn's snapshots under
@@ -381,7 +411,7 @@ class ChatEventSink:
       # future runner that populates both from double-stamping.)
       if self._tool_was_memory_recall(event.get("tool_use_id")):
         return
-      recall = recall_from_command(event.get("input"))
+      recall = recall_from_command(event.get("input"), self._recall_binding)
       if recall is not None:
         event["recall"] = recall
       return

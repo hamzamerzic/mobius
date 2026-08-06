@@ -6,6 +6,7 @@ import {
   isShellNavigationDenied,
   PROXIED_APP_SUBTREES,
 } from '../swNavigationPolicy.js'
+import { appCodeCacheKey } from '../../sw-cache-policy.js'
 
 const SOURCE = readFileSync(
   new URL('../../sw.js', import.meta.url),
@@ -104,10 +105,11 @@ test('server-owned and standalone navigations never catch-fallback to shell', ()
   }
 })
 
-test('offline app cache key ignores install intent query', () => {
-  assert.match(
-    SOURCE,
-    /searchParams\.delete\(['"]install['"]\)/,
-    'offline cache key strips ?install=1',
+test('offline app cache identity ignores one-shot install fields', () => {
+  assert.equal(
+    appCodeCacheKey(
+      'https://mobius.example/apps/notes/?install=1&pass=opaque',
+    ),
+    'https://mobius.example/apps/notes/',
   )
 })

@@ -25,6 +25,10 @@ const drawerItemActionMenu = readFileSync(
   new URL('../../Drawer/DrawerItemActionMenu.jsx', import.meta.url),
   'utf8',
 )
+const contextMenuOutsideDismiss = readFileSync(
+  new URL('../../../hooks/useContextMenuOutsideDismiss.js', import.meta.url),
+  'utf8',
+)
 const paneModelSrc = readFileSync(new URL('../paneModel.js', import.meta.url), 'utf8')
 const chrome = readFileSync(new URL('../WorkspaceChrome.jsx', import.meta.url), 'utf8')
 const dragBinding = readFileSync(new URL('../useWorkspaceDrag.js', import.meta.url), 'utf8')
@@ -46,9 +50,9 @@ test('the workspace menu avoids an oversized border-and-shadow card', () => {
   assert.doesNotMatch(rule, /box-shadow:[^;]*(?:1[6-9]|[2-9]\d)px/)
 })
 
-test('the desktop workspace menu stays close-only, edge-clamped, and keyboard navigable', () => {
+test('the workspace tab menu stays close-only, edge-clamped, and keyboard navigable', () => {
   const menuMarkup = shell.slice(
-    shell.indexOf('{tabActionsAvailable && tabMenu &&'),
+    shell.indexOf('{tabMenu &&'),
     shell.indexOf('</HistoryDismissProvider>'),
   )
   assert.match(shell, /aria-label="Tab actions"/)
@@ -64,9 +68,11 @@ test('the desktop workspace menu stays close-only, edge-clamped, and keyboard na
   assert.match(shell, /querySelector\('\[role="menuitem"\]'\)\?\.focus\(\)/)
   assert.match(shell, /tabMenuReturnFocusRef\.current = event\.currentTarget/)
   assert.match(shell, /returnTarget\?\.focus\?\.\(\{ preventScroll: true \}\)/)
-  assert.match(shell, /const tabActionsAvailable = workspaceMode !== 'phone'/)
-  assert.match(shell, /event\.preventDefault\(\)\s*\n\s*if \(!tabActionsAvailable\) return/)
-  assert.match(shell, /\{tabActionsAvailable && tabMenu &&/)
+  assert.match(shell, /const openTabMenuAt = useCallback/)
+  assert.match(shell, /const openTabMenuAtRef = useRef\(openTabMenuAt\)/)
+  assert.match(shell, /\{tabMenu &&/)
+  assert.doesNotMatch(shell, /tabActionsAvailable/)
+  assert.match(shell, /useContextMenuOutsideDismiss\(\{[\s\S]*?open: Boolean\(tabMenu\)/)
   assert.doesNotMatch(shell, /workspace__menu-handle|workspace__menu-header|workspace__menu-close/)
   assert.doesNotMatch(css, /workspace__menu-handle|workspace__menu-header|workspace__menu-close|workspace-tab-sheet-in/)
 })
@@ -76,13 +82,8 @@ test('an implicit home tab does not engage the single-pane tab strip', () => {
   // single-screen blob intentionally has an empty legacy mirror; resetting it
   // on a deep link would silently change its view mode back to builder.
   assert.match(workspaceSession, /const replaceImplicitBootTab = !blobValid\s*\n?\s*&& Object\.keys\(workspace\.panes\)\.length === 1/)
-  assert.match(shell, /const \[tabStripEngaged, setTabStripEngaged\] = useState\(openTabs\.length >= 2\)/)
-  assert.match(shell, /if \(openTabs\.length >= 2\) setTabStripEngaged\(true\)/)
-  assert.match(shell, /else if \(openTabs\.length === 0\) setTabStripEngaged\(false\)/)
-  // With splits ON the strip follows the EFFECTIVE builder world only (never
-  // single mode or an immersive takeover); the engaged latch is the kill-switch
-  // world's legacy rule.
-  assert.match(shell, /const tabStripVisible = !immersiveActive\s*\n?\s*&& \(SPLITS \? effectiveViewMode === 'panes' : tabStripEngaged\)\s*\n?\s*&& openTabs\.length >= 1/)
+  assert.doesNotMatch(shell, /tabStripEngaged/)
+  assert.match(shell, /const tabStripVisible = !immersiveActive\s*\n?\s*&& effectiveViewMode === 'panes'\s*\n?\s*&& openTabs\.length >= 1/)
   assert.doesNotMatch(shell, /mobius-open-tabs|flattenRollbackPriority|writeOpenTabs/)
   // v2 DELETED the legacy sole-tab "unpin" shortcut (deletion list): the sole-tab
   // close is always a real CLOSE_TAB now, so an emptied builder auto-returns to
@@ -91,8 +92,25 @@ test('an implicit home tab does not engage the single-pane tab strip', () => {
   assert.match(shell, /const closeTab = useCallback\(\(tab, \{ reason \} = \{\}\)/)
 })
 
+test('the canonical workspace snapshot survives a closed PWA relaunch', () => {
+  assert.match(
+    shell,
+    /useWorkspaceSession\(\{\s*storage: localStorage,\s*legacyStorage: sessionStorage,\s*\}\)/,
+    'the durable snapshot remains canonical while the one-time session migration stays available',
+  )
+  assert.doesNotMatch(
+    shell,
+    /sessionStorage\.setItem\(paneModel\.STORAGE_KEY/,
+  )
+  assert.match(
+    workspaceSession,
+    /storage\.setItem\(\s*paneModel\.STORAGE_KEY,\s*paneModel\.serializeWorkspace\(workspace\)/,
+  )
+})
+
 test('the drop preview reads as an 18% accent fill with a 2px border and morph', () => {
   const rule = css.match(/\.workspace__drop-preview\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(rule, /position:\s*fixed/)
   assert.match(rule, /border:\s*2px solid var\(--accent\)/)
   assert.match(rule, /var\(--accent\)\s*18%/)
   assert.match(rule, /border-radius:\s*10px/)
@@ -100,6 +118,23 @@ test('the drop preview reads as an 18% accent fill with a 2px border and morph',
   // morph makes the larger uncapped bands feel even more responsive.
   assert.match(rule, /opacity 60ms/)
   assert.match(rule, /90ms cubic-bezier\(0\.2, 0, 0, 1\)/)
+  const previewZ = Number(rule.match(/z-index:\s*(\d+)/)?.[1] || 0)
+  const shieldRule = css.match(/\.workspace__drag-shield\s*\{[\s\S]*?\}/)?.[0] || ''
+  const chipRule = css.match(/\.workspace__drag-chip\s*\{[\s\S]*?\}/)?.[0] || ''
+  const shieldZ = Number(shieldRule.match(/z-index:\s*(\d+)/)?.[1] || 0)
+  const chipZ = Number(chipRule.match(/z-index:\s*(\d+)/)?.[1] || 0)
+  assert.ok(previewZ > shieldZ && previewZ < chipZ,
+    'the landing marker stays above the drag layer and below its label')
+  assert.match(dragBinding, /document\.body\.appendChild\(previewEl\)/)
+  assert.match(dragBinding, /clientPointToLayout\(\{\s*x: box\.clientLeft,/)
+  assert.match(dragBinding, /value \* box\.zoom/,
+    'content-local lengths cross into the fixed root layout exactly once')
+  assert.doesNotMatch(dragBinding, /clientDeltaToLayout/)
+  assert.match(dragBinding, /contentElRef\.current\?\.closest\?\.\('\.shell'\)/)
+  assert.match(dragBinding, /refreshSceneStrips\(scene, box\)/,
+    'the live frame follows the Builder strip that mounted after preview reveal')
+  assert.match(dragBinding, /renderPreview\(next, box\)/,
+    'the frame passes its existing geometry read into preview rendering')
 })
 
 test('the strip caret variant drops the fill and border for a solid bar', () => {
@@ -147,8 +182,7 @@ test('post-drag click suppression is source-scoped and expires on fresh input', 
   assert.match(dragBinding, /suppressNextSourceClick\(srcEl\)/)
 })
 
-test('the undo chord is flag-gated and defers to focused inputs', () => {
-  assert.match(shell, /if \(!paneModel\.WORKSPACE_SPLITS_ENABLED\) return undefined[\s\S]*?undoKeyPressed\(e\)/)
+test('the undo chord defers to focused inputs', () => {
   assert.match(shell, /isEditableTarget\(document\.activeElement\)/)
   assert.match(shell, /dispatchWorkspace\(\{ type: 'UNDO_LAST' \}\)/)
 })
@@ -448,8 +482,8 @@ test('ShellBrand isolates gesture state and wires the brand ref + Shift+Enter', 
   // transition callback; there is no Settings conversion call.
   assert.doesNotMatch(handler, /convertSettingsForModeTransition/)
   assert.match(handler, /return modeView\.run\(\{/)
-  assert.match(handler, /mode\.toggle\(\{ cause, to \}\)/)
   assert.match(handler, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: to \}\)/)
+  assert.doesNotMatch(handler, /mode\.toggle/)
   assert.doesNotMatch(handler, /openDrawer|closeDrawer/)
   // The gesture hook receives the toggle + the brand ref (for the ring var). The
   // ref is UNIFIED with the desktop-sidebar focus ref (one ref, both jobs) after
@@ -460,8 +494,12 @@ test('ShellBrand isolates gesture state and wires the brand ref + Shift+Enter', 
   assert.match(shell, /<ShellBrand[\s\S]*?brandRef=\{brandButtonRef\}/)
   // The drag-deny vibrate is DEAD (point 15: dragging is building, never denied).
   assert.doesNotMatch(shell, /viewModeVibrateRef|onDragBlocked/)
-  // Keyboard path: Shift+Enter flips the mode (preventDefault keeps it off the drawer).
-  assert.match(shellBrand, /e\.shiftKey && e\.key === 'Enter'/)
+  // Keyboard path: the discoverable Shift+Enter binding flips the mode
+  // (preventDefault keeps it off the drawer).
+  assert.match(
+    shellBrand,
+    /shortcutMatches\(e, SHELL_SHORTCUTS\.toggleBuilder\)/,
+  )
   assert.match(shellBrand, /keyboardModeClickRef\.current = true/)
   assert.match(shellBrand, /keyboardModeClickRef\.current && e\.detail === 0/)
 })
@@ -562,7 +600,7 @@ test('logo pointer provenance EXPIRES so a keyboard context menu reaches the nat
   // as keyboard-invoked; Shell wires it into the brand's onKeyDown.
   assert.match(logoGestureSrc, /const onKeyDown = useCallback\(\(\) => \{\s*\n?\s*lastPointerTypeRef\.current = ''\s*\n?\s*lastPointerTypeAtRef\.current = 0/)
   assert.match(logoGestureSrc, /onKeyDown, onLostPointerCapture,\s*\n?\s*consumeSuppressedClick/)
-  assert.match(shellBrand, /if \(splitsEnabled\) logoGesture\.onKeyDown\(\)/)
+  assert.match(shellBrand, /logoGesture\.onKeyDown\(\)/)
 })
 
 test('the Builder brand indicator is static and has no perpetual frame loop', () => {
@@ -615,19 +653,10 @@ test('the mode handler commits one final world inside the scene transaction', ()
   assert.match(handler, /deriveModeSnapshotPlan\(\{ workspace: ws, projection, contentRect \}\)/)
   assert.match(handler, /return modeView\.run\(\{/)
   assert.match(handler, /direction: leavingBuilder \? 'exit' : 'enter'/)
-  assert.match(handler, /update: \(\) => \{[\s\S]*?dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: to \}\)[\s\S]*?mode\.toggle\(\{ cause, to \}\)/)
+  assert.match(handler, /update: \(\) => \{[\s\S]*?dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: to \}\)/)
+  assert.match(shell, /onWorkspaceTransitionRef\.current = \(prevWs, nextWs\) => \{[\s\S]*?mode\.syncCommitted\(nextWs\.viewMode\)/)
   assert.match(modeViewTransitionSrc, /!prefersReducedMotion\(\)/)
   assert.match(modeViewTransitionSrc, /if \(!supported\) \{[\s\S]*?flushSync\(update\)/)
-})
-
-test('the PROPOSED builder power-chrome is behind a default-OFF flag + root class', () => {
-  // The flag only enables on the literal '1' (default off), read once at load.
-  assert.match(paneModelSrc, /export const BUILDER_POWER_CHROME = \(\(\) => \{[\s\S]*?localStorage\.getItem\('mobius:builder-power'\) === '1'/)
-  // Shell adds the root class only when the flag is on AND builder mode is active.
-  assert.match(shell, /builderModeActive && paneModel\.BUILDER_POWER_CHROME \? ' shell--builder-power' : ''/)
-  // The gated chrome: a power-rail under the bar + energized dividers.
-  assert.match(shellCss, /\.shell--builder-power \.shell__bar\s*\{[\s\S]*?box-shadow/)
-  assert.match(css, /\.shell--builder-power \.workspace__divider-bar/)
 })
 
 test('the logo keeps the stable "Toggle navigation" name; gesture rides aria-description + live region', () => {
@@ -635,12 +664,12 @@ test('the logo keeps the stable "Toggle navigation" name; gesture rides aria-des
   // it); the hold/keyboard path is a supplementary aria-description, and mode state
   // rides a polite live region (not a conflicting aria-pressed).
   assert.match(shellBrand, /aria-label="Toggle navigation"/)
-  assert.match(shellBrand, /aria-description=\{splitsEnabled\s*\n?\s*\? 'Hold or press Shift\+Enter for builder mode'/)
+  assert.match(shellBrand, /aria-description="Hold or press Shift\+Enter for builder mode"/)
   assert.match(shellBrand, /role="status" aria-live="polite"/)
   assert.match(shellBrand, /builderModeActive \? 'Builder mode' : 'Single screen'/)
 })
 
-test('mobile tabs require a hold before dragging while the strip preserves pinch zoom', () => {
+test('one held drawer-row gesture resolves menu, reorder, or workspace drag', () => {
   assert.match(shellCss, /\.shell__tabstrip\s*\{[\s\S]*?touch-action:\s*pan-x pinch-zoom/)
   assert.match(shellCss, /\.shell__tab-open\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pinch-zoom/)
   assert.doesNotMatch(shellCss, /data-touch-drag-handle/)
@@ -649,35 +678,70 @@ test('mobile tabs require a hold before dragging while the strip preserves pinch
   assert.equal((paneStrip.match(/data-drag-key=\{dragKey\}/g) || []).length, 1,
     'the tab button is the one drag source')
   assert.match(drawerCss, /\.drawer__row \.drawer__item\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-y pinch-zoom/)
+  assert.match(drawerCss, /\.drawer__row \.drawer__item\[data-pinned-key\]\s*\{[\s\S]*?touch-action:\s*pinch-zoom/)
   assert.match(dragBinding, /touchTabMoveIntent\(dx, dy\)/)
-  assert.match(dragBinding, /scrollStripEl\.scrollLeft \+= previousPoint\.x - ev\.clientX/)
-  assert.match(
+  assert.doesNotMatch(
     dragBinding,
     /sourceKind === 'drawer' && e\.pointerType !== 'mouse'\) return/,
-    'touch drawer rows must not enter the workspace drag-out controller',
+    'touch drawer rows must remain available to the workspace drag controller',
   )
-  assert.match(drawer, /heldDrawerRowIntent\(dx, dy, true\)/)
-  assert.match(drawer, /openItemMenuAt\(\{ x: upEvent\.clientX, y: upEvent\.clientY \}\)/)
-  assert.doesNotMatch(dragBinding, /openTabMenuAtRef/)
+  assert.match(dragBinding, /\}, PRESS_DRAG_HOLD_MS\)/,
+    'tabs and drawer rows share one first hold stage — no divergent tab timing')
+  assert.doesNotMatch(dragBinding, /TAB_HOLD_MS/,
+    'the separate longer tab hold is gone; a short hold moves a tab too')
+  assert.match(dragBinding, /PRESS_MENU_HOLD_MS - PRESS_DRAG_HOLD_MS/,
+    'one sequential timer owns both hold stages for drawer rows and tabs')
+  assert.match(dragBinding, /drawerRowMoveIntent\(dx, dy, \{[\s\S]*?held,[\s\S]*?isTouch,[\s\S]*?data-pinned-key/,
+    'one pure decision boundary owns the held row directions')
+  assert.match(dragBinding, /intent === 'reorder'[\s\S]*?beginReorder/,
+    'the reorder outcome hands off to the row implementation')
+  assert.match(dragBinding, /intent === 'workspace'\) arm\(\)/,
+    'the workspace outcome arms the shared drag implementation')
+  assert.match(dragBinding, /sourceKind === 'drawer' && !glided[\s\S]*?positionChip/,
+    'a captured drawer session suppresses preview until its own glide completes')
+  assert.match(dragBinding, /sourceKind === 'drawer' && drawerEdgeX != null && !glided[\s\S]*?crossedDrawerExit/,
+    'the captured drawer edge owns glide-close even if preview rendering has already changed the drawer ref')
+  assert.match(dragBinding, /const drawerSpace = captureLayoutSpace\(drawer\)[\s\S]*?drawerSpace\.clientLeft \+ drawerSpace\.width \* drawerSpace\.zoom/,
+    'the drawer exit threshold and pointer clientX share client-pixel space under document zoom')
+  assert.doesNotMatch(dragBinding, /drawerEdgeX = [^\n]*getBoundingClientRect\(\)\.right/,
+    'raw zoom-sensitive rectangle coordinates cannot own the drawer exit threshold')
+  assert.doesNotMatch(dragBinding, /sourceKind === 'drawer' && drawerOpenRef\.current[\s\S]{0,160}?glided/,
+    'drawer-session behavior must not depend on a render-world ref that can change before the drawer DOM leaves')
+  assert.match(dragBinding, /const point = \{ \.\.\.lastPoint \}[\s\S]*?menuOpened = true[\s\S]*?handler\.openMenu\(point\)/,
+    'a stationary long hold opens actions before release')
+  assert.doesNotMatch(dragBinding, /const point = \{ \.\.\.lastPoint \}[\s\S]{0,120}?cleanup\(/,
+    'selection suppression must stay active while the opening contact is still down')
+  const drawerPointerUp = dragBinding.match(/const onUp = \(ev\) => \{[\s\S]*?\n      \}/)?.[0] || ''
+  assert.doesNotMatch(drawerPointerUp, /openMenu/,
+    'releasing a shorter stationary hold remains a normal tap')
+  assert.match(drawerPointerUp, /if \(menuOpened\)[\s\S]*?cleanup\(\{ suppressClick: true \}\)/,
+    'the menu-opening gesture restores selection only when its pointer ends')
+  assert.match(dragBinding, /const openTabMenu = openTabMenuAtRef\?\.current[\s\S]*?openTabMenu\(point\.x, point\.y, tabFromKey\(key\), paneId\)/,
+    'a stationary tab hold opens actions from the shared hold timer, while still held')
+  assert.doesNotMatch(drawerPointerUp, /openTabMenuAtRef/,
+    'releasing a tab hold no longer opens actions — the hold timer does, like the drawer')
   assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)
-  assert.match(drawer, /function beginTouchMenuHold\(event\)/)
-  assert.match(drawer, /function beginTouchMenuHold\(event\)[\s\S]*?holdTimerRef\.current = setTimeout\(\(\) => \{[\s\S]*?window\.addEventListener\('touchmove', preventClaimedTouchMove, \{ capture: true, passive: false \}\)/)
-  assert.match(drawer, /function beginPinnedReorder\(event\)[\s\S]*?holdTimerRef\.current = setTimeout\(\(\) => \{[\s\S]*?window\.addEventListener\('touchmove', preventClaimedTouchMove, \{ capture: true, passive: false \}\)/)
-  assert.equal((drawer.match(/window\.addEventListener\('touchmove', preventClaimedTouchMove, \{ capture: true, passive: false \}\)/g) || []).length, 2,
-    'only a resolved row hold may install cancelable touch ownership')
+  assert.match(shell, /const drawerRowGesturesRef = useRef\(new Map\(\)\)/)
+  assert.match(drawer, /const registry = drawerRowGesturesRef\.current[\s\S]*?registry\.set\(key, drawerGestureHandlerRef\)/)
+  assert.doesNotMatch(drawer, /pinnedReorderIntent|heldDrawerRowIntent/,
+    'the row implementation must not classify the same gesture a second time')
+  assert.doesNotMatch(drawer, /onTouchStart|addEventListener\('touchmove'|addEventListener\('touchend'/,
+    'reordering has one Pointer Events lifecycle')
+  assert.doesNotMatch(drawer, /beginTouchMenuHold|touchMenuCleanupRef|drawerGestureEndPoint/,
+    'drawer menu access must not own a parallel custom touch lifecycle')
   assert.match(drawer, /const TOUCH_CONTEXT_MENU_PROVENANCE_MS = 1500/)
   assert.match(drawer, /function suppressTouchContextMenu\(event\)[\s\S]*?event\.nativeEvent\?\.pointerType[\s\S]*?contextPointerType === 'touch'[\s\S]*?freshTouchPointer[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?stopImmediatePropagation/)
-  assert.equal((drawer.match(/onContextMenuCapture=\{suppressTouchContextMenu\}/g) || []).length, 2,
-    'touch contextmenu must be stopped before the shared bubble-phase menu opener')
-  assert.match(drawerCss, /\.drawer__row \.drawer__item\s*\{[\s\S]*?-webkit-touch-callout:\s*none/)
-  assert.match(drawer, /sourceBtn\.setAttribute\('data-hold-ready', 'true'\)/)
-  assert.match(drawer, /const openMenu = held && !dragging && !cancelledAfterHold/)
-  assert.match(drawer, /if \(openMenu\) openItemMenuAt\(\{ x: upEvent\.clientX, y: upEvent\.clientY \}\)/)
-  assert.match(drawer, /if \(intent === 'cancel'\)[\s\S]*?cancelledAfterHold = true/)
-  assert.match(drawerCss, /\.drawer__item\[data-hold-ready="true"\]/)
+  assert.equal((drawer.match(/onContextMenuCapture=\{suppressTouchContextMenu\}/g) || []).length, 1,
+    'the card still suppresses native contextmenu during its own hold')
+  assert.doesNotMatch(drawerCss, /\.drawer__row \.drawer__item\s*\{[\s\S]*?-webkit-touch-callout:/,
+    'the shared controller owns callout suppression for its full hold window')
+  assert.doesNotMatch(drawer, /data-hold-ready/)
+  assert.match(drawer, /if \(dragging\) \{[\s\S]*?settle\(false\)/,
+    'a cancelled pinned reorder still rolls back')
+  assert.doesNotMatch(drawerCss, /data-hold-ready/)
 })
 
-test('drawer swipe-to-close leaves vertical scrolling on the native pointer path', () => {
+test('drawer whitespace stays native while pinned rows reserve the shared pointer path', () => {
   assert.match(drawerCss, /\.drawer\s*\{[\s\S]*?touch-action:\s*pan-y pinch-zoom/)
   assert.match(drawer, /onPointerDown=\{onDrawerPointerDown\}/)
   assert.match(drawer, /onPointerMove=\{onDrawerPointerMove\}/)
@@ -791,8 +855,8 @@ test('chat drawer dots distinguish active work from unseen completion', () => {
   )
   assert.match(
     shell,
-    /ev\.type === 'chat_run_finished'[\s\S]*?!visibleChatIdsRef\.current\.has\(String\(chatId\)\)[\s\S]*?setAttentionChatIds/,
-    'a finished run must raise attention only while the chat is not visible',
+    /ev\.type === 'chat_run_finished'[\s\S]*?!visibleChatIdsRef\.current\.has\(String\(chatId\)\)(?:(?!chatQueries\.messages\.refresh)[\s\S])*?setAttentionChatIds/,
+    'a hidden finished chat must raise attention without parsing its transcript',
   )
   assert.match(
     shell,
@@ -810,7 +874,10 @@ test('chat drawer dots distinguish active work from unseen completion', () => {
 
 test('live preview reveal keeps the workspace controller distinct from device mode', () => {
   assert.match(shell, /const deviceMode = paneModel\.modeForRect\(contentRect\)/)
-  assert.match(shell, /mode\.toggle\(\{ cause: 'auto', to: 'panes' \}\)/)
+  assert.doesNotMatch(shell, /opensLivePreview|mode\.toggle\(\{ cause: 'auto'/,
+    'preview intent must not predict a mode change the placement resolver may reject')
+  assert.match(shell, /prevWs\.viewMode !== nextWs\.viewMode[\s\S]*?mode\.syncCommitted\(nextWs\.viewMode\)/,
+    'presentation follows only the resolver actual workspace transition')
   assert.match(shell, /resolveWorkspaceRequests\(ws, requests, \{[\s\S]*?mode: deviceMode,/)
   assert.doesNotMatch(shell, /const mode = paneModel\.modeForRect\(contentRect\)/)
 })
@@ -823,27 +890,13 @@ test('large drawer lists memoize ordering and row actions without changing row o
   assert.match(drawer, /visibleRecents\.map\(\(\{ kind, item \}\)[\s\S]*?item=\{item\}[\s\S]*?actions=\{rowActions\}/)
   assert.match(drawer, /item=\{app\}[\s\S]*?actions=\{rowActions\}/)
   assert.doesNotMatch(drawer, /onSelect=\{\(\) => on(?:Chat|App)/)
+  assert.equal((drawer.match(/<DrawerItemMenu/g) || []).length, 1,
+    'the drawer must render one item-menu controller')
 })
 
-test('mixed recents reserve artwork for apps and separate sections without a second type scale', () => {
+test('mixed recents reserve artwork for apps without redundant chat icons', () => {
   assert.match(drawer, /kind === 'app'[\s\S]*?<AppIcon/)
   assert.doesNotMatch(drawer, /drawer__chat-icon|<Chat\b|<Clock\b|<PinFilled\b/)
-  assert.match(
-    drawerCss,
-    /\.drawer__label\s*\{[\s\S]*?font-size:\s*14px[\s\S]*?font-weight:\s*600[\s\S]*?color:\s*var\(--text\)[\s\S]*?padding:\s*6px 12px[\s\S]*?margin:\s*12px 0 4px/,
-  )
-  assert.match(
-    drawerCss,
-    /\.drawer__item\s*\{[\s\S]*?font-size:\s*14px/,
-  )
-  assert.match(
-    drawerCss,
-    /@media \(min-width: 1024px\)[\s\S]*?\.drawer__item,[\s\S]*?font-size:\s*15px[\s\S]*?\.drawer__label\s*\{[\s\S]*?font-size:\s*15px/,
-  )
-  assert.doesNotMatch(
-    drawerCss,
-    /\.drawer__row \.drawer__item\s*\{[^}]*font-size:/,
-  )
 })
 
 test('New chat and Apps share one compact navigation rhythm', () => {
@@ -872,13 +925,13 @@ test('the Möbius header keeps its phone divider but flows into desktop navigati
   )
 })
 
-test('row-owned context menus need no permanent kebab or hidden anchor', () => {
+test('drawer rows keep action and reorder chrome out of the list', () => {
   assert.match(drawer, /<DrawerItemActionMenu[\s\S]*?itemKind=\{kind\}/)
   assert.doesNotMatch(
     drawer,
-    /triggerHidden|drawer__menu-anchor|drawer__more|DotsVerticalMoreMenu/,
+    /triggerHidden|drawer__menu-anchor|drawer__more|drawer__row-actions|drawer__reorder-handle|DotsHorizontalMoreMenu|DotsVerticalMoreMenu|GripVertical/,
   )
-  assert.doesNotMatch(drawerCss, /drawer__menu-anchor|drawer__more/)
+  assert.doesNotMatch(drawerCss, /drawer__menu-anchor|drawer__more|drawer__row-actions|drawer__reorder-handle/)
   assert.match(drawer, /onContextMenu=\{openItemMenu\}/)
   assert.match(
     drawer,
@@ -904,16 +957,43 @@ test('chat deletion is immediate while app deletion still requires confirmation'
   )
 })
 
-test('drawer row menus use one semantic context-menu path across pointer types', () => {
-  assert.match(drawer, /function openItemMenuAt\(point\)[\s\S]*?actions\.toggleMenu\(kind, id, true, surface,/)
+test('drawer row actions have one opening path without a custom touch hold', () => {
+  assert.match(drawer, /import \{ useHistoryDismiss \} from '\.\.\/\.\.\/hooks\/useHistoryDismiss\.jsx'/)
+  assert.match(drawer, /open: openItemMenuHistory,[\s\S]*?close: closeItemMenu,[\s\S]*?useHistoryDismiss\(\(\) => setOpenMenu\(null\)\)/)
+  assert.match(drawer, /function showItemMenu\(\{ restoreFocusTarget, \.\.\.menu \}\) \{[\s\S]*?openItemMenuHistory\(\)[\s\S]*?setOpenMenu\(menu\)/,
+    'Back ownership must be registered before the portaled menu paints')
+  assert.match(drawer, /function openItemMenuAt\(point,[\s\S]*?actions\.openMenu\(\{[\s\S]*?restoreFocusTarget: trigger,/)
   assert.equal((drawer.match(/onContextMenu=\{openItemMenu\}/g) || []).length, 2,
-    'app cards, app rows, and chat rows must share one opening function')
-  assert.match(drawer, /if \(openMenu\) openItemMenuAt\(\{ x: upEvent\.clientX, y: upEvent\.clientY \}\)/)
+    'app cards and drawer rows must share one semantic opening function')
+  assert.match(drawer, /if \(suppressTouchContextMenu\(event\)\) return/,
+    'native touch contextmenu must never pre-empt the shared held gesture')
   assert.doesNotMatch(
     dragBinding,
     /srcEl\.closest\('\.drawer__row'\)\?\.querySelector\('\.drawer__more'\)\?\.click\(\)/,
     'touch hold must not depend on a synthetic trigger click',
   )
+  assert.doesNotMatch(drawer, /function beginTouchMenuHold/,
+    'drawer rows must not add a second touch lifecycle beside the shared controller')
+  assert.match(drawerCss, /\.drawer__item-action-layer\s*\{[\s\S]*?pointer-events:\s*none/)
+  assert.match(drawerCss, /\.drawer__item-action-menu\s*\{[\s\S]*?pointer-events:\s*auto/,
+    'the menu stays interactive while the next outside tap reaches its real destination')
+  assert.doesNotMatch(drawer, /navigator\.vibrate/,
+    'drawer rows rely on platform long-press feedback instead of adding a second vibration')
+})
+
+test('both context menus dismiss without stealing the destination press, including app frames', () => {
+  assert.match(shell, /useContextMenuOutsideDismiss\(\{[\s\S]*?open: Boolean\(tabMenu\)/)
+  assert.match(drawerItemActionMenu, /useContextMenuOutsideDismiss\(\{[\s\S]*?open,[\s\S]*?menuRef,[\s\S]*?onDismiss: closeFromOutside/)
+  assert.match(
+    drawerItemActionMenu,
+    /const closeFromOutside = useCallback\(\(\) => \{[\s\S]*?pointerOwnerRef\.current = \{ press: null, clickAction: null \}[\s\S]*?restoreOnCloseRef\.current = false[\s\S]*?onClose\(\)/,
+    'outside dismissal retires stale activation ownership and does not restore focus over the destination',
+  )
+  assert.match(contextMenuOutsideDismiss, /document\.addEventListener\('pointerdown', dismissFromOutsidePointer, true\)/)
+  assert.match(contextMenuOutsideDismiss, /menuRef\.current\?\.contains\(event\.target\)/)
+  assert.match(contextMenuOutsideDismiss, /window\.addEventListener\('blur', dismissFromFrameFocus, true\)/)
+  assert.match(contextMenuOutsideDismiss, /document\.activeElement\?\.tagName === 'IFRAME'/,
+    'focus transfer owns the cross-document seam because iframe pointer events cannot bubble to the shell')
 })
 
 test('a secondary-button release cannot immediately select a flipped drawer menu item', () => {
@@ -921,18 +1001,27 @@ test('a secondary-button release cannot immediately select a flipped drawer menu
   assert.match(drawer, /event\.pointerType !== 'mouse' \|\| event\.button !== 2/)
   assert.match(drawer, /window\.addEventListener\('pointerup', onSecondaryPointerUp, true\)/)
   assert.match(drawer, /upEvent\.pointerId !== pointerId \|\| upEvent\.button !== 2/)
-  assert.match(drawer, /cleanup\(\)[\s\S]*?actions\.toggleMenu\(kind, id, true, surface, placement\)/)
+  assert.match(drawer, /const openingPoint = \{ x: event\.clientX, y: event\.clientY \}/)
+  assert.match(drawer, /cleanup\(\)[\s\S]*?openItemMenuAt\(openingPoint, sourceBtn\)/,
+    'the release path must not normalize the pointer point twice')
   assert.match(drawer, /timer = setTimeout\(cleanup, 1500\)/)
 })
 
-test('launcher cards and drawer rows share the same long-press threshold and movement slop', () => {
+test('launcher cards and drawer rows share the stationary menu threshold', () => {
   const dragImports = drawer.match(
     /import \{([\s\S]*?)\} from '\.\.\/Shell\/dragController\.js'/,
   )?.[1] || ''
-  assert.match(dragImports, /DRAWER_HOLD_MS/)
+  assert.match(dragImports, /PRESS_MENU_HOLD_MS/)
   assert.match(dragImports, /PRE_HOLD_MOVE_PX/)
-  assert.match(drawer, /\}, DRAWER_HOLD_MS\)/)
+  assert.match(drawer, /\}, PRESS_MENU_HOLD_MS\)/)
   assert.match(drawer, /> PRE_HOLD_MOVE_PX/)
+  assert.match(dragBinding, /\}, PRESS_DRAG_HOLD_MS\)/,
+    'the drag stage timing is shared across drawer rows and tabs')
+  assert.doesNotMatch(
+    drawer.match(/function beginPinnedReorder\([\s\S]*?\n  function onRowPointerDown/)?.[0] || '',
+    /PRESS_(?:DRAG|MENU)_HOLD_MS/,
+    'the shared controller, not the reorder implementation, owns hold timing',
+  )
   assert.doesNotMatch(drawer, /520/)
 })
 
@@ -1009,7 +1098,7 @@ test('Shell threads the (drag-preview) viewMode into the content derivation and 
   // retain the same chat without sharing geometry or activating both runtimes.
   assert.match(shell, /const standardOwner = world === STANDARD_CHAT_WORLD/)
   assert.match(shell, /const builderPainted = !standardOwner[\s\S]*effectiveViewMode === 'panes'/)
-  assert.match(shell, /visible=\{surfaceVisible && chatPanesVisible && role !== 'held'\}/)
+  assert.match(shell, /runtimeActive=\{surfaceVisible && chatPanesVisible && role !== 'held'\}/)
 })
 
 test('DRAG IS BUILDING: arming in single mode unfolds a builder preview; any drop commits panes', () => {
@@ -1040,7 +1129,7 @@ test('the builder preview cannot outlive its drag session past one visibility bo
   // guards keep it bounded:
   // (1) SOURCE — pagehide joins the per-session teardown, so a BFCache freeze that
   //     fires no pointercancel/blur/visibilitychange still cancels the drag.
-  assert.match(dragBinding, /const onPageHide = \(\) => cleanup\(\{ suppressClick: armed \|\| scrolling \}\)/)
+  assert.match(dragBinding, /const onPageHide = \(\) => cleanup\(\{ suppressClick: menuOpened \|\| armed \|\| scrolling \}\)/)
   assert.match(dragBinding, /window\.addEventListener\('pagehide', onPageHide\)/)
   assert.match(dragBinding, /window\.removeEventListener\('pagehide', onPageHide\)/)
   // (2) BACKSTOP — a persistent foreground reconcile force-cleans any session still
@@ -1069,30 +1158,14 @@ test('the builder preview cannot outlive its drag session past one visibility bo
   assert.match(dragBinding, /may outlive its session by at most ONE visibility\/foreground boundary,\s*\n?\s*\/\/ or at most one subsequent user interaction/)
 })
 
-test('the splits kill-switch forces the single-pane fallback so a rolled-back panes blob is not un-exitable', () => {
-  // The tiled render (chromeActive) is flag-INDEPENDENT, but both exit controls
-  // (the logo gesture + Shift+Enter) are flag-GATED. So a rolled-back client that
-  // persisted a 'panes' blob and then had WORKSPACE_SPLITS disabled would restore
-  // TILED with no way to reach single ("cannot reach single mode", survives reload).
-  // coerceViewMode — run by normalize() on every parse/restore — forces 'single'
-  // when splits are off, delivering the kill-switch's documented single-pane fallback
-  // (the tree is preserved; re-enabling splits restores the panes).
-  assert.match(paneModelSrc, /function coerceViewMode\(mode\) \{\s*\n\s*if \(!WORKSPACE_SPLITS_ENABLED\) return 'single'/)
-})
-
 test('workspace focus, drag label, and cancel visuals remain coherent', () => {
   // V4: the FOCUSED pane's active pill softens the base full-accent border so the 2px
   // underline is what carries focus (the border used to mask it).
   const focused = css.match(/\.workspace__strip--focused \.shell__tab--active \{[\s\S]*?\n\}/)?.[0] || ''
   assert.match(focused, /box-shadow: inset 0 -2px 0 0 var\(--accent\)/)
   assert.match(focused, /border-color: color-mix\(in srgb, var\(--accent\) 45%, var\(--border-light\)\)/)
-  // Pointer and tab measurements translate through the one content-box origin.
-  // Fixed drag chrome remains in viewport coordinates and clamps at that edge.
-  assert.match(dragBinding, /return clientPointToLocal\(\{ x: clientX, y: clientY \}, box\)/)
-  assert.match(dragBinding, /left: toLocal\(r\.left, r\.top, box\)\.x/)
-  assert.match(dragBinding, /chipOffset\(\{ x: clientX, y: clientY \}, isTouch\)/)
-  assert.doesNotMatch(dragBinding, /toViewportLayout/)
-  assert.match(dragBinding, /const viewportWidth = document\.documentElement\.clientWidth\s*\n\s*\|\| window\.innerWidth/)
+  // Fixed drag chrome remains clamped inside the viewport edge.
+  assert.match(dragBinding, /const viewportWidth = viewport\.width \|\| window\.innerWidth/)
   assert.match(dragBinding, /const maxLeft = Math\.max\(margin, viewportWidth - chipWidth - margin\)/)
   assert.match(dragBinding, /Math\.max\(margin, Math\.min\(left, maxLeft\)\)/)
   // V6: a CANCELLED drag blurs the drag-origin row so its focus ring clears; a
@@ -1108,7 +1181,7 @@ test('workspace drag batches geometry reads before frame writes', () => {
   assert.ok(frame.indexOf('const box = contentBox()') < frame.lastIndexOf('positionChip(cx, cy, isTouch, key)'))
   assert.match(frame, /updateAutoScroll\(cx, cy, box\)/)
   assert.match(frame, /toLocal\(cx, cy, box\)/)
-  assert.match(dragBinding, /measureTabs\(autoPaneId, box\)/,
+  assert.match(dragBinding, /measureStrip\(autoPaneId, box\)/,
     'auto-scroll shares its content rect across strip and pointer measurements')
 })
 
@@ -1181,7 +1254,6 @@ test('round4-3: every reducer edge into an empty single screen uses one policy b
   assert.ok(dispatch.length > 0, 'found the workspace dispatch boundary')
   assert.match(dispatch, /workspaceReducer\(prev, action\)/)
   assert.match(dispatch, /enteredEmptySingleScreen\(\s*prev\.ws, next\.ws/)
-  assert.match(dispatch, /prev\.ws, next\.ws, paneModel\.WORKSPACE_SPLITS_ENABLED/)
   assert.match(dispatch, /requestEmptySingleNewChatRef\.current\?\.\(\)/)
   // Explicit calls remain only for boot states that do not cross a reducer edge:
   // populated-history null restore and live-confirmed zero-chat bootstrap.

@@ -68,6 +68,8 @@ import {
   shouldServeCacheFirst,
   shouldFallBackToCacheOnError,
   isAppCodeRoute,
+  appCodeCacheKey,
+  appCodeRequestMayBeStored,
   appCodeStoreAction,
   supersededVersionKeys,
   entriesToTrim,
@@ -121,9 +123,45 @@ const opaqueFramePublicAssetCorsPlugin = {
 // this same worker's global scope). On an UPDATE we never reach activate until
 // the page posted SKIP_WAITING at its idle boundary; the reload Shell then
 // drives adopts the freshly-active worker without any spontaneous claim.
+// POLICY OVERRIDE OF THE UPDATE LEASH.
+//
+// The leash above assumes waiting costs nothing but freshness. For one class of
+// change it costs a working feature: a document's Content-Security-Policy also
+// governs every worker it spawns, and a precached document keeps serving the
+// headers it was stored with. So while the outgoing generation stays in charge,
+// the shell runs under a policy the server has already replaced, and any
+// capability that policy forbids stays broken no matter how many times the
+// owner relaunches. On an installed PWA there is no way to escape that by hand.
+//
+// The service worker script itself is always revalidated against the network
+// (`updateViaCache: 'none'`), so this is the only code path that can reach such
+// an installation. When the policy the server now sends differs from the one the
+// outgoing generation serves, take over immediately instead of waiting for an
+// idle boundary that may never come. Read the outgoing document at module
+// evaluation, before Workbox's install writes the new precache entry, so the
+// comparison cannot race its own replacement.
+const outgoingDocumentPolicy = caches.match('/index.html', { ignoreSearch: true })
+  .then(response => (response ? response.headers.get('content-security-policy') || '' : null))
+  .catch(() => null)
+
+async function documentPolicyChanged() {
+  const [outgoing, fresh] = await Promise.all([
+    outgoingDocumentPolicy,
+    fetch('/index.html', { cache: 'reload', credentials: 'same-origin' })
+      .then(response => response.headers.get('content-security-policy') || '')
+      .catch(() => ''),
+  ])
+  // No cached document, or offline: leave the leash in place.
+  return outgoing !== null && fresh !== '' && fresh !== outgoing
+}
+
 let isFirstInstall = false
-self.addEventListener('install', () => {
+self.addEventListener('install', (event) => {
   isFirstInstall = !self.registration.active
+  if (isFirstInstall) return
+  event.waitUntil(documentPolicyChanged().then(async (changed) => {
+    if (changed) await self.skipWaiting()
+  }).catch(() => {}))
 })
 self.addEventListener('message', (event) => {
   // The page reached its idle apply-boundary and asked us to take over.
@@ -466,11 +504,8 @@ function appCodeHandler(cacheName, { gated }) {
     // The module URL carries a rotating auth token and a retry `_=` buster;
     // strip both so the cache key is stable across token rotation (else
     // every load is a miss and the offline entry is unreachable).
-    const key = new URL(request.url)
-    key.searchParams.delete('token')
-    key.searchParams.delete('_')
-    key.searchParams.delete('install')
-    const cacheKey = key.href
+    const cacheKey = appCodeCacheKey(request.url)
+    const requestMayBeStored = appCodeRequestMayBeStored(request.url)
 
     // The (bounded) network fetch that refreshes the cache. cache:'reload'
     // bypasses the browser HTTP cache so we get a full 200 body, never a 304
@@ -498,7 +533,7 @@ function appCodeHandler(cacheName, { gated }) {
       // ungated (frame/module) stores every 200; gated (standalone) stores
       // only X-Mobius-Offline:1 and PURGES a header-less 200 so an app
       // toggled offline_capable OFF self-heals on the next refresh.
-      const store = resp
+      const store = resp && requestMayBeStored
         ? applyAppCodeStore(cache, cacheKey, resp, gated)
         : Promise.resolve()
       return { resp, store }
@@ -711,9 +746,8 @@ setCatchHandler(async ({ request, url }) => {
 // Message payload (at least one URL):
 //   { type: 'moebius:precache-app', frameUrl?: string, moduleUrl?: string }
 //
-// Key-normalization mirrors appCodeHandler exactly (strips token, _,
-// install query params) so the warmed cache entries are found on the next
-// cache.match(). Storage follows the UNGATED frame/module policy
+// Key-normalization uses appCodeHandler's shared policy so warmed entries are
+// found on the next cache.match(). Storage follows the UNGATED frame/module policy
 // (appCodeStoreAction with gated=false): any 200 lands, matching the live
 // open path. URLs are validated against isAppCodeRoute so a page message
 // can only prime the frame/module routes, nothing else.
@@ -726,21 +760,8 @@ self.addEventListener('message', (event) => {
   const { frameUrl, moduleUrl } = msg
   if (!frameUrl && !moduleUrl) return
 
-  // Normalize a URL to its cache key (strip token/_ /install params).
-  function normKey(rawUrl) {
-    try {
-      const u = new URL(rawUrl, self.location.origin)
-      u.searchParams.delete('token')
-      u.searchParams.delete('_')
-      u.searchParams.delete('install')
-      return u.href
-    } catch {
-      return null
-    }
-  }
-
   async function warmOne(rawUrl, cacheName) {
-    const key = normKey(rawUrl)
+    const key = appCodeCacheKey(rawUrl, self.location.origin)
     if (!key) return
     const url = new URL(key)
     if (url.origin !== self.location.origin || !isAppCodeRoute(url.pathname)) return

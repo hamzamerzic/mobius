@@ -6,9 +6,24 @@ data volume bounds it — but that volume also holds SQLite, so scratch without
 a lifecycle would take durable data down with it. These cover both halves.
 """
 
+import asyncio
+import threading
 import time
 
+import pytest
+
 from app import agent_scratch, config, models
+from app.browser_profiles import BrowserSessionScan, BrowserSessionTarget
+from app.runner_registry import registry
+
+
+@pytest.fixture(autouse=True)
+def _complete_empty_browser_inventory(monkeypatch):
+  monkeypatch.setattr(
+    agent_scratch,
+    "browser_session_targets_for_chat",
+    lambda _chat_id: BrowserSessionScan(frozenset(), True),
+  )
 
 
 def _pin_data_dir(monkeypatch, tmp_path):
@@ -48,15 +63,152 @@ def test_scratch_is_isolated_per_chat(monkeypatch, tmp_path):
   assert agent_scratch.scratch_for_chat("a") != agent_scratch.scratch_for_chat("b")
 
 
-def test_sweep_reclaims_scratch_for_a_chat_with_no_run_in_flight(
+@pytest.mark.asyncio
+async def test_release_if_idle_removes_only_the_finished_chats_scratch(
+  monkeypatch, tmp_path, db
+):
+  """Turn completion should not wait for the broad crash-recovery sweep."""
+  _pin_data_dir(monkeypatch, tmp_path)
+  finished = agent_scratch.scratch_for_chat("finished-chat")
+  sibling = agent_scratch.scratch_for_chat("other-chat")
+
+  assert await agent_scratch.release_if_idle("finished-chat") is not None
+
+  assert not finished.exists()
+  assert sibling.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_release_if_idle_preserves_a_newer_running_run(
+  monkeypatch, tmp_path, db, chat
+):
+  """A stale finished event cannot delete scratch adopted by a successor."""
+  _pin_data_dir(monkeypatch, tmp_path)
+  chat_id = getattr(chat, "id", chat)
+  db.add_all([
+    models.ChatRun(
+      id="run-finished", root_run_id="run-finished", chat_id=chat_id,
+      status="completed",
+    ),
+    models.ChatRun(
+      id="run-successor", root_run_id="run-successor", chat_id=chat_id,
+      status="running",
+    ),
+  ])
+  db.commit()
+  scratch = agent_scratch.scratch_for_chat(chat_id)
+
+  assert await agent_scratch.release_if_idle(chat_id) is None
+  assert scratch.is_dir()
+
+
+@pytest.mark.parametrize("status", ["parked", "resume_pending"])
+@pytest.mark.asyncio
+async def test_release_if_idle_reclaims_scratch_between_physical_runs(
+  monkeypatch, tmp_path, db, chat, status
+):
+  """A durable continuation recreates scratch when its next process starts."""
+  _pin_data_dir(monkeypatch, tmp_path)
+  chat_id = getattr(chat, "id", chat)
+  db.add(models.ChatRun(
+    id=f"run-{status}", root_run_id=f"run-{status}", chat_id=chat_id,
+    status=status,
+  ))
+  db.commit()
+  scratch = agent_scratch.scratch_for_chat(chat_id)
+
+  assert await agent_scratch.release_if_idle(chat_id) is not None
+  assert not scratch.exists()
+
+
+@pytest.mark.asyncio
+async def test_release_if_idle_preserves_a_starting_run_without_a_row(
+  monkeypatch, tmp_path
+):
+  """Programmatic starts claim the registry before StartTurn reaches SQLite."""
+  _pin_data_dir(monkeypatch, tmp_path)
+  scratch = agent_scratch.scratch_for_chat("starting-chat")
+  assert registry.mark_starting("starting-chat") is True
+
+  assert await agent_scratch.release_if_idle("starting-chat") is None
+  assert scratch.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_release_if_idle_requires_a_complete_empty_browser_inventory(
+  monkeypatch, tmp_path
+):
+  _pin_data_dir(monkeypatch, tmp_path)
+  scratch = agent_scratch.scratch_for_chat("browser-chat")
+  monkeypatch.setattr(
+    agent_scratch,
+    "browser_session_targets_for_chat",
+    lambda _chat_id: BrowserSessionScan(frozenset(), False),
+  )
+
+  assert await agent_scratch.release_if_idle("browser-chat") is None
+  assert scratch.is_dir()
+
+  monkeypatch.setattr(
+    agent_scratch,
+    "browser_session_targets_for_chat",
+    lambda _chat_id: BrowserSessionScan(frozenset({
+      BrowserSessionTarget(session="chat-browser-chat"),
+    }), True),
+  )
+  assert await agent_scratch.release_if_idle("browser-chat") is None
+  assert scratch.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_reclaim_cannot_delete_a_successors_canonical_scratch(
+  monkeypatch, tmp_path
+):
+  _pin_data_dir(monkeypatch, tmp_path)
+  original = agent_scratch.scratch_for_chat("chat-cancel")
+  entered = threading.Event()
+  finish = threading.Event()
+  real_reclaim = agent_scratch._reclaim_detached
+
+  def blocked_reclaim(path):
+    entered.set()
+    assert finish.wait(timeout=2)
+    return real_reclaim(path)
+
+  monkeypatch.setattr(agent_scratch, "_reclaim_detached", blocked_reclaim)
+  task = asyncio.create_task(agent_scratch.release_if_idle("chat-cancel"))
+  try:
+    for _ in range(100):
+      if entered.is_set():
+        break
+      await asyncio.sleep(0.01)
+    assert entered.is_set()
+    assert not original.exists()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+      await task
+    successor = agent_scratch.scratch_for_chat("chat-cancel")
+  finally:
+    finish.set()
+
+  for _ in range(100):
+    if not any(tmp_path.joinpath("agent-scratch").glob(".chat-cancel.released-*")):
+      break
+    await asyncio.sleep(0.01)
+  assert successor.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_sweep_reclaims_scratch_for_a_chat_with_no_run_in_flight(
   monkeypatch, tmp_path, db
 ):
   _pin_data_dir(monkeypatch, tmp_path)
   idle = agent_scratch.scratch_for_chat("idle-chat")
   (idle / "leftover.bin").write_bytes(b"x" * 2048)
 
-  result = agent_scratch.sweep_idle_scratch(
-    db, now=time.time() + agent_scratch._SWEEP_GRACE_SECONDS + 1
+  result = await agent_scratch.sweep_idle_scratch(
+    now=time.time() + agent_scratch._SWEEP_GRACE_SECONDS + 1
   )
 
   assert not idle.exists()
@@ -64,7 +216,8 @@ def test_sweep_reclaims_scratch_for_a_chat_with_no_run_in_flight(
   assert result["bytes"] >= 2048
 
 
-def test_sweep_never_deletes_scratch_of_a_run_still_in_flight(
+@pytest.mark.asyncio
+async def test_sweep_never_deletes_scratch_of_a_run_still_in_fight(
   monkeypatch, tmp_path, db, chat
 ):
   """Deleting a live run's scratch would corrupt a turn already in progress."""
@@ -72,22 +225,44 @@ def test_sweep_never_deletes_scratch_of_a_run_still_in_flight(
   chat_id = getattr(chat, "id", chat)
   db.add(
     models.ChatRun(
-      id="run-live", chat_id=chat_id, status="running"
+      id="run-live", root_run_id="run-live", chat_id=chat_id, status="running"
     )
   )
   db.commit()
   live = agent_scratch.scratch_for_chat(chat_id)
 
-  result = agent_scratch.sweep_idle_scratch(
-    db, now=time.time() + agent_scratch._SWEEP_GRACE_SECONDS + 1
+  result = await agent_scratch.sweep_idle_scratch(
+    now=time.time() + agent_scratch._SWEEP_GRACE_SECONDS + 1
   )
 
   assert live.is_dir()
-  assert result["kept_live"] == 1
   assert result["removed"] == 0
 
 
-def test_sweep_spares_scratch_created_before_its_run_row_exists(
+@pytest.mark.asyncio
+async def test_crash_recovery_sweep_reclaims_parked_scratch(
+  monkeypatch, tmp_path, db, chat
+):
+  """A missed finish event must not retain scratch until a later resume."""
+  _pin_data_dir(monkeypatch, tmp_path)
+  chat_id = getattr(chat, "id", chat)
+  db.add(models.ChatRun(
+    id="run-parked", root_run_id="run-parked", chat_id=chat_id,
+    status="parked",
+  ))
+  db.commit()
+  scratch = agent_scratch.scratch_for_chat(chat_id)
+
+  result = await agent_scratch.sweep_idle_scratch(
+    now=time.time() + agent_scratch._SWEEP_GRACE_SECONDS + 1,
+  )
+
+  assert not scratch.exists()
+  assert result["removed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_sweep_spares_scratch_created_before_its_run_row_exists(
   monkeypatch, tmp_path, db
 ):
   """Scratch and the ChatRun row are created around the same moment and are not
@@ -96,15 +271,18 @@ def test_sweep_spares_scratch_created_before_its_run_row_exists(
   _pin_data_dir(monkeypatch, tmp_path)
   starting = agent_scratch.scratch_for_chat("just-started")
 
-  result = agent_scratch.sweep_idle_scratch(db)
+  result = await agent_scratch.sweep_idle_scratch()
 
   assert starting.is_dir()
   assert result["kept_recent"] == 1
   assert result["removed"] == 0
 
 
-def test_sweep_reports_zero_before_any_scratch_exists(monkeypatch, tmp_path, db):
+@pytest.mark.asyncio
+async def test_sweep_reports_zero_before_any_scratch_exists(
+  monkeypatch, tmp_path, db
+):
   """First run on a fresh volume: absence is an ordinary result, not an error."""
   _pin_data_dir(monkeypatch, tmp_path / "never-written")
 
-  assert agent_scratch.sweep_idle_scratch(db)["removed"] == 0
+  assert (await agent_scratch.sweep_idle_scratch())["removed"] == 0

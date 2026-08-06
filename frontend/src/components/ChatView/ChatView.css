@@ -8,12 +8,12 @@
    ║   1. `.chat__foot` is `position: absolute`, offset above   ║
    ║      env(safe-area-inset-bottom),                           ║
    ║      with `pointer-events: none` — chat content scrolls    ║
-   ║      *behind* the composer. Only the pill + + + queue +    ║
-   ║      attach-tray re-enable pointer-events. The gutter is   ║
-   ║      transparent.                                          ║
+   ║      *behind* the composer. Visible footer controls must   ║
+   ║      opt back in through the allow-list beside the foot;   ║
+   ║      transparent wrappers keep the gutter pass-through.    ║
    ║                                                            ║
-   ║   2. `--composer-h` is published by a ResizeObserver in    ║
-   ║      ChatView.jsx that watches `.chat__foot`. `.chat__list`║
+   ║   2. `--composer-h` is published by the scroll controller's║
+   ║      ResizeObserver on `.chat__foot`. `.chat__list`        ║
    ║      reserves --composer-h + the same full safe-area       ║
    ║      expression + 16px so the last message clears the      ║
    ║      pill and gesture area as it grows                     ║
@@ -156,12 +156,12 @@
   margin: 0 auto;
   /* Bottom padding clears the absolutely-positioned `.chat__foot`.
      Tracks the foot's measured height via the `--composer-h` CSS
-     var (written by ChatView's ResizeObserver), the full device safe-area
-     gap below the foot (the SAME env() expression as `.chat__foot`'s
-     `bottom` — keep them in sync), plus a small breathing-room
-     margin so chips/queue tray growing the foot keeps the last
-     message clear of the pill. Fallback 80px is for the first
-     paint before the RO fires. */
+     var (written by the scroll controller's ResizeObserver), the
+     full device safe-area gap below the foot (the SAME env()
+     expression as `.chat__foot`'s `bottom` — keep them in sync),
+     plus a small breathing-room margin so chips/queue tray growing
+     the foot keeps the last message clear of the pill. Fallback
+     80px is for the first paint before the RO fires. */
   padding: 8px 6px calc(var(--composer-h, 80px) + env(safe-area-inset-bottom, 0px) + 16px);
   display: flex;
   flex-direction: column;
@@ -370,6 +370,34 @@
   align-items: flex-start;
 }
 
+/* A search jump is a one-shot held position, not a new scrolling mode. The
+   restrained row wash and text highlight make the destination legible without
+   competing with ordinary user/assistant surfaces. */
+.chat__msg--search-reveal {
+  animation: chat-search-reveal 2.6s ease-out both;
+}
+
+.chat__msg--search-reveal .chat__text::highlight(chat-search-result) {
+  color: inherit;
+  background-color: color-mix(in srgb, var(--accent) 34%, transparent);
+}
+
+.chat__msg--search-reveal:focus { outline: none; }
+.chat__msg--search-reveal:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 6px;
+}
+
+@keyframes chat-search-reveal {
+  0%, 55% { filter: drop-shadow(0 0 0.55rem color-mix(in srgb, var(--accent) 45%, transparent)); }
+  100% { filter: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat__msg--search-reveal { animation: none; }
+}
+
 /* Tap-to-show message metadata. User timestamps and copy share one row, while
    assistant rows show the copy action alone. ChatView clears the visible state
    automatically after a short glance, so the row never remains expanded. */
@@ -425,6 +453,29 @@
   opacity: 0.7;
   transition: opacity 140ms ease, color 140ms ease, background 140ms ease;
 }
+.chat__msg-speak {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  padding: 2px 5px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--muted);
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 140ms ease, color 140ms ease, background 140ms ease;
+}
+.chat__msg-speak:active { transform: scale(0.94); }
+.chat__msg-speak--active { color: var(--accent); opacity: 1; }
+.chat__msg-speak--error { color: var(--danger); opacity: 1; }
+.chat__msg-speak:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  opacity: 1;
+}
 .chat__msg-copy:active { transform: scale(0.94); }
 .chat__msg-copy--copied { color: var(--accent); opacity: 1; }
 .chat__msg-copy:focus-visible {
@@ -435,6 +486,10 @@
 @media (hover: hover) and (pointer: fine) {
   .chat__msg-copy:hover {
     background: var(--surface2); /* CONTRACT: secondary opaque fill */
+    color: var(--text);
+  }
+  .chat__msg-speak:hover {
+    background: var(--surface2);
     color: var(--text);
   }
 }
@@ -777,9 +832,14 @@
 }
 
 .chat__text + .chat__tools,
-.chat__tools + .chat__text,
-.chat__tools + .chat__tools {
+.chat__tools + .chat__text {
   margin-top: var(--activity-block-gap, 8px);
+}
+
+/* Consecutive activity stretches share the compact internal row rhythm; prose
+   boundaries keep the wider block gap above. */
+.chat__tools + .chat__tools {
+  margin-top: var(--activity-row-gap, 4px);
 }
 .chat__text--assistant + .chat__text--assistant { margin-top: 0.75rem; }
 
@@ -1587,9 +1647,7 @@
   transform: rotate(-90deg);
 }
 
-/* Expanded, a quiet vertical hairline places the chronological child steps
-   beneath the parent label. The rail is neutral hierarchy, not a decorative
-   accent stripe. */
+/* A quiet rail makes the expanded parent/child hierarchy scannable. */
 .chat__activity-timeline {
   display: flex;
   flex-direction: column;
@@ -1754,17 +1812,11 @@
   padding: var(--activity-row-gap, 4px) 0;
 }
 
-/* Top-level transcript actions keep a dependable touch target. Nested activity
-   rows deliberately stay at their compact 28px base height: the parent
-   disclosure already establishes one bounded inspection surface, so making
-   every child match top-level chat spacing turns an expanded run back into a
-   full transcript. The rows remain full-width buttons along the timeline. */
+/* Full-size touch targets belong to explicit actions. Full-width activity
+   disclosures retain their compact base height. */
 @media (pointer: coarse) {
   .chat__empty-action,
   .chat__quick-action-chip,
-  .chat__activity-header:not(.chat__activity-header--static),
-  .chat__activity-header--reserve-interactive,
-  .chat__tool--compact > .chat__tool-header:not(.chat__tool-header--static),
   .chat__tool-copy,
   .chat__lazy-retry {
     min-height: 44px;
@@ -1880,6 +1932,10 @@
    on the foot itself and re-enabled selectively on its interactive
    children, so taps on the gutter pass through to the chat. */
 .chat__foot {
+  --chat-foot-rail-gap: 3px;
+  /* Opaque footer cards need a wider physical gap to read as equally
+     separated from the composer as the translucent progress rail. */
+  --chat-foot-card-gap: 6px;
   position: absolute;
   /* Interactive controls must stay wholly inside the device safe rectangle.
      Android Chrome paints the shell's gesture backdrop in the unsafe band;
@@ -1945,8 +2001,10 @@
 .chat__foot .chat__attach-tray,
 .chat__foot .chat__question-nudge,
 .chat__foot .chat__resume-nudge,
+.chat__foot .chat__jump-latest,
 .chat__foot .chat__open-app,
 .chat__foot .chat__progress-step--toggle,
+.chat__foot .slash-menu,
 .chat__foot .chat__pill,
 .chat__foot .composer-plus { pointer-events: auto; }
 
@@ -2140,6 +2198,47 @@
   transition: transform 0.16s ease;
 }
 
+/* Keep the primary action's three SVGs mounted in one grid cell. Send → Steer
+   stays an immediate swap. Transitions into Stop are deliberately sequential:
+   the directional glyph leaves first, then the square settles in, so the two
+   meanings never mix while the shared button shell changes colour. */
+.chat__action-glyphs {
+  --stop-handoff: 0.1s;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+}
+
+.chat__action-glyph {
+  grid-area: 1 / 1;
+  opacity: 0;
+}
+
+.chat__action-glyphs--send .chat__action-glyph--send,
+.chat__action-glyphs--steer .chat__action-glyph--steer {
+  opacity: 1;
+}
+
+.chat__action-glyph--stop {
+  transform: scale(0.76) rotate(-8deg);
+}
+
+.chat__action-glyphs--stop :is(.chat__action-glyph--send, .chat__action-glyph--steer) {
+  transform: scale(0.82);
+  transition:
+    opacity var(--stop-handoff) ease-in,
+    transform var(--stop-handoff) ease-in;
+}
+
+.chat__action-glyphs--stop .chat__action-glyph--stop {
+  opacity: 1;
+  transform: none;
+  transition:
+    opacity 0.12s ease-out var(--stop-handoff),
+    transform 0.16s var(--ease-out-soft, ease-out) var(--stop-handoff);
+}
+
 .chat__send {
   background: var(--accent); /* CONTRACT: vivid opaque accent fill */
   color: #fff;
@@ -2171,7 +2270,7 @@
 .chat__stop:focus-visible {
   outline: none;
 }
-.chat__stop:focus-visible svg {
+.chat__stop:focus-visible .chat__action-glyph--stop {
   outline: 2px solid var(--accent);
   /* Offset is measured from the SVG box, so it has to shrink as the glyph
      grows: at 28px a 3px offset draws 28 + 2*(3 + 2) = 38px, exactly the
@@ -2179,6 +2278,12 @@
      around the glyph. 1px keeps the previous 34px visual. */
   outline-offset: 1px;
   border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat__action-glyphs--stop .chat__action-glyph {
+    transition: none;
+  }
 }
 
 /* Steer (fast-forward) button — replaces Stop while a turn is streaming
@@ -2240,6 +2345,40 @@
 .chat__resume-nudge:active { transform: scale(0.96); }
 
 .chat__offscreen-nudges > button + button { margin-top: 8px; }
+
+/* Jump-to-latest: a round, mostly-transparent control floating in the same
+   slot above the composer, shown once the reader has scrolled away from the
+   content tail (ChatView renders it only then). Tapping routes through the
+   controller's tail reveal — contract R5a's one-shot navigation, never
+   live-follow. Kept quieter than the attention nudges: neutral surface tint
+   at low opacity over blur, no accent, because it is a convenience, not an
+   attention request. */
+.chat__jump-latest {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  margin: 0 auto;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  background: color-mix(in srgb, var(--surface) 45%, transparent);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  color: color-mix(in srgb, var(--text) 78%, transparent);
+  cursor: pointer;
+  /* Same entrance + press behavior as the nudges (no fill mode — a filled
+     transform would permanently override the :active press scale). */
+  animation: chat-foot-rise 0.22s var(--ease-out-soft, ease-out);
+  transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.08s;
+}
+.chat__jump-latest:hover {
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  border-color: var(--border);
+  color: var(--text);
+}
+.chat__jump-latest:active { transform: scale(0.96); }
 
 /* ── Voice input ──────────────────────────────────── */
 .chat__mic {
@@ -2360,6 +2499,7 @@
   z-index: 50;
   /* Touch-scroll inside the popover should not bubble up and close
      the keyboard or scroll the chat behind it. */
+  touch-action: pan-y;
   overscroll-behavior: contain;
 }
 
@@ -2938,7 +3078,7 @@
    its height, so a height animation would fight the composer clearance. */
 .chat__progress-rail {
   max-width: 720px;
-  margin: 0 auto 3px;
+  margin: 0 auto var(--chat-foot-rail-gap);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -3033,7 +3173,7 @@
      48px wider than the pill it feeds (owner catch, 2026-07-17). */
   width: 100%;
   max-width: 720px;
-  margin: 0 auto 8px;
+  margin: 0 auto var(--chat-foot-card-gap);
   background: var(--surface); /* CONTRACT: opaque card/panel fill, sits on --bg */
   border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
   border-radius: 12px;

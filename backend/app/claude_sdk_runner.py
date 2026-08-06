@@ -64,6 +64,7 @@ import os
 import signal
 import shutil
 from collections import deque
+from contextlib import ExitStack
 from typing import Any
 
 from claude_agent_sdk import (
@@ -296,17 +297,12 @@ class ActiveClaudeClient:
     # after the steered row on reload (Q1, Q2, A1A2 instead of Q1, A1, Q2, A2).
     self._steer_user_msgs: list[dict] = []
     self._steer_consume_cids: list[str] = []
-    # A steer was requested but not yet cut over. The runner clears the
-    # turn at the NEXT completed content-block boundary (an AssistantMessage)
-    # rather than mid-token, so the user sees the finished sentence/thought
-    # before the steer takes over. Set by `steer()`, consumed by the runner.
-    self._steer_requested = False
-    # One interrupt is in flight: an `interrupt()` has been signalled but the
+    # One interrupt is in flight: `steer()` has signalled `interrupt()` but the
     # terminal ResultMessage that ends the interrupted turn has not arrived
-    # yet. Guards the boundary cut so a second steer (or a second
-    # AssistantMessage) in the drain window can't fire a duplicate interrupt
-    # before the SDK has closed the first; the runner clears it on the
-    # terminal result. Stop's hard `interrupt()` does not consult this — Stop
+    # yet. Guards the steer cut so a second steer arriving in the drain window
+    # can't fire a duplicate interrupt before the SDK has closed the first; the
+    # runner clears it on the terminal result and drains every buffered steer
+    # text together. Stop's hard `interrupt()` does not consult this — Stop
     # always cuts immediately.
     self._interrupt_in_flight = False
     self._finished: asyncio.Future[None] = (
@@ -319,19 +315,23 @@ class ActiveClaudeClient:
     user_msgs: list[dict] | None = None,
     consume_pending_cids: list[str] | None = None,
   ) -> bool:
-    """Buffers a steer to cut in at the next content-block boundary.
+    """Fires an immediate soft interrupt so a steer lands right away.
 
-    Claude's SDK cannot append to an in-flight tool loop, and the only
-    mid-turn lever is `interrupt()` — but interrupting on the token that
-    happens to be streaming throws away a half-finished sentence or
-    thinking trace. Instead we record the redirect text and FLAG the
-    request; the runner watches its own `receive_response()` loop and
-    interrupts only after the next COMPLETED content block is published
-    (an `AssistantMessage`), so the user sees the finished thought, then
-    the steer takes over. The existing drain-then-requery path on the
-    interrupt's terminal result delivers the buffered text on the same
-    connected client, preserving session context. (Stop is the separate
-    immediate-cut path — see `interrupt()`.)
+    Claude's SDK cannot append to an in-flight tool loop, and its only
+    mid-turn lever is `interrupt()`. We record the redirect text, then
+    interrupt the live turn NOW — on the same connected client — instead of
+    waiting for the next completed content block. The runner's
+    `receive_response()` loop can be parked inside a long-running tool call,
+    where no `AssistantMessage` arrives for seconds to minutes; deferring the
+    cut to that boundary is what made steering land unpredictably. Interrupting
+    immediately aborts the in-flight step (its work is redone once the model
+    reads the steer) and may seal a partial block, matching Codex's immediate
+    steer. The interrupt's terminal ResultMessage flows to the existing
+    drain-then-requery path in the runner, which seals the pre-steer A1,
+    appends the steered rows, and re-queries the buffered text on the same
+    session (preserving context). Two rapid steers collapse into one interrupt
+    via `_interrupt_in_flight` and drain together. (Stop is the separate
+    teardown path — see `interrupt()`.)
 
     `user_msgs` / `consume_pending_cids` are the transcript-side payload the
     runner replays into `sink.split_for_steer` when the interrupted turn
@@ -374,7 +374,15 @@ class ActiveClaudeClient:
           continue
         self._steer_consume_cids.append(cid)
         buffered_consume.add(cid)
-    self._steer_requested = True
+    # Fire the interrupt immediately (soft interrupt on the same connected
+    # client) so the steer lands now instead of at the next content-block
+    # boundary. The `_interrupt_in_flight` guard collapses two rapid steers
+    # into a single interrupt — both texts drain together when the terminal
+    # ResultMessage arrives. A racing hard Stop resolves `_finished`, so the
+    # guard no-ops rather than interrupting a torn-down client.
+    if not self._interrupt_in_flight and not self._finished.done():
+      self._interrupt_in_flight = True
+      await self._client.interrupt()
     return True
 
   async def interrupt(self) -> None:
@@ -387,9 +395,9 @@ class ActiveClaudeClient:
     direct caller.
 
     Stop is the hard, immediate-cut path: it drops the buffered steer
-    ENTIRELY — the provider-facing text (`pending_steer` + `_steer_requested`,
-    so no boundary cut or requery fires for work the user just abandoned) AND
-    the transcript-side rows (`_steer_user_msgs` + `_steer_consume_cids`, so the
+    ENTIRELY — the provider-facing text (`pending_steer`, so no requery fires
+    for work the user just abandoned) AND the transcript-side rows
+    (`_steer_user_msgs` + `_steer_consume_cids`, so the
     turn-end seal appends nothing).
 
     Both halves have to go, because Stop OWNS those rows from here on: a
@@ -404,7 +412,6 @@ class ActiveClaudeClient:
     """
     self._interrupt_requested = True
     self.pending_steer = []
-    self._steer_requested = False
     self._steer_user_msgs = []
     self._steer_consume_cids = []
     await self._client.interrupt()
@@ -754,6 +761,8 @@ async def run_claude_sdk_turn(
   db,
   agent_settings: dict | None = None,
   skills_enabled: bool = False,
+  run_policy=None,
+  connector_plan=None,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
@@ -774,6 +783,8 @@ async def run_claude_sdk_turn(
       path can ship without changing what the agent does — skill loads
       are still observed (chip + activity log) whenever a skill does
       load, regardless of this flag.
+    connector_plan: Detached owner-managed MCP configuration built before the
+      request session was released. It is plain data and never queries SQLite.
 
   Returns:
     A dict containing the resulting session ID, final cost, and error.
@@ -800,6 +811,28 @@ async def run_claude_sdk_turn(
     context,
   ) -> PermissionResultAllow | PermissionResultDeny:
     del context
+    if run_policy is not None:
+      nested_tools = {
+        "Task", "TaskOutput", "TaskStop", "Workflow", "Workflows", "Agent",
+      }
+      if tool_name in nested_tools:
+        return PermissionResultDeny(
+          message="Delegated child tasks cannot launch or manage other agents."
+        )
+      if tool_name == "AskUserQuestion":
+        return PermissionResultDeny(
+          message=(
+            "Delegated child tasks cannot park on an owner question; return the "
+            "blocker to the parent instead."
+          )
+        )
+      if run_policy.scope == "read" and tool_name in {
+        "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
+      }:
+        return PermissionResultDeny(
+          message="This delegated task is read-only."
+        )
+      return PermissionResultAllow(updated_input=input_data)
     # Auto-approve every tool except AskUserQuestion — this preserves
     # the "trust the agent" posture (no tool gating) while still
     # intercepting AskUserQuestion for the partner UX. The callback is
@@ -898,8 +931,8 @@ async def run_claude_sdk_turn(
   # The "ultracode" tier maps to xhigh effort for the SDK flag (which only
   # accepts low/medium/high/xhigh/max) and arms the Workflow-tool
   # orchestration via the keyword trigger appended to this turn's prompt.
-  _ultracode = _effort == "ultracode"
-  if _ultracode:
+  _ultracode = _effort == "ultracode" and run_policy is None
+  if _effort == "ultracode":
     _effort = "xhigh"
   turn_message = user_message + _ULTRACODE_REMINDER if _ultracode else user_message
   # Cross-provider mismatch defense (mirrors codex_sdk_runner).
@@ -968,6 +1001,18 @@ async def run_claude_sdk_turn(
         ],
       },
     }
+    if run_policy is not None:
+      options_kwargs.update({
+        "permission_mode": (
+          "plan" if run_policy.scope == "read" else "acceptEdits"
+        ),
+        "max_budget_usd": run_policy.max_budget_usd,
+        "disallowed_tools": [
+          "AskUserQuestion", "Task", "TaskOutput", "TaskStop",
+          "Workflow", "Workflows", "Agent",
+        ],
+        "agents": {},
+      })
     if skills_enabled:
       options_kwargs["skills"] = "all"
     if model_override:
@@ -986,15 +1031,51 @@ async def run_claude_sdk_turn(
     # Passed via --settings as inline JSON.
     _cli_settings = {"ultracode": True} if _ultracode else {"disableWorkflows": True}
     options_kwargs["extra_args"] = {"settings": json.dumps(_cli_settings)}
-    options = ClaudeAgentOptions(**options_kwargs)
 
-    client = ClaudeSDKClient(options)
+    # A dict-valued SDK mcp_servers option is serialized directly into the CLI
+    # argv. Keep credentials out of /proc/cmdline by handing Claude an anonymous
+    # 0600 config file path instead. After connect(), replace that fd with
+    # /dev/null but keep its number reserved until teardown: simply closing it
+    # would let the argv-visible path alias an unrelated descriptor later.
+    connector_config_stack = ExitStack()
+    connector_config_handle = None
+    if connector_plan is not None:
+      try:
+        from app.connectors import claude_mcp_config_handle
+        connector_config_handle = connector_config_stack.enter_context(
+          claude_mcp_config_handle(connector_plan)
+        )
+        if connector_config_handle:
+          options_kwargs["mcp_servers"] = connector_config_handle.path
+      except Exception:
+        connector_config_stack.close()
+        connector_config_stack = ExitStack()
+        log.warning(
+          "Claude MCP connection injection skipped chat_id=%s",
+          chat_id,
+          exc_info=True,
+        )
+    try:
+      options = ClaudeAgentOptions(**options_kwargs)
+      client = ClaudeSDKClient(options)
+    except Exception:
+      connector_config_stack.close()
+      raise
+
     active_client = ActiveClaudeClient(client, chat_id=chat_id)
     registry.register(active_client)
 
     try:
       try:
-        await asyncio.wait_for(client.connect(), timeout=30.0)
+        try:
+          await asyncio.wait_for(client.connect(), timeout=30.0)
+        finally:
+          # Claude has consumed the config by the time the control channel is
+          # connected. Destroy its contents before query() gives the model a
+          # shell or process-inspection tool, while reserving the argv-visible
+          # fd number so it cannot alias another live descriptor.
+          if connector_config_handle is not None:
+            connector_config_handle.retire()
       except asyncio.TimeoutError:
         bc.publish({
           "type": "error",
@@ -1044,28 +1125,13 @@ async def run_claude_sdk_turn(
             sdk_msg, bc, current_session_id,
           )
           if terminal is None:
-            # Boundary-fire a buffered steer. `steer()` only flags the
-            # request (it no longer interrupts mid-token); we cut over at
-            # the next COMPLETED content block, which is exactly when an
-            # AssistantMessage is dispatched (the finished text / thinking /
-            # tool_use block was just published to the broadcast). The
-            # `_interrupt_in_flight` guard makes this fire exactly ONCE per
-            # interrupt cycle: a second steer or another AssistantMessage
-            # arriving before the interrupt's terminal ResultMessage closes
-            # the turn must not issue a duplicate interrupt, and a racing
-            # hard Stop (which clears pending_steer) makes the condition
-            # no-op. The buffered text is delivered by the existing
-            # drain-then-requery path below when that terminal arrives.
-            if (
-              isinstance(sdk_msg, AssistantMessage)
-              and active_client._steer_requested
-              and active_client.pending_steer
-              and not active_client._interrupt_in_flight
-              and not active_client._finished.done()
-            ):
-              active_client._steer_requested = False
-              active_client._interrupt_in_flight = True
-              await client.interrupt()
+            # A steer fires its interrupt synchronously in
+            # ActiveClaudeClient.steer() (a soft interrupt on the same
+            # connected client), so there is no boundary cut to make here — a
+            # steer during a long-running tool call would otherwise sit
+            # buffered until the tool returned. The interrupt's terminal
+            # ResultMessage is handled below, where the drain-then-requery
+            # path seals A1 and re-asks with the buffered steer text.
             continue
           if (
             active_client.interrupt_requested
@@ -1088,7 +1154,6 @@ async def run_claude_sdk_turn(
             # durability catch-all for a steer that never reaches a requery.
             await _seal_steer_split(bc, active_client, chat_id)
             active_client.pending_steer = []
-            active_client._steer_requested = False
             await client.query(
               _steer_redirect_message("\n\n".join(steer_texts))
             )
@@ -1138,7 +1203,6 @@ async def run_claude_sdk_turn(
             # turn-end finally covers the no-requery case.
             await _seal_steer_split(bc, active_client, chat_id)
             active_client.pending_steer = []
-            active_client._steer_requested = False
             await client.query(
               _steer_redirect_message("\n\n".join(steer_texts))
             )
@@ -1242,6 +1306,7 @@ async def run_claude_sdk_turn(
       try:
         await client.disconnect()
       finally:
+        connector_config_stack.close()
         # The SDK closes only its direct CLI PID. Reap the verified private
         # group as a bounded backstop for tool children, and do not let a
         # repeated task cancellation skip the SIGKILL worker once it starts.

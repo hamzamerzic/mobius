@@ -17,6 +17,10 @@ from app.run_state import running_chat_ids
 
 
 _CHAT_PROFILE = re.compile(r"^chat-([0-9a-fA-F-]{36})$")
+_AGENT_BROWSER_SERVER_EXECUTABLES = frozenset({
+  "agent-browser-linux-arm64",
+  "agent-browser-linux-x64",
+})
 _CACHE_PATHS = (
   "Default/Cache",
   "Default/Code Cache",
@@ -28,9 +32,7 @@ _CACHE_PATHS = (
   "ShaderCache",
 )
 _DEFAULT_MAX_BYTES = 2 * 1024**3
-_DEFAULT_LOW_WATER_BYTES = 1536 * 1024**2
-_RAILWAY_DEFAULT_MAX_BYTES = 128 * 1024**2
-_RAILWAY_DEFAULT_LOW_WATER_BYTES = 96 * 1024**2
+_DEFAULT_LOW_WATER_BYTES = _DEFAULT_MAX_BYTES * 3 // 4
 _DEFAULT_INACTIVE_DAYS = 30
 _DEFAULT_SWEEP_SECONDS = 60 * 60
 _status = {
@@ -56,6 +58,14 @@ class BrowserSessionTarget:
   socket_dir: str | None = None
 
 
+@dataclass(frozen=True)
+class BrowserSessionScan:
+  """Exact targets plus whether process discovery was complete."""
+
+  targets: frozenset[BrowserSessionTarget]
+  complete: bool
+
+
 def _env_int(name: str, default: int) -> int:
   try:
     value = int(os.environ.get(name, str(default)))
@@ -64,26 +74,18 @@ def _env_int(name: str, default: int) -> int:
   return value if value >= 0 else default
 
 
-def _running_on_railway() -> bool:
-  return any(os.environ.get(name) for name in (
-    "RAILWAY_ENVIRONMENT",
-    "RAILWAY_ENVIRONMENT_ID",
-    "RAILWAY_PROJECT_ID",
-    "RAILWAY_SERVICE_ID",
-  ))
-
-
-def default_browser_profile_quota() -> tuple[int, int]:
-  """Return platform-aware high/low water defaults.
-
-  Railway Trial and Free volumes are smaller than the ordinary 2 GiB profile
-  ceiling, so using the self-host default there would wait until after the
-  whole volume was full. Operator env overrides are still applied by the
-  quota function below.
-  """
-  if _running_on_railway():
-    return _RAILWAY_DEFAULT_MAX_BYTES, _RAILWAY_DEFAULT_LOW_WATER_BYTES
-  return _DEFAULT_MAX_BYTES, _DEFAULT_LOW_WATER_BYTES
+def default_browser_profile_quota(
+  data_dir: str | Path,
+) -> tuple[int, int]:
+  """Size profile defaults from the stable capacity of the data filesystem."""
+  try:
+    total_bytes = int(shutil.disk_usage(data_dir).total)
+  except (OSError, TypeError, ValueError):
+    return _DEFAULT_MAX_BYTES, _DEFAULT_LOW_WATER_BYTES
+  if total_bytes <= 0:
+    return _DEFAULT_MAX_BYTES, _DEFAULT_LOW_WATER_BYTES
+  max_bytes = min(_DEFAULT_MAX_BYTES, total_bytes // 4)
+  return max_bytes, max_bytes * 3 // 4
 
 
 def browser_profile_sweep_seconds() -> int:
@@ -155,7 +157,7 @@ def browser_session_targets_for_chat(
   chat_id: str,
   *,
   proc_root: Path = Path("/proc"),
-) -> set[BrowserSessionTarget]:
+) -> BrowserSessionScan:
   """Return live agent-browser routing targets created by one chat.
 
   ``AGENT_BROWSER_SESSION=chat-<id>`` gives ordinary invocations a safe
@@ -169,24 +171,27 @@ def browser_session_targets_for_chat(
   Routing values are opaque. agent-browser accepts values that look like paths
   or options; cleanup passes them only through a child environment (never a
   shell, CLI option value, or path operation), matching the daemon exactly.
-  Only the agent-browser server binary is considered. Proc races and permission
-  errors are normal and read as an incomplete, best-effort set.
+  Only the agent-browser server binary is considered. A process disappearing
+  during the scan cannot remain a live target and is safe to ignore; any other
+  unreadable process makes the result incomplete so destructive callers can
+  preserve scratch rather than mistaking uncertainty for an empty inventory.
   """
   if not chat_id or not proc_root.is_dir():
-    return set()
+    return BrowserSessionScan(frozenset(), False)
   try:
     processes = list(proc_root.iterdir())
   except OSError:
-    return set()
+    return BrowserSessionScan(frozenset(), False)
 
   targets: set[BrowserSessionTarget] = set()
+  complete = True
   for process in processes:
     if not process.name.isdigit():
       continue
     try:
       argv = (process / "cmdline").read_bytes().split(b"\0")
       executable = Path(argv[0].decode("utf-8", errors="replace")).name
-      if executable != "agent-browser-linux-x64":
+      if executable not in _AGENT_BROWSER_SERVER_EXECUTABLES:
         continue
       values: dict[bytes, str] = {}
       for raw in (process / "environ").read_bytes().split(b"\0"):
@@ -198,7 +203,10 @@ def browser_session_targets_for_chat(
           b"AGENT_BROWSER_SOCKET_DIR",
         ):
           values[key] = value.decode("utf-8", errors="surrogateescape")
+    except (FileNotFoundError, ProcessLookupError):
+      continue
     except OSError:
+      complete = False
       continue
     session = values.get(b"AGENT_BROWSER_SESSION")
     if values.get(b"CHAT_ID") == chat_id and session is not None:
@@ -207,7 +215,7 @@ def browser_session_targets_for_chat(
         namespace=values.get(b"AGENT_BROWSER_NAMESPACE"),
         socket_dir=values.get(b"AGENT_BROWSER_SOCKET_DIR"),
       ))
-  return targets
+  return BrowserSessionScan(frozenset(targets), complete)
 
 
 def chat_activity_snapshot(db: Session) -> dict[str, dict]:
@@ -250,7 +258,9 @@ def enforce_browser_profile_quota(
   """
   root = Path(data_dir) / "agent-browser-profiles"
   now = now or datetime.now(UTC).replace(tzinfo=None)
-  default_max_bytes, default_low_water_bytes = default_browser_profile_quota()
+  default_max_bytes, default_low_water_bytes = default_browser_profile_quota(
+    data_dir,
+  )
   max_bytes = max_bytes if max_bytes is not None else _env_int(
     "AGENT_BROWSER_PROFILE_MAX_BYTES", default_max_bytes,
   )

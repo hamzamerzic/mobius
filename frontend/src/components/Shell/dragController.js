@@ -16,7 +16,9 @@
 //
 // Geometry convention: every point and rect here is in CONTENT-LOCAL pixels
 // (relative to .shell__content's box), the same coordinate space projectLayout
-// emits its pane rects in. The binding subtracts the content bounding rect once.
+// emits its pane rects in. A strip may have a negative y when the single-pane
+// Builder strip is the shell sibling immediately above content; the binding
+// measures that real rect rather than pretending every strip is inside a pane.
 
 import {
   STRIP_H, PANE_GAP,
@@ -31,15 +33,23 @@ import { tabKey } from './tabModel.js'
 // A mouse drag arms once the pointer travels past this from the press point;
 // below it, the press is still a plain click (tab activate / row open).
 export const POINTER_SLOP = 5
-// Touch lift is a long-press. Tabs use the shorter threshold because they live
-// in a horizontal strip; drawer rows use the longer threshold in their own
-// gesture owner so an ordinary vertical scroll wins before any row action.
-export const TAB_HOLD_MS = 350
-export const DRAWER_HOLD_MS = 450
+// A touch press-and-hold resolves in two deliberate stages, shared by drawer
+// rows, launcher cards, and workspace tabs so no surface invents its own
+// timing. After the first (short) stage the item becomes draggable — movement
+// picks it up as a reorder/workspace/strip drag — while a press that stays
+// still through the second stage opens that item's actions. A short hold moves,
+// a long hold opens actions, identically everywhere. (Tabs previously diverged
+// with one longer hold whose RELEASE opened the menu; they now share this.)
+export const PRESS_DRAG_HOLD_MS = 180
+// Stay ahead of the platform's own long-press takeover. Some touch browsers
+// cancel the pointer around their native context-menu threshold; opening first
+// keeps the menu on our single Pointer Events path instead of a release-time
+// native contextmenu fallback.
+export const PRESS_MENU_HOLD_MS = 400
 // Movement past this before a hold resolves yields to the source scroller.
 export const PRE_HOLD_MOVE_PX = 8
-// After a touch lift, a release that never moved past this is not a drop. Tabs
-// cancel cleanly because their hold gesture is reserved for dragging.
+// After a touch lift, a release that never moved past this is not a drop; the
+// menu opens from the hold timer while still held, never from this release.
 export const RELEASE_IN_PLACE_PX = 5
 
 // ── Zone geometry (design §3.2 / §3.3) ───────────────────────────────────────
@@ -96,16 +106,58 @@ export function passedSlop(dx, dy, slop = POINTER_SLOP) {
 
 // Tabs do not infer drag intent from direction: every move before their hold
 // resolves belongs to scrolling, and the binding arms tab dragging only after
-// that deliberate hold. Drawer touch gestures are owned by Drawer itself so a
-// held row can open its menu or reorder a pin without also moving the workspace.
+// that deliberate hold.
 export function touchTabMoveIntent(dx, dy, limit = PRE_HOLD_MOVE_PX) {
   if (hypot(dx, dy) <= limit) return 'pending'
   return 'scroll'
 }
 
+// The drawer row's one held gesture has three outcomes. Before a pinned touch
+// hold, vertical movement scrolls the list through the same pointer owner while
+// a horizontal move yields to drawer swipe; unpinned rows keep native scrolling.
+// Afterwards (or immediately for a mouse), vertical movement reorders a pin and
+// outward movement lifts the row into the workspace. Keeping this classification
+// pure prevents the menu, reorder and workspace branches from growing separate
+// threshold logic.
+export function drawerRowMoveIntent(dx, dy, {
+  held = false,
+  isTouch = false,
+  pinned = false,
+} = {}) {
+  const limit = isTouch && !held ? PRE_HOLD_MOVE_PX : POINTER_SLOP
+  if (hypot(dx, dy) <= limit) return 'pending'
+  if (isTouch && !held) {
+    return pinned && Math.abs(dy) > Math.abs(dx) ? 'scroll' : 'yield'
+  }
+  if (Math.abs(dy) > Math.abs(dx)) return pinned ? 'reorder' : 'cancel'
+  return dx > 0 ? 'workspace' : 'cancel'
+}
+
 // After a lift, a release still within this radius did not become a drag.
 export function releasedInPlace(dx, dy, limit = RELEASE_IN_PLACE_PX) {
   return hypot(dx, dy) <= limit
+}
+
+// Release velocity (layout px/ms) for the drawer's momentum glide. The pinned
+// rows scroll under our own pointer owner (touch-action reserves them for the
+// hold-to-reorder gesture), so the browser gives us no native fling — we measure
+// one. A thumb DECELERATES in the last moment before it lifts, so reading only
+// the final move reports "no flick" and kills the glide; instead average the
+// travel across the recent window. `samples` are {t (ms), top (scroll offset)}
+// pushed each move. Returns 0 for a paused release (newest sample stale) or a
+// window too short to measure, so a deliberate stop keeps its exact position.
+export function flingReleaseVelocity(samples, now, { maxAgeMs = 110, minSpanMs = 8 } = {}) {
+  if (!Array.isArray(samples) || samples.length < 2) return 0
+  const newest = samples[samples.length - 1]
+  if (!newest || now - newest.t > maxAgeMs) return 0
+  let oldest = newest
+  for (let i = samples.length - 1; i >= 0; i -= 1) {
+    if (now - samples[i].t > maxAgeMs) break
+    oldest = samples[i]
+  }
+  const span = newest.t - oldest.t
+  if (span < minSpanMs) return 0
+  return (newest.top - oldest.top) / span
 }
 
 // Whether the workspace-root-edge drop zone may arm for this pointer + mode: it
@@ -139,17 +191,6 @@ export function crossedDrawerExit(pointX, edgeX, gap = DRAWER_EXIT_PX) {
 
 // ── Small geometry helpers ───────────────────────────────────────────────────
 
-// Translate viewport pointer coordinates into an element's local geometry.
-// The shell stays at native document scale, so this boundary owns translation
-// only; introducing a second scaled coordinate space here would make every
-// drag and fixed overlay carry special conversion rules again.
-export function clientPointToLocal(point, clientRect) {
-  return {
-    x: Number(point?.x) - (Number(clientRect?.left) || 0),
-    y: Number(point?.y) - (Number(clientRect?.top) || 0),
-  }
-}
-
 function contains(rect, point) {
   return point.x >= rect.x && point.x <= rect.x + rect.w
     && point.y >= rect.y && point.y <= rect.y + rect.h
@@ -157,6 +198,15 @@ function contains(rect, point) {
 
 function insetRect(rect, m) {
   return { x: rect.x + m, y: rect.y + m, w: Math.max(0, rect.w - 2 * m), h: Math.max(0, rect.h - 2 * m) }
+}
+
+function paneStripRect(pane) {
+  return pane.stripRect || {
+    x: pane.rect.x,
+    y: pane.rect.y,
+    w: pane.rect.w,
+    h: STRIP_H,
+  }
 }
 
 // The band widths for a pane (design §3.2). Both axes are an uncapped proportional
@@ -212,6 +262,7 @@ function rawCaretIndex(point, tabs) {
 // jump takes the raw index immediately).
 export function caretZone(point, pane, prevZone = null) {
   const tabs = pane.tabs || []
+  const stripRect = paneStripRect(pane)
   let index = rawCaretIndex(point, tabs)
   const prevIdx = (prevZone && prevZone.type === 'strip' && prevZone.paneId === pane.paneId)
     ? prevZone.index : null
@@ -223,21 +274,22 @@ export function caretZone(point, pane, prevZone = null) {
     if (index > prevIdx) index = point.x >= boundary + HYSTERESIS_PX ? index : prevIdx
     else index = point.x <= boundary - HYSTERESIS_PX ? index : prevIdx
   }
-  let caretX = pane.rect.x + STRIP_CARET_PAD
+  let caretX = stripRect.x + STRIP_CARET_PAD
   if (index > 0 && tabs[index - 1]) caretX = tabs[index - 1].right + 1
   if (index < tabs.length && tabs[index]) caretX = tabs[index].left - 1
   return {
     type: 'strip',
     paneId: pane.paneId,
     index,
-    rect: { x: caretX, y: pane.rect.y + 5, w: CARET_W, h: CARET_H },
+    rect: { x: caretX, y: stripRect.y + 5, w: CARET_W, h: CARET_H },
   }
 }
 
 // The strip region a caret owns: the strip row plus a small pad below it.
 function overStrip(point, pane) {
-  return point.y >= pane.rect.y && point.y <= pane.rect.y + STRIP_H + STRIP_CARET_PAD
-    && point.x >= pane.rect.x && point.x <= pane.rect.x + pane.rect.w
+  const rect = paneStripRect(pane)
+  return point.y >= rect.y && point.y <= rect.y + rect.h + STRIP_CARET_PAD
+    && point.x >= rect.x && point.x <= rect.x + rect.w
 }
 
 // The edge (split) zone for a point inside a pane, with cap/min suppression via
@@ -359,18 +411,28 @@ function paneAt(point, scene) {
   return null
 }
 
+function stripPaneAt(point, scene) {
+  for (const pane of scene.panes) {
+    if (overStrip(point, pane)) return pane
+  }
+  return null
+}
+
 // The single hit-test entry the binding calls each move. Fixed precedence
 // (design §3.2): tab-strip caret > workspace-root edge > pane edge > center.
 // `prevZone` is the zone from the previous move, threaded through for
 // hysteresis; pass null for a fresh test. Returns a zone with a `rect` (the
 // preview geometry) or null (no drop target — the drop cancels).
 export function hitTest(point, scene, prevZone = null) {
-  const pane = paneAt(point, scene)
-  const canJoin = !!pane
+  const stripPane = stripPaneAt(point, scene)
 
   // 1. strip caret — checked first so a drop over the tabs always reads as an
   // insert, even in the outer-margin corner where a root edge would also apply.
-  if (pane && overStrip(point, pane)) return canJoin ? caretZone(point, pane, prevZone) : null
+  // The single-pane Builder strip is outside the content box, so strip ownership
+  // is deliberately independent of paneAt().
+  if (stripPane) return caretZone(point, stripPane, prevZone)
+
+  const pane = paneAt(point, scene)
 
   // 2. workspace-root edge — fine pointers only.
   if (scene.allowRootEdge) {
@@ -382,10 +444,8 @@ export function hitTest(point, scene, prevZone = null) {
   if (pane) {
     const ez = edgeZone(point, pane, scene, prevZone)
     if (ez) return ez
-    if (canJoin) {
-      const cz = centerZone(point, pane, scene)
-      if (cz) return cz
-    }
+    const cz = centerZone(point, pane, scene)
+    if (cz) return cz
   }
   return null
 }
@@ -425,24 +485,28 @@ export function releaseZone(freshZone, previewedZone) {
   return freshZone && zoneEq(freshZone, previewedZone) ? freshZone : null
 }
 
-// Build a scene from the live workspace + projection. `measureTabs(paneId)`
-// returns that pane's measured tab rects ([{ key, left, right }] in content
-// coordinates); the binding supplies it from the DOM, tests supply a stub. The
+// Build a scene from the live workspace + projection. `measureStrip(paneId)`
+// returns that pane's measured strip rect plus tab rects in content coordinates;
+// the binding supplies it from the DOM, tests supply a stub. The
 // shared canSplit / canRootSplit predicates are evaluated HERE, so a zone that
 // would violate a cap or a minimum is never even offered — the exact predicates
 // the context menu and the resolver consult (design §3.2 / §6.2).
-export function buildScene(ws, projection, mode, contentRect, source, allowRootEdge, measureTabs) {
+export function buildScene(ws, projection, mode, contentRect, source, allowRootEdge, measureStrip) {
   const panes = projection.visibleLeaves.map((paneId) => {
     const rect = projection.rects[paneId]
     const paneTabs = ws.panes[paneId] ? ws.panes[paneId].tabs : []
+    const measuredStrip = measureStrip ? measureStrip(paneId) : null
     return {
       paneId,
       rect,
+      stripRect: measuredStrip?.rect || {
+        x: rect.x, y: rect.y, w: rect.w, h: STRIP_H,
+      },
       // The key of this pane's SOLE tab (else null): edgeZone suppresses a split
       // that would just rename a single-tab pane, including a drawer drag of the
       // item already open here.
       soleTabKey: paneTabs.length === 1 ? tabKey(paneTabs[0]) : null,
-      tabs: measureTabs ? (measureTabs(paneId) || []) : [],
+      tabs: measuredStrip?.tabs || [],
       canSplit: {
         left: paneCanSplit(ws, paneId, 'left', mode, contentRect),
         right: paneCanSplit(ws, paneId, 'right', mode, contentRect),

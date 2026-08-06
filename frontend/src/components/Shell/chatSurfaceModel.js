@@ -2,10 +2,11 @@
 // physically independent layout worlds while preserving one stable mount per
 // chat inside each world.
 
-import { focusedSlotSeed, SINGLE_SLOT_PANE } from './paneModel.js'
+import { SINGLE_SLOT_PANE } from './paneModel.js'
 
 export const STANDARD_CHAT_WORLD = 'standard'
 export const BUILDER_CHAT_WORLD = 'builder'
+export const FOCUSED_BUILDER_CHAT_SURFACE = '__builder-focused-chat__'
 
 export function chatSurfaceKey(world, chatId) {
   return `${world}:chat:${chatId}`
@@ -44,14 +45,11 @@ export function deriveChatSurfaceOwners({ workspace, baseProjection, projection 
     if (owner) owners.push(owner)
   }
 
-  // Legacy workspaces have no singleScreen migration marker yet. The rest of
-  // the Standard-world projection treats that absence as the focused Builder
-  // item that the first mode transaction will seed, so retain the matching
-  // Standard ChatView on the very first render too. An explicit null remains
-  // the intentional New Chat landing and must not inherit Builder focus.
-  const slot = ('singleScreen' in workspace)
-    ? workspace.singleScreen
-    : focusedSlotSeed(workspace)
+  // Standard retains a ChatView only for its OWN slot. An absent (legacy/
+  // uninitialized) or explicit-null slot is the empty New Chat landing and mounts
+  // no Standard ChatView — Standard never borrows Builder's focused chat (two-worlds
+  // design).
+  const slot = workspace.singleScreen
   if (slot?.kind === 'chat') {
     owners.push({
       world: STANDARD_CHAT_WORLD,
@@ -69,18 +67,60 @@ export function deriveChatSurfaceOwners({ workspace, baseProjection, projection 
  * display-ready. A Standard owner never suppresses Builder's cover for the
  * same chat (and vice versa); their layout lifecycles are independent.
  */
-export function deriveChatSurfaceLayers(owners, presentedChatByPane) {
+export function deriveChatSurfaceLayers(
+  owners,
+  presentedChatBySurface,
+  { focusedBuilderPaneId = null } = {},
+) {
   const desiredByWorld = new Map()
   for (const owner of owners) {
     if (!desiredByWorld.has(owner.world)) desiredByWorld.set(owner.world, new Set())
     desiredByWorld.get(owner.world).add(String(owner.chatId))
   }
 
+  // A focused Builder pane is one visual surface even when focus moves between
+  // physical panes. Per-pane handoff state cannot cover that move: the outgoing
+  // pane and incoming pane each still own their active chat, so neither looks
+  // like a chat change.
+  const focusedPaneKey = focusedBuilderPaneId == null
+    ? null
+    : String(focusedBuilderPaneId)
+  const focusedOwner = focusedPaneKey == null
+    ? null
+    : owners.find(owner => (
+        owner.world === BUILDER_CHAT_WORLD
+        && String(owner.paneId) === focusedPaneKey
+      ))
+  const presentedFocusedId = presentedChatBySurface.get(
+    FOCUSED_BUILDER_CHAT_SURFACE,
+  )
+  const previousFocusedOwner = focusedOwner
+      && presentedFocusedId
+      && String(presentedFocusedId) !== String(focusedOwner.chatId)
+    ? owners.find(owner => (
+        owner.world === BUILDER_CHAT_WORLD
+        && String(owner.chatId) === String(presentedFocusedId)
+      ))
+    : null
+
   const layers = []
   for (const owner of owners) {
+    if (previousFocusedOwner && owner.surfaceKey === previousFocusedOwner.surfaceKey) {
+      layers.push({
+        ...owner,
+        presentationPaneId: focusedPaneKey,
+        role: 'held',
+      })
+      continue
+    }
+    if (previousFocusedOwner && owner.surfaceKey === focusedOwner.surfaceKey) {
+      layers.push({ ...owner, role: 'staging' })
+      continue
+    }
+
     const paneKey = String(owner.paneId)
     const activeId = String(owner.chatId)
-    const previousId = presentedChatByPane.get(paneKey)
+    const previousId = presentedChatBySurface.get(paneKey)
     const transitioning = previousId && previousId !== activeId
     if (transitioning && !desiredByWorld.get(owner.world)?.has(String(previousId))) {
       layers.push({

@@ -3,6 +3,18 @@ import test from 'node:test'
 
 import { preserveTogglePosition } from '../preserveTogglePosition.js'
 
+function scrollBox(overrides = {}) {
+  return {
+    currentCSSZoom: 1,
+    clientWidth: 1,
+    clientHeight: 1,
+    offsetWidth: 1,
+    offsetHeight: 1,
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 1, height: 1 }),
+    ...overrides,
+  }
+}
+
 test('toggle position is corrected from the DOM mutation before rAF', () => {
   const originalMutationObserver = globalThis.MutationObserver
   const originalRaf = globalThis.requestAnimationFrame
@@ -27,7 +39,7 @@ test('toggle position is corrected from the DOM mutation before rAF', () => {
 
   try {
     const body = {}
-    const scroller = { scrollTop: 40 }
+    const scroller = scrollBox({ scrollTop: 40 })
     let top = 120
     const anchor = {
       parentElement: {},
@@ -70,7 +82,7 @@ test('rAF remains a fallback when MutationObserver is unavailable', () => {
   }
 
   try {
-    const scroller = { scrollTop: 20 }
+    const scroller = scrollBox({ scrollTop: 20 })
     let top = 80
     const anchor = {
       parentElement: {},
@@ -84,6 +96,40 @@ test('rAF remains a fallback when MutationObserver is unavailable', () => {
     assert.equal(scroller.scrollTop, 8)
   }
   finally {
+    globalThis.MutationObserver = originalMutationObserver
+    globalThis.requestAnimationFrame = originalRaf
+  }
+})
+
+test('a painted toggle delta is converted before changing zoomed scrollTop', () => {
+  const originalMutationObserver = globalThis.MutationObserver
+  const originalRaf = globalThis.requestAnimationFrame
+  let rafCallback = null
+  globalThis.MutationObserver = undefined
+  globalThis.requestAnimationFrame = (callback) => {
+    rafCallback = callback
+    return 1
+  }
+
+  try {
+    const scroller = scrollBox({
+      scrollTop: 40,
+      currentCSSZoom: 0.9,
+      offsetWidth: 1000,
+      offsetHeight: 800,
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 900, height: 720 }),
+    })
+    let top = 120
+    const anchor = {
+      closest: () => scroller,
+      getBoundingClientRect: () => ({ top }),
+    }
+
+    preserveTogglePosition(anchor)
+    top = 156
+    rafCallback()
+    assert.equal(scroller.scrollTop, 80)
+  } finally {
     globalThis.MutationObserver = originalMutationObserver
     globalThis.requestAnimationFrame = originalRaf
   }
@@ -132,13 +178,13 @@ test('disclosure preservation never reads or writes the dynamic spacer', () => {
 
   try {
     let queried = false
-    const scroller = {
+    const scroller = scrollBox({
       scrollTop: 50,
       querySelector: () => {
         queried = true
         throw new Error('disclosures do not own reservation geometry')
       },
-    }
+    })
     const body = { getBoundingClientRect: () => ({ height: 60 }) }
     const anchor = {
       parentElement: {},

@@ -47,42 +47,6 @@ export const PANE_GAP = 7
 // and positioned renderers cannot drift.
 export const STRIP_H = 34
 
-// Multi-pane exposure waits for the pane-aware back/sentinel work (stage B).
-// Until then every user ENTRY POINT into splits — the context-menu split/move
-// items and the phone pane chip/sheet — is ON by default now that the PR2
-// gates (unit + positive-behavior e2e) are green; 'mobius:workspace-splits'
-// = '0' is the kill switch that restores the single-pane fallback. Read once
-// at module load; absent-localStorage runtimes get the default (enabled).
-export const WORKSPACE_SPLITS_ENABLED = (() => {
-  try { return localStorage.getItem('mobius:workspace-splits') !== '0' } catch { return true }
-})()
-
-// Kill switch for the builder-mode Settings tab. When enabled (the default),
-// sanitizeTab accepts the canonical `settings:settings` tab so Settings can live
-// in a pane; the nav adapter opens it as a tab in builder mode and as the
-// takeover overlay in single mode. When DISABLED, sanitizeTab drops a Settings
-// tab exactly like an unknown kind — so a rolled-back client (feature shipped,
-// then flag turned off) SCRUBS any persisted Settings tab before first render
-// and reverts to today's overlay everywhere (design: flag-off sanitization).
-//
-// It is GATED on WORKSPACE_SPLITS_ENABLED (review §3): the Settings tab only makes
-// sense where builder mode (panes) can exist. With splits off there is no builder
-// mode, so a persisted `settings:settings` is scrubbed on parse AND new Settings
-// navigation routes to the takeover overlay — the tab can never leak into the
-// legacy single-pane strip. Read once at module load; '0' also disables.
-export const BUILDER_SETTINGS_ENABLED = WORKSPACE_SPLITS_ENABLED && (() => {
-  try { return localStorage.getItem('mobius:builder-settings') !== '0' } catch { return true }
-})()
-
-// PROPOSED "more power" builder chrome — NOT yet owner-approved (design item 6).
-// An accent power-rail under the top bar + accent-energized dividers while in
-// builder mode. Default OFF: it ships behind this flag so the owner can preview it
-// by flipping 'mobius:builder-power' to '1' (one class toggle, no rebuild). Read
-// once at load, mirroring the other kill switches; only the literal '1' enables it.
-export const BUILDER_POWER_CHROME = (() => {
-  try { return localStorage.getItem('mobius:builder-power') === '1' } catch { return false }
-})()
-
 // The smallest a pane may be. canSplit refuses a split whose either resulting
 // child would fall below this within the pane's current projected rect — the
 // shared feasibility predicate drag/menu/resolver all consult (design §3.2,
@@ -90,10 +54,11 @@ export const BUILDER_POWER_CHROME = (() => {
 export const MIN_PANE_W = 280
 export const MIN_PANE_H = 200
 
-// sessionStorage key for the sole serialized workspace state.
+// localStorage key for the sole serialized workspace state. The workspace must
+// survive a fully closed/relaunched PWA, not only an in-tab reload.
 export const STORAGE_KEY = 'mobius-workspace'
 
-// sessionStorage key for the maximized ("focus one pane full-screen") presentation.
+// localStorage key for the maximized ("focus one pane full-screen") presentation.
 // Deliberately SEPARATE from STORAGE_KEY: focusing a pane must never rewrite the
 // persisted split tree or ratios (design §2), so the maximize is a thin presentation
 // overlay stored beside the blob and re-seeded on mount. Without this, the reload
@@ -175,7 +140,7 @@ function sanitizeTab(raw) {
     return String(raw.id) === tabModel.APPS_ID ? tabModel.appsTab() : null
   }
   if (raw.kind === 'settings') {
-    return (BUILDER_SETTINGS_ENABLED && String(raw.id) === tabModel.SETTINGS_ID)
+    return String(raw.id) === tabModel.SETTINGS_ID
       ? tabModel.settingsTab()
       : null
   }
@@ -444,6 +409,10 @@ export function seedFromFlatTabs(tabs) {
   const clean = dedupTabs(sanitizeTabs(tabs))
   const paneId = 'p0'
   const keys = clean.map(tabModel.tabKey)
+  // A pure constructor: NO singleScreen slot (absence is the migration marker, and
+  // this same builder is used by fixtures that model a legacy absent-slot blob). The
+  // genuine first-boot seed lives in the RESET_FLAT reducer, which is the only path
+  // that turns a legacy/flat active chat into the live Standard world.
   return {
     v: 1,
     viewMode: coerceViewMode('single'),
@@ -465,26 +434,27 @@ export function seedFromFlatTabs(tabs) {
 // full-bleed (the workspaceView derivation reads viewMode; the tree is untouched
 // so toggling back re-projects it exactly). Any other/absent value is 'panes'.
 //
-// The splits KILL SWITCH forces 'single' here — its documented job is to "restore
-// the single-pane fallback", and normalize() runs on every parse/restore. Without
-// this, a rolled-back client (splits shipped, blob persisted 'panes', then the flag
-// turned OFF) restores viewMode 'panes' and RENDERS TILED (the tiled derivation is
-// flag-independent) while BOTH exit controls — the logo gesture and Shift+Enter —
-// are flag-gated OFF: an un-exitable multi-pane workspace that survives reload
-// ("cannot reach single mode"). Forcing 'single' collapses to the focused tab and
-// preserves the tree, so re-enabling splits restores the panes.
 function coerceViewMode(mode) {
-  if (!WORKSPACE_SPLITS_ENABLED) return 'single'
   return mode === 'single' ? 'single' : 'panes'
 }
 
 function singleScreenTab(ws) {
-  const item = ('singleScreen' in ws)
-    ? sanitizeSingleScreen(ws.singleScreen)
-    : focusedSlotSeed(ws)
+  // Standard's surface is its OWN slot only — an absent (legacy/uninitialized) slot
+  // is the empty home, never the focused Builder pane. sanitizeSingleScreen(undefined)
+  // collapses to null, so Standard never borrows Builder's focus (two-worlds design).
+  const item = sanitizeSingleScreen(ws.singleScreen)
   if (!item) return null
   if (item.kind === 'apps') return tabModel.appsTab()
   return tabModel.makeTab(item.kind, item.id)
+}
+
+// Seed only the hidden Builder tree. Keeping this separate from the mode flip
+// lets compound gestures prepare a candidate tree, then commit the mode only
+// after the rest of the gesture succeeds.
+function seedEmptyBuilder(ws) {
+  if (!isEmptyTree(ws)) return ws
+  const tab = singleScreenTab(ws)
+  return tab ? doOpenTab(ws, tab) : ws
 }
 
 // Set the view-mode. Pure; returns the SAME reference on a true no-op. Builder
@@ -493,12 +463,8 @@ function singleScreenTab(ws) {
 // there is no content to seed and the workspace honestly remains Standard.
 export function setViewMode(ws, mode) {
   const requested = coerceViewMode(mode)
-  let nextWs = ws
-  if (requested === 'panes' && isEmptyTree(ws)) {
-    const tab = singleScreenTab(ws)
-    if (!tab) return ws
-    nextWs = doOpenTab(ws, tab)
-  }
+  const nextWs = requested === 'panes' ? seedEmptyBuilder(ws) : ws
+  if (requested === 'panes' && isEmptyTree(nextWs)) return ws
   if (nextWs.viewMode === requested) return nextWs
   return { ...nextWs, viewMode: requested }
 }
@@ -533,11 +499,10 @@ export function singleScreenKey(ws) {
 // selects through its independent slot. Callers that bind lifecycle events to
 // an owner use this instead of assuming every owner exists in ws.panes.
 export function activeKeyForOwner(ws, ownerPaneId) {
-  if (String(ownerPaneId) === SINGLE_SLOT_PANE) {
-    if ('singleScreen' in ws) return singleScreenKey(ws)
-    const seed = focusedSlotSeed(ws)
-    return seed ? tabModel.tabKey(seed) : null
-  }
+  // The single-world slot owner selects through its OWN slot only. An absent slot
+  // is empty (singleScreenKey → null), never the focused Builder pane's tab —
+  // Standard never borrows Builder's focus (two-worlds design).
+  if (String(ownerPaneId) === SINGLE_SLOT_PANE) return singleScreenKey(ws)
   return ws.panes?.[ownerPaneId]?.activeTabKey ?? null
 }
 
@@ -560,7 +525,7 @@ export function setSingleScreen(ws, slot) {
 // back to the most recently positioned concrete tab in that same pane. Otherwise
 // the first-ever builder→single toggle from the common Settings flow paints an
 // empty shell even though the owner's chat is still directly underneath it.
-export function focusedSlotSeed(ws) {
+function focusedSlotSeed(ws) {
   const pane = ws.panes[ws.focusedPaneId]
   const key = pane?.activeTabKey
   if (!pane || !key) return null
@@ -585,28 +550,23 @@ export function seedSingleScreenIfAbsent(ws) {
   return { ...ws, singleScreen: focusedSlotSeed(ws) }
 }
 
-// True when the whole workspace holds no tabs — every pane is empty. After a close
-// this is the "last tab in builder just closed" signal (owner semantic: an empty
-// builder auto-returns to single).
+// True when the whole workspace holds no tabs.
 export function isEmptyTree(ws) {
   return panesAreEmpty(ws.panes)
 }
 
-// Auto-return an EMPTIED builder to single (owner semantic: closing the last tab
-// with no panes left in builder returns to single). Applied by the close reducer
-// cases when a close in 'panes' mode empties the tree. Flips viewMode to single
-// and, for a legacy workspace whose slot was never initialized, carries the
-// departing visible item into Standard before the emptied tree loses it. The
-// caller marks the undo `restoreViewMode` so undo restores the closed tab AND
-// builder mode as ONE gesture. Returns { ws, autoReturned } so the caller knows
-// whether to flag the undo.
-function autoReturnIfEmptied(prevWs, nextWs) {
-  if (prevWs.viewMode !== 'panes') return { ws: nextWs, autoReturned: false }
-  if (isEmptyTree(prevWs) || !isEmptyTree(nextWs)) return { ws: nextWs, autoReturned: false }
-  const withSlot = ('singleScreen' in nextWs)
-    ? nextWs
-    : setSingleScreen(nextWs, focusedSlotSeed(prevWs))
-  return { ws: setViewMode(withSlot, 'single'), autoReturned: true }
+// normalize() owns the no-empty-Builder invariant, so a close that empties the
+// tree already arrives here in Standard. Preserve an existing Standard item; if
+// Standard was empty or uninitialized, carry the departing visible item instead.
+// The caller uses autoReturned to make Undo restore tab + Builder in one gesture.
+function completeCloseTransition(prevWs, nextWs) {
+  const autoReturned = prevWs.viewMode === 'panes' && nextWs.viewMode === 'single'
+  if (!autoReturned) return { ws: nextWs, autoReturned: false }
+  if (nextWs.singleScreen) return { ws: nextWs, autoReturned: true }
+  return {
+    ws: setSingleScreen(nextWs, focusedSlotSeed(prevWs)),
+    autoReturned: true,
+  }
 }
 
 // Every live leaf pane id in in-order (left-to-right) sequence. The resolver
@@ -681,12 +641,11 @@ export function singleScreenRoute(ws) {
 // and the reload snapshot — so a single-world reload restores the slot, not the
 // builder focus (design: derive activeView from the current world).
 export function activeContentRoute(ws) {
-  // An absent slot is the migration marker for a fresh/legacy workspace. The
-  // renderer already falls back to the focused pane in that state; route
-  // projection must do the same or first boot paints one surface while
-  // navigation reports the empty home screen. Once singleScreen is initialized
-  // (including explicit null), the independent Standard world is authoritative.
-  if (ws.viewMode === 'single' && 'singleScreen' in ws) return singleScreenRoute(ws)
+  // In single mode the active content is ALWAYS the Standard slot, never the focused
+  // Builder pane. An absent (legacy/uninitialized) slot reports the empty home exactly
+  // like an explicit-null slot — Standard is authoritative and never borrows Builder's
+  // focus (two-worlds design); opening an item in single mode initializes the slot.
+  if (ws.viewMode === 'single') return singleScreenRoute(ws)
   return focusedContentRoute(ws)
 }
 
@@ -1566,7 +1525,7 @@ export function serializeWorkspace(ws) {
   return JSON.stringify(ws)
 }
 
-// The raw stored blob, or null if storage is unavailable. sessionStorage.getItem
+// The raw stored blob, or null if storage is unavailable. Browser storage getItem
 // can THROW (SecurityError in a sandboxed frame, disabled storage, a privacy
 // policy), and the caller reads it while evaluating parseWorkspace's argument —
 // outside parseWorkspace's own try/catch. Guarding the read here keeps broken
@@ -1608,7 +1567,7 @@ export function writeFocusedPaneView(paneId, storage) {
 //   - and it IS the focused pane (the lockstep invariant toggle/reconcile keep).
 // Any miss returns null → the workspace boots in its normal tiled view.
 export function resolveInitialFocusedPaneView(ws, rawId) {
-  if (!WORKSPACE_SPLITS_ENABLED || rawId == null || !ws || !ws.panes) return null
+  if (rawId == null || !ws || !ws.panes) return null
   if (ws.viewMode === 'single') return null
   if (Object.keys(ws.panes).length <= 1) return null
   if (!ws.panes[rawId]) return null
@@ -1711,7 +1670,7 @@ export function workspaceReducer(state, action) {
       // undo restores the closed tab AND builder mode as ONE gesture.
       if (next === ws) return state
       const closeLabel = action.label || 'Closed tab'
-      const { ws: closed, autoReturned } = autoReturnIfEmptied(ws, next)
+      const { ws: closed, autoReturned } = completeCloseTransition(ws, next)
       return { ws: closed, undo: { ws, label: closeLabel, toast: closeLabel, restoreViewMode: autoReturned } }
     }
     case 'CLOSE_PANE': {
@@ -1721,7 +1680,7 @@ export function workspaceReducer(state, action) {
       const next = closePane(ws, action.paneId)
       if (next === ws) return state
       const paneLabel = action.label || 'Closed pane'
-      const { ws: closed, autoReturned } = autoReturnIfEmptied(ws, next)
+      const { ws: closed, autoReturned } = completeCloseTransition(ws, next)
       return { ws: closed, undo: { ws, label: paneLabel, toast: paneLabel, restoreViewMode: autoReturned } }
     }
     case 'CLOSE_OTHER_TABS': {
@@ -1749,13 +1708,13 @@ export function workspaceReducer(state, action) {
       // A drag drop from a drawer row (open the item AT the zone) or a strip tab
       // (degrades to a move). One commit, one undo slot — the drop is one tap
       // from repaired (design §3.5).
-      const cleanTab = sanitizeTab(action.tab)
-      if (!cleanTab) return state
-      // When a drawer drag enters Builder from an empty hidden tree, resolve the
-      // mode first: setViewMode seeds Standard's current screen as tab one. The
-      // dragged item then joins/splits that seeded pane instead of replacing it.
-      const working = action.flipViewMode ? setViewMode(ws, action.flipViewMode) : ws
-      const next = openTabAt(working, cleanTab, action.target)
+      // Prepare Standard's current screen as tab one before placing a drawer
+      // drop into an empty hidden tree. Neither seed nor mode commits unless the
+      // placement succeeds, so a rejected drop remains a true no-op.
+      const working = action.flipViewMode === 'panes' ? seedEmptyBuilder(ws) : ws
+      const placed = openTabAt(working, action.tab, action.target)
+      // A rejected drop must not commit the prepared seed or its mode change.
+      if (placed === working) return state
       // A single-leaf splitting drop made in single view-mode flips to 'panes' as
       // part of the SAME gesture (the drop's intent is a second visible surface).
       // Folding the flip into THIS action — rather than a following SET_VIEW_MODE —
@@ -1763,11 +1722,11 @@ export function workspaceReducer(state, action) {
       // reverts the mode along with the tree, never leaving the toggle reading the
       // flipped mode over a reverted tree. action.flipViewMode is null for every
       // ordinary drop, so this is a no-op there.
-      const flipped = action.flipViewMode ? setViewMode(next, action.flipViewMode) : next
-      if (flipped === ws) return state
+      const next = action.flipViewMode ? setViewMode(placed, action.flipViewMode) : placed
+      if (next === ws) return state
       const dropLabel = action.label || 'Moved tab'
       return {
-        ws: flipped,
+        ws: next,
         undo: { ws, label: dropLabel, toast: dropLabel, restoreViewMode: !!action.flipViewMode },
       }
     }
@@ -1810,12 +1769,9 @@ export function workspaceReducer(state, action) {
       }
     }
     case 'SET_VIEW_MODE': {
-      // A pure view flip (design: view-mode toggle). It never mutates the tree,
-      // so it is ORTHOGONAL to the undo slot: it neither creates nor clears it
-      // (a pending tab-move stays undoable) and it is itself reversible by
-      // toggling again, so it takes no slot of its own. mode 'toggle' flips;
-      // 'single'/'panes' set explicitly (the single-leaf split-drop passes
-      // 'panes' so the new pane actually shows).
+      // A view transition is orthogonal to the undo slot. Entering Builder may
+      // seed its empty hidden tree from Standard, but that seed is part of the
+      // destination representation rather than a separate editable gesture.
       const flipped = action.mode === 'toggle' ? toggleViewMode(ws) : setViewMode(ws, action.mode)
       // On the FIRST-ever builder→single switch the slot is seeded from the focused
       // concrete item (two-worlds design: seed once, using property absence as the
@@ -1871,8 +1827,19 @@ export function workspaceReducer(state, action) {
       // RESET_FLAT reseeds the BUILDER tree only (two-worlds design): preserve the
       // current world and single-screen slot unless the reset removed every tab,
       // in which case the shared no-empty-Builder invariant resolves to Standard.
-      const next = setViewMode(seeded, ws.viewMode)
-      if ('singleScreen' in ws) next.singleScreen = ws.singleScreen
+      const candidate = { ...seeded, viewMode: ws.viewMode }
+      if ('singleScreen' in ws) candidate.singleScreen = ws.singleScreen
+      else if (candidate.viewMode === 'single') {
+        // First boot of a legacy/flat active chat into Standard: the derivations no
+        // longer borrow Builder focus, so seed the slot from the reset's focused item
+        // or the surface renders the empty New-Chat home instead of that chat. Only
+        // the genuine uninitialized case (no slot on the current ws) seeds here; a
+        // later toggle/close still owns the slot via seedSingleScreenIfAbsent /
+        // completeCloseTransition, and an explicit null slot stays New Chat.
+        const seed = focusedSlotSeed(seeded)
+        if (seed) candidate.singleScreen = seed
+      }
+      const next = normalize(candidate)
       if (deepEqual(next, ws) && undo == null) return state
       return { ws: next, undo: null }
     }

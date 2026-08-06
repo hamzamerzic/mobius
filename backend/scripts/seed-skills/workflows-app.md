@@ -20,12 +20,16 @@ Any turn where you fanned work out to background helpers or an orchestrated run 
 
 ## Before you hand back
 
-1. **Find the app.** It may not be installed — if this comes back empty, skip the rest **silently**. No install prompt, no apology; the link just isn't offered this turn.
+1. **Find the app.** Match on the manifest id, NOT the slug: an install whose
+   preferred slug was taken gets a fallback like `workflows-2`, and a slug check
+   would then miss the very app it is looking for. It may also genuinely not be
+   installed — if this comes back empty, skip the rest **silently**. No install
+   prompt, no apology; the link just isn't offered this turn.
 
    ```bash
    WF_ID=$(curl -s -H "Authorization: Bearer $AGENT_TOKEN" \
      "$API_BASE_URL/api/apps/" \
-     | python3 -c 'import sys,json; print(next((a["id"] for a in json.load(sys.stdin) if a.get("slug")=="workflows"), ""))')
+     | python3 -c 'import sys,json; print(next((a["id"] for a in json.load(sys.stdin) if (a.get("manifest_url") or "").endswith("#manifest-id=workflows")), ""))')
    ```
 
 2. **Nudge it to refresh (best-effort).** The app self-refreshes when the partner opens it, so this only warms it early — ignore any non-2xx, and never block the reply on it.

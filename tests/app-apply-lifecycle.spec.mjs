@@ -113,7 +113,8 @@ test('explicit apply owns draft, publication, iframe refresh, and rollback', asy
     })
     let frame = await currentFrame(page, app.id)
     await expect(frame.locator('#revision')).toHaveText('revision one ready')
-    await frame.locator('#increment').click()
+    // This test owns lifecycle behavior; workspace-panes owns physical frame clicks.
+    await frame.locator('#increment').press('Enter')
     await expect(frame.locator('#count')).toHaveText('1')
 
     await page.waitForTimeout(1_000)

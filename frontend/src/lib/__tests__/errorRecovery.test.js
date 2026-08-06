@@ -13,6 +13,7 @@ import {
   writeErrorRecoveryAttempt,
   writeRefreshedRecoveryAttempt,
 } from '../errorRecovery.js'
+import { redactDiagnosticText } from '../diagnosticRedaction.js'
 
 function memoryStorage() {
   const values = new Map()
@@ -293,4 +294,24 @@ test('repair prompt bounds and indents untrusted diagnostics', () => {
 
 test('repair chat paths encode chat identity', () => {
   assert.equal(repairChatPath('chat id'), '/shell/?chat=chat%20id')
+})
+
+test('diagnostic redaction removes every authorization scheme without swallowing neighbours', () => {
+  const redacted = redactDiagnosticText([
+    'Authorization: Token tok-scheme-secret',
+    'Authorization: ApiKey key-scheme-secret',
+    'authorization: Digest response="digest-scheme-secret"',
+    '{"authorization":"Token json-scheme-secret","keep":"visible-field"}',
+    '{"authorization":"Digest username=\\"Mufasa\\", response=\\"escaped-quote-secret\\"","keep":"second-visible-field"}',
+  ].join('\n'))
+
+  for (const secret of [
+    'tok-scheme-secret',
+    'key-scheme-secret',
+    'digest-scheme-secret',
+    'json-scheme-secret',
+    'escaped-quote-secret',
+  ]) assert.equal(redacted.includes(secret), false, `must redact ${secret}`)
+  assert.match(redacted, /visible-field/)
+  assert.match(redacted, /second-visible-field/)
 })

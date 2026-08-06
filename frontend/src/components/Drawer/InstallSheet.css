@@ -18,6 +18,7 @@
 @keyframes is-fade { from { opacity: 0; } to { opacity: 1; } }
 
 .is__card {
+  position: relative;
   width: 100%;
   max-width: 420px;
   background: var(--surface, #14181f);
@@ -196,9 +197,8 @@
   border: 1px solid var(--border, #252b36);
 }
 
-/* iOS Safari Share-step copy: larger, higher-contrast than the form
-   hint since it's now the card's main content, with a quiet directional
-   arrow that points down at the Safari Share button in the browser chrome. */
+/* Hand-off step copy: larger and higher-contrast than the form hint, since
+   once the form is replaced this IS the card's main content. */
 .is__hint--steps {
   margin-top: 4px;
   font-size: 14px;
@@ -211,22 +211,57 @@
   font-weight: 600;
 }
 
-.is__arrow {
+/* Two equal-weight ways across to Safari — tap the link, or take the
+   address. Stacked rather than side-by-side: the labels carry app names
+   and wrap badly in half a phone-width card. */
+.is__handoff {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  margin: 12px auto 0;
-  border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--accent, #a78bfa) 34%, var(--border, #252b36));
-  background: color-mix(in srgb, var(--accent, #a78bfa) 10%, transparent);
-  font-size: 18px;
-  color: var(--accent, #a78bfa);
-  animation: is-arrow-cue 1.8s var(--ease-out-soft, ease-out) infinite;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 18px;
 }
 
-@keyframes is-arrow-cue {
-  0%, 100% { opacity: 0.72; transform: translateY(0); }
-  50% { opacity: 1; transform: translateY(-2px); }
+.is__btn--link {
+  display: block;
+  text-align: center;
+  text-decoration: none;
+}
+
+/* Corner dismissal. Sits in the card's padding, with a touch target larger
+   than the glyph so a thumb can hit it without crowding the title. */
+.is__close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted, #9ca3af);
+  font: inherit;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+
+.is__close:hover {
+  color: var(--text, #d4d4d8);
+  background: var(--hover, rgba(255, 255, 255, 0.06));
+}
+
+.is__close:focus-visible {
+  outline: 2px solid var(--accent, #a78bfa);
+  outline-offset: 2px;
+}
+
+/* The address is a pass-free recovery path to read or retype by hand. */
+.is__url {
+  color: var(--text, #d4d4d8);
+  overflow-wrap: anywhere;
+  user-select: all;
 }

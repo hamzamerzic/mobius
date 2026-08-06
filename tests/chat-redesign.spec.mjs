@@ -14,6 +14,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { mockPendingQuestionState } from './_mockPendingQuestion.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -29,8 +30,12 @@ function fulfillStartedPost(route) {
 
 /** Helper: log in via the storageState set by auth.setup.mjs and
  *  install a default route mock that returns 204 for /stream. */
-async function setupWithStreamMock(page, streamBody) {
-  await page.setViewportSize({ width: 412, height: 915 })
+async function setupWithStreamMock(
+  page,
+  streamBody,
+  viewport = { width: 412, height: 915 },
+) {
+  await page.setViewportSize(viewport)
   await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
     fulfillStartedPost(route)
   )
@@ -128,6 +133,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
       'data: {"type":"done"}\n\n',
     ].join('')
     await setupWithStreamMock(page, streamBody)
+    await mockPendingQuestionState(page, 'q-pick-one')
     await newChat(page)
     await sendMessage(page, 'Ask me a question')
 
@@ -156,6 +162,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     ].join('')
     let streamCount = 0
     let answerAttempts = 0
+    let pendingQuestion
     await setupWithStreamMock(page, () => (
       streamCount++ === 0 ? questionStream : 'data: {"type":"done"}\n\n'
     ))
@@ -171,8 +178,10 @@ test.describe('Bug 1: AskUserQuestion', () => {
           body: '{"detail":"temporary failure"}',
         })
       }
+      pendingQuestion.markAnswered()
       return fulfillStartedPost(route)
     })
+    pendingQuestion = await mockPendingQuestionState(page, 'q-retry-answer')
 
     await newChat(page)
     await sendMessage(page, 'Ask for a launch lane')
@@ -215,9 +224,17 @@ test.describe('Bug 1: AskUserQuestion', () => {
       'data: {"type":"done"}\n\n',
     ].join('')
     let streamCount = 0
+    let pendingQuestion
     await setupWithStreamMock(page, () => (
       streamCount++ === 0 ? streamBody : 'data: {"type":"done"}\n\n'
     ))
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
+      if (route.request().method() !== 'POST') return route.fallback()
+      const body = route.request().postDataJSON()
+      if (body.answers) pendingQuestion.markAnswered()
+      return fulfillStartedPost(route)
+    })
+    pendingQuestion = await mockPendingQuestionState(page, 'q-stable-card')
     await newChat(page)
     await sendMessage(page, 'Ask me which route')
 
@@ -261,7 +278,8 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await expect(page.getByRole('button', { name: 'Submitted' })).toBeDisabled()
     await expect(card.locator('.qcard__hint')).toHaveText('Choose one')
     await expect(card.locator('.qcard__opt')).toHaveCount(2)
-    await expect(customAnswer).toBeDisabled()
+    await expect(customAnswer).toHaveAttribute('readonly', '')
+    await expect(customAnswer).not.toBeEditable()
     await expect(customAnswer).toHaveValue('Take the quiet streets')
 
     const after = await geometry()
@@ -275,6 +293,85 @@ test.describe('Bug 1: AskUserQuestion', () => {
     expect(after.input.color).not.toBe(before.input.color)
     expect(after.input.textFillColor).toBe(after.input.color)
     expect(after.submitTop).toBeCloseTo(before.submitTop, 5)
+  })
+
+
+  test('multiline custom answers grow inline without moving the conversation', async ({ page }) => {
+    const streamBody = [
+      `data: ${JSON.stringify({
+        type: 'question',
+        question_id: 'q-steady-multiline',
+        questions: [{
+          question: 'Describe the change',
+          header: 'Details',
+          multiSelect: false,
+          options: [
+            { label: 'Small', description: 'Keep the change focused' },
+            { label: 'Broad', description: 'Cover the surrounding behavior' },
+          ],
+        }],
+      })}\n\n`,
+      'data: {"type":"done"}\n\n',
+    ].join('')
+    await setupWithStreamMock(page, streamBody, { width: 426, height: 510 })
+    await mockPendingQuestionState(page, 'q-steady-multiline')
+    await newChat(page)
+    await sendMessage(page, 'Ask for multiline details')
+
+    const card = page.locator('[data-chat-surface="painted"] .qcard')
+    const customAnswer = card.getByRole('textbox', {
+      name: 'Custom answer for: Describe the change',
+    })
+    await expect(card).toBeVisible({ timeout: 5000 })
+    expect(await card.evaluate(el => !!el.closest('.chat__scroll'))).toBe(true)
+    expect(await card.evaluate(el => !!el.closest('.chat__question-dock'))).toBe(false)
+    await customAnswer.focus()
+
+    const geometry = () => card.evaluate(el => {
+      const scroll = el.closest('.chat__scroll')
+      const input = el.querySelector('.qcard__input')
+      const rect = node => node?.getBoundingClientRect()
+      return {
+        cardTop: rect(el)?.top,
+        cardHeight: rect(el)?.height,
+        inputHeight: rect(input)?.height,
+        chatScrollTop: scroll?.scrollTop,
+      }
+    })
+
+    const before = await geometry()
+    await customAnswer.pressSequentially('First line')
+    await page.keyboard.press('Enter')
+    await customAnswer.pressSequentially('Second line')
+    await page.keyboard.press('Enter')
+    await customAnswer.pressSequentially('Third line')
+    await page.evaluate(() => new Promise(resolve => (
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    )))
+    const after = await geometry()
+
+    await expect(customAnswer).toHaveValue('First line\nSecond line\nThird line')
+    expect(after.cardHeight).toBeGreaterThan(before.cardHeight)
+    expect(after.inputHeight).toBeGreaterThan(before.inputHeight)
+    expect(after.cardTop).toBeCloseTo(before.cardTop, 5)
+    expect(after.chatScrollTop).toBeCloseTo(before.chatScrollTop, 5)
+
+    // Past the growth cap, the writing field—not the transcript—owns overflow.
+    // Drive the real keyboard path so caret reveal, beforeinput, input, and the
+    // chat scroll owner race exactly as they do for an owner writing an answer.
+    for (let line = 4; line <= 14; line += 1) {
+      await page.keyboard.press('Enter')
+      await customAnswer.pressSequentially(`Line ${line}`)
+    }
+    await page.evaluate(() => new Promise(resolve => (
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    )))
+    const capped = await geometry()
+    const inputScrollTop = await customAnswer.evaluate(el => el.scrollTop)
+    expect(capped.inputHeight).toBeLessThanOrEqual(181)
+    expect(inputScrollTop).toBeGreaterThan(0)
+    expect(capped.cardTop).toBeCloseTo(before.cardTop, 5)
+    expect(capped.chatScrollTop).toBeCloseTo(before.chatScrollTop, 5)
   })
 
 
@@ -485,11 +582,13 @@ test.describe('Q&A atomic write', () => {
     // frontend's doSendSilent puts `answers` in the body, not in a
     // separate POST /question-answers request.
     const sentBodies = []
+    let pendingQuestion
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
       if (route.request().method() !== 'POST') return route.continue()
       const body = route.request().postDataJSON()
       sentBodies.push(body)
       if (body.answers) {
+        pendingQuestion.markAnswered()
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -534,6 +633,7 @@ test.describe('Q&A atomic write', () => {
         body: streamCount === 1 ? streamBody : 'data: {"type":"done"}\n\n',
       })
     })
+    pendingQuestion = await mockPendingQuestionState(page, 'q-pick-atomic')
 
     await page.setViewportSize({ width: 412, height: 915 })
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
@@ -609,6 +709,7 @@ test.describe('Q&A atomic write', () => {
     let releaseAnswer
     let markAnswerStarted
     const answerStarted = new Promise(resolve => { markAnswerStarted = resolve })
+    let pendingQuestion
 
     await page.setViewportSize({ width: 426, height: 860 })
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async route => {
@@ -617,6 +718,7 @@ test.describe('Q&A atomic write', () => {
       if (!body.answers) return fulfillStartedPost(route)
       markAnswerStarted()
       await new Promise(resolve => { releaseAnswer = resolve })
+      pendingQuestion.markAnswered()
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
@@ -633,6 +735,7 @@ test.describe('Q&A atomic write', () => {
     await page.route('**/api/chat/stop', route =>
       route.fulfill({ status: 200, body: '{}' })
     )
+    pendingQuestion = await mockPendingQuestionState(page, 'q-viewport-anchor')
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')

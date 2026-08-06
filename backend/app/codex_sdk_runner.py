@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures as _cf
+import functools
 import logging
 import os
 import signal
@@ -118,6 +119,24 @@ from app.memory_observability import record_memory_checkpoint_once
 
 log = logging.getLogger("moebius.chat")
 
+# The SDK implements every async protocol wait with ``asyncio.to_thread``.
+# A turn parked on request_user_input can hold that worker for hours; enough
+# parked chats therefore exhaust Python's small process-wide default executor
+# and prevent a new Codex client from even starting. Give each SDK client a
+# small owned pool: one worker may block on notifications while control/close
+# retain independent progress, and unrelated application work never queues
+# behind parked turns.
+_CODEX_CALL_EXECUTOR_WORKERS = 3
+_PROCESS_GROUP_CAPTURE_SPIN_SECONDS = 0.1
+_PROCESS_GROUP_CAPTURE_POLL_SECONDS = 0.01
+
+
+def _process_group_capture_delay(elapsed: float) -> float:
+  """Yield eagerly during normal startup, then back off a wedged poller."""
+  if elapsed < _PROCESS_GROUP_CAPTURE_SPIN_SECONDS:
+    return 0
+  return _PROCESS_GROUP_CAPTURE_POLL_SECONDS
+
 # Möbius supplies the complete behavioral constitution through the thread's
 # base_instructions. These overrides prevent user/project Codex configuration
 # from silently adding a second instruction stack. Permission, tool, app, and
@@ -139,15 +158,21 @@ def _env_flag_on(name: str, *, default: bool) -> bool:
   return raw.strip().lower() not in ("off", "0", "false", "no", "")
 
 
-def _codex_config_overrides() -> list[str]:
+def _codex_config_overrides(
+  *,
+  allow_questions: bool = True,
+  allow_multi_agent: bool = True,
+  allow_goals: bool = True,
+) -> list[str]:
   """Assemble the Codex ``CodexConfig.config_overrides`` for a turn.
 
   Prompt-control overrides are unconditional: per-chat ``base_instructions``
   owns behavior, while config files and project instruction documents must not
   grow a provider-specific second constitution.
 
-  ``request_user_input`` (AskUserQuestion parity) is always on. Multi-agent
-  (collab / spawn_agent — the Codex analog of Claude's Task fleet, whose
+  ``request_user_input`` (AskUserQuestion parity) is on for ordinary chats and
+  deliberately absent for delegated children. Multi-agent (collab /
+  spawn_agent — the Codex analog of Claude's Task fleet, whose
   ``collabAgentToolCall`` items the dispatch surfaces as ordinary background
   activity) is on by DEFAULT but behind a RUNTIME kill switch: set the env var
   ``MOEBIUS_CODEX_MULTI_AGENT`` to off/0/false/no to disable it and restart
@@ -165,14 +190,17 @@ def _codex_config_overrides() -> list[str]:
   delegate probe after any @openai/codex bump.
   """
   overrides = list(_CODEX_PROMPT_CONTROL_OVERRIDES)
-  overrides += [
-    "features.default_mode_request_user_input=true",
-    # Codex owns goal durability in its thread store.  Enabling the native
-    # goal extension lets a new app-server resume the logical operation after
+  if allow_questions:
+    overrides.append("features.default_mode_request_user_input=true")
+  if allow_goals:
+    # Codex owns goal durability in its thread store. Enabling the native goal
+    # extension lets a new app-server resume the logical operation after
     # Möbius deliberately tears the previous process down for a restart.
-    "features.goals=true",
-  ]
-  if _env_flag_on("MOEBIUS_CODEX_MULTI_AGENT", default=True):
+    overrides.append("features.goals=true")
+  if (
+    allow_multi_agent
+    and _env_flag_on("MOEBIUS_CODEX_MULTI_AGENT", default=True)
+  ):
     overrides += [
       "features.multi_agent_v2.enabled=true",
       "features.multi_agent_v2.tool_namespace=agents",
@@ -242,14 +270,66 @@ def _codex_process_group_id(
   return pgid
 
 
+class _CodexCallExecutor:
+  """Per-client worker pool for the SDK's blocking sync protocol surface."""
+
+  def __init__(self, chat_id: str) -> None:
+    self._executor = _cf.ThreadPoolExecutor(
+      max_workers=_CODEX_CALL_EXECUTOR_WORKERS,
+      thread_name_prefix=f"mobius-codex-{chat_id[:8]}",
+    )
+
+  async def call(self, fn, /, *args, **kwargs):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+      self._executor,
+      functools.partial(fn, *args, **kwargs),
+    )
+
+  def close(self) -> None:
+    # AsyncCodex.__aexit__ has already closed the transport before this owner
+    # is released. ``wait=False`` keeps an unexpected SDK waiter from ever
+    # blocking the FastAPI event loop during terminal cleanup.
+    self._executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _install_codex_call_executor(
+  codex_context: Any,
+  chat_id: str,
+) -> _CodexCallExecutor | None:
+  """Route one AsyncCodex client's sync bridge off the default executor.
+
+  Unit-test fakes intentionally omit the private ``_client._call_sync`` seam;
+  they have no blocking SDK protocol and need no executor. The production SDK
+  is pinned and this is the same wrapper-internal chain already guarded by the
+  approval-handler and process-identity contract helpers.
+  """
+  client = getattr(codex_context, "_client", None)
+  if client is None or not callable(getattr(client, "_call_sync", None)):
+    return None
+  owner = _CodexCallExecutor(chat_id)
+  try:
+    client._call_sync = owner.call
+  except (AttributeError, TypeError):
+    owner.close()
+    log.warning(
+      "Codex SDK async client does not allow an owned call executor; "
+      "falling back to its default executor chat_id=%s",
+      chat_id,
+      exc_info=True,
+    )
+    return None
+  return owner
+
+
 async def _enter_codex_context_owned(
   codex_context: Any,
 ) -> tuple[Any, asyncio.CancelledError | None]:
   """Enter AsyncCodex without abandoning its threaded startup on cancel.
 
-  The pinned SDK implements ``AsyncCodexClient.start()`` with
-  ``asyncio.to_thread(CodexClient.start)``. Cancelling ``__aenter__`` therefore
-  cancels only the awaiter; the worker can continue through ``Popen`` and
+  The pinned SDK implements ``AsyncCodexClient.start()`` as a blocking sync
+  call offloaded to a worker. Cancelling ``__aenter__`` therefore cancels only
+  the awaiter; the owned worker can continue through ``Popen`` and
   publish ``_proc`` after the cancelled runner has already returned. Keep the
   complete enter operation in a runner-owned task, shield it through every
   caller cancellation, and hand the cancellation back to the caller only once
@@ -287,11 +367,12 @@ async def _enter_codex_context_owned(
 class _EnteredCodexContext:
   """Own exit for an AsyncCodex context whose enter is already owned.
 
-  The pinned SDK delegates close to ``asyncio.to_thread``. An ordinary await
-  lets a second caller cancellation cancel that awaiter while its worker is
-  still queued or running, allowing process-group reap and runner return to
-  overtake the SDK's direct-child ``wait()``. Keep the complete exit in a
-  runner-owned task and defer every repeated cancellation until it finishes.
+  The pinned SDK delegates close to a blocking worker call (routed through the
+  per-client executor above). An ordinary await lets a second caller
+  cancellation cancel that awaiter while its worker is still queued or
+  running, allowing process-group reap and runner return to overtake the SDK's
+  direct-child ``wait()``. Keep the complete exit in a runner-owned task and
+  defer every repeated cancellation until it finishes.
   """
 
   def __init__(self, context: Any, entered: Any) -> None:
@@ -355,11 +436,19 @@ async def _capture_codex_process_group_during_start(
   identity helper therefore runs silently until ``setsid`` makes PID == PGID;
   it never returns or signals the shared group.
   """
+  started_at = time.monotonic()
   while not stop.is_set():
     pgid = _codex_process_group_id(codex, log_unisolated=False)
     if pgid is not None:
       return pgid
-    await asyncio.sleep(0)
+    # Preserve zero-delay polling during the narrow Popen→initialize window:
+    # an initialization failure can clear the only child PID after one loop
+    # turn. If startup remains unresolved beyond that normal window, back off
+    # so a wedged client cannot spin Uvicorn's event loop at 100% CPU.
+    delay = _process_group_capture_delay(
+      time.monotonic() - started_at,
+    )
+    await asyncio.sleep(delay)
   return _codex_process_group_id(codex, log_unisolated=False)
 
 
@@ -1357,6 +1446,8 @@ async def run_codex_sdk_turn(
   goal_mode: bool = False,
   goal_continue: bool = False,
   fallback_goal_objective: str | None = None,
+  run_policy=None,
+  connector_plan=None,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -1372,6 +1463,8 @@ async def run_codex_sdk_turn(
       bridge to park on a future while the user answers.
     db: SQLAlchemy session for durable-chat persistence paths, or None for an
       out-of-band turn with no Chat row (for example nightly Reflection).
+    connector_plan: Detached owner-managed MCP configuration built before the
+      request session was released. It is plain data and never queries SQLite.
 
   Returns:
     Dict with `session_id`, `cost_usd`, and `error`.
@@ -1451,10 +1544,26 @@ async def run_codex_sdk_turn(
   env = dict(base_env)
   env.setdefault("CODEX_HOME", "/data/cli-auth/codex")
 
+  # Remote MCP connections are materialized in chat.py while its DB session is
+  # still live. Secrets use Codex's env indirection rather than thread config or
+  # argv; the thread receives only env-variable names. Snapshot construction is
+  # the optional-capability failure boundary; this runner trusts the typed,
+  # detached plan rather than silently masking internal contract violations.
+  connector_thread_config = None
+  if connector_plan is not None:
+    connector_thread_config = connector_plan.codex_config
+    env.update(connector_plan.codex_env)
+
   # config_overrides always isolates the prompt stack, then carries the
   # request_user_input (AskUserQuestion parity), goal, and multi-agent flags.
+  # Delegated children disable those optional tools at this provider-owned seam.
   codex_bin = shutil.which("codex")
-  config_overrides = _codex_config_overrides()
+  delegated = run_policy is not None
+  config_overrides = _codex_config_overrides(
+    allow_questions=not delegated,
+    allow_multi_agent=not delegated,
+    allow_goals=not delegated,
+  )
   launch_args = _codex_app_server_launch_args(codex_bin, config_overrides)
   config_kwargs: dict[str, Any] = dict(
     codex_bin=codex_bin,
@@ -1488,6 +1597,7 @@ async def run_codex_sdk_turn(
   task_host_tool_use_id: str | None = None
   public_task_ids: set[str] = set()
   codex_context = sdk["AsyncCodex"](config=config)
+  codex_call_executor = _install_codex_call_executor(codex_context, chat_id)
   process_group_capture_stop: asyncio.Event | None = None
   process_group_capture_task: asyncio.Task[int | None] | None = None
   if launch_args is not None:
@@ -1596,14 +1706,15 @@ async def run_codex_sdk_turn(
       # resulting concurrent.futures.Future. That keeps the JSON-RPC
       # round-trip blocked (correct — the app-server is waiting for our
       # response) while letting asyncio handle the user's answer POST.
-      _install_request_user_input_handler(
-        codex,
-        loop=asyncio.get_running_loop(),
-        chat_id=chat_id,
-        bc=bc,
-        pending_questions=pending_questions,
-        db=db,
-      )
+      if not delegated:
+        _install_request_user_input_handler(
+          codex,
+          loop=asyncio.get_running_loop(),
+          chat_id=chat_id,
+          bc=bc,
+          pending_questions=pending_questions,
+          db=db,
+        )
 
       # We use the SDK's `ApprovalMode.auto_review`, which maps to
       # `approvalPolicy=on_request` with `approvalsReviewer=auto_review`
@@ -1625,7 +1736,13 @@ async def run_codex_sdk_turn(
       # screenshots. Full access here follows the same reasoning, and
       # Möbius's design philosophy
       # ("trust the agent; container is the sandbox") is consistent.
-      _sandbox = sdk["Sandbox"].full_access
+      _sandbox = (
+        sdk["Sandbox"].read_only
+        if delegated and run_policy.scope == "read"
+        else sdk["Sandbox"].workspace_write
+        if delegated
+        else sdk["Sandbox"].full_access
+      )
       persisted_goal = None
       goal_store_available = True
       if session_id is not None and goal_mode:
@@ -1667,6 +1784,7 @@ async def run_codex_sdk_turn(
           sandbox=_sandbox,
           base_instructions=base_instructions,
           developer_instructions="",
+          config=connector_thread_config,
           cwd=cwd,
           model=model,
           personality=sdk["Personality"].none,
@@ -1685,6 +1803,7 @@ async def run_codex_sdk_turn(
           sandbox=_sandbox,
           base_instructions=base_instructions,
           developer_instructions="",
+          config=connector_thread_config,
           cwd=cwd,
           model=model,
           personality=sdk["Personality"].none,
@@ -1718,6 +1837,18 @@ async def run_codex_sdk_turn(
         # silent to the user, not to operators. A genuine resume ERROR still
         # raises upstream and surfaces; only this "different thread returned"
         # case (a lost session) reseeds.
+        if delegated and not run_policy.allow_session_reseed:
+          from app.delegations import REVIEW_REQUIRED_MARKER
+          return {
+            "session_id": current_session_id,
+            "cost_usd": None,
+            "error": (
+              f"{REVIEW_REQUIRED_MARKER}: The delegated write session could "
+              "not be resumed after restart. Its durable history is intact, "
+              "but Möbius will not replay write work automatically. Review "
+              "the child history and start a new task if another pass is needed."
+            ),
+          }
         log.warning(
           "Codex session lost for chat %s (requested=%s actual=%s); reseeding "
           "from DB transcript",
@@ -2188,13 +2319,8 @@ async def run_codex_sdk_turn(
       # Our own teardown, seen from the inside. A stop interrupts the turn;
       # when that times out the escalation SIGTERMs the turn's private
       # process group, so the transport dies mid-stream instead of
-      # delivering turn/completed. Surfacing that as a provider failure is
-      # both wrong and destructive: the raw string overwrites the stall note
-      # (`chat_event_sink._pause_note`) published moments earlier, because
-      # error blocks
-      # coalesce latest-wins and drop every events.ERROR_PASSTHROUGH_FIELDS
-      # the new event omits — taking the note's one-tap Resume with it and
-      # leaving the owner an unexplained error and no way back.
+      # delivering turn/completed. That is our requested interruption, not a
+      # provider failure, so it must stay out of the owner-facing transcript.
       #
       # Usually expected after escalation, but WARNING is deliberate: a real
       # app-server crash can coincide with a requested stop and has the same
@@ -2297,6 +2423,8 @@ async def run_codex_sdk_turn(
           # until its bounded TERM/KILL sequence has completed.
           deferred_cancel = deferred_cancel or exc
       reap_task.result()
+    if codex_call_executor is not None:
+      codex_call_executor.close()
     if deferred_cancel is not None:
       raise deferred_cancel
 

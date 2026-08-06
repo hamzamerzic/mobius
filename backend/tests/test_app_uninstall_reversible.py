@@ -713,4 +713,13 @@ def test_recover_migrates_preserved_direct_cron_without_executing_it(
   register.assert_called_once_with(
     source_dir.name, "15 4 * * *", job.resolve(), app_id,
   )
-  direct_run.assert_not_called()
+  # The invariant is that the app-owned replay script is never EXECUTED —
+  # only parsed. Asserting "no subprocess at all" overshot that: patching
+  # `<module>.subprocess.run` rebinds the attribute on the shared subprocess
+  # module, so it also captures unrelated platform-owned calls such as
+  # reconciliation's crontab read. Assert the real guarantee instead.
+  executed = [
+    call for call in direct_run.call_args_list
+    if "init-cron.sh" in str(call.args[0] if call.args else call)
+  ]
+  assert executed == [], f"replay script was executed: {executed}"

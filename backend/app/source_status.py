@@ -7,8 +7,7 @@ so this module returns metadata only: refs, ancestry counts, source-diff
 magnitudes, and working-tree counts/path names.  It never fetches, writes, or
 returns source contents.
 
-Platform compares ``HEAD`` with its configured update target (normally
-``origin/main``). Apps keep their
+Platform compares ``HEAD`` with ``origin/main``.  Apps keep their
 installer-owned ``upstream`` branch as the installed baseline, while also
 reporting last-fetched ``origin`` and configured GitHub-fork topology.  Nothing
 here fetches, so every remote relationship is a view of refs already on disk,
@@ -24,7 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from app import app_git, release_channel
+from app import app_git
 from app.config import get_settings
 
 _GIT_TIMEOUT = 8
@@ -236,14 +235,6 @@ def _diff_summary(
   return summary
 
 
-def _endpoint_diff_paths(repo: Path, left: str, right: str) -> set[str] | None:
-  """Return path names whose endpoint bytes differ, independent of topology."""
-  proc = _git(repo, "diff", "--name-only", "--no-renames", "-z", left, right, "--")
-  if proc.returncode != 0:
-    return None
-  return {path for path in proc.stdout.split("\0") if path}
-
-
 def _reconciliation_summary(
   repo: Path,
   local: str,
@@ -268,7 +259,7 @@ def _reconciliation_summary(
   }
   try:
     receipt = app_git.preview_reconciliation(repo, local, upstream)
-    endpoint_paths = _endpoint_diff_paths(repo, upstream, local)
+    endpoint_paths = app_git.endpoint_diff_paths(repo, upstream, local)
   except (OSError, subprocess.SubprocessError, RuntimeError):
     return empty
   if endpoint_paths is None:
@@ -456,13 +447,6 @@ def _project_status(
   *, repo: Path, kind: str, key: str, name: str, slug: str | None,
   version: str | None, manifest_url: str | None,
 ) -> dict[str, Any]:
-  platform_channel = None
-  channel_invalid = False
-  if kind == "platform":
-    try:
-      platform_channel = release_channel.platform_release_channel()
-    except release_channel.ReleaseChannelError:
-      channel_invalid = release_channel.release_ref_requested()
   response: dict[str, Any] = {
     "key": key,
     "kind": kind,
@@ -475,40 +459,16 @@ def _project_status(
     "forks": [],
     "branch": None,
     "head_sha": None,
-    "base_ref": (
-      platform_channel.target_ref
-      if platform_channel is not None
-      else ("release-channel-invalid" if channel_invalid else "origin/main")
-    ) if kind == "platform" else "upstream",
+    "base_ref": "origin/main" if kind == "platform" else "upstream",
     "base_sha": None,
+    "comparison_ref": None,
+    "comparison_sha": None,
     "ahead": None,
     "behind": None,
     "tree": None,
     "reconciliation": None,
     "working": None,
     "state": "unavailable",
-    "contribution_disabled": bool(
-      channel_invalid
-      or (
-        platform_channel is not None
-        and platform_channel.contributions_disabled
-      )
-    ) if kind == "platform" else False,
-    "contribution_disabled_reason": (
-      release_channel.CONTRIBUTION_DISABLED_REASON
-      if kind == "platform" and (
-        channel_invalid
-        or (
-          platform_channel is not None
-          and platform_channel.contributions_disabled
-        )
-      )
-      else None
-    ),
-    "release_ref": (
-      platform_channel.release_ref
-      if platform_channel is not None else None
-    ) if kind == "platform" else None,
   }
   if not repo.is_dir() or not (repo / ".git").exists():
     return response
@@ -530,6 +490,15 @@ def _project_status(
     compare_local=(kind == "platform"),
     classify_install=(kind == "app"),
   )
+  if kind == "app" and origin.get("ref"):
+    # Installer-owned ``upstream`` remains the update baseline, but a landed
+    # contribution can reach the last-fetched canonical branch before an app
+    # update advances that marker. Exact tree equality is a projection-safe
+    # witness: unlike an ordinary origin diff, it cannot turn omitted package
+    # files into apparent owner deletions.
+    origin["head_tree_matches_origin"] = app_git.ref_trees_equal(
+      repo, origin["ref"], "HEAD",
+    )
   response.update({"origin": origin, "forks": forks})
 
   response.update({
@@ -549,18 +518,26 @@ def _project_status(
     return response
 
   ahead, behind = _comparison_counts(repo, base_ref, "HEAD")
+  comparison_ref = (
+    origin["ref"]
+    if kind == "app" and origin.get("head_tree_matches_origin")
+    else base_ref
+  )
+  comparison_sha = _rev(repo, comparison_ref)
   tree, managed_paths = _diff_inventory(
-    repo, base_ref, "HEAD", classify_install=(kind == "app"),
+    repo, comparison_ref, "HEAD", classify_install=(kind == "app"),
   )
   reconciliation = _reconciliation_summary(
     repo,
     "HEAD",
-    base_ref,
+    comparison_ref,
     managed_paths=managed_paths,
   )
   response.update({
     "behind": behind,
     "ahead": ahead,
+    "comparison_ref": comparison_ref,
+    "comparison_sha": comparison_sha,
     "tree": tree,
     "reconciliation": reconciliation,
   })
@@ -611,7 +588,7 @@ def _project_status(
 
 
 def build_platform_status() -> dict[str, Any]:
-  """Inspect the live platform clone against its configured exact target."""
+  """Inspect the live platform clone against its last-fetched origin/main."""
   settings = get_settings()
   data_dir = Path(settings.data_dir).resolve()
   return _project_status(

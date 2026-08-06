@@ -1,9 +1,28 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  deploymentKind,
+  deploymentKindLabel,
+  platformActivationLabel,
   platformStatusFromApply,
   platformUpdateStatusLabel,
 } from '../platformUpdateState.js'
+
+test('the deployment classifier stays as binary as the backend that emits it', () => {
+  assert.equal(deploymentKind({ deployment: 'railway' }), 'railway')
+  assert.equal(deploymentKind({ deployment: 'self_hosted' }), 'self_hosted')
+  // deployment_kind() returns only those two, so anything else is unknown
+  // rather than a third kind the UI may render guidance for.
+  for (const unknown of [undefined, null, {}, { deployment: null }, { deployment: 'fly' }]) {
+    assert.equal(deploymentKind(unknown), null)
+  }
+})
+
+test('the deployment badge names an unresolved deployment self-hosted', () => {
+  assert.equal(deploymentKindLabel({ deployment: 'railway' }), 'Railway')
+  assert.equal(deploymentKindLabel({ deployment: 'self_hosted' }), 'Self-hosted')
+  assert.equal(deploymentKindLabel(null), 'Self-hosted')
+})
 
 test('a clean apply consumes the reviewed target but preserves restart readiness', () => {
   const projected = platformStatusFromApply(
@@ -24,6 +43,28 @@ test('a clean apply consumes the reviewed target but preserves restart readiness
   assert.equal(projected.available, false)
   assert.equal(projected.needs_restart, true)
   assert.equal(projected.contained_upstream_sha, 'applied')
+})
+
+test('an image-required apply projects the external activation contract', () => {
+  const activation = {
+    level: 'image_rebuild',
+    guidance: ['Rebuild and deploy.'],
+  }
+  const projected = platformStatusFromApply(
+    { state: 'available', available: true, needs_restart: false },
+    {
+      state: 'activation_needed',
+      needs_restart: false,
+      activation,
+      upstream_commit: 'applied',
+    },
+  )
+
+  assert.equal(projected.available, false)
+  assert.equal(projected.needs_restart, false)
+  assert.equal(projected.activation, activation)
+  assert.equal(platformActivationLabel(projected.activation), 'Image rebuild')
+  assert.equal(platformUpdateStatusLabel(projected), 'Image rebuild required')
 })
 
 test('a failed newer release does not forget an earlier staged update', () => {
@@ -97,6 +138,14 @@ test('update-row copy represents restart and availability independently', () => 
     }),
     'New update available',
   )
+  assert.equal(
+    platformUpdateStatusLabel({
+      state: 'activation_needed',
+      activation: { level: 'proxy_reload' },
+      available: false,
+    }),
+    'Proxy reload required',
+  )
 })
 
 test('blocking and repair states keep priority over batching copy', () => {
@@ -118,13 +167,13 @@ test('blocking and repair states keep priority over batching copy', () => {
   )
 })
 
-test('deployment-managed releases do not advertise an in-app update', () => {
+test('a legacy deployment flag does not hide an available in-app update', () => {
   assert.equal(
     platformUpdateStatusLabel({
       state: 'available',
       available: true,
       updates_disabled: true,
     }),
-    'Managed by deployment',
+    'New update available',
   )
 })

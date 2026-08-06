@@ -28,6 +28,7 @@ from app.broadcast import ChatBroadcast, create_broadcast
 from app.chat_writer import Barrier, get_writer
 from app.database import SessionLocal
 from app.deps import Principal
+from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 # -- shared harness ------------------------------------------------------
@@ -574,7 +575,7 @@ def test_failed_question_commit_appended_scrub_by_identity(monkeypatch):
   identity-based scrub guards against."""
   _seed_chat("t5a", messages=[{"role": "user", "content": "hi", "ts": 1}])
   bc = ChatBroadcast("t5a")
-  sink = chat_mod._ChatEventSink(bc, "t5a", run_token="rt-5a")
+  sink = chat_mod._ChatEventSink(bc, "t5a", run_token="rt-5a", recall_binding=EMPTY_RECALL_BINDING)
   sink.publish({"type": "text", "content": "thinking"})
 
   # Latch the actor's QuestionCommit handler so it blocks INSIDE the commit
@@ -644,7 +645,7 @@ def test_failed_question_commit_coalesced_scrub_restores_fields(monkeypatch):
   deleted."""
   _seed_chat("t5b", messages=[{"role": "user", "content": "hi", "ts": 1}])
   bc = ChatBroadcast("t5b")
-  sink = chat_mod._ChatEventSink(bc, "t5b", run_token="rt-5b")
+  sink = chat_mod._ChatEventSink(bc, "t5b", run_token="rt-5b", recall_binding=EMPTY_RECALL_BINDING)
 
   # First, a SUCCESSFUL question commit so a question block with identity
   # "q1" already exists in assistant_blocks with its original payload.
@@ -752,50 +753,6 @@ def test_stop_handoff_clears_only_immediate_successor_marker(monkeypatch):
   assert _load("t6b")["running"] is True, (
     "a stale Stop-bumped run must NOT clear a newer run's marker"
   )
-
-
-def test_watchdog_handoff_records_interrupted_outcome(monkeypatch):
-  """The watchdog shares Stop's safe generation handoff, but its durable
-  outcome is an interruption rather than a user-requested stop."""
-  from app.runner_registry import RunnerKind
-
-  cid = "watchdog-outcome"
-  _seed_owner_and_creds()
-  _seed_chat(
-    cid, messages=[{"role": "user", "content": "hi", "ts": 1}],
-    pending=[], running="running",
-  )
-  _seed_run(f"rt-{cid}", cid)
-
-  class StoppableHandle:
-    chat_id = cid
-    kind = RunnerKind.CLAUDE_SDK
-
-    async def stop(self, timeout=2.0):
-      del timeout
-      chat_mod.registry.unregister(self.chat_id, self.kind)
-      return True
-
-  async def stalled_runner(*, bc, **_kwargs):
-    chat_mod.registry.register(StoppableHandle())
-    bc.bc.last_event_at = time.monotonic() - chat_mod.PROGRESS_TIMEOUT - 1
-    db = SessionLocal()
-    try:
-      assert await chat_mod.sweep_stalled_live_runs(db) == [cid]
-    finally:
-      db.close()
-    return {"session_id": "sess", "cost_usd": 0.0}
-
-  import app.claude_sdk_runner as csr
-  monkeypatch.setattr(csr, "run_claude_sdk_turn", stalled_runner)
-
-  chat_mod.mark_starting(cid)
-  gen = chat_mod.current_run_generation(cid)
-  _run_real_chat(cid, run_token=f"rt-{cid}", run_gen=gen)
-  _drain_actor()
-
-  assert _load(cid)["running"] is False
-  assert _run_outcomes(cid) == {f"rt-{cid}": "interrupted"}
 
 
 # -- 7. unsupported runtime cleanup: marker cleared, pending dropped -----
@@ -1983,7 +1940,7 @@ def test_stale_reclaim_bow_out_preserves_fresh_owners_broadcast_and_browser(
   published = []
   orig = bc.publish
   bc.publish = lambda e: (published.append(e.get("type")), orig(e))[1]
-  sink = chat_mod._ChatEventSink(bc, "t18a", run_token="rt-18a")
+  sink = chat_mod._ChatEventSink(bc, "t18a", run_token="rt-18a", recall_binding=EMPTY_RECALL_BINDING)
 
   # The FRESH owner already holds the active-broadcast pointer with its OWN
   # broadcast (a different object than this dying run's `bc`).
@@ -2047,7 +2004,7 @@ def test_stale_reclaim_bow_out_clears_pointer_but_leaves_browser_when_no_success
   published = []
   orig = bc.publish
   bc.publish = lambda e: (published.append(e.get("type")), orig(e))[1]
-  sink = chat_mod._ChatEventSink(bc, "t18b", run_token="rt-18b")
+  sink = chat_mod._ChatEventSink(bc, "t18b", run_token="rt-18b", recall_binding=EMPTY_RECALL_BINDING)
 
   # NO fresh owner took over: the active-broadcast pointer is still THIS run's.
   bc_mod.set_active_broadcast(bc)

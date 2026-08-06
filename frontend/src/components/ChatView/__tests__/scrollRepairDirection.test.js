@@ -53,7 +53,7 @@ test('pin repair never moves backward over an unchanged reader position', () => 
   )
 })
 
-test('reserved-bottom reader settlement replays the exact numeric position', () => {
+test('reserved-bottom reader settlement enters follow without moving backward', () => {
   const row = {
     offsetTop: 500,
     offsetHeight: 220,
@@ -64,6 +64,11 @@ test('reserved-bottom reader settlement replays the exact numeric position', () 
     scrollHeight: 1900,
     scrollTop: 1200,
     clientHeight: 700,
+    currentCSSZoom: 1,
+    clientWidth: 1000,
+    offsetWidth: 1000,
+    offsetHeight: 700,
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 1000, height: 700 }),
     querySelector(selector) {
       if (selector === '.spacer-dynamic') return spacer
       if (selector === '[data-key="assistant-tail"]') return row
@@ -81,32 +86,24 @@ test('reserved-bottom reader settlement replays the exact numeric position', () 
     offset: -700,
   })
   const settledMode = modeAfterReaderGesture({
-    reachedPhysicalBottom: true,
-    hasReservedTail: true,
+    reachedBottom: true,
     holdMode,
   })
-  assert.equal(settledMode, holdMode)
+  assert.deepEqual(settledMode, { kind: 'FOLLOW_BOTTOM' })
 
   applyMode(scrollEl, settledMode)
   assert.equal(scrollEl.scrollTop, 1200,
-    'settlement must not jump backward to the prompt or real-content tail')
+    'following the physical tail must not jump backward before reservation')
 })
 
-test('only an unreserved reader bottom creates follow', () => {
+test('physical reader bottom creates follow without a reservation branch', () => {
   const hold = { kind: 'ANCHOR_AT', key: 'a-1', offset: -300 }
-  assert.equal(modeAfterReaderGesture({
-    reachedPhysicalBottom: true,
-    hasReservedTail: true,
-    holdMode: hold,
-  }), hold)
   assert.deepEqual(modeAfterReaderGesture({
-    reachedPhysicalBottom: true,
-    hasReservedTail: false,
+    reachedBottom: true,
     holdMode: hold,
   }), { kind: 'FOLLOW_BOTTOM' })
   assert.equal(modeAfterReaderGesture({
-    reachedPhysicalBottom: false,
-    hasReservedTail: false,
+    reachedBottom: false,
     holdMode: hold,
   }), hold)
 })
@@ -151,7 +148,7 @@ test('question viewport release restores only its captured base authority', () =
   ), followOverlay, 'an equivalent-looking mode is not the overlay\'s authority')
 })
 
-test('only real-bottom or an armed pin handoff can enter follow', () => {
+test('only explicit tail intent or an armed pin handoff can enter follow', () => {
   const hold = { kind: 'ANCHOR_AT', key: 'a-1', offset: 30 }
   const follow = { kind: 'FOLLOW_BOTTOM' }
   const armedPin = {
@@ -169,7 +166,11 @@ test('only real-bottom or an armed pin handoff can enter follow', () => {
     follow,
   )
   assert.equal(
-    modeForScrollTransition(hold, follow, 'reader:real-content-bottom'),
+    modeForScrollTransition(hold, follow, 'reader:scroll-bottom'),
+    follow,
+  )
+  assert.equal(
+    modeForScrollTransition(hold, follow, 'reader:composer-bottom'),
     follow,
   )
 })
@@ -200,26 +201,39 @@ test('two gestures inside one quiet settlement advance two generations', () => {
     gestureSequence: 11,
     claimedSequence: null,
     version: 4,
+    atBottom: false,
   })
   assert.deepEqual(firstGesture, {
-    claimedSequence: 11, version: 5,
+    claimedSequence: 11, version: 5, reachedBottom: false,
   })
-  assert.deepEqual(readerIntentAfterScroll({
+  const reachedTail = readerIntentAfterScroll({
     gestureSequence: 11,
     claimedSequence: firstGesture.claimedSequence,
     version: firstGesture.version,
-  }), {
-    claimedSequence: 11, version: 5,
-  }, 'more scroll frames from the same input sequence share its generation')
+    reachedBottom: firstGesture.reachedBottom,
+    atBottom: true,
+  })
+  assert.deepEqual(reachedTail, {
+    claimedSequence: 11, version: 5, reachedBottom: true,
+  }, 'one input sequence shares its generation and latches physical-tail arrival')
+  assert.deepEqual(readerIntentAfterScroll({
+    gestureSequence: 11,
+    claimedSequence: reachedTail.claimedSequence,
+    version: reachedTail.version,
+    reachedBottom: reachedTail.reachedBottom,
+    atBottom: false,
+  }), reachedTail, 'lazy output cannot erase tail intent before settlement')
 
   const secondGesture = readerIntentAfterScroll({
     gestureSequence: 12,
-    claimedSequence: firstGesture.claimedSequence,
-    version: firstGesture.version,
+    claimedSequence: reachedTail.claimedSequence,
+    version: reachedTail.version,
+    reachedBottom: reachedTail.reachedBottom,
+    atBottom: false,
   })
   assert.deepEqual(secondGesture, {
-    claimedSequence: 12, version: 6,
-  }, 'a newer input sequence advances even before the shared quiet edge')
+    claimedSequence: 12, version: 6, reachedBottom: false,
+  }, 'a newer input sequence advances and starts a fresh tail decision')
 })
 
 test('terminal settlement waits through taps but dies after actual reader movement', () => {

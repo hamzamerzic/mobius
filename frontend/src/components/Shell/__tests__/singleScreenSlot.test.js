@@ -31,22 +31,38 @@ function tiledBuilder() {
 // ── Forgiving parse / normalize (design: forward-compat, no v2 bump) ─────────
 
 test('normalize preserves property ABSENCE as the migration marker', () => {
+  // A legacy/uninitialized blob has NO singleScreen property, and the seedFromFlatTabs
+  // constructor writes none either — so its ABSENCE (the migration marker) is exactly
+  // what normalize must preserve.
   const ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
-  assert.equal('singleScreen' in ws, false, 'a fresh seed has no slot (uninitialized)')
+  assert.equal('singleScreen' in ws, false, 'a legacy blob has no slot (uninitialized)')
   const n = paneModel.normalize(ws)
   assert.equal('singleScreen' in n, false, 'absence survives normalize')
 })
 
-test('a fresh standard seed routes through its focused fallback until the slot initializes', () => {
+test('the fresh seed has no slot; RESET_FLAT seeds first boot from the active item', () => {
+  // Two-worlds: seedFromFlatTabs is a PURE constructor — no single-screen slot
+  // (absence is the migration marker, reused by fixtures modelling a legacy blob).
+  // The derivations stay borrow-free: a genuinely absent slot is the empty home. The
+  // real first-boot seed lives in the RESET_FLAT reducer — the only path that turns a
+  // legacy/flat active chat into the live Standard world.
   const chat = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
-  assert.equal('singleScreen' in chat, false)
-  assert.equal(paneModel.activeContentRoute(chat).chatId, '5')
+  assert.equal('singleScreen' in chat, false, 'the constructor writes no slot')
+  assert.equal(chat.viewMode, 'single')
+  assert.equal(paneModel.activeContentRoute(chat).chatId, null, 'an unseeded slot is the empty home')
 
-  const app = paneModel.seedFromFlatTabs([makeTab('chat', '5'), makeTab('app', '42')])
-  assert.equal('singleScreen' in app, false)
-  assert.equal(paneModel.activeContentRoute(app).appId, 42)
+  const booted = reduce(init(chat), { type: 'RESET_FLAT', tabs: [makeTab('chat', '5')] }).ws
+  assert.deepEqual(booted.singleScreen, { kind: 'chat', id: '5' }, 'RESET_FLAT seeds the active chat')
+  assert.equal(paneModel.activeContentRoute(booted).chatId, '5', 'first boot lands on the active chat')
+
+  const bootedApp = reduce(init(paneModel.seedFromFlatTabs([])), {
+    type: 'RESET_FLAT', tabs: [makeTab('chat', '5'), makeTab('app', '42')],
+  }).ws
+  assert.deepEqual(bootedApp.singleScreen, { kind: 'app', id: '42' }, 'the last-active tab seeds the slot')
+  assert.equal(paneModel.activeContentRoute(bootedApp).appId, 42)
 
   const empty = paneModel.seedFromFlatTabs([])
+  assert.equal('singleScreen' in empty, false, 'an empty seed has no departing item — slot stays absent')
   assert.equal(paneModel.activeContentRoute(empty).chatId, null, 'an empty first boot starts at home')
 })
 
@@ -108,14 +124,18 @@ test('activeKeyForOwner resolves real panes and the synthetic single owner', () 
   assert.equal(paneModel.activeKeyForOwner(ws, 'missing-pane'), null)
 })
 
-test('activeKeyForOwner gives a legacy Standard owner the focused seed without overriding explicit null', () => {
+test('activeKeyForOwner treats a legacy absent slot as empty — never the focused seed', () => {
   const legacy = paneModel.seedFromFlatTabs([
     { kind: 'chat', id: '5', title: 'Five' },
   ])
+  // Strip the seeded slot to model an uninitialized legacy blob (absent marker).
+  delete legacy.singleScreen
   assert.equal('singleScreen' in legacy, false)
+  // Two-worlds: the Standard owner selects through its OWN slot only. An absent slot
+  // is empty (null), never the focused Builder pane's chat.
   assert.equal(
     paneModel.activeKeyForOwner(legacy, paneModel.SINGLE_SLOT_PANE),
-    'chat:5',
+    null,
   )
 
   const initializedEmpty = { ...legacy, singleScreen: null }
@@ -129,6 +149,9 @@ test('activeKeyForOwner gives a legacy Standard owner the focused seed without o
 
 test('SET_VIEW_MODE to single seeds the slot from the focused item, once', () => {
   const ws = tiledBuilder() // focused chat 5
+  // Model a legacy uninitialized builder (no slot) so the first builder→single toggle
+  // must seed from focus — a fresh seed now pre-fills the slot, which would bypass it.
+  delete ws.singleScreen
   const s1 = reduce(init(ws), { type: 'SET_VIEW_MODE', mode: 'single' })
   assert.deepEqual(s1.ws.singleScreen, { kind: 'chat', id: '5' }, 'seeded from focus')
   // Back to panes, focus the app, back to single: the slot is NOT reseeded.
@@ -142,6 +165,9 @@ test('SET_VIEW_MODE to single seeds the slot from the focused item, once', () =>
 
 test('seeding a Settings-focused builder pane uses its underlying concrete tab', () => {
   let ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
+  // Model a legacy uninitialized builder (no slot) so the toggle seeds from focus and
+  // exercises the Settings-skip in focusedSlotSeed rather than the pre-seeded slot.
+  delete ws.singleScreen
   ws = paneModel.openTab(ws, tabModel.settingsTab(), { paneId: ws.focusedPaneId, activate: true })
   const s = reduce(init(ws), { type: 'SET_VIEW_MODE', mode: 'single' })
   assert.deepEqual(s.ws.singleScreen, { kind: 'chat', id: '5' },
@@ -253,7 +279,7 @@ test('activeContentRoute reflects the SLOT in single mode, the focused pane in b
 
 // ── Empty-builder auto-return + one-gesture undo (owner semantic) ────────────
 
-test('closing the LAST builder tab auto-returns to single', () => {
+test('closing the final Builder tab keeps a visible Standard item and can re-enter', () => {
   // Single-pane builder with one chat; close it → the tree empties → auto-return.
   const ws = builderSeed([makeTab('chat', '5')])
   const s = reduce(init(ws), { type: 'CLOSE_TAB', tabKey: 'chat:5' })
@@ -264,6 +290,20 @@ test('closing the LAST builder tab auto-returns to single', () => {
     'a legacy workspace carries the departing visible tab into Standard',
   )
   assert.equal(s.undo.restoreViewMode, true, 'the undo is flagged one-gesture')
+
+  const fromNewChat = {
+    ...builderSeed([makeTab('chat', '5')]),
+    singleScreen: null,
+  }
+  const carried = reduce(init(fromNewChat), { type: 'CLOSE_TAB', tabKey: 'chat:5' })
+  assert.deepEqual(
+    carried.ws.singleScreen,
+    { kind: 'chat', id: '5' },
+    'an initialized empty Standard screen still keeps the departing visible tab',
+  )
+  const reentered = reduce(carried, { type: 'SET_VIEW_MODE', mode: 'panes' })
+  assert.equal(reentered.ws.viewMode, 'panes')
+  assert.ok(paneModel.paneOf(reentered.ws, 'chat:5'))
 })
 
 test('an empty builder tree enters by seeding the current Standard chat or app', () => {
@@ -282,8 +322,7 @@ test('an empty builder tree enters by seeding the current Standard chat or app',
   }
 
   const empty = paneModel.seedFromFlatTabs([])
-  const home = empty
-  const refused = reduce(init(home), { type: 'SET_VIEW_MODE', mode: 'panes' })
+  const refused = reduce(init(empty), { type: 'SET_VIEW_MODE', mode: 'panes' })
   assert.equal(refused.ws.viewMode, 'single', 'the New Chat landing has no concrete tab to seed')
 
   const stale = JSON.stringify({ ...empty, viewMode: 'panes' })
@@ -292,18 +331,6 @@ test('an empty builder tree enters by seeding the current Standard chat or app',
     'single',
     'a persisted empty Builder repairs to Standard at boot',
   )
-})
-
-test('closing the final Builder tab can re-enter from the preserved Standard screen', () => {
-  const ws = {
-    ...builderSeed([makeTab('chat', '5')]),
-    singleScreen: { kind: 'chat', id: '5' },
-  }
-  let state = reduce(init(ws), { type: 'CLOSE_TAB', tabKey: 'chat:5' })
-  assert.equal(state.ws.viewMode, 'single')
-  state = reduce(state, { type: 'SET_VIEW_MODE', mode: 'panes' })
-  assert.equal(state.ws.viewMode, 'panes')
-  assert.ok(paneModel.paneOf(state.ws, 'chat:5'))
 })
 
 test('a drawer drop into an empty Builder preserves a Standard chat or app as the first tab', () => {
@@ -334,6 +361,22 @@ test('a drawer drop into an empty Builder preserves a Standard chat or app as th
     )
     assert.deepEqual(state.ws.singleScreen, ws.singleScreen)
   }
+})
+
+test('a refused drawer drop does not enter or seed Builder', () => {
+  const ws = {
+    ...paneModel.seedFromFlatTabs([]),
+    singleScreen: { kind: 'chat', id: '5' },
+  }
+  const state = reduce(init(ws), {
+    type: 'OPEN_TAB_AT',
+    tab: makeTab('app', '42'),
+    target: { paneId: 'missing', edge: 'right' },
+    flipViewMode: 'panes',
+  })
+  assert.equal(state.ws, ws)
+  assert.equal(state.ws.viewMode, 'single')
+  assert.equal(paneModel.isEmptyTree(state.ws), true)
 })
 
 test('deleting the last builder resource also leaves no empty builder behind', () => {
@@ -373,21 +416,6 @@ test('CLOSE_PANE that empties the builder auto-returns to single', () => {
   assert.equal(s.ws.viewMode, 'single')
   assert.deepEqual(s.ws.singleScreen, { kind: 'chat', id: '5' })
   assert.equal(s.undo.restoreViewMode, true)
-})
-
-test('a genuinely empty New Chat entry preserves the coupled close undo', () => {
-  // Auto-return arms a mode-coupled undo (restoreViewMode). Trying to enter an
-  // empty Builder is not a new mode intent because that destination does not
-  // exist, so it must not weaken the one-gesture restoration.
-  const ws = { ...builderSeed([makeTab('chat', '5')]), singleScreen: null }
-  let state = reduce(init(ws), { type: 'CLOSE_TAB', tabKey: 'chat:5' }) // → single, coupled undo
-  assert.equal(state.undo.restoreViewMode, true)
-  state = reduce(state, { type: 'SET_VIEW_MODE', mode: 'panes' }) // refused: tree is empty
-  assert.equal(state.ws.viewMode, 'single')
-  assert.equal(state.undo.restoreViewMode, true, 'the refused entry does not rewrite undo semantics')
-  state = reduce(state, { type: 'UNDO_LAST' })
-  assert.ok(paneModel.paneOf(state.ws, 'chat:5'), 'tab restored')
-  assert.equal(state.ws.viewMode, 'panes', 'the closed Builder world is restored with its tab')
 })
 
 test('a real later mode choice still rebases a coupled undo to tree-only', () => {

@@ -13,6 +13,7 @@ from app import chat_event_sink
 from app.agent_lifecycle import normalize_chat_event, record_event
 from app.chat_event_sink import ChatEventSink
 from test_app_fixtures import create_local_app
+from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 def _chat_run(db, chat_id="chat-life", run_id="run-life", *, deleted=False):
@@ -253,7 +254,9 @@ def test_sink_submits_lifecycle_through_writer_actor(db):
     def publish(self, _event):
       pass
 
-  sink = ChatEventSink(Bus(), "chat-life", "run-life")
+  sink = ChatEventSink(
+    Bus(), "chat-life", "run-life", recall_binding=EMPTY_RECALL_BINDING,
+  )
   sink.record_lifecycle({
     "type": "task_start",
     "task_id": "task-1",
@@ -289,7 +292,9 @@ def test_sink_fences_and_retries_unreconstructable_lifecycle_fact(monkeypatch):
 
   writer = Writer()
   monkeypatch.setattr(chat_event_sink, "get_writer", lambda: writer)
-  sink = ChatEventSink(object(), "chat-life", "run-life")
+  sink = ChatEventSink(
+    object(), "chat-life", "run-life", recall_binding=EMPTY_RECALL_BINDING,
+  )
   sink.record_lifecycle({
     "type": "task_start", "task_id": "task-1",
     "provider_session_id": "session-1", "source_event_id": "uuid-1",

@@ -6,13 +6,14 @@ import logging
 import time
 from pathlib import Path as FilePath
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.responses import Response
 from sqlalchemy.orm import Session
 
 from app import activity, models, questions, schemas
 from app.broadcast import create_broadcast, get_broadcast, get_system_broadcast
+from app.chat_event_sink import active_sink_stream_snapshot
 from app.chat import (
   _schedule_continuation,
   discard_starting,
@@ -55,6 +56,23 @@ log = logging.getLogger(__name__)
 
 # Keepalive interval for the SSE stream to prevent proxy timeouts.
 _KEEPALIVE_INTERVAL = 30  # seconds
+
+# A server-owned assistant snapshot already contains every content-bearing
+# event reduced by ChatEventSink. These few replay-safe control facts live
+# outside that block list and remain necessary when a reconnect skips the full
+# content log. They are replay-safe by contract: cumulative, idempotent by
+# identity, or a durable transcript boundary that tells the client to refresh.
+_SNAPSHOT_REPLAY_EVENT_TYPES = frozenset({
+  "answers_applied",
+  "app_updated",
+  "build_phase",
+  "chat_run_finished",
+  "chat_run_started",
+  "queued_turn_starting",
+  "steer_delivery_failed",
+  "steered_into_turn",
+  "theme_updated",
+})
 
 
 def _message_persist_unavailable(exc: Exception, *, chat_id: str) -> HTTPException:
@@ -185,29 +203,33 @@ def _has_unanswered_question(
   chat: models.Chat,
   question_id: str | None,
 ) -> bool:
-  """Whether the durable tail prompt is the question being answered."""
-  msgs = list(chat.messages or [])
-  tail_questions: list[dict] = []
-  for msg in reversed(msgs):
+  """Whether an answer to `question_id` should be accepted for this chat.
+
+  Primary signal is the durable `pending_question_id` marker, so an answer
+  lands even when parallel tool/subagent output or a terminal error trails the
+  card, and across a restart. Fallback: a *targeted* answer (a specific
+  question_id) is still honored when the marker has cleared but that exact card
+  is unanswered in the latest turn — answering the card after a Stop is a fresh
+  continuation request, not a stale race. Position-independent; a later user
+  turn (the decision was superseded) is not eligible.
+  """
+  open_id = chat.pending_question_id
+  if open_id is not None:
+    return question_id is None or question_id == open_id
+  if not question_id:
+    return False
+  for msg in reversed(chat.messages or []):
     if msg.get("hidden"):
       continue
     if msg.get("role") != "assistant":
       return False
-    blocks = list(msg.get("blocks") or [])
-    while blocks:
-      block = blocks.pop()
-      if block.get("type") != "question" or block.get("answers"):
-        break
-      tail_questions.append(block)
-    break
-
-  if not tail_questions:
-    return False
-  if question_id:
     return any(
-      block.get("question_id") == question_id for block in tail_questions
+      block.get("type") == "question"
+      and block.get("question_id") == question_id
+      and not block.get("answers")
+      for block in (msg.get("blocks") or [])
     )
-  return True
+  return False
 
 
 def _queued_response(
@@ -293,9 +315,14 @@ def _user_message_from_body(
   if body.cid:
     user_msg["cid"] = body.cid
   ensure_user_cid(user_msg)
-  if body.continuation == "manual":
+  # A recovered question answer resumes the interrupted logical turn even
+  # though its provider prompt contains the human-readable answer.
+  continuation_reason = (
+    "question_answer" if body.answers else body.continuation
+  )
+  if continuation_reason:
     user_msg["kind"] = "continuation"
-    user_msg["continuation_reason"] = "manual"
+    user_msg["continuation_reason"] = continuation_reason
   if body.hidden:
     user_msg["hidden"] = True
   if body.attachments:
@@ -697,6 +724,19 @@ async def send_message(
           "message": started_message,
         },
       )
+
+  # A durable open question parks the turn on the owner's decision. Only an
+  # answer (handled above) or Stop advances it; a plain send must not slip past
+  # and orphan it. That was the pre-fix bug: once the parked turn hit a terminal
+  # error, a follow-up send started a fresh turn and stranded the still-open
+  # card. The composer is disabled client-side while a question is open — this
+  # is the authoritative guard for API clients and post-restart races. Answers
+  # short-circuit above; force_steer keeps its own refusal below.
+  if not body.force_steer and chat.pending_question_id is not None:
+    raise HTTPException(
+      status_code=409,
+      detail="Answer the pending question, or Stop the turn, before sending.",
+    )
 
   # A pending question parks the provider's control channel inside the
   # synchronous request_user_input bridge. A force-steer cannot be accepted
@@ -1120,14 +1160,17 @@ async def cancel_pending_message(
 async def stream_chat(
   request: Request,
   chat_id: str,
+  snapshot: bool = Header(False, alias="X-Mobius-Stream-Snapshot"),
   principal: Principal = Depends(get_chat_view_principal),
   db: Session = Depends(get_db),
 ):
   """SSE endpoint: subscribes to the chat's broadcast and streams events.
 
-  Sends a catch-up burst of all prior events, then streams live events
-  until the broadcast is completed or the client disconnects.  Keepalive
-  comments are sent every 30 s to prevent proxy timeouts.
+  Snapshot-capable clients receive the live sink's current assistant items plus
+  the small set of replay-safe control facts that are not represented there;
+  older clients receive the full prior event log. Both then stream only new
+  events until completion or disconnect. Keepalive comments are sent every
+  30 s to prevent proxy timeouts.
 
   Same actor gate as send_message: owner streams any chat; an app token
   streams only a chat it created (403 otherwise). The ownership check
@@ -1175,6 +1218,14 @@ async def stream_chat(
     # the queue with no await in between), so the catch-up burst still
     # captures exactly the events present when this subscriber attaches.
     catch_up, queue = bc.subscribe()
+    snapshot_items = (
+      active_sink_stream_snapshot(chat_id, bc) if snapshot else None
+    )
+    if snapshot_items is not None:
+      catch_up = [
+        event for event in catch_up
+        if event.get("type") in _SNAPSHOT_REPLAY_EVENT_TYPES
+      ]
     last_embed_auth_check = 0.0
 
     def embed_session_active() -> bool:
@@ -1189,6 +1240,8 @@ async def stream_chat(
     try:
       if not embed_session_active():
         return
+      if snapshot_items is not None:
+        yield _sse({"type": "stream_snapshot", "items": snapshot_items})
       # Send all events buffered before this client connected.
       has_done = False
       for event in catch_up:

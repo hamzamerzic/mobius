@@ -21,8 +21,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, defer
 
 from app import (
-  activity, app_activity, app_apply, app_git, app_jobs, app_preview,
-  app_recency, fs_locks, icon_cache, icon_ownership,
+  activity, app_activity, app_apply, app_capability_acceptance, app_git,
+  app_jobs, app_preview, app_recency, fs_locks, icon_cache,
   models, providers, schemas,
   source_dirs,
 )
@@ -30,10 +30,7 @@ from app.app_identity import (
   reject_if_source_dir_taken as _reject_if_source_dir_taken,
   validate_source_dir as _validate_source_dir,
 )
-from app.app_source_paths import (
-  legacy_platform_runtime_dir_for_app as _legacy_platform_runtime_dir_for_app,
-  resolve_app_source_dir as _resolve_app_source_dir,
-)
+from app.app_source_paths import resolve_app_source_dir as _resolve_app_source_dir
 from app.routes.app_schedules import (
   reconcile_app_cron_supervision,
   router as schedules_router,
@@ -83,12 +80,14 @@ def _safe_to_rmtree_source(
   """Whether uninstall may recursively delete this resolved source dir.
 
   Only an IMMEDIATE, non-numeric child of /data/apps that NO OTHER app row
-  still resolves to. Refuses to delete:
+  still resolves to. The database requires unique canonical source strings;
+  the resolved-path comparison remains defense against an aliased legacy row.
+  Refuses to delete:
     - a nested descendant (parent != apps_root) — a legacy/invalid row whose
       source_dir points deep into /data/apps could otherwise rmtree a path
       inside another app's tree,
     - a /data/apps/<integer> per-app storage tree, and
-    - a directory a SIBLING app row shares — removing it when one app is
+    - a directory a SIBLING app row resolves to — removing it when one app is
       uninstalled would break the other.
   Ordinary app source dirs are a unique /data/apps/<slug>. Legacy rows that
   point outside that root are never removed by app uninstall/purge.
@@ -97,7 +96,7 @@ def _safe_to_rmtree_source(
     return False
   others = (
     db.query(models.App)
-    .filter(models.App.id != exclude_id, models.App.source_dir.isnot(None))
+    .filter(models.App.id != exclude_id)
     .all()
   )
   for other in others:
@@ -251,17 +250,16 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
       deleted_app_id,
     )
 
-  resolved_source = _resolve_app_source_dir(app_source_dir, app_name, settings)
-  if resolved_source is not None:
-    try:
-      async with fs_locks.source_dir_lock(str(resolved_source)):
-        if _safe_to_rmtree_source(resolved_source, apps_root, db, deleted_app_id):
-          await asyncio.to_thread(_drop_cron_and_rmtree, resolved_source)
-    except Exception:
-      log.exception(
-        "Hard-deleted app %s but could not remove its retired source tree",
-        deleted_app_id,
-      )
+  try:
+    resolved_source = _resolve_app_source_dir(app_source_dir)
+    async with fs_locks.source_dir_lock(str(resolved_source)):
+      if _safe_to_rmtree_source(resolved_source, apps_root, db, deleted_app_id):
+        await asyncio.to_thread(_drop_cron_and_rmtree, resolved_source)
+  except Exception:
+    log.exception(
+      "Hard-deleted app %s but could not remove its retired source tree",
+      deleted_app_id,
+    )
 
 
 @router.get("/", response_model=list[schemas.AppOut])
@@ -368,15 +366,11 @@ async def preview_app_install(
     )
   )
   source = body.manifest_url if body.manifest_url is not None else raw_base
-  canonical = install._canonical_identity_key(source, manifest["id"])
-  existing = (
-    db.query(models.App)
-    .filter(
-      models.App.manifest_url == canonical,
-      models.App.deleted_at.is_(None),
-    )
-    .first()
+  existing = install._find_install_identity_row(
+    db, source_url=source, manifest_id=manifest["id"],
   )
+  if existing is not None and existing.deleted_at is not None:
+    existing = None
   installed_contract = existing.capability_contract if existing else None
   return schemas.AppPreviewOut(
     manifest=manifest,
@@ -886,7 +880,7 @@ async def update_check(
       checked_at=checked_at,
     )
 
-  if not manifest_url or not source_dir:
+  if not manifest_url:
     return _unknown()
 
   # Authentication and the target lookup have completed.  Release the request
@@ -1026,8 +1020,6 @@ async def update_preview(
         ),
       )
   app = live_app_or_404(db, app_id)
-  if not app.source_dir:
-    raise HTTPException(status_code=400, detail="App has no source_dir.")
   repo = Path(app.source_dir)
   if not app_git.is_repo(repo):
     raise HTTPException(status_code=400, detail="App is not a git repo.")
@@ -1064,6 +1056,7 @@ async def update_preview(
 )
 async def update_candidate_preview(
   app_id: int,
+  manifest_url: str | None = None,
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
@@ -1095,10 +1088,10 @@ async def update_candidate_preview(
   from app import install
 
   app = live_app_or_404(db, app_id)
-  manifest_url = app.manifest_url
+  installed_manifest_url = app.manifest_url
   source_dir = app.source_dir
   upstream_commit = app.upstream_commit
-  if not manifest_url or not source_dir:
+  if not installed_manifest_url:
     raise HTTPException(400, "App has no update source.")
   repo = Path(source_dir)
   if not app_git.is_repo(repo) or not app_git.ref_exists(
@@ -1109,8 +1102,18 @@ async def update_candidate_preview(
   # Release the request session before upstream network I/O, matching the
   # update-check route's connection-pool discipline.
   db.close()
-  fetch_manifest_url = install._canonical_base(manifest_url) + "/mobius.json"
+  fetch_manifest_url = (
+    manifest_url
+    if manifest_url is not None
+    else install._canonical_base(installed_manifest_url) + "/mobius.json"
+  )
   fetched = await install.fetch_upstream_source(fetch_manifest_url)
+  if manifest_url is not None and not install._catalog_identity_matches(
+    installed_manifest_url, manifest_url, fetched.manifest["id"],
+  ):
+    raise HTTPException(
+      409, "Requested update source does not match the installed app.",
+    )
   candidate_tree = _fetched_source_tree(fetched)
   source_digest = install._source_review_digest(
     manifest=fetched.manifest,
@@ -1248,8 +1251,6 @@ async def create_conflict_resolver_chat(
 ):
   """Create or return the owner-visible resolver chat for an app conflict."""
   app = live_app_or_404(db, app_id, populate=True)
-  if not app.source_dir:
-    raise HTTPException(status_code=400, detail="App has no source_dir.")
   repo = Path(app.source_dir)
   if not app_git.is_repo(repo):
     raise HTTPException(status_code=400, detail="App is not a git repo.")
@@ -1278,6 +1279,7 @@ async def create_conflict_resolver_chat(
         app_git.start_conflict_merge,
         repo,
         merge_base=merge.merge_base_oid,
+        allow_unrelated_histories=merge.unrelated_histories,
       ) or conflict_paths
       if not conflict_paths:
         raise HTTPException(
@@ -1625,6 +1627,48 @@ async def resolve_app_update(
   )
 
 
+class RuntimeCapabilityAcceptanceRequest(BaseModel):
+  accept_digest: str = Field(
+    min_length=64,
+    max_length=64,
+    pattern=r"^[0-9a-f]{64}$",
+  )
+
+
+@router.get("/{app_id}/runtime-capabilities")
+def review_local_runtime_capabilities(
+  app_id: int,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Review the normalized runtime declaration in a Store app's local source."""
+  try:
+    return app_capability_acceptance.review_local_runtime_capabilities(
+      db, app_id,
+    )
+  except app_capability_acceptance.CapabilityAcceptanceError as exc:
+    raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@router.post(
+  "/{app_id}/runtime-capabilities/accept",
+  dependencies=[Depends(reject_cross_site)],
+)
+def accept_local_runtime_capabilities(
+  app_id: int,
+  body: RuntimeCapabilityAcceptanceRequest,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Accept one reviewed declaration through the live server lifecycle."""
+  try:
+    return app_capability_acceptance.accept_local_runtime_capabilities(
+      db, app_id, body.accept_digest,
+    )
+  except app_capability_acceptance.CapabilityAcceptanceError as exc:
+    raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
 @router.get("/{app_id}", response_model=schemas.AppOut)
 def get_app(
   app_id: int,
@@ -1872,12 +1916,6 @@ async def update_icon(
     app = live_app(db, app_id, populate=True)
     if app is None or app.token_nonce != expected_nonce:
       raise HTTPException(404, "App not found.")
-    transition = icon_ownership.split_legacy_icon_ownership(app)
-    if transition.warning:
-      log.warning(
-        "legacy icon ownership for app %s: %s",
-        app.id, transition.warning,
-      )
     app.icon_override_png = processed
     db.commit()
   return Response(status_code=204)
@@ -2078,29 +2116,13 @@ async def delete_app(
     # job.sh stays in the preserved source tree so a reinstall/recover can
     # re-register the schedule. Drop cron under the per-source-dir lock, off the
     # loop (crontab shells out).
-    settings = get_settings()
-    resolved_source = _resolve_app_source_dir(
-      app_source_dir, app_name, settings
-    )
     try:
-      if resolved_source is not None:
-        async with fs_locks.source_dir_lock(str(resolved_source)):
-          await asyncio.to_thread(_drop_cron_only, resolved_source)
+      resolved_source = _resolve_app_source_dir(app_source_dir)
+      async with fs_locks.source_dir_lock(str(resolved_source)):
+        await asyncio.to_thread(_drop_cron_only, resolved_source)
     except Exception:
       log.exception(
         "App %s was deleted but its source cron could not be disabled",
-        app_id,
-      )
-    runtime_dir = _legacy_platform_runtime_dir_for_app(app)
-    try:
-      if runtime_dir is not None and (
-        resolved_source is None or runtime_dir.resolve() != resolved_source
-      ):
-        async with fs_locks.source_dir_lock(str(runtime_dir)):
-          await asyncio.to_thread(_drop_cron_only, runtime_dir)
-    except Exception:
-      log.exception(
-        "App %s was deleted but its legacy cron could not be disabled",
         app_id,
       )
 
@@ -2263,20 +2285,10 @@ async def recover_app(
     # preserved scripts here: an older one may run the job directly. Once all
     # replay locations are restored, the common reconciler below preserves the
     # cadence while rewriting/installing the supervised command.
-    settings = get_settings()
-    resolved_source = _resolve_app_source_dir(
-      app_source_dir, app_name, settings
-    )
     try:
-      if resolved_source is not None:
-        async with fs_locks.source_dir_lock(str(resolved_source)):
-          await asyncio.to_thread(_reenable_init_cron_replay, resolved_source)
-      runtime_dir = _legacy_platform_runtime_dir_for_app(app)
-      if runtime_dir is not None and (
-        resolved_source is None or runtime_dir.resolve() != resolved_source
-      ):
-        async with fs_locks.source_dir_lock(str(runtime_dir)):
-          await asyncio.to_thread(_reenable_init_cron_replay, runtime_dir)
+      resolved_source = _resolve_app_source_dir(app_source_dir)
+      async with fs_locks.source_dir_lock(str(resolved_source)):
+        await asyncio.to_thread(_reenable_init_cron_replay, resolved_source)
     except Exception:
       log.exception(
         "App %s was recovered but its cron declaration could not be restored",

@@ -3,18 +3,7 @@
  * focused tests because mobile timing regressions repeatedly happened here.
  */
 
-/**
- * The stable identity of a user message. `cid` is the canonical identity
- * (React key, DOM pin target `data-cid`, queue cancel key, force-steer
- * selection). Current clients mint it; card-221 backfilled `cid=legacy-<ts>`
- * onto every legacy row, so post-migration every user row carries an explicit
- * cid and no read-time derivation is needed (chat_writer.cid_of matches). `ts`
- * is display/ordering metadata only. Returns null for a row with no cid.
- */
-export function cidOf(msg) {
-  if (!msg) return null
-  return msg.cid || null
-}
+import { groupActivityRuns } from './activityGrouping.js'
 
 export function isContinuationMessage(message) {
   return message?.kind === 'continuation'
@@ -74,71 +63,16 @@ export function serverSnapshotBehindLocal(serverMsgs, localMsgs) {
   })
 }
 
-function durableMessageIdentity(message) {
-  if (!message) return null
-  if (message.id != null) return `id:${message.id}`
-  if (message.cid != null) return `cid:${message.cid}`
-  if (message.ts != null) return `ts:${message.role || ''}:${message.ts}`
-  return null
-}
-
-/**
- * Refresh the server-authoritative recent page without discarding an already
- * loaded older prefix. ChatView persists that wider window so R4 can restore
- * an ANCHOR_AT row after navigating away. Replacing it with the default last
- * 20 rows removes the anchor from the DOM and lets the browser clamp the
- * restored viewport toward the top.
- *
- * Offsets establish where the two windows overlap; durable row identities
- * verify that the history was only appended/updated rather than rewritten.
- * Any gap or identity mismatch fails closed to the recent server page.
- */
-export function mergeRecentMessagesIntoLoadedWindow({
-  loadedMessages,
-  loadedOffset,
-  recentMessages,
-  recentOffset,
-  preserveLocalSuffix = false,
-}) {
-  const recent = Array.isArray(recentMessages) ? recentMessages : []
-  const fallback = {
-    messages: recent,
-    offset: Number.isInteger(recentOffset) ? recentOffset : 0,
-  }
-  if (!Array.isArray(loadedMessages) || loadedMessages.length === 0) {
-    return fallback
-  }
-  if (!Number.isInteger(loadedOffset) || !Number.isInteger(recentOffset)) {
-    return fallback
-  }
-
-  const prefixLength = recentOffset - loadedOffset
-  if (prefixLength < 0 || prefixLength > loadedMessages.length || recent.length === 0) {
-    return fallback
-  }
-
-  const overlapLength = Math.min(
-    loadedMessages.length - prefixLength,
-    recent.length,
-  )
-  if (overlapLength <= 0) return fallback
-  for (let index = 0; index < overlapLength; index += 1) {
-    const loadedId = durableMessageIdentity(loadedMessages[prefixLength + index])
-    const recentId = durableMessageIdentity(recent[index])
-    if (!loadedId || loadedId !== recentId) return fallback
-  }
-
-  const localSuffix = preserveLocalSuffix
-    ? loadedMessages.slice(prefixLength + overlapLength)
-    : []
-  return {
-    messages: [
-      ...loadedMessages.slice(0, prefixLength),
-      ...recent,
-      ...localSuffix,
-    ],
-    offset: loadedOffset,
-  }
+/** The floating jump-to-latest control (contract R5a) shows only while the
+ * reader holds a position away from the content tail, and yields to any
+ * visible attention nudge — a nudge navigates to the same tail with strictly
+ * more context, so stacking both would be two controls for one action. */
+export function jumpToLatestShown({
+  awayFromTail = false,
+  questionNudgeShown = false,
+  resumeNudgeShown = false,
+} = {}) {
+  return !!awayFromTail && !questionNudgeShown && !resumeNudgeShown
 }
 
 export function canFastForwardQueue(pendingMessages, turnActive) {
@@ -203,6 +137,24 @@ function coldBlockRenderCost(block) {
   return Math.max(1, Math.ceil(String(block.content || '').length / 4000))
 }
 
+function coldPresentationChunks(blocks) {
+  const entries = blocks.map(item => ({ item }))
+  return groupActivityRuns(entries).map(node => {
+    if (node.group) {
+      return {
+        blocks: node.group.map(entry => entry.item),
+        // MsgContent presents one contiguous thinking/tool run as one collapsed
+        // ActivityStretch. Preparing every private entry as its own frame made
+        // the scheduler repeat the same growing group dozens of times before
+        // revealing a surface that contains only one row.
+        cost: 1,
+      }
+    }
+    const block = node.single.item
+    return { blocks: [block], cost: coldBlockRenderCost(block) }
+  })
+}
+
 /**
  * Build prefix-complete frames for a pathological cold transcript commit.
  *
@@ -220,7 +172,8 @@ export function coldTranscriptRenderFrames(
   const totalCost = messages.reduce((sum, message) => {
     const blocks = Array.isArray(message?.blocks) ? message.blocks : []
     return sum + (blocks.length > 0
-      ? blocks.reduce((blockSum, block) => blockSum + coldBlockRenderCost(block), 0)
+      ? coldPresentationChunks(blocks)
+        .reduce((chunkSum, chunk) => chunkSum + chunk.cost, 0)
       : 1)
   }, 0)
   if (totalCost < minCost) return [messages]
@@ -248,8 +201,8 @@ export function coldTranscriptRenderFrames(
       ])
     }
 
-    for (const block of blocks) {
-      const blockCost = coldBlockRenderCost(block)
+    for (const chunk of coldPresentationChunks(blocks)) {
+      const blockCost = chunk.cost
       let consumed = 0
       while (consumed < blockCost) {
         const take = Math.min(
@@ -259,10 +212,10 @@ export function coldTranscriptRenderFrames(
         consumed += take
         frameCost += take
         const complete = consumed === blockCost
-        const partialBlock = complete
+        const partialBlock = complete || chunk.blocks.length !== 1
           ? null
-          : { ...block, _coldRenderFraction: consumed / blockCost }
-        if (complete) visibleBlocks.push(block)
+          : { ...chunk.blocks[0], _coldRenderFraction: consumed / blockCost }
+        if (complete) visibleBlocks.push(...chunk.blocks)
         if (frameCost === frameBudget) {
           publish(partialBlock)
           frameCost = 0

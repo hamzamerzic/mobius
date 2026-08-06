@@ -1,8 +1,7 @@
 """First-boot bootstrap — ensure_bootstrap_apps_installed contract.
 
 Validates the boot-time invariants: ordered installs, canonical manifest
-identity, per-app uninstall policy and failure isolation, legacy migration,
-and the offline-test escape hatch.
+identity, per-app uninstall policy, and failure isolation.
 """
 
 from datetime import datetime, timezone
@@ -14,34 +13,24 @@ from fastapi import HTTPException
 
 from app import app_git, models
 from app.bootstrap import (
-  _LEGACY_PLATFORM_APPS_MIGRATION,
+  BOOTSTRAP_CONNECTIONS_MANIFEST_URL,
+  BOOTSTRAP_MEMORY_MANIFEST_URL,
+  BOOTSTRAP_REFLECTION_MANIFEST_URL,
   BOOTSTRAP_SKILLS_MANIFEST_URL,
   BOOTSTRAP_STORE_MANIFEST_URL,
-  LEGACY_PLATFORM_APP_MANIFEST_URLS,
-  _migrate_legacy_platform_apps,
   ensure_bootstrap_apps_installed,
 )
 
 
-def _reset_legacy_platform_marker(db):
-  """Drop the durable one-shot marker so a case can act as a FIRST boot.
-
-  The marker is per-database and the suite reuses one, so without this every
-  case after the first would correctly short-circuit and assert nothing.
-  """
-  from sqlalchemy import text
-
-  db.execute(
-    text("DELETE FROM schema_migrations WHERE version = :v"),
-    {"v": _LEGACY_PLATFORM_APPS_MIGRATION},
-  )
-  db.commit()
 
 
 def _install_result(name="App", slug="app", app_id=1, mode="install"):
   from app.install import InstallResult
 
-  app = models.App(id=app_id, name=name, slug=slug)
+  app = models.App(
+    source_dir="/tmp/mobius-tests/test-bootstrap-29",
+    id=app_id, name=name, slug=slug,
+  )
   return InstallResult(
     app=app,
     mode=mode,
@@ -57,8 +46,9 @@ def _bootstrap_urls():
   return [
     BOOTSTRAP_STORE_MANIFEST_URL,
     BOOTSTRAP_SKILLS_MANIFEST_URL,
-    LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"],
-    LEGACY_PLATFORM_APP_MANIFEST_URLS["reflection"],
+    BOOTSTRAP_MEMORY_MANIFEST_URL,
+    BOOTSTRAP_REFLECTION_MANIFEST_URL,
+    BOOTSTRAP_CONNECTIONS_MANIFEST_URL,
   ]
 
 
@@ -72,14 +62,14 @@ def test_recovery_store_bootstrap_is_pinned_to_an_immutable_commit():
 
 @pytest.mark.asyncio
 async def test_bootstrap_installs_all_apps_in_order_when_absent(db, monkeypatch):
-  """A fresh database installs the store first, then Memory and Reflection."""
+  """A fresh database installs the store first, then the other core apps."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
   install_mock = AsyncMock(return_value=_install_result())
 
   with patch("app.bootstrap.install_from_manifest", install_mock):
     await ensure_bootstrap_apps_installed(db)
 
-  assert install_mock.await_count == 4
+  assert install_mock.await_count == 5
   assert [
     call.kwargs["manifest_url"] for call in install_mock.await_args_list
   ] == _bootstrap_urls()
@@ -90,14 +80,35 @@ async def test_bootstrap_installs_all_apps_in_order_when_absent(db, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_bootstrap_releases_identity_transaction_before_install(
+  db, monkeypatch,
+):
+  """Serial fetch/compile work must not retain the identity query connection."""
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+
+  def install_after_release(*_args, **_kwargs):
+    assert not db.in_transaction()
+    return _install_result()
+
+  install_mock = AsyncMock(side_effect=install_after_release)
+  with patch("app.bootstrap.install_from_manifest", install_mock):
+    await ensure_bootstrap_apps_installed(db)
+
+  assert install_mock.await_count == len(_bootstrap_urls())
+  assert not db.in_transaction()
+
+
+@pytest.mark.asyncio
 async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
-  """Store returns after uninstall; Skills/Memory stay gone; live Reflection skips."""
+  """Store returns after uninstall; Skills/Memory/Connections stay gone;
+  live Reflection skips."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
   from app.install import _canonical_identity_key
 
   deleted_at = datetime.now(timezone.utc)
   db.add_all([
     models.App(
+      source_dir="/tmp/mobius-tests/store",
       name="Store",
       description="owner uninstalled",
       jsx_source="export default function App() {}",
@@ -108,6 +119,7 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
       deleted_at=deleted_at,
     ),
     models.App(
+      source_dir="/tmp/mobius-tests/skills",
       name="Skills",
       description="owner uninstalled",
       jsx_source="export default function App() {}",
@@ -118,23 +130,36 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
       deleted_at=deleted_at,
     ),
     models.App(
+      source_dir="/tmp/mobius-tests/memory",
       name="Memory",
       description="owner uninstalled",
       jsx_source="export default function App() {}",
       slug="memory",
       manifest_url=_canonical_identity_key(
-        LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"], "memory",
+        BOOTSTRAP_MEMORY_MANIFEST_URL, "memory",
       ),
       deleted_at=deleted_at,
     ),
     models.App(
+      source_dir="/tmp/mobius-tests/reflection",
       name="Reflection",
       description="already here",
       jsx_source="export default function App() {}",
       slug="reflection",
       manifest_url=_canonical_identity_key(
-        LEGACY_PLATFORM_APP_MANIFEST_URLS["reflection"], "reflection",
+        BOOTSTRAP_REFLECTION_MANIFEST_URL, "reflection",
       ),
+    ),
+    models.App(
+      source_dir="/tmp/mobius-tests/connections",
+      name="Connections",
+      description="owner uninstalled",
+      jsx_source="export default function App() {}",
+      slug="connections",
+      manifest_url=_canonical_identity_key(
+        BOOTSTRAP_CONNECTIONS_MANIFEST_URL, "connections",
+      ),
+      deleted_at=deleted_at,
     ),
   ])
   db.commit()
@@ -144,7 +169,8 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
     await ensure_bootstrap_apps_installed(db)
 
   # Only the Store (the recovery surface) returns after an owner uninstall;
-  # Skills and Memory (policy False) stay gone; live Reflection is skipped.
+  # Skills, Memory, and Connections (policy False) stay gone; live
+  # Reflection is skipped.
   assert install_mock.await_count == 1
   assert [
     call.kwargs["manifest_url"] for call in install_mock.await_args_list
@@ -159,6 +185,7 @@ async def test_bootstrap_skips_live_apps_by_canonical_manifest(db, monkeypatch):
 
   db.add_all([
     models.App(
+      source_dir="/tmp/mobius-tests/app-store",
       name="Store",
       description="already here",
       jsx_source="export default function App() {}",
@@ -166,6 +193,7 @@ async def test_bootstrap_skips_live_apps_by_canonical_manifest(db, monkeypatch):
       manifest_url=_canonical_identity_key(BOOTSTRAP_STORE_MANIFEST_URL, "store"),
     ),
     models.App(
+      source_dir="/tmp/mobius-tests/skills-custom",
       name="Skills",
       description="already here",
       jsx_source="export default function App() {}",
@@ -175,21 +203,33 @@ async def test_bootstrap_skips_live_apps_by_canonical_manifest(db, monkeypatch):
       ),
     ),
     models.App(
+      source_dir="/tmp/mobius-tests/memory-custom",
       name="Memory",
       description="already here",
       jsx_source="export default function App() {}",
       slug="memory-custom",
       manifest_url=_canonical_identity_key(
-        LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"], "memory",
+        BOOTSTRAP_MEMORY_MANIFEST_URL, "memory",
       ),
     ),
     models.App(
+      source_dir="/tmp/mobius-tests/reflection-custom",
       name="Reflection",
       description="already here",
       jsx_source="export default function App() {}",
       slug="reflection-custom",
       manifest_url=_canonical_identity_key(
-        LEGACY_PLATFORM_APP_MANIFEST_URLS["reflection"], "reflection",
+        BOOTSTRAP_REFLECTION_MANIFEST_URL, "reflection",
+      ),
+    ),
+    models.App(
+      source_dir="/tmp/mobius-tests/connections-custom",
+      name="Connections",
+      description="already here",
+      jsx_source="export default function App() {}",
+      slug="connections-custom",
+      manifest_url=_canonical_identity_key(
+        BOOTSTRAP_CONNECTIONS_MANIFEST_URL, "connections",
       ),
     ),
   ])
@@ -201,95 +241,8 @@ async def test_bootstrap_skips_live_apps_by_canonical_manifest(db, monkeypatch):
   install_mock.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("manifest_url_shape", ["empty", "raw", "canonical"])
-@pytest.mark.parametrize("source_shape", ["platform_core", "data_apps"])
-async def test_bootstrap_migrates_active_legacy_platform_rows(
-  source_shape, manifest_url_shape, db, monkeypatch,
-):
-  """The legacy migration remains one-shot and limited to retired sources."""
-  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
-  from app.config import get_settings
-  from app.install import _canonical_identity_key
-
-  data_dir = get_settings().data_dir
-  legacy_source = {
-    "platform_core": f"{data_dir}/platform/core-apps/memory",
-    "data_apps": f"{data_dir}/apps/memory",
-  }[source_shape]
-  raw_memory_manifest = LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"]
-  stored_manifest_url = {
-    "empty": None,
-    "raw": raw_memory_manifest,
-    "canonical": _canonical_identity_key(raw_memory_manifest, "memory"),
-  }[manifest_url_shape]
-  db.add(models.App(
-    name="Memory",
-    description="legacy platform app",
-    jsx_source="export default function App() {}",
-    slug="memory",
-    source_dir=legacy_source,
-    manifest_url=stored_manifest_url,
-  ))
-  db.commit()
-
-  _reset_legacy_platform_marker(db)
-  should_migrate = source_shape == "platform_core" or manifest_url_shape == "empty"
-  install_mock = AsyncMock(
-    return_value=_install_result("Memory", "memory", app_id=3, mode="update"),
-  )
-  with patch("app.bootstrap.install_from_manifest", install_mock):
-    await _migrate_legacy_platform_apps(db)
-
-  if should_migrate:
-    install_mock.assert_awaited_once()
-    assert (
-      install_mock.await_args.kwargs["manifest_url"]
-      == LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"]
-    )
-    assert install_mock.await_args.kwargs["source"] == "bootstrap"
-  else:
-    install_mock.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-async def test_owner_app_reusing_a_historical_slug_is_never_overwritten(
-  db, monkeypatch,
-):
-  """An owner's own app named `memory` must survive the next boot.
-
-  `app_apply` writes exactly the shape the historical predicate matches — slug
-  from the manifest id, source_dir /data/apps/<slug>, no manifest_url — so
-  without a durable one-shot marker the migration would install the catalog
-  manifest OVER an app the owner built themselves.
-  """
-  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
-  from app.config import get_settings
-
-  data_dir = get_settings().data_dir
-  _reset_legacy_platform_marker(db)
-
-  # First boot: nothing legacy present, so the migration closes its window.
-  empty_mock = AsyncMock(return_value=_install_result())
-  with patch("app.bootstrap.install_from_manifest", empty_mock):
-    await _migrate_legacy_platform_apps(db)
-  empty_mock.assert_not_awaited()
-
-  # Later: the owner builds their own app and happens to call it "memory".
-  db.add(models.App(
-    name="Memory",
-    description="the owner's OWN app, not the catalog one",
-    jsx_source="export default function App() {}",
-    slug="memory",
-    source_dir=f"{data_dir}/apps/memory",
-    manifest_url=None,
-  ))
-  db.commit()
-
-  install_mock = AsyncMock(return_value=_install_result("Memory", "memory"))
-  with patch("app.bootstrap.install_from_manifest", install_mock):
-    await _migrate_legacy_platform_apps(db)
-  install_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -297,6 +250,7 @@ async def test_bootstrap_ignores_unrelated_store_slug(db, monkeypatch):
   """A user-built app named store does not satisfy canonical app identity."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
   db.add(models.App(
+    source_dir="/tmp/mobius-tests/store",
     name="Store",
     description="user's own app, unrelated to the bootstrap manifest",
     jsx_source="export default function App() {}",
@@ -325,11 +279,12 @@ async def test_bootstrap_failure_doesnt_block_remaining_apps(
     _install_result("Skills", "skills", app_id=4),
     _install_result("Memory", "memory", app_id=2),
     _install_result("Reflection", "reflection", app_id=3),
+    _install_result("Connections", "connections", app_id=5),
   ])
   with patch("app.bootstrap.install_from_manifest", install_mock):
     await ensure_bootstrap_apps_installed(db)
 
-  assert install_mock.await_count == 4
+  assert install_mock.await_count == 5
   assert [
     call.kwargs["manifest_url"] for call in install_mock.await_args_list
   ] == _bootstrap_urls()
@@ -340,17 +295,6 @@ async def test_bootstrap_failure_doesnt_block_remaining_apps(
   assert bootstrap_errors, "expected bootstrap failure to log at ERROR"
 
 
-@pytest.mark.asyncio
-async def test_bootstrap_respects_skip_env_var(db, monkeypatch):
-  """MOEBIUS_SKIP_BOOTSTRAP=1 skips migrations and every app install."""
-  monkeypatch.setenv("MOEBIUS_SKIP_BOOTSTRAP", "1")
-  install_mock = AsyncMock()
-  migration_mock = AsyncMock()
-  with patch("app.bootstrap.install_from_manifest", install_mock), \
-       patch("app.bootstrap._migrate_legacy_platform_apps", migration_mock):
-    await ensure_bootstrap_apps_installed(db)
-  install_mock.assert_not_awaited()
-  migration_mock.assert_not_awaited()
 
 
 _SKILLS_MAIN_MANIFEST = (
@@ -373,6 +317,7 @@ async def test_bootstrap_recognizes_skills_row_installed_at_other_ref(
     "https://raw.githubusercontent.com/mobius-os/app-skills"
   )
   db.add(models.App(
+    source_dir="/tmp/mobius-tests/skills",
     id=50, name="Skills", slug="skills",
     manifest_url=_canonical_identity_key(_SKILLS_MAIN_MANIFEST, "skills"),
   ))
@@ -394,6 +339,7 @@ async def test_bootstrap_honors_skills_tombstone_at_other_ref(db, monkeypatch):
   from app.install import _canonical_identity_key
 
   db.add(models.App(
+    source_dir="/tmp/mobius-tests/skills",
     id=51, name="Skills", slug="skills",
     manifest_url=_canonical_identity_key(_SKILLS_MAIN_MANIFEST, "skills"),
     deleted_at=datetime.now(timezone.utc),
@@ -406,3 +352,30 @@ async def test_bootstrap_honors_skills_tombstone_at_other_ref(db, monkeypatch):
 
   urls = [c.kwargs["manifest_url"] for c in install_mock.await_args_list]
   assert BOOTSTRAP_SKILLS_MANIFEST_URL not in urls  # tombstone respected
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_honors_legacy_trusted_origin_tombstone(
+  db, monkeypatch,
+):
+  """A pre-identity catalog row remains uninstalled after owner deletion."""
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  db.add(models.App(
+    source_dir="/tmp/mobius-tests/legacy-memory",
+    id=52,
+    name="Memory",
+    slug="memory",
+    manifest_url=None,
+    deleted_at=datetime.now(timezone.utc),
+  ))
+  db.commit()
+
+  install_mock = AsyncMock(return_value=_install_result())
+  with patch(
+    "app.app_git.origin_url",
+    return_value="https://github.com/mobius-os/app-memory.git",
+  ), patch("app.bootstrap.install_from_manifest", install_mock):
+    await ensure_bootstrap_apps_installed(db)
+
+  urls = [c.kwargs["manifest_url"] for c in install_mock.await_args_list]
+  assert BOOTSTRAP_MEMORY_MANIFEST_URL not in urls

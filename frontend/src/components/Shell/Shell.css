@@ -288,6 +288,10 @@
    visibility:hidden settlement frame is never exposed. */
 .shell__chat-view {
   background: var(--bg);
+  /* A ChatView owns several internal paint layers (composer, progress rail,
+     menus). Keep those z-index values local to the view so they cannot punch
+     through a shell-owned handoff or New Chat presentation above it. */
+  isolation: isolate;
 }
 
 .shell__chat-view--staging {
@@ -300,6 +304,35 @@
   visibility: visible;
   pointer-events: none;
   z-index: 2;
+}
+
+/* While New chat is allocating, the ordinary landing covers the outgoing
+   ChatView and its z:2 handoff cover. */
+.shell__new-chat-presentation {
+  z-index: 3;
+}
+
+/* The resolved ChatView is already painted underneath. Fade the complete,
+   opaque welcome surface rather than unmounting one logo and asking the next
+   image node to replace it on the same frame; matching pixels stay visually
+   stable while the real composer arrives softly. */
+.shell__new-chat-presentation--releasing {
+  pointer-events: none;
+  will-change: opacity;
+  animation: shell-new-chat-release 180ms ease-out both;
+}
+
+@keyframes shell-new-chat-release {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Keep animationend as the state-machine completion signal without exposing
+     a visible transition to owners who prefer reduced motion. */
+  .shell__new-chat-presentation--releasing {
+    animation-duration: 1ms;
+  }
 }
 
 /* ── Tab strip: pinned chats/apps to swap between ─────────────────── */
@@ -578,13 +611,25 @@
   white-space: nowrap;
   border: 0;
 }
-/* PROPOSED "more power" builder chrome (design item 6, default OFF). Shell adds
-   .shell--builder-power only when the mobius:builder-power flag is on AND builder
-   mode is active. An accent power-rail under the top bar signals the build world;
-   the energized dividers live in workspace.css. Owner-toggleable preview — no
-   rebuild needed to try it. */
-.shell--builder-power .shell__bar {
-  box-shadow: inset 0 -2px 0 0 var(--accent);
+/* A real text control is required to reserve the software keyboard during the
+   async New-chat handoff. It stays mounted outside the modal drawer's inert
+   subtree and never participates in layout or pointer hit-testing. */
+.shell__composer-focus-lease {
+  position: fixed;
+  left: 0;
+  bottom: 0;
+  width: 1px;
+  height: 1px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  resize: none;
+  font-size: 16px;
+  caret-color: transparent;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -609,10 +654,14 @@
 /* Desktop productivity shell: the workspace starts at the very top, while a
    narrow left rail remains as the only persistent chrome. Expanding navigation
    turns that same rail into the drawer header (brand + notification bell);
-   collapsing it leaves a stable Möbius mark plus compact quick actions. Density
-   comes from removing redundant chrome while the document remains at native
-   scale, so viewport, pointer, iframe, and layout geometry share one space. */
+   collapsing it leaves a stable Möbius mark plus compact quick actions. */
 @media (min-width: 1024px) {
+  /* Intentional desktop shell density. Keep this in the shell-owned stylesheet:
+     index.css also serves standalone apps, which must retain native sizing. */
+  :root {
+    zoom: 0.9;
+  }
+
   .shell {
     --desktop-rail-width: 58px;
     --shell-bar-height: 0px;

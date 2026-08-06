@@ -1,10 +1,12 @@
 import fcntl
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 
+from app.platform_activation import dependency_fingerprint_paths
 from scripts.verify_test_runtime import PLATFORM_ROOT, platform_head, validate_runtime
 
 
@@ -102,6 +104,8 @@ def test_test_compose_pins_runtime_to_mounted_checkout():
   assert "BUILD_SHA=${GITHUB_SHA:-unknown}" in compose
   assert "./:/workspace:ro" in compose
   assert 'python3", "/app/scripts/verify_test_runtime.py"' in compose
+  pytest_service = compose.split("\n  pytest:\n", 1)[1].split("\nvolumes:\n", 1)[0]
+  assert "\n    init: true\n" in pytest_service
 
 
 def test_test_wrapper_isolates_compose_and_rejects_stale_images():
@@ -113,10 +117,12 @@ def test_test_wrapper_isolates_compose_and_rejects_stale_images():
   assert "the test runner never rebuilds" in wrapper
   dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
   assert "COPY Dockerfile ./test-image-inputs/Dockerfile" not in dockerfile
-  shell_deps = "RUN cd ./shell-src && npm ci --ignore-scripts"
+  shell_deps = (
+    "COPY frontend/package.json frontend/package-lock.json* ./shell-src/"
+  )
   retained_assets = (
-    "RUN mkdir -p /tmp/pdfjs-install",
-    "RUN mkdir -p /tmp/katex-install",
+    "mkdir -p /tmp/pdfjs-install",
+    "mkdir -p /tmp/katex-install",
   )
   backend_source = "COPY backend/app ./app/"
   backend_scripts = "COPY backend/scripts ./scripts/"
@@ -135,10 +141,46 @@ def test_node_runtime_satisfies_the_pinned_agent_browser_engine():
   dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
   preship = (ROOT / "scripts" / "preship-gate.sh").read_text(encoding="utf-8")
   assert "FROM node:24-trixie-slim AS node-runtime" in dockerfile
-  assert "agent-browser@0.31.1" in dockerfile
+  pinned_script_packages = {
+    "@anthropic-ai/claude-code": "CLAUDE_CODE_VERSION",
+    "agent-browser": "AGENT_BROWSER_VERSION",
+  }
+  for version_argument in pinned_script_packages.values():
+    assert re.search(
+      rf"^ARG {version_argument}=\d+\.\d+\.\d+$",
+      dockerfile,
+      re.MULTILINE,
+    )
+  apt_layer = dockerfile[
+    dockerfile.index("# System deps and global npm packages"):
+    dockerfile.index("# tectonic is a server-side subprocess")
+  ]
+  for package, version_argument in pinned_script_packages.items():
+    assert apt_layer.count(f"{package}@${{{version_argument}}}") == 2
+  assert "--engine-strict --strict-allow-scripts" in apt_layer
+  for package in ("jq", "ripgrep", "sqlite3", "unzip"):
+    assert re.search(rf"\b{package}\b", apt_layer)
   assert "node:24-trixie-slim sh -c" in preship
   assert "node:22" not in dockerfile
   assert "node:22" not in preship
+
+
+def test_tectonic_release_is_verified_for_supported_image_architectures():
+  dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+  tectonic_layer = dockerfile[
+    dockerfile.index("ARG TECTONIC_VERSION="):
+    dockerfile.index("# GitHub CLI:")
+  ]
+
+  for architecture in ("AMD64", "ARM64"):
+    assert re.search(
+      rf"^ARG TECTONIC_SHA256_{architecture}=[0-9a-f]{{64}}$",
+      tectonic_layer,
+      re.MULTILINE,
+    )
+  assert "amd64) target=x86_64" in tectonic_layer
+  assert "arm64) target=aarch64" in tectonic_layer
+  assert 'echo "${sha256}  /tmp/${tarball}" | sha256sum -c -' in tectonic_layer
 
 
 def test_image_deduplicates_agent_cli_payloads_without_breaking_sdk_contracts():
@@ -158,8 +200,8 @@ def test_image_deduplicates_agent_cli_payloads_without_breaking_sdk_contracts():
     "pip install --no-cache-dir --require-hashes -r requirements.lock"
     in requirements_layer
   )
-  assert "claude-agent-sdk==0.2.126" in requirements
-  assert "claude-agent-sdk==0.2.126" in requirements_lock
+  assert "claude-agent-sdk==0.2.128" in requirements
+  assert "claude-agent-sdk==0.2.128" in requirements_lock
   assert (
     'Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"'
     in requirements_layer
@@ -182,9 +224,7 @@ def test_image_deduplicates_agent_cli_payloads_without_breaking_sdk_contracts():
 
 def test_production_image_keeps_persistent_sso_checkouts_bootable():
   dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-  fingerprint = (
-    ROOT / "scripts" / "test-image-fingerprint.sh"
-  ).read_text(encoding="utf-8")
+  fingerprint_paths = dependency_fingerprint_paths(ROOT)
   requirements = (ROOT / "backend" / "requirements.txt").read_text(
     encoding="utf-8"
   )
@@ -217,8 +257,9 @@ def test_production_image_keeps_persistent_sso_checkouts_bootable():
   assert "jwt.encode" in probe
   assert "jwt.decode" in probe
   assert "except JWTError:" in probe
-  assert "backend/legacy_runtime/jose/__init__.py" in fingerprint
-  assert "backend/legacy_runtime/verify_jose.py" in fingerprint
+  fingerprint_paths = dependency_fingerprint_paths(ROOT)
+  assert "backend/legacy_runtime/jose/__init__.py" in fingerprint_paths
+  assert "backend/legacy_runtime/verify_jose.py" in fingerprint_paths
   assert "COPY backend/legacy_runtime/verify_jose.py" in dockerfile
   assert (
     "COPY backend/legacy_runtime/ "
@@ -279,16 +320,6 @@ def test_submit_pr_rechecks_landed_hooks_after_refresh():
   # enforces any hook policy that the fetch just landed.
   assert initial_doctor < fetch < rebase < publish
   assert "scripts/git-doctor.sh --fix" in refreshed_segment
-
-
-def test_submit_pr_blocks_non_main_release_before_git_mutation():
-  submit = (ROOT / "scripts" / "submit-pr.sh").read_text(encoding="utf-8")
-  guard = submit.index('MOBIUS_PLATFORM_RELEASE_REF}" != "refs/heads/main"')
-  doctor = submit.index("scripts/git-doctor.sh --fix")
-  fetch = submit.index("git fetch origin main")
-
-  assert guard < doctor < fetch
-  assert "platform contributions are disabled" in submit
 
 
 def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
@@ -555,12 +586,15 @@ def test_documented_browser_commands_use_disposable_runner():
   assert '/home/' not in test_script
 
 
-def test_pull_requests_run_required_suites_and_cutover_publishes_immutable_image():
+def test_manual_and_pull_request_runs_cover_suites_and_cutover_image():
   test_workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
     encoding="utf-8"
   )
   image_workflow = (
     ROOT / ".github" / "workflows" / "external-recovery-image.yml"
+  ).read_text(encoding="utf-8")
+  digest_workflow = (
+    ROOT / ".github" / "workflows" / "core-digest-image.yml"
   ).read_text(encoding="utf-8")
   assert not (ROOT / ".github" / "workflows" / "main-image.yml").exists()
   assert not (
@@ -575,6 +609,7 @@ def test_pull_requests_run_required_suites_and_cutover_publishes_immutable_image
   e2e = test_workflow.split("\n  e2e:\n", 1)[1]
 
   assert "pull_request:\n" in test_triggers
+  assert "workflow_dispatch:\n" in test_triggers
   assert "push:\n" not in test_triggers
   assert "'feat/**'" not in test_triggers
   assert "'fix/**'" not in test_triggers
@@ -675,11 +710,86 @@ def test_pull_requests_run_required_suites_and_cutover_publishes_immutable_image
   assert "cache-to: type=gha,mode=max,ignore-error=true" in image_workflow
   assert "load: true" not in image_workflow
 
-  workflows = test_workflow + image_workflow
-  assert workflows.count("DOCKER_BUILD_RECORD_UPLOAD: 'false'") == 2
+  workflows = test_workflow + image_workflow + digest_workflow
+  assert workflows.count("DOCKER_BUILD_RECORD_UPLOAD: 'false'") == 3
   assert "actions/checkout@v5" not in workflows
   assert "actions/setup-node@v5" not in workflows
   assert "actions/setup-python@v5" not in workflows
+
+
+def test_recurring_core_digest_workflow_keeps_dynamic_and_frozen_identity_separate():
+  workflow = (
+    ROOT / ".github" / "workflows" / "core-digest-image.yml"
+  ).read_text(encoding="utf-8")
+  triggers = workflow.split("\npermissions:\n", 1)[0]
+  assert "push:\n" in triggers
+  assert "workflow_dispatch:\n" in triggers
+  assert "    branches: [stack/external-recovery-v1]\n" in triggers
+  assert "pull_request:\n" not in triggers
+
+  current = workflow.index("/internal/core-releases/current")
+  prepublish = workflow.index("/internal/core-releases/prepublish")
+  registry_login = workflow.index("docker/login-action@")
+  build = workflow.index("docker/build-push-action@")
+  ownership_recheck = workflow.index(
+    "Recheck protected-branch ownership before binding"
+  )
+  bind = workflow.index("/internal/core-releases/bind")
+  postpublish = workflow.index("/internal/core-releases/postpublish")
+  final_current = workflow.rindex("/internal/core-releases/current")
+  assert (
+    current < prepublish < registry_login < build < ownership_recheck
+    < bind < postpublish
+  )
+  assert postpublish < final_current
+
+  assert "permissions:\n  contents: read\n  packages: write\n" in workflow
+  assert "environment: external-recovery-release" in workflow
+  assert "group: mobius-core-image-publication" in workflow
+  assert "cancel-in-progress: false" in workflow
+  assert "MOBIUS_MANAGED_CORE_RELEASE_ENABLED == 'true'" in workflow
+  assert "MOBIUS_MANAGED_CORE_PREREQUISITE_SHA" in workflow
+  assert "MOBIUS_MANAGED_CORE_PREREQUISITE_DIGEST" in workflow
+  assert "FROZEN_COMPATIBILITY_SHA" in workflow
+  assert "FROZEN_COMPATIBILITY_DIGEST" in workflow
+  assert "CORE_PREREQUISITE_SHA" in workflow
+  assert "CORE_PREREQUISITE_DIGEST" in workflow
+  assert "scripts/core_digest_release.py current" in workflow
+  assert "scripts/external_recovery_release.py" in workflow
+  assert "inventory" in workflow
+  assert "exact-current replay" in workflow
+  assert "steps.current.outputs.mode == 'replay'" in workflow
+  assert "steps.current.outputs.active_digest" in workflow
+  assert "The active controller digest changed before prepublish" in workflow
+  assert "steps.gate.outputs.mode == 'resume_cutover'" in workflow
+  assert "steps.gate.outputs.mode == 'completed_replay'" not in workflow
+  assert "candidate_sha:" in triggers
+  assert "ref: ${{ env.CANDIDATE_SHA }}" in workflow
+  assert 'test "$release_head" = "$CANDIDATE_SHA"' in workflow
+  assert 'git merge-base --is-ancestor "$CANDIDATE_SHA" "$release_head"' in workflow
+  assert workflow.count(
+    'if [ "$release_head" != "$CANDIDATE_SHA" ]; then'
+  ) == 1
+  assert "Refusing to bind a candidate that no longer owns" in workflow
+  assert "persist-credentials: false" in workflow
+  assert "cache-to: type=gha,mode=max,ignore-error=true" in workflow
+
+  immutable_tag = (
+    "tags: ${{ env.MOBIUS_IMAGE_REPOSITORY }}:sha-${{ env.CANDIDATE_SHA }}-"
+    "run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
+  )
+  assert immutable_tag in workflow
+  assert '--tag "$MOBIUS_RELEASE_CHANNEL"' not in workflow
+  assert 'tags: ${{ env.MOBIUS_RELEASE_CHANNEL }}' not in workflow
+  assert '--tag "$MOBIUS_IMAGE_REPOSITORY:main"' not in workflow
+  assert '--tag "$MOBIUS_IMAGE_REPOSITORY:daily"' not in workflow
+  assert "docker buildx imagetools create" not in workflow
+
+  assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" in workflow
+  assert "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c" in workflow
+  assert "docker/login-action@dbcb813823bdd20940b903addbd779551569679f" in workflow
+  assert "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a" in workflow
+
 
 def test_hosted_concurrency_is_scoped_to_the_pull_request():
   workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(

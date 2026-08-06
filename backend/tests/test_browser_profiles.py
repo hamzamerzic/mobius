@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 from app import browser_profiles, chat
 from app.browser_profiles import enforce_browser_profile_quota
@@ -27,22 +28,67 @@ def _named_profile(root, name, *, cache_bytes, durable_bytes):
   return profile
 
 
-def test_railway_defaults_fit_below_managed_volume_limit(monkeypatch):
+def test_profile_defaults_follow_data_capacity_not_provider(monkeypatch, tmp_path):
+  monkeypatch.setattr(
+    browser_profiles.shutil,
+    "disk_usage",
+    lambda path: SimpleNamespace(total=512 * 1024**2),
+  )
+  expected = (128 * 1024**2, 96 * 1024**2)
+  assert browser_profiles.default_browser_profile_quota(tmp_path) == expected
   for name in (
     "RAILWAY_ENVIRONMENT",
     "RAILWAY_ENVIRONMENT_ID",
     "RAILWAY_PROJECT_ID",
     "RAILWAY_SERVICE_ID",
   ):
-    monkeypatch.delenv(name, raising=False)
-  assert browser_profiles.default_browser_profile_quota() == (
+    monkeypatch.setenv(name, "railway-test")
+  assert browser_profiles.default_browser_profile_quota(tmp_path) == expected
+
+
+def test_profile_defaults_are_capped_and_fall_back_on_probe_failure(
+  monkeypatch, tmp_path,
+):
+  monkeypatch.setattr(
+    browser_profiles.shutil,
+    "disk_usage",
+    lambda path: SimpleNamespace(total=16 * 1024**3),
+  )
+  assert browser_profiles.default_browser_profile_quota(tmp_path) == (
     2 * 1024**3, 1536 * 1024**2,
   )
 
-  monkeypatch.setenv("RAILWAY_PROJECT_ID", "project-test")
-  assert browser_profiles.default_browser_profile_quota() == (
-    128 * 1024**2, 96 * 1024**2,
+  def fail(_path):
+    raise OSError("unavailable")
+
+  monkeypatch.setattr(browser_profiles.shutil, "disk_usage", fail)
+  assert browser_profiles.default_browser_profile_quota(tmp_path) == (
+    2 * 1024**3, 1536 * 1024**2,
   )
+
+  monkeypatch.setattr(
+    browser_profiles.shutil,
+    "disk_usage",
+    lambda path: SimpleNamespace(total=0),
+  )
+  assert browser_profiles.default_browser_profile_quota(tmp_path) == (
+    2 * 1024**3, 1536 * 1024**2,
+  )
+
+
+def test_profile_quota_environment_overrides_capacity(monkeypatch, tmp_path):
+  monkeypatch.setattr(
+    browser_profiles.shutil,
+    "disk_usage",
+    lambda path: SimpleNamespace(total=512 * 1024**2),
+  )
+  monkeypatch.setenv("AGENT_BROWSER_PROFILE_MAX_BYTES", "42")
+  monkeypatch.setenv("AGENT_BROWSER_PROFILE_LOW_WATER_BYTES", "31")
+
+  result = enforce_browser_profile_quota(tmp_path, {}, set())
+
+  assert result["max_bytes"] == 42
+  assert result["low_water_bytes"] == 31
 
 
 def test_profile_sweep_interval_is_hourly_and_bounded(monkeypatch):
@@ -56,11 +102,12 @@ def test_profile_sweep_interval_is_hourly_and_bounded(monkeypatch):
 
 def _fake_browser_process(
   proc, pid, *, chat_id, session, namespace=None, socket_dir=None,
+  executable="agent-browser-linux-x64",
 ):
   process = proc / str(pid)
   process.mkdir(parents=True)
   (process / "cmdline").write_bytes(
-    b"/usr/local/lib/agent-browser-linux-x64\0"
+    f"/usr/local/lib/{executable}\0".encode()
   )
   values = {
     "CHAT_ID": chat_id,
@@ -90,6 +137,14 @@ def test_browser_sessions_for_chat_preserves_opaque_session_values(tmp_path):
     namespace="custom/ns", socket_dir="/tmp/ab-sockets",
   )
   _fake_browser_process(proc, 107, chat_id="chat-a", session="-x")
+  _fake_browser_process(
+    proc, 108, chat_id="chat-a", session="arm-preview",
+    executable="agent-browser-linux-arm64",
+  )
+  _fake_browser_process(
+    proc, 109, chat_id="chat-a", session="lookalike",
+    executable="agent-browser-linux-x64-wrapper",
+  )
 
   foreign = proc / "104"
   foreign.mkdir()
@@ -105,9 +160,11 @@ def test_browser_sessions_for_chat_preserves_opaque_session_values(tmp_path):
     b"CHAT_ID=chat-a\0AGENT_BROWSER_SESSION=not-a-browser\0"
   )
 
-  assert browser_profiles.browser_session_targets_for_chat(
+  scan = browser_profiles.browser_session_targets_for_chat(
     "chat-a", proc_root=proc,
-  ) == {
+  )
+  assert scan.complete is True
+  assert scan.targets == frozenset({
     browser_profiles.BrowserSessionTarget(session="custom:colon"),
     browser_profiles.BrowserSessionTarget(session="unicode-ø-世界"),
     browser_profiles.BrowserSessionTarget(session=long_name),
@@ -117,7 +174,8 @@ def test_browser_sessions_for_chat_preserves_opaque_session_values(tmp_path):
       socket_dir="/tmp/ab-sockets",
     ),
     browser_profiles.BrowserSessionTarget(session="-x"),
-  }
+    browser_profiles.BrowserSessionTarget(session="arm-preview"),
+  })
 
 
 def test_terminal_browser_cleanup_closes_inherited_and_custom_sessions(
@@ -129,7 +187,7 @@ def test_terminal_browser_cleanup_closes_inherited_and_custom_sessions(
   monkeypatch.setattr(
     browser_profiles,
     "browser_session_targets_for_chat",
-    lambda _chat_id: {
+    lambda _chat_id: browser_profiles.BrowserSessionScan(frozenset({
       browser_profiles.BrowserSessionTarget(session="custom:colon"),
       browser_profiles.BrowserSessionTarget(session="unicode-ø-世界"),
       browser_profiles.BrowserSessionTarget(session=long_name),
@@ -139,7 +197,7 @@ def test_terminal_browser_cleanup_closes_inherited_and_custom_sessions(
         socket_dir="/tmp/ab-sockets",
       ),
       browser_profiles.BrowserSessionTarget(session="-x"),
-    },
+    }), True),
   )
   calls = []
 
@@ -176,7 +234,8 @@ def test_terminal_browser_cleanup_closes_inherited_and_custom_sessions(
 
 def test_terminal_browser_cleanup_kills_timed_out_close_process(monkeypatch):
   monkeypatch.setattr(
-    browser_profiles, "browser_session_targets_for_chat", lambda _chat_id: set(),
+    browser_profiles, "browser_session_targets_for_chat",
+    lambda _chat_id: browser_profiles.BrowserSessionScan(frozenset(), True),
   )
   monkeypatch.setattr(chat, "_BROWSER_CLOSE_WAIT_TIMEOUT", 0.01)
   monkeypatch.setattr(chat, "_BROWSER_CLOSE_KILL_GRACE", 0.01)
@@ -221,7 +280,8 @@ def test_terminal_browser_cleanup_kills_timed_out_close_process(monkeypatch):
 
 def test_terminal_browser_cleanup_bounds_wait_after_sigkill(monkeypatch, caplog):
   monkeypatch.setattr(
-    browser_profiles, "browser_session_targets_for_chat", lambda _chat_id: set(),
+    browser_profiles, "browser_session_targets_for_chat",
+    lambda _chat_id: browser_profiles.BrowserSessionScan(frozenset(), True),
   )
   monkeypatch.setattr(chat, "_BROWSER_CLOSE_WAIT_TIMEOUT", 0.01)
   monkeypatch.setattr(chat, "_BROWSER_CLOSE_KILL_GRACE", 0.01)
@@ -268,7 +328,8 @@ def test_terminal_browser_cleanup_bounds_wait_when_process_disappears_before_ter
   monkeypatch, caplog,
 ):
   monkeypatch.setattr(
-    browser_profiles, "browser_session_targets_for_chat", lambda _chat_id: set(),
+    browser_profiles, "browser_session_targets_for_chat",
+    lambda _chat_id: browser_profiles.BrowserSessionScan(frozenset(), True),
   )
   monkeypatch.setattr(chat, "_BROWSER_CLOSE_WAIT_TIMEOUT", 0.01)
   monkeypatch.setattr(chat, "_BROWSER_CLOSE_KILL_WAIT_TIMEOUT", 0.01)

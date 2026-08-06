@@ -32,6 +32,12 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserverVFS
 
+from app.build_admission import (
+  BuildLeaseUnavailable,
+  build_lease,
+  require_vite_build_admission,
+  vite_build_admitted,
+)
 from app.process_groups import (
   isolated_process_group_id,
   lower_process_group_priority,
@@ -40,6 +46,7 @@ from app.process_groups import (
 log = logging.getLogger(__name__)
 
 _DEBOUNCE_SECS = 1.75
+_POLL_INTERVAL_SECS = 2.0
 _INCOMPLETE_GRACE_SECS = 30.0
 _WATCH_RESTART_BACKOFF_MAX = 30.0
 _WATCH_LEASE_RETRY_INITIAL = 1.0
@@ -57,6 +64,7 @@ _FRONTEND_DIR = Path(os.environ.get(
 ))
 _DIST_DIR = _FRONTEND_DIR / "dist"
 _STAGING_DIST_DIR = _FRONTEND_DIR / ".dist-staging"
+_BAKED_VENDOR_DIR = Path("/app/static/vendor")
 _REBUILD_DIST_DIR = _FRONTEND_DIR / ".dist-rebuild"
 _NEXT_DIST_DIR = _FRONTEND_DIR / ".dist-next"
 _OLD_DIST_DIR = _FRONTEND_DIR / ".dist-old"
@@ -65,10 +73,10 @@ _ATTIC_DIR = _FRONTEND_DIR / ".assets-attic"
 # steering, or reading a live reply. Agent edits can publish many generations
 # during that one foreground session, and lazy chunks (Settings is the common
 # case) are fetched only when first opened. Three generations lasted less than
-# two minutes during a real multi-file refactor. Sixty-four keeps roughly an
-# hour of that unusually rapid edit cadence while remaining a hard, predictable
-# disk bound (today's complete hashed asset set is about 1.3 MiB/generation).
-_ATTIC_KEEP = 64
+# two minutes during a real multi-file refactor. Sixteen keeps several minutes
+# of that unusually rapid edit cadence while putting a firm bound on retained
+# shell generations and leaving more room for owner data.
+_ATTIC_KEEP = 16
 _BUILT_GLOBAL_CHECK = (
   _FRONTEND_DIR / "scripts" / "check-built-globals.mjs"
 )
@@ -96,11 +104,20 @@ _ACTIVE_WATCHER: "_FrontendHandler | None" = None
 _ACTIVE_SUPERVISOR: "_FrontendSupervisor | None" = None
 
 
+def _memory_is_tight() -> bool:
+  """True when starting another native JS build risks an OOM kill.
+
+  Unmeasurable memory is ``unknown``, which fails open. The shared Vite policy
+  combines ratio/PSI pressure with the absolute reserve small cgroups need.
+  """
+  return not vite_build_admitted()
+
+
 def _source_tree_scandir(
   frontend_root: Path,
   path: str | None,
 ) -> Iterator[os.DirEntry[str]]:
-  """Expose only build inputs to watchdog's once-per-second snapshot.
+  """Expose only build inputs to watchdog's polling snapshot.
 
   A recursive observer rooted at the editable frontend would otherwise stat
   node_modules, build generations, caches, and git metadata even though none of
@@ -580,13 +597,27 @@ def _vite_build_cmd(out_dir: Path) -> list[str]:
 
 
 def _copy_vendor(dest: Path) -> None:
-  vendor = Path("/app/static/vendor")
+  """Fill image-built vendor dependencies without replacing source assets.
+
+  Vite has already copied ``frontend/public/vendor`` into ``dest``. The image
+  also supplies heavy generated dependencies (currently KaTeX) that are not
+  checked into the source tree. Those two inputs are complementary: the baked
+  tree may fill absent paths, but source-owned public files must win when a
+  path exists in both. Replacing the directory here used to erase every newly
+  added public vendor asset at the final publish boundary.
+  """
+  vendor = _BAKED_VENDOR_DIR
   if not vendor.is_dir():
     return
   vendor_dest = dest / "vendor"
-  if vendor_dest.exists():
-    shutil.rmtree(vendor_dest)
-  shutil.copytree(vendor, vendor_dest)
+  vendor_dest.mkdir(parents=True, exist_ok=True)
+  for source in vendor.rglob("*"):
+    target = vendor_dest / source.relative_to(vendor)
+    if source.is_dir():
+      target.mkdir(parents=True, exist_ok=True)
+    elif not target.exists():
+      target.parent.mkdir(parents=True, exist_ok=True)
+      shutil.copy2(source, target)
 
 
 def _prepare_next_from(source_dir: Path) -> None:
@@ -684,19 +715,26 @@ def _publish_built_dir(source_dir: Path, reason: str) -> bool:
 
 
 def _run_vite_build_once(out_dir: Path) -> str:
-  """Run one explicit full Vite build into ``out_dir``."""
-  _ensure_node_modules()
-  if out_dir.exists():
-    shutil.rmtree(out_dir)
-  result = subprocess.run(
-    _vite_build_cmd(out_dir),
-    cwd=str(_FRONTEND_DIR),
-    env=_vite_env(_REBUILD_CACHE_DIR, _REBUILD_TMP_DIR),
-    stdout=subprocess.PIPE,
-    stderr=subprocess.STDOUT,
-    text=True,
-    timeout=180,
-  )
+  """Run one explicit full Vite build into ``out_dir``.
+
+  This path waits for the shared lease. If the cgroup is still unsafe once it
+  owns the lease, owner Apply rolls its source change back and rebuild_shell.sh
+  aborts cleanly; either operation can be retried without risking an OOM kill.
+  """
+  with build_lease():
+    require_vite_build_admission()
+    _ensure_node_modules()
+    if out_dir.exists():
+      shutil.rmtree(out_dir)
+    result = subprocess.run(
+      _vite_build_cmd(out_dir),
+      cwd=str(_FRONTEND_DIR),
+      env=_vite_env(_REBUILD_CACHE_DIR, _REBUILD_TMP_DIR),
+      stdout=subprocess.PIPE,
+      stderr=subprocess.STDOUT,
+      text=True,
+      timeout=180,
+    )
   if result.returncode != 0:
     if out_dir.exists():
       shutil.rmtree(out_dir)
@@ -780,7 +818,7 @@ class _FrontendHandler(FileSystemEventHandler):
         self._source_observer = PollingObserverVFS(
           stat=os.stat,
           listdir=lambda path: _source_tree_scandir(_FRONTEND_DIR, path),
-          polling_interval=1.0,
+          polling_interval=_POLL_INTERVAL_SECS,
         )
         self._source_observer.schedule(
           self, str(_FRONTEND_DIR), recursive=True,
@@ -967,107 +1005,129 @@ class _FrontendHandler(FileSystemEventHandler):
         })
 
   def _run_demand_build(self, reason: str) -> None:
-    """Run one isolated build and publish it before releasing its heap."""
-    with self._state_lock:
-      blocked_signature = self._blocked_conflict_signature
-    if blocked_signature is not None:
-      current_signature, _ = _source_snapshot()
-      if current_signature == blocked_signature:
-        # The same conflicted snapshot is still present. Stat it cheaply, but
-        # do not reread every text input on each backstop retry.
-        self._queue_build("conflict-marker preflight retry")
-        return
-    preflight = _stable_source_preflight()
-    if preflight is None:
-      self._queue_build("source changed during conflict-marker preflight")
-      return
-    source_signature, conflicts = preflight
-    if conflicts:
-      with self._state_lock:
-        newly_blocked = self._blocked_conflict_signature != source_signature
-        self._blocked_conflict_signature = source_signature
-      if newly_blocked:
-        log.warning(
-          "frontend demand build deferred; conflict markers remain in %s",
-          ", ".join(conflicts),
-        )
-      # Poll the cheap preflight after the normal debounce as a backstop for a
-      # missed/coalesced observer event. Do not make a transient editing state
-      # sticky, and do not emit shell_rebuild_failed while the last good dist
-      # remains served.
-      self._queue_build("conflict-marker preflight retry")
-      return
-    with self._state_lock:
-      conflict_cleared = self._blocked_conflict_signature is not None
-      self._blocked_conflict_signature = None
-    if conflict_cleared:
-      log.info("frontend conflict-marker preflight cleared; resuming build")
-    _ensure_node_modules()
-    if _STAGING_DIST_DIR.exists():
-      shutil.rmtree(_STAGING_DIST_DIR)
-    cmd = _vite_build_cmd(_STAGING_DIST_DIR)
-    proc: subprocess.Popen | None = None
-    rc: int | None = None
-    output = ""
+    """Run one isolated build and publish it before releasing its heap.
+
+    Both admission failures requeue the ORIGINAL reason after the normal
+    debounce, exactly like the conflict-marker retry below. Deferring is only
+    correct here, where a retry is free: the explicit rebuild path cannot
+    retry, so it waits for the lease instead.
+    """
     try:
-      proc = subprocess.Popen(
-        cmd,
-        cwd=str(_FRONTEND_DIR),
-        env=_vite_env(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        start_new_session=True,
-      )
-      lower_process_group_priority(
-        isolated_process_group_id(proc.pid),
-        logger=log,
-        label="Frontend build",
-      )
-      with self._proc_lock:
-        self._watch_proc = proc
-      log.info("frontend demand build started after %s", reason)
-      try:
-        output, _ = proc.communicate(timeout=180)
-      except subprocess.TimeoutExpired as exc:
-        self._terminate_watch_process(signal.SIGTERM)
+      with build_lease(blocking=False):
+        if _memory_is_tight():
+          self._queue_build(reason)
+          return
+        with self._state_lock:
+          blocked_signature = self._blocked_conflict_signature
+        if blocked_signature is not None:
+          current_signature, _ = _source_snapshot()
+          if current_signature == blocked_signature:
+            # The same conflicted snapshot is still present. Stat it
+            # cheaply, but do not reread every text input on each retry.
+            self._queue_build("conflict-marker preflight retry")
+            return
+        preflight = _stable_source_preflight()
+        if preflight is None:
+          self._queue_build("source changed during conflict-marker preflight")
+          return
+        source_signature, conflicts = preflight
+        if conflicts:
+          with self._state_lock:
+            newly_blocked = (
+              self._blocked_conflict_signature != source_signature
+            )
+            self._blocked_conflict_signature = source_signature
+          if newly_blocked:
+            log.warning(
+              "frontend demand build deferred; conflict markers remain in %s",
+              ", ".join(conflicts),
+            )
+          # Poll the cheap preflight after the normal debounce as a
+          # backstop for a missed/coalesced observer event. Do not make a
+          # transient editing state sticky, and do not emit
+          # shell_rebuild_failed while the last good dist remains served.
+          self._queue_build("conflict-marker preflight retry")
+          return
+        with self._state_lock:
+          conflict_cleared = self._blocked_conflict_signature is not None
+          self._blocked_conflict_signature = None
+        if conflict_cleared:
+          log.info(
+            "frontend conflict-marker preflight cleared; resuming build",
+          )
+        _ensure_node_modules()
+        if _STAGING_DIST_DIR.exists():
+          shutil.rmtree(_STAGING_DIST_DIR)
+        cmd = _vite_build_cmd(_STAGING_DIST_DIR)
+        proc: subprocess.Popen | None = None
+        rc: int | None = None
+        output = ""
         try:
-          output, _ = proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-          self._terminate_watch_process(signal.SIGKILL)
-          output, _ = proc.communicate()
-        raise RuntimeError("vite build timed out after 180 seconds") from exc
-      rc = proc.returncode
-    finally:
-      with self._proc_lock:
-        if self._watch_proc is proc:
-          self._watch_proc = None
-    if self._closed.is_set():
-      return
-    if rc != 0:
-      shutil.rmtree(_STAGING_DIST_DIR, ignore_errors=True)
-      detail = _tail(output) or f"vite build exited {rc}"
-      raise RuntimeError(detail)
-    if output.strip():
-      log.info("frontend demand build complete: %s", _tail(output, 1000))
-    current_source_signature, _ = _source_snapshot()
-    if current_source_signature != source_signature:
-      shutil.rmtree(_STAGING_DIST_DIR, ignore_errors=True)
-      log.info(
-        "frontend source changed during demand build; discarding staging",
-      )
-      self._queue_build("source changed during demand build")
-      return
-    if not self._refresh_staging_signature():
-      raise RuntimeError("vite build completed without a staging generation")
-    self._publish_dirty_sync(f"build:{reason}")
-    with self._state_lock:
-      publish_pending = self._staging_dirty
-    if not publish_pending:
-      try:
-        _write_source_stamp(source_signature)
-      except OSError:
-        log.warning("could not persist frontend source signature")
+          proc = subprocess.Popen(
+            cmd,
+            cwd=str(_FRONTEND_DIR),
+            env=_vite_env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+          )
+          lower_process_group_priority(
+            isolated_process_group_id(proc.pid),
+            logger=log,
+            label="Frontend build",
+          )
+          with self._proc_lock:
+            self._watch_proc = proc
+          log.info("frontend demand build started after %s", reason)
+          try:
+            output, _ = proc.communicate(timeout=180)
+          except subprocess.TimeoutExpired as exc:
+            self._terminate_watch_process(signal.SIGTERM)
+            try:
+              output, _ = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+              self._terminate_watch_process(signal.SIGKILL)
+              output, _ = proc.communicate()
+            raise RuntimeError(
+              "vite build timed out after 180 seconds",
+            ) from exc
+          rc = proc.returncode
+        finally:
+          with self._proc_lock:
+            if self._watch_proc is proc:
+              self._watch_proc = None
+        if self._closed.is_set():
+          return
+        if rc != 0:
+          shutil.rmtree(_STAGING_DIST_DIR, ignore_errors=True)
+          detail = _tail(output) or f"vite build exited {rc}"
+          raise RuntimeError(detail)
+        if output.strip():
+          log.info("frontend demand build complete: %s", _tail(output, 1000))
+        current_source_signature, _ = _source_snapshot()
+        if current_source_signature != source_signature:
+          shutil.rmtree(_STAGING_DIST_DIR, ignore_errors=True)
+          log.info(
+            "frontend source changed during demand build; discarding staging",
+          )
+          self._queue_build("source changed during demand build")
+          return
+        if not self._refresh_staging_signature():
+          raise RuntimeError(
+            "vite build completed without a staging generation",
+          )
+        self._publish_dirty_sync(f"build:{reason}")
+        with self._state_lock:
+          publish_pending = self._staging_dirty
+        if not publish_pending:
+          try:
+            _write_source_stamp(source_signature)
+          except OSError:
+            log.warning("could not persist frontend source signature")
+    except BuildLeaseUnavailable:
+      # Only the acquisition above can raise this; the body takes no lease.
+      self._queue_build(reason)
 
   def _refresh_staging_signature(self) -> bool:
     sig = _tree_signature(_STAGING_DIST_DIR)

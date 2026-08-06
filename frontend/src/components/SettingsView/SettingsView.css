@@ -91,6 +91,12 @@
   line-height: 1.45;
 }
 
+.settings__notice--stacked {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
 .settings__subtext a {
   color: var(--accent);
   text-decoration: underline;
@@ -556,4 +562,50 @@
 
 .settings__section--server .settings__subtext--tight {
   margin: -10px 0 0;
+}
+
+/* ── Provider-neutral MCP connections ──────────────────────────────── */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+@media (hover: hover) and (pointer: fine) {
+
+}
+
+
+
+
+
+
+
+
+@media (hover: hover) and (pointer: fine) {
+}
+
+
+
+
+
+
+
+
+
+
+
+
+@container settings (max-width: 480px) {
+
+
 }

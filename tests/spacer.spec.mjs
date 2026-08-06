@@ -262,7 +262,16 @@ test.describe('Spacer mechanics', () => {
     await sendMessage(page, 'First message')
     const first = await measure(page)
     await stopAgent(page)
-    await sendMessage(page, 'Second message')
+    const scroll = page.locator('[data-chat-surface="painted"] .chat__scroll')
+    const composer = page.getByRole('textbox', { name: 'Message Möbius…' })
+    await expect(scroll).toHaveAttribute('data-scroll-mode', 'PIN_USER_MSG')
+    await composer.fill('Second message')
+    await expect(composer).toHaveValue('Second message')
+    await expect(scroll).toHaveAttribute('data-scroll-mode', 'FOLLOW_BOTTOM')
+    await composer.press('Enter')
+    await page.evaluate(() => new Promise(r =>
+      requestAnimationFrame(() => requestAnimationFrame(r))
+    ))
 
     const m = await measure(page)
     expect(m.msgCount).toBeGreaterThanOrEqual(2)
@@ -478,55 +487,95 @@ test.describe('Short responses', () => {
 })
 
 test.describe('Chat switching (the bug)', () => {
-  test('11. Return to chat — RO active, spacer tracks injected content', async ({ page }) => {
+  test('11. Cold return preserves the visible owner\'s exact reading position', async ({ page }) => {
     await setup(page)
     await newChat(page)
-    await sendMessage(page, 'Test switch')
+    const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
+    expect(chatId).toBeTruthy()
 
-    const beforeSwitch = await measure(page)
-    expect(beforeSwitch.spacerH).toBeGreaterThan(0)
+    // Persist enough stable transcript rows to make a middle reading position
+    // meaningfully different from both the first row and the recent tail.
+    await page.evaluate(async ({ id }) => {
+      const token = localStorage.getItem('token')
+      const now = Date.now()
+      const messages = Array.from({ length: 36 }, (_, index) => ({
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: `Return position row ${index}. ${'Stable browser contract text. '.repeat(12)}`,
+        ts: now + index,
+        cid: index % 2 === 0 ? `return-position-${index}` : undefined,
+        blocks: [],
+      }))
+      const response = await fetch(`/api/chats/${id}`, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ messages }),
+      })
+      if (!response.ok) throw new Error(`seed PUT failed: ${response.status}`)
+    }, { id: chatId })
 
-    // Simulate switching away: save state to sessionStorage.
+    await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chatId)}`, {
+      waitUntil: 'domcontentloaded',
+    })
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll'))
+      .toBeVisible({ timeout: 15000 })
+
+    // Exercise the reader-owned path rather than assigning scrollTop as test
+    // setup. The pointer edge opens the controller's gesture window; the
+    // resulting ANCHOR_AT write is the product state that must survive return.
     await page.evaluate(() => {
       const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-      const spacer = document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')
-      if (scroll && spacer) {
-        const positions = JSON.parse(sessionStorage.getItem('chat-scroll') || '{}')
-        const spacers = JSON.parse(sessionStorage.getItem('chat-spacer') || '{}')
-        positions['test-chat'] = scroll.scrollHeight - scroll.scrollTop
-        spacers['test-chat'] = spacer.style.height
-        sessionStorage.setItem('chat-scroll', JSON.stringify(positions))
-        sessionStorage.setItem('chat-spacer', JSON.stringify(spacers))
-      }
+      if (!scroll) throw new Error('scroll surface missing')
+      scroll.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+      scroll.scrollTop = Math.floor(scroll.scrollHeight / 3)
     })
+    await page.waitForFunction((id) => {
+      const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      const saved = JSON.parse(localStorage.getItem('chat-reading-position') || '{}')[id]
+      return scroll?.dataset.scrollMode === 'ANCHOR_AT'
+        && saved?.kind === 'ANCHOR_AT'
+        && scroll.scrollTop > scroll.clientHeight
+    }, chatId)
 
-    // Reload to simulate returning.
-    await page.goto(BASE)
-    await expect(page.locator('[data-chat-surface="painted"] :is(.chat__scroll, .chat__empty-wrap)').first()).toBeVisible({ timeout: 8000 })
-    await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
+    const readPosition = () => page.evaluate((id) => {
+      const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      const saved = JSON.parse(localStorage.getItem('chat-reading-position') || '{}')[id]
+      const anchor = scroll.querySelector(`[data-key="${CSS.escape(saved.key)}"]`)
+      return {
+        key: saved.key,
+        offset: saved.offset,
+        anchorTop: anchor.getBoundingClientRect().top - scroll.getBoundingClientRect().top,
+      }
+    }, chatId)
+    const beforeReturn = await readPosition()
 
-    const hasScroll = await page.evaluate(() => !!document.querySelector('[data-chat-surface="painted"] .chat__scroll'))
-    if (!hasScroll) {
-      // App loaded a different (empty) chat — skip this assertion.
-      return
-    }
+    // A cold shell mount may retain physical ChatView owners for both workspace
+    // worlds. An initially hidden owner has never painted and must not replace
+    // the visible owner's durable coordinate while mounting or unloading.
+    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll'))
+      .toBeVisible({ timeout: 15000 })
+    await page.waitForFunction((id) => (
+      document.querySelector('[data-chat-surface="painted"]')?.dataset.chatId === id
+      && document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+        ?.dataset.scrollMode === 'ANCHOR_AT'
+    ), chatId)
 
-    // Inject content simulating agent still streaming.
-    await injectContent(page, 'Streaming content. ', 50)
-    const afterContent = await measure(page)
-    if (afterContent.error) return // scroll element disappeared
+    const afterReturn = await readPosition()
 
-    // Key assertion: spacer should have shrunk (RO is active).
-    if (afterContent.listH > afterContent.clientH) {
-      expect(afterContent.spacerH).toBe(0)
-    } else {
-      assertSpacerReasonable(afterContent)
-    }
+    expect(afterReturn.key).toBe(beforeReturn.key)
+    expect(Math.abs(afterReturn.offset - beforeReturn.offset)).toBeLessThanOrEqual(1)
+    // A cold fetch may contain fewer paginated rows above the anchor, so raw
+    // scrollTop is deliberately not stable. The semantic coordinate must put
+    // the same anchor at the same visible viewport position.
+    expect(Math.abs(afterReturn.anchorTop - beforeReturn.anchorTop)).toBeLessThanOrEqual(8)
   })
 })
 
 test.describe('Empty state transition', () => {
-  test('12. fullViewHRef captured on empty->chat transition', async ({ page }) => {
+  test('12. visible viewport reservation initializes on empty->chat transition', async ({ page }) => {
     await setup(page)
     await newChat(page)
 
@@ -540,7 +589,7 @@ test.describe('Empty state transition', () => {
     await sendMessage(page, 'First ever message')
     const m = await measure(page)
 
-    // Spacer should use the full viewport height, not 0.
+    // Spacer should use the newly mounted visible viewport height, not 0.
     expect(m.spacerH).toBeGreaterThan(0)
     assertSpacerReasonable(m)
     assertUserMsgAtTop(m)
@@ -1014,50 +1063,110 @@ test.describe('Scroll edge cases', () => {
     expect(gapFromBottom).toBeGreaterThan(50)
   })
 
-  test('25. Auto-follow stays glued tightly (regression on test 18 threshold)', async ({ page }) => {
-    // Test 18 asserts gap < 200 — wide enough to let the broken RO pass
-    // (5 small chunks drift ~150px without re-applying FOLLOW_BOTTOM).
-    // This is the SAME setup + content volume; the only difference is
-    // a TIGHT assertion (<= 5). Demonstrates the regression directly
-    // without invoking the 204-refresh path that heavier injection
-    // accidentally triggers.
+  test('25. Reserved-tail swipe follows tool output without jumping backward', async ({ page }) => {
     await setup(page)
     await newChat(page)
     await sendMessage(page, 'Autoscroll tight test')
 
-    await injectContent(page, 'Filling viewport with lots of text. ', 150)
     const before = await measure(page)
-    expect(before.listH).toBeGreaterThan(before.clientH)
+    expect(before.spacerH).toBeGreaterThan(0)
+    expect(before.userVisualTop).toBeGreaterThanOrEqual(0)
+    expect(before.userVisualTop).toBeLessThanOrEqual(10)
 
-    // Engage FOLLOW_BOTTOM via real gesture (test 18's exact pattern).
-    await page.evaluate(() => {
-      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-      if (s) s.scrollTop = s.scrollHeight
-    })
-    await page.evaluate(() => new Promise(r => setTimeout(r, 150)))
+    // The fresh pin is already clamped at the physical bottom, so the browser
+    // cannot emit another scroll event. A deliberate swipe toward the end is
+    // nevertheless explicit follow intent.
     await page.evaluate(() => {
       const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (!s) return
-      s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
-      s.scrollTop = Math.max(0, s.scrollTop - 1)
-      s.scrollTop = s.scrollHeight
+      s.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true, pointerType: 'touch', clientY: 400,
+      }))
+      s.dispatchEvent(new PointerEvent('pointermove', {
+        bubbles: true, pointerType: 'touch', clientY: 360,
+      }))
+      s.dispatchEvent(new PointerEvent('pointerup', {
+        bubbles: true, pointerType: 'touch', clientY: 360,
+      }))
     })
-    await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
+    await page.waitForFunction(() => (
+      document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+        ?.dataset.scrollMode === 'FOLLOW_BOTTOM'
+    ))
 
     const atBottom = await measure(page)
     expect(atBottom.scrollH - atBottom.scrollTop - atBottom.clientH)
       .toBeLessThanOrEqual(5)
 
-    // Five small chunks (test 18's exact volume) — auto-follow MUST
-    // keep us within a few px of the bottom, not 200px adrift.
+    // Tool calls consume reserved room first. Follow stays at the same physical
+    // tail rather than jumping backward to a second "real content" bottom.
     for (let i = 0; i < 5; i++) {
-      await injectContent(page, `Streaming chunk ${i + 1}. More text here. `, 5)
+      await injectToolBlock(page)
     }
 
     const after = await measure(page)
-    expect(after.error).toBeUndefined()
+    expect(after.toolCount).toBe(5)
     const afterGap = after.scrollH - after.scrollTop - after.clientH
     expect(afterGap).toBeLessThanOrEqual(10)
+  })
+
+  test('28. Keyboard-sized viewport consumes blank reservation before lifting output', async ({ page }) => {
+    await setup(page)
+    await newChat(page)
+    await sendMessage(page, 'Responsive keyboard spacer test')
+
+    // The fresh pin is already at the physical tail. This upward swipe is the
+    // explicit reader action that asks the chat to keep following it.
+    await page.evaluate(() => {
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      if (!s) return
+      s.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true, pointerType: 'touch', clientY: 400,
+      }))
+      s.dispatchEvent(new PointerEvent('pointermove', {
+        bubbles: true, pointerType: 'touch', clientY: 360,
+      }))
+      s.dispatchEvent(new PointerEvent('pointerup', {
+        bubbles: true, pointerType: 'touch', clientY: 360,
+      }))
+    })
+    await page.waitForFunction(() => (
+      document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+        ?.dataset.scrollMode === 'FOLLOW_BOTTOM'
+    ))
+
+    const closed = await measure(page)
+    expect(closed.spacerH).toBeGreaterThan(300)
+
+    // Simulate the shell's final keyboard-open geometry. While reservation is
+    // still available, the smaller box must remove blank spacer one-for-one so
+    // the prompt and physical tail remain at the same scroll coordinate.
+    await page.setViewportSize({ width: 412, height: 615 })
+    await page.waitForFunction(({ oldClientH, oldSpacerH }) => {
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      const spacer = document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')
+      const spacerH = parseInt(spacer?.style.height) || 0
+      return s?.dataset.scrollMode === 'FOLLOW_BOTTOM'
+        && s.clientHeight < oldClientH
+        && spacerH < oldSpacerH
+    }, { oldClientH: closed.clientH, oldSpacerH: closed.spacerH })
+
+    const open = await measure(page)
+    expect(Math.abs(open.scrollTop - closed.scrollTop)).toBeLessThanOrEqual(8)
+    expect(Math.abs(open.userVisualTop - closed.userVisualTop)).toBeLessThanOrEqual(8)
+    expect(open.scrollH - open.scrollTop - open.clientH).toBeLessThanOrEqual(8)
+    expect(Math.abs(
+      (closed.spacerH - open.spacerH) - (closed.clientH - open.clientH),
+    )).toBeLessThanOrEqual(8)
+
+    // Once output exceeds the smaller visible screen, no blank room remains;
+    // FOLLOW_BOTTOM then lifts only the overflow and continues at the tail.
+    await injectContent(page, 'Keyboard-visible streamed output. ', 120)
+    const overflow = await measure(page)
+    expect(overflow.spacerH).toBe(0)
+    expect(overflow.scrollTop).toBeGreaterThan(open.scrollTop + 20)
+    expect(overflow.scrollH - overflow.scrollTop - overflow.clientH)
+      .toBeLessThanOrEqual(10)
   })
 
   test('24. Auto-follow re-engages when user scrolls back to bottom', async ({ page }) => {
@@ -1090,8 +1199,11 @@ test.describe('Scroll edge cases', () => {
       const expectedMode = top === 'bottom' ? 'FOLLOW_BOTTOM' : 'ANCHOR_AT'
       await page.waitForFunction(kind => {
         const id = localStorage.getItem('moebius_active_chat')
-        const modes = JSON.parse(sessionStorage.getItem('chat-mode') || '{}')
-        return !!id && modes[id]?.kind === kind
+        const modes = JSON.parse(localStorage.getItem('chat-reading-position') || '{}')
+        const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+        return !!id
+          && scroll?.dataset.scrollMode === kind
+          && modes[id]?.kind === kind
       }, expectedMode, { timeout: 3000 })
     }
 
@@ -1192,16 +1304,28 @@ test.describe('Scroll edge cases', () => {
     expect(after.spacerH).toBeGreaterThanOrEqual(0)
   })
 
-  test('27. Viewport resize cycles do not engage auto-follow on streaming chat', async ({ page }) => {
-    // Guards the prevListH gate in the ResizeObserver: the auto-follow
-    // branch must not snap to bottom when the list merely re-measures due
-    // to a viewport resize (content unchanged). This is a partial guard
-    // for the keyboard-cycle drift class of bugs — it does NOT simulate
-    // Chrome Android's first-focus overshoot, which is a browser-level
-    // animation quirk outside our code's control.
+  test('27. Viewport cycles preserve a sent-message pin and an older anchor', async ({ page }) => {
+    // The actual chat scroll box is the single keyboard/layout signal. Repeated
+    // resize cycles reapply whichever semantic mode already owns the chat;
+    // geometry must never replace a pin or exact anchor with another alignment.
     await setup(page)
     await newChat(page)
     await sendMessage(page, 'First')
+
+    const pinned = await measure(page)
+    expect(pinned.userVisualTop).toBeGreaterThanOrEqual(0)
+    expect(pinned.userVisualTop).toBeLessThanOrEqual(10)
+    for (let i = 0; i < 3; i++) {
+      for (const height of [615, 915]) {
+        await page.setViewportSize({ width: 412, height })
+        await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
+        const duringCycle = await measure(page)
+        expect(Math.abs(duringCycle.userVisualTop - pinned.userVisualTop))
+          .toBeLessThanOrEqual(8)
+        await expect(page.locator('[data-chat-surface="painted"] .chat__scroll'))
+          .toHaveAttribute('data-scroll-mode', 'PIN_USER_MSG')
+      }
+    }
 
     // Grow the content so there's room to scroll up.
     await injectContent(page, 'Padding content line. ', 80)
@@ -1209,12 +1333,17 @@ test.describe('Scroll edge cases', () => {
       requestAnimationFrame(() => requestAnimationFrame(r))
     ))
 
-    // Scroll to the top (definitely not near the bottom).
+    // Scroll to the top through the reader-owned path (definitely not near the
+    // bottom). A bare scrollTop write is browser/programmatic layout, not
+    // reading intent, and deliberately cannot replace the keyboard snapshot.
     await page.evaluate(() => {
       const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-      if (s) s.scrollTop = 0
+      if (!s) return
+      s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+      s.scrollTop = 0
+      s.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }))
     })
-    await page.evaluate(() => new Promise(r => setTimeout(r, 50)))
+    await page.evaluate(() => new Promise(r => setTimeout(r, 350)))
 
     const before = await measure(page)
 
@@ -1227,5 +1356,160 @@ test.describe('Scroll edge cases', () => {
 
     const after = await measure(page)
     expect(Math.abs(after.scrollTop - before.scrollTop)).toBeLessThan(20)
+  })
+
+  test('28. An already-focused paste follows the tail before the composer grows', async ({ page }) => {
+    const events = [
+      { type: 'catch_up_done' },
+      { type: 'text', content: 'Long response paragraph. '.repeat(120) },
+      { type: 'done' },
+    ]
+    await setupWithSSE(page, events, { width: 412, height: 615 })
+    await newChat(page)
+    await sendMessage(page, 'First message')
+    await page.waitForFunction(
+      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
+      { timeout: 10000 }
+    )
+
+    const overflow = await measure(page)
+    expect(overflow.scrollH).toBeGreaterThan(overflow.clientH + 100)
+
+    // Establish an ordinary reading anchor, then put that held viewport at the
+    // physical tail without manufacturing FOLLOW_BOTTOM. This is the restored
+    // / already-focused state that previously depended on a fresh composer tap.
+    await page.evaluate(() => {
+      const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      scroll.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        button: 0,
+        pointerType: 'touch',
+      }))
+      scroll.scrollTop = Math.max(0, Math.floor(scroll.scrollHeight / 3))
+      scroll.dispatchEvent(new Event('scroll', { bubbles: true }))
+      scroll.dispatchEvent(new PointerEvent('pointerup', {
+        bubbles: true,
+        button: 0,
+        pointerType: 'touch',
+      }))
+    })
+    await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 350)))
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll'))
+      .toHaveAttribute('data-scroll-mode', 'ANCHOR_AT')
+    await page.evaluate(() => {
+      const surface = document.querySelector('[data-chat-surface="painted"]')
+      const scroll = surface.querySelector('.chat__scroll')
+      const input = surface.querySelector('.chat__input')
+      scroll.scrollTop = scroll.scrollHeight
+      input.focus({ preventScroll: true })
+    })
+    const atTail = await measure(page)
+    expect(atTail.scrollH - atTail.scrollTop - atTail.clientH).toBeLessThanOrEqual(4)
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll'))
+      .toHaveAttribute('data-scroll-mode', 'ANCHOR_AT')
+
+    const result = await page.evaluate(async () => {
+      const surface = document.querySelector('[data-chat-surface="painted"]')
+      const scroll = surface.querySelector('.chat__scroll')
+      const input = surface.querySelector('.chat__input')
+      const foot = surface.querySelector('.chat__foot')
+      window.__mobiusChatScrollTrace = {
+        version: 1,
+        transitions: [],
+        writes: [],
+        events: [],
+      }
+      const sample = () => ({
+        mode: scroll.dataset.scrollMode,
+        top: Math.round(scroll.scrollTop),
+        height: scroll.scrollHeight,
+        viewport: scroll.clientHeight,
+        gap: Math.round(scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight),
+        inputHeight: input.offsetHeight,
+        footHeight: foot.offsetHeight,
+      })
+
+      // A bottom-edge touch can still be waiting to prove whether a native
+      // scroll will arrive. Paste from the software keyboard then changes the
+      // already-focused textarea without another DOM pointer event.
+      scroll.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        button: 0,
+        pointerType: 'touch',
+      }))
+      const before = sample()
+      const lines = [
+        'First pasted line that wraps across the narrow composer width.',
+        'Second pasted line that also grows the composer.',
+        'Third pasted line.',
+        'Fourth pasted line.',
+      ]
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      ).set
+      valueSetter.call(input, lines[0])
+      input.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        inputType: 'insertFromPaste',
+        data: lines[0],
+      }))
+      const immediate = sample()
+      const settledFrames = []
+      for (const line of lines.slice(1)) {
+        const next = `${input.value}\n${line}`
+        valueSetter.call(input, next)
+        input.dispatchEvent(new InputEvent('input', {
+          bubbles: true,
+          inputType: 'insertLineBreak',
+          data: line,
+        }))
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+        settledFrames.push(sample())
+      }
+      await new Promise(resolve => setTimeout(resolve, 2100))
+      const afterFormerGestureCap = sample()
+      const composerEvents = window.__mobiusChatScrollTrace.events
+        .filter(event => event.event === 'reader:composer-bottom')
+      return {
+        before,
+        immediate,
+        settledFrames,
+        afterFormerGestureCap,
+        composerEvents,
+      }
+    })
+
+    expect(result.immediate.mode).toBe('FOLLOW_BOTTOM')
+    expect(result.composerEvents).toHaveLength(1)
+    expect(result.settledFrames.at(-1).footHeight).toBeGreaterThan(result.before.footHeight)
+    for (const frame of result.settledFrames) {
+      expect(frame.gap).toBeLessThanOrEqual(4)
+    }
+    expect(result.afterFormerGestureCap.gap).toBeLessThanOrEqual(4)
+    expect(Math.abs(
+      result.afterFormerGestureCap.top - result.settledFrames.at(-1).top
+    )).toBeLessThanOrEqual(4)
+
+    // Keyboard-animation resize signals may update the composer room, but the
+    // footer/scroll ResizeObserver remains the only transcript geometry owner.
+    const signalOnly = await page.evaluate(async () => {
+      const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      scroll.scrollTop = Math.max(0, scroll.scrollTop - 12)
+      await new Promise(resolve => requestAnimationFrame(resolve))
+      const beforeSignal = Math.round(scroll.scrollTop)
+      window.dispatchEvent(new Event('resize'))
+      window.visualViewport?.dispatchEvent(new Event('resize'))
+      await new Promise(resolve => requestAnimationFrame(() => {
+        requestAnimationFrame(() => requestAnimationFrame(resolve))
+      }))
+      return {
+        mode: scroll.dataset.scrollMode,
+        beforeSignal,
+        afterSignal: Math.round(scroll.scrollTop),
+      }
+    })
+    expect(signalOnly.mode).toBe('FOLLOW_BOTTOM')
+    expect(signalOnly.afterSignal).toBe(signalOnly.beforeSignal)
   })
 })

@@ -17,7 +17,9 @@ import {
 } from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
 import useNavigation, { deepLink } from '../../hooks/useNavigation.js'
+import useContextMenuOutsideDismiss from '../../hooks/useContextMenuOutsideDismiss.js'
 import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
+import { captureLayoutSpace, clientPointToLayout } from '../../lib/layoutSpace.js'
 import { parseNotificationTarget } from '../../lib/notificationTarget.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import useTheme from '../../hooks/useTheme.js'
@@ -41,7 +43,6 @@ import {
   workspaceRequestFromSystemEvent,
   workspaceRequestsForBuiltApps,
   ACTIVATE_FOREGROUND,
-  ACTIVATE_LIVE_PREVIEW,
 } from './workspacePlacement.js'
 import {
   appUpdateStaleMessage,
@@ -62,6 +63,7 @@ import {
   currentReusableEmptyChat,
   mergeChatListWithCreatedGuards,
   mostRecentConcreteChatId,
+  newChatPresentationIsCurrent,
   reconcileCreatedChatGuard,
   rememberCreatedChat,
   reusableChatDetailVerdict,
@@ -83,6 +85,10 @@ import {
   stageComposerHandoff,
 } from '../ChatView/composerDraft.js'
 import {
+  beginTouchComposerFocusLease,
+  releaseComposerFocusLease,
+} from './composerFocusLease.js'
+import {
   shouldRearmShellApply,
   watchForShellUpdateOnForeground,
 } from './swHandoff.js'
@@ -97,6 +103,7 @@ import { undoKeyPressed, isEditableTarget } from './workspaceOnboarding.js'
 import PaneChatView from './PaneChatView.jsx'
 import {
   BUILDER_CHAT_WORLD,
+  FOCUSED_BUILDER_CHAT_SURFACE,
   STANDARD_CHAT_WORLD,
   deriveChatSurfaceLayers,
   deriveChatSurfaceOwners,
@@ -116,7 +123,6 @@ import {
   MODE_MOTION, EMPTY_SINGLE_SURFACE_KEY,
 } from './workspaceView.js'
 import NewChatLanding from './NewChatLanding.jsx'
-import { recentChatsToPrefetch } from './chatPrefetch.js'
 import {
   PaneTab, panePanelDomId, paneTabDomId, scrollStripWheel, stripKeyDown,
 } from './PaneStrip.jsx'
@@ -127,7 +133,9 @@ import useDesktopSidebar, {
 import useWorkspaceSession from './useWorkspaceSession.js'
 import useShellReloadController from './useShellReloadController.js'
 import useAppFrameCache from './useAppFrameCache.js'
+import useShellVisualViewport from './useShellVisualViewport.js'
 import ShellBrand from './ShellBrand.jsx'
+import { createMediaSessionOwner } from './mediaSessionOwner.js'
 import { HistoryDismissProvider } from '../../hooks/useHistoryDismiss.jsx'
 
 const APP_SETTINGS_SECTIONS = new Set([
@@ -172,13 +180,17 @@ export default function Shell() {
     projection,
     visiblePaneIds,
     persistWorkspaceSnapshot,
-  } = useWorkspaceSession({ storage: sessionStorage })
+  } = useWorkspaceSession({
+    storage: localStorage,
+    legacyStorage: sessionStorage,
+  })
 
   const {
     activeView,
     activeAppId,
     activeChatId,
     drawerOpen, settingsOverlayOpen, settingsOpenRaw, openDrawer, closeDrawer,
+    drawerNavigationCover, finishDrawerNavigationPresentation,
     navTo, tabRevealRevision, applyModeDestination, dismissSettings,
     backFiredRef, drawerPushedRef, navStackRef, navigationEpochRef,
     activeViewRef, activeChatIdRef, activeAppIdRef,
@@ -204,7 +216,6 @@ export default function Shell() {
   const drawerModeTransitioning = desktopSidebarMode && drawerOpen
   const navigationOpen = persistentDrawer ? desktopSidebarOpen : drawerOpen
   const modalDrawerOpen = !persistentDrawer && drawerOpen
-  const navigationSurfaceOpen = modalDrawerOpen
   const [appsDirectoryHost, setAppsDirectoryHost] = useState(null)
   // This is the single semantic owner of reserved desktop navigation space.
   // Both the root class and the content-geometry transaction below read it.
@@ -249,16 +260,15 @@ export default function Shell() {
   // The render never uses `activeView === 'settings'` for pane suppression (that
   // would hide every pane behind a builder Settings tab — the named risk).
   const settingsActive = settingsOverlayOpen
-  // Builder mode is the tiled 'panes' view-mode (only meaningful when splits can
-  // exist). The logo itself is the persistent mode indicator and gesture surface;
+  // Builder mode is the tiled 'panes' view-mode. The logo itself is the
+  // persistent mode indicator and gesture surface;
   // there is deliberately no separate header control.
   // Durable mode and drag-preview stay in the small mode reducer. The visual
   // Standard ↔ Builder scene belongs independently to the browser transition.
-  const SPLITS = paneModel.WORKSPACE_SPLITS_ENABLED
   const shellRootRef = useRef(null)
+  useShellVisualViewport(shellRootRef)
   const mode = useModeController({
     committedMode: workspace.viewMode,
-    splitsEnabled: SPLITS,
   })
   const modeView = useModeViewTransition({
     rootRef: shellRootRef,
@@ -275,12 +285,11 @@ export default function Shell() {
     }
   }, [workspace.viewMode, modeView.active, modeState.transition, setFocusedPaneViewId])
 
-  // Builder mode = the committed 'panes' world (logo twist + static brand cue + power
-  // chrome), clamped off by the splits kill switch (INV 16). Flips synchronously
-  // with the toggle, matching the gesture's own spring/snap.
-  const builderModeActive = modeMachine.builderModeActive(modeState, { splitsEnabled: SPLITS })
+  // Builder mode = the committed 'panes' world. It flips synchronously with the
+  // toggle, matching the gesture's own spring/snap.
+  const builderModeActive = modeMachine.builderModeActive(modeState)
   // Drag-preview alone may project the tiled world before it is committed.
-  const effectiveViewMode = modeMachine.effectiveViewMode(modeState, { splitsEnabled: SPLITS })
+  const effectiveViewMode = modeMachine.effectiveViewMode(modeState)
   const multiPaneBuilderVisible = effectiveViewMode === 'panes'
     && paneModel.paneIdsInOrder(workspace).length > 1
   const multiPaneBuilderVisibleRef = useRef(multiPaneBuilderVisible)
@@ -320,6 +329,17 @@ export default function Shell() {
   // immersive can solo its pane over the whole workspace (§4/§9). Full contract:
   // lib/immersive.js.
   const [immersiveAppId, dispatchImmersive] = useReducer(immersiveReducer, null)
+  const [nowPlaying, setNowPlaying] = useState(null)
+  const mediaSessionOwnerRef = useRef(null)
+  if (!mediaSessionOwnerRef.current) {
+    mediaSessionOwnerRef.current = createMediaSessionOwner(setNowPlaying)
+  }
+  const handleMediaSession = useCallback((appId, event, sendControl) => {
+    mediaSessionOwnerRef.current.receive(appId, event, sendControl)
+  }, [])
+  const handleNowPlayingControl = useCallback((action) => {
+    mediaSessionOwnerRef.current.control(action)
+  }, [])
   // Stable identity — AppCanvas's message-listener effect depends on it.
   const handleImmersive = useCallback((appId, value) => {
     dispatchImmersive({ type: 'request', appId, value })
@@ -373,6 +393,9 @@ export default function Shell() {
   // with the per-render navTo identity. Pane handlers call through this stable
   // facade and still reach the latest navigation implementation via the ref.
   const stablePaneNavTo = useCallback((view, opts) => navToRef.current(view, opts), [])
+  const handleNowPlayingOpen = useCallback((appId) => {
+    navToRef.current('canvas', { appId })
+  }, [])
   // Reconcile in-memory route hints after every workspace transition (design
   // §5.1.3). navStackRef is stable, so recreating this closure each render is
   // behaviourally identical. reconcileRoutePanes points each hint at the pane
@@ -382,6 +405,9 @@ export default function Shell() {
   // be removed while focus is elsewhere. Physical history hints self-correct at
   // restore time (OPEN_TAB dedups an open item to its true pane).
   onWorkspaceTransitionRef.current = (prevWs, nextWs) => {
+    if (prevWs.viewMode !== nextWs.viewMode) {
+      mode.syncCommitted(nextWs.viewMode)
+    }
     navStackRef.current = paneModel.reconcileRoutePanes(navStackRef.current, prevWs, nextWs)
   }
 
@@ -465,40 +491,6 @@ export default function Shell() {
   const chatsStatus = chats.length > 0 || chatsQuery.isSuccess
     ? 'success'
     : (chatsQuery.isError ? 'error' : 'loading')
-  // Prime only the two most-recent chats that are not already open, including
-  // active chats: their cached transcript is useful while stream catch-up runs.
-  // ChatView still revalidates on mount, but this gives its synchronous cache
-  // read a real transcript so a later chat switch can paint immediately. Run
-  // once after the live drawer projection arrives, at browser idle, and stand
-  // down under data-saver so speed never creates surprise background transfer.
-  const warmedChatsOnLoadRef = useRef(false)
-  useEffect(() => {
-    if (
-      warmedChatsOnLoadRef.current
-      || !chatsQuery.isSuccess
-      || !chatsQuery.isFetchedAfterMount
-    ) return
-    warmedChatsOnLoadRef.current = true
-    if (navigator.connection?.saveData) return
-    const candidates = recentChatsToPrefetch(chats, activeChatId)
-    if (candidates.length === 0) return
-    const warm = async () => {
-      for (const chat of candidates) {
-        await chatQueries.messages.prefetch(queryClient, chat.id)
-      }
-    }
-    if (typeof requestIdleCallback === 'function') {
-      requestIdleCallback(() => { void warm() }, { timeout: 3000 })
-    } else {
-      setTimeout(() => { void warm() }, 1000)
-    }
-  }, [
-    activeChatId,
-    chats,
-    chatsQuery.isFetchedAfterMount,
-    chatsQuery.isSuccess,
-    queryClient,
-  ])
   const appPreviewAckRef = useRef(new Set())
   const handleAppPreviewSeen = useCallback((app, final) => {
     acknowledgeAppPreview({
@@ -563,6 +555,22 @@ export default function Shell() {
   const shellUpdatePickupCheckStartedRef = useRef(false)
   const [composerRequest, setComposerRequest] = useState(null)
   const composerRequestTokenRef = useRef(0)
+  const composerFocusLeaseRef = useRef(null)
+  // A user-initiated New-chat tap should acknowledge the destination before
+  // row allocation, cache maintenance, or a degraded network can finish. Keep
+  // the first-class empty surface above the outgoing chat until the resolved
+  // ChatView reports a painted frame; the focus lease below carries any early
+  // typing across that ID-less interval.
+  const [newChatPresentation, setNewChatPresentation] = useState(null)
+  const newChatPresentationRef = useRef(null)
+  // A slow New-chat allocation replaces the modal drawer visually without
+  // consuming its history entry. Destination navigation owns that entry once
+  // the concrete chat exists; avoiding an early Back traversal also keeps the
+  // temporary phone composer focused until the real composer accepts it.
+  const displayedNavigationOpen = navigationOpen && (
+    persistentDrawer || newChatPresentation == null
+  )
+  const navigationSurfaceOpen = modalDrawerOpen && newChatPresentation == null
 
   const requestComposer = useCallback((chatId, {
     draft, focus = false,
@@ -701,18 +709,6 @@ export default function Shell() {
   // A single implicit home tab on a fresh session stays visually identical to
   // the pre-workspace shell. State (rather than a render-time ref mutation) keeps
   // this safe under replayed or abandoned concurrent renders.
-  const [tabStripEngaged, setTabStripEngaged] = useState(openTabs.length >= 2)
-  useEffect(() => {
-    if (openTabs.length >= 2) setTabStripEngaged(true)
-    else if (openTabs.length === 0) setTabStripEngaged(false)
-  }, [openTabs.length])
-  // Persist only the versioned workspace. The former flat-tab rollback mirror
-  // completed its release window and was removed so every boot has one owner.
-  useEffect(() => {
-    try {
-      sessionStorage.setItem(paneModel.STORAGE_KEY, paneModel.serializeWorkspace(workspace))
-    } catch { /* private mode / quota — workspace stays in memory only */ }
-  }, [workspace])
   // Pointer events inside an iframe do not bubble to its positioned shell
   // wrapper. The verified live frame sends a tiny focus signal so app panes have
   // the same click-to-focus semantics as native chat panes.
@@ -737,7 +733,7 @@ export default function Shell() {
   // retired.
   const requestEmptySingleNewChat = useCallback(() => {
     const ws = workspaceStateRef.current.ws
-    const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+    const single = ws.viewMode === 'single'
     if (!single || ws.singleScreen != null) return
     const candidate = currentReusableEmptyChat(chatsRef.current, {
       activeChatId: activeChatIdRef.current,
@@ -753,24 +749,8 @@ export default function Shell() {
   requestEmptySingleNewChatRef.current = requestEmptySingleNewChat
   const closeTab = useCallback((tab, { reason } = {}) => {
     const key = tabModel.tabKey(tab)
-    const ws = workspaceStateRef.current.ws
-    // R3 (auto-return through the descriptor): a user close that EMPTIES the builder
-    // tree auto-returns to single (the reducer's autoReturnIfEmptied). Arm the SAME
-    // mirror the durable flip in the small mode controller in the SAME batch so
-    // flips to single NOW — not a frame later via the passive sync-committed
-    // reconcile, which left the logo twisted for one intermediate frame. An emptied
-    // tree has no pane to animate, so the exit is instant; the
-    // tree's coupled undo re-enters builder as one gesture. A sole Settings tab is
-    // no exception — closing it empties the tree the same way. reason:'deleted' does
-    // not auto-return (the reducer skips it), so it is excluded here too.
-    if (SPLITS && reason !== 'deleted' && ws.viewMode === 'panes'
-        && !paneModel.isEmptyTree(ws) && paneModel.isEmptyTree(paneModel.closeTab(ws, key))) {
-      mode.toggle({ cause: 'auto', to: 'single' })
-    }
     dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: key, reason })
-    // If this auto-returned into a never-seeded single slot, dispatchWorkspace owns
-    // the New Chat request. The coupled undo still restores tab + builder together.
-  }, [dispatchWorkspace, mode, workspaceStateRef])
+  }, [dispatchWorkspace])
   const placeInWorkspace = useCallback((requestOrRequests) => {
     const requests = Array.isArray(requestOrRequests)
       ? requestOrRequests
@@ -795,18 +775,7 @@ export default function Shell() {
     // would unmount the mounted-hidden SettingsView). dismissSettings no-ops when no
     // takeover is open.
     const currentWs = workspaceStateRef.current.ws
-    const world = paneModel.WORKSPACE_SPLITS_ENABLED ? currentWs.viewMode : 'single'
-    const opensLivePreview = requests.some(
-      request => request?.activation === ACTIVATE_LIVE_PREVIEW,
-    )
-    // The placement resolver folds the durable Standard → Builder flip into the
-    // live-preview request. Mirror that same intent into the transition
-    // descriptor in this React batch so render mode and workspace mode never
-    // disagree for an intermediate frame. No presentation plan: the preview
-    // should appear immediately, not wait behind decorative entry motion.
-    if (SPLITS && world === 'single' && opensLivePreview) {
-      mode.toggle({ cause: 'auto', to: 'panes' })
-    }
+    const world = currentWs.viewMode
     if (world === 'single'
         && requests.some(r => r && r.item && r.activation === ACTIVATE_FOREGROUND)) {
       dismissSettings()
@@ -825,21 +794,16 @@ export default function Shell() {
         liveApps,
       }),
     })
-  }, [dispatchWorkspace, dismissSettings, mode])
+  }, [dispatchWorkspace, dismissSettings])
   // The tab strip is the BUILDER SURFACE: with splits ON it follows the
   // EFFECTIVE builder world exactly — always present in builder (even at a
   // single leaf, where this single-pane .shell__tabstrip stands in for the
   // tiled WorkspaceChrome strips, giving phone users the drag source), riding
   // a single-mode drag preview with the rest of the tiled presentation, and NEVER
-  // rendered in single mode OR over an immersive lease
-  // (the shell exit replaces every builder navigation surface). The legacy
-  // tabStripEngaged latch is
-  // the KILL-SWITCH world's rule only (engaged after 2+ tabs) — letting it
-  // leak into the flag-ON formula painted the parked builder tree's strip
-  // over single mode whenever the latch was set. An empty workspace (no tabs)
-  // shows nothing either way — the >= 1 gate stays.
+  // rendered in single mode OR over an immersive lease (the shell exit replaces
+  // every builder navigation surface). An empty workspace shows no strip.
   const tabStripVisible = !immersiveActive
-    && (SPLITS ? effectiveViewMode === 'panes' : tabStripEngaged)
+    && effectiveViewMode === 'panes'
     && openTabs.length >= 1
   const shellTabStripVisible = tabStripVisible && !workspaceChromeActive
 
@@ -963,26 +927,32 @@ export default function Shell() {
   const visibleChatPanes = useMemo(() => {
     return deriveChatSurfaceOwners({ workspace, baseProjection, projection })
   }, [baseProjection, projection, workspace])
-  // Last chat that reached a stable painted frame in each visible pane. On a
-  // chat-tab change, keep that outgoing ChatView mounted as an inert cover while
-  // the incoming chat runs its existing hide/restore/reveal transaction below.
-  // The map advances only from the incoming ChatView's layout-ready callback,
-  // so rapid A -> B -> C navigation keeps A painted and replaces only staging B.
-  const [presentedChatByPane, setPresentedChatByPane] = useState(() => new Map())
+  // Last chat that reached a stable painted frame on each presentation surface.
+  // Physical pane ids own ordinary Builder handoffs; one synthetic surface owns
+  // focused Builder presentation across pane changes. The map advances only from
+  // the incoming ChatView's layout-ready callback, so rapid A -> B -> C
+  // navigation keeps A painted and replaces only staging B.
+  const [presentedChatBySurface, setPresentedChatBySurface] = useState(() => new Map())
   const visibleChatPaneSignature = visibleChatPanes
     .map(({ world, paneId, chatId }) => `${world}:${paneId}:${chatId}`)
     .join('|')
 
-  // Drop state for panes whose active visible surface is no longer a chat.
+  // Drop state for surfaces whose active owner is no longer a chat.
   // Same-pane A -> B deliberately keeps A until B reports display-ready.
   useEffect(() => {
-    const livePaneIds = new Set(visibleChatPanes.map(({ paneId }) => String(paneId)))
-    setPresentedChatByPane(prev => {
+    const liveSurfaceIds = new Set(visibleChatPanes.map(({ paneId }) => String(paneId)))
+    if (focusedPaneViewId != null && visibleChatPanes.some(owner => (
+      owner.world === BUILDER_CHAT_WORLD
+      && String(owner.paneId) === String(focusedPaneViewId)
+    ))) {
+      liveSurfaceIds.add(FOCUSED_BUILDER_CHAT_SURFACE)
+    }
+    setPresentedChatBySurface(prev => {
       let changed = false
       const next = new Map(prev)
-      for (const paneId of next.keys()) {
-        if (!livePaneIds.has(String(paneId))) {
-          next.delete(paneId)
+      for (const surfaceId of next.keys()) {
+        if (!liveSurfaceIds.has(String(surfaceId))) {
+          next.delete(surfaceId)
           changed = true
         }
       }
@@ -991,29 +961,101 @@ export default function Shell() {
     // The primitive signature is the intentional dependency: visibleChatPanes
     // is rebuilt from workspace objects and should not churn this cleanup.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleChatPaneSignature])
+  }, [focusedPaneViewId, visibleChatPaneSignature])
 
-  const handlePaneChatDisplayReady = useCallback((paneId, readyChatId) => {
+  const handlePaneChatDisplayReady = useCallback((
+    paneId,
+    readyChatId,
+    focusedPresentation = false,
+  ) => {
     const id = String(readyChatId)
     const paneKey = String(paneId)
     // Ignore a late ready signal from staging B after rapid navigation reached C.
     // Surface owners include both real builder panes and the single world's
     // synthetic slot, so resolve the selected key through their shared boundary.
     if (paneModel.activeKeyForOwner(workspaceStateRef.current.ws, paneKey) !== `chat:${id}`) return
-    setPresentedChatByPane(prev => {
-      if (String(prev.get(paneKey) ?? '') === id) return prev
+    setPresentedChatBySurface(prev => {
       const next = new Map(prev)
-      next.set(paneKey, id)
-      return next
+      let changed = false
+      if (String(next.get(paneKey) ?? '') !== id) {
+        next.set(paneKey, id)
+        changed = true
+      }
+      if (focusedPresentation
+          && String(focusedPaneViewIdRef.current) === paneKey
+          && String(next.get(FOCUSED_BUILDER_CHAT_SURFACE) ?? '') !== id) {
+        next.set(FOCUSED_BUILDER_CHAT_SURFACE, id)
+        changed = true
+      }
+      return changed ? next : prev
     })
-  }, [workspaceStateRef])
+    const presentation = newChatPresentationRef.current
+    if (
+      !presentation?.releasing
+      && String(presentation?.chatId ?? '') === id
+    ) {
+      const releasing = { ...presentation, releasing: true }
+      newChatPresentationRef.current = releasing
+      setNewChatPresentation(current => (
+        current === presentation ? releasing : current
+      ))
+      // The keyboard lease is deliberately NOT released here. Display-ready only
+      // unblocks the composerRequest (gated on surfaceVisible); the destination
+      // composer accepts focus one animation frame later. Releasing now blurs
+      // the lease a frame early, leaving nothing focused — Android drops and
+      // re-raises the soft keyboard (the New-chat "bounce"). On this success
+      // path the composer's own focus atomically takes the keyboard from the
+      // lease and the lease's onBlur clears it; only the abandon paths (failed
+      // or superseded allocation) release the lease explicitly.
+    }
+    finishDrawerNavigationPresentation()
+  }, [finishDrawerNavigationPresentation, focusedPaneViewIdRef, workspaceStateRef])
+
+  const finishNewChatPresentationRelease = useCallback((presentation) => {
+    if (!presentation?.releasing || newChatPresentationRef.current !== presentation) return
+    newChatPresentationRef.current = null
+    setNewChatPresentation(current => (
+      current === presentation ? null : current
+    ))
+  }, [])
+
+  // A route change, Back gesture, drawer reopen, or mode switch supersedes a
+  // pending New-chat tap. Retire its cover and keyboard lease together so its
+  // eventual network result cannot repaint or navigate over the newer intent.
+  useLayoutEffect(() => {
+    const presentation = newChatPresentationRef.current
+    if (!presentation || newChatPresentationIsCurrent(presentation, {
+      navigationEpoch: navigationEpochRef.current,
+      viewMode: workspace.viewMode,
+      drawerEntryOpen: drawerPushedRef.current && navigationOpen,
+      activeView,
+      activeChatId,
+    })) return
+    newChatPresentationRef.current = null
+    setNewChatPresentation(current => (
+      current === presentation ? null : current
+    ))
+    releaseComposerFocusLease(composerFocusLeaseRef.current)
+  }, [
+    activeChatId,
+    activeView,
+    drawerPushedRef,
+    navigationEpochRef,
+    navigationOpen,
+    newChatPresentation,
+    workspace.viewMode,
+  ])
 
   // At most two ChatViews per transitioning owner: the last painted chat and the
   // current active chat. Handoff dedupe is world-local: Standard's retained copy
   // must never suppress Builder's outgoing cover for the same underlying chat.
   const chatPaneLayers = useMemo(() => {
-    return deriveChatSurfaceLayers(visibleChatPanes, presentedChatByPane)
-  }, [presentedChatByPane, visibleChatPanes])
+    return deriveChatSurfaceLayers(
+      visibleChatPanes,
+      presentedChatBySurface,
+      { focusedBuilderPaneId: focusedPaneViewId },
+    )
+  }, [focusedPaneViewId, presentedChatBySurface, visibleChatPanes])
   // Shell is the only layer that knows which retained workspace world is
   // actually painted. Publish one stable readiness contract for visual tools;
   // they must not learn private handoff classes or compositor attributes.
@@ -1062,7 +1104,7 @@ export default function Shell() {
     // Only builder repair falls back to a historical chat. In single mode the
     // deleted-close edge already requested the explicit New Chat destination;
     // selecting chats[0] here would overwrite it with an unrelated transcript.
-    const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+    const single = ws.viewMode === 'single'
     const builderEmpty = !single
       && Object.keys(ws.panes).length === 1
       && !ws.panes[ws.focusedPaneId]?.activeTabKey
@@ -1079,17 +1121,15 @@ export default function Shell() {
     recoveredChatIdsRef.current.delete(chatId)
   }, [])
 
-  // Tabs expose a compact browser-style close menu without adding permanent
-  // chrome on desktop: right-click or the keyboard menu key. Phone tabs reserve
-  // press-and-hold for dragging and never open these bulk actions. The same state
-  // drives both the single strip and tiled pane strips.
+  // Tabs expose one compact browser-style close menu without adding permanent
+  // chrome: right-click or the keyboard menu key on desktop, and a stationary
+  // hold on touch. Movement after the touch hold still enters tab dragging. The
+  // same state drives both the single strip and tiled pane strips.
   const [tabMenu, setTabMenu] = useState(null)
   const tabMenuRef = useRef(null)
   const tabMenuReturnFocusRef = useRef(null)
-  const tabActionsAvailable = workspaceMode !== 'phone'
   const openTabMenu = useCallback((event, tab, paneId) => {
     event.preventDefault()
-    if (!tabActionsAvailable) return
     const owner = paneId || paneModel.paneOf(workspace, tabModel.tabKey(tab))?.id
     if (!owner) return
     const triggerRect = event.currentTarget.getBoundingClientRect()
@@ -1104,21 +1144,37 @@ export default function Shell() {
       tabKey: tabModel.tabKey(tab),
       paneId: owner,
     })
-  }, [tabActionsAvailable, workspace])
+  }, [workspace])
+  const openTabMenuAt = useCallback((x, y, tab, paneId) => {
+    if (!tab) return
+    const owner = paneId
+      || paneModel.paneOf(workspaceStateRef.current.ws, tabModel.tabKey(tab))?.id
+    if (!owner) return
+    tabMenuReturnFocusRef.current = null
+    setTabMenu({ x, y, tab, tabKey: tabModel.tabKey(tab), paneId: owner })
+  }, [])
   const closeTabMenu = useCallback((restoreFocus = true) => {
     setTabMenu(null)
     if (!restoreFocus) return
     const returnTarget = tabMenuReturnFocusRef.current
     queueMicrotask(() => returnTarget?.focus?.({ preventScroll: true }))
   }, [])
+  const closeTabMenuFromOutside = useCallback(() => {
+    closeTabMenu(false)
+  }, [closeTabMenu])
+  useContextMenuOutsideDismiss({
+    open: Boolean(tabMenu),
+    menuRef: tabMenuRef,
+    onDismiss: closeTabMenuFromOutside,
+  })
   useLayoutEffect(() => {
     if (!tabMenu || !tabMenuRef.current) return
     const menu = tabMenuRef.current
     const root = document.documentElement
-    const rootRect = root.getBoundingClientRect()
+    const rootSpace = captureLayoutSpace(root)
     const position = placeContextMenu({
-      clientPoint: { x: tabMenu.x, y: tabMenu.y },
-      clientViewport: rootRect,
+      point: clientPointToLayout({ x: tabMenu.x, y: tabMenu.y }, rootSpace),
+      viewport: { width: rootSpace.width, height: rootSpace.height },
       menuSize: { width: menu.offsetWidth, height: menu.offsetHeight },
     })
     menu.style.setProperty('--workspace-menu-x', `${position.x}px`)
@@ -1141,27 +1197,15 @@ export default function Shell() {
   }, [])
   useEffect(() => {
     if (!tabMenu) return undefined
-    if (!tabActionsAvailable) {
-      closeTabMenu(false)
-      return undefined
-    }
-    const onDown = (event) => {
-      if (!event.target.closest?.('.workspace__menu')) closeTabMenu(false)
-    }
     const onKey = (event) => {
       if (event.key === 'Escape') closeTabMenu()
     }
-    document.addEventListener('pointerdown', onDown, true)
     document.addEventListener('keydown', onKey, true)
-    return () => {
-      document.removeEventListener('pointerdown', onDown, true)
-      document.removeEventListener('keydown', onKey, true)
-    }
-  }, [closeTabMenu, tabActionsAvailable, tabMenu])
+    return () => document.removeEventListener('keydown', onKey, true)
+  }, [closeTabMenu, tabMenu])
 
   // ── Workspace drag controller wiring (design §3, PR3) ─────────────────────
-  // All of this is gated behind WORKSPACE_SPLITS_ENABLED — the hook installs no
-  // listeners when the flag is off, so the default build is byte-unchanged.
+  // One shared controller owns the shipped workspace's document-level gesture.
   // Volatile inputs travel through refs so the hook installs its single
   // document-level pointerdown listener exactly once (never re-registers).
   // dragActiveRef is declared above useNavigation (the drawer OPEN path reads it).
@@ -1169,21 +1213,22 @@ export default function Shell() {
   sceneInputsRef.current = { projection, mode: workspaceMode, contentRect }
   const labelForTabRef = useRef(labelForTab)
   labelForTabRef.current = labelForTab
+  const openTabMenuAtRef = useRef(openTabMenuAt)
+  openTabMenuAtRef.current = openTabMenuAt
+  const drawerRowGesturesRef = useRef(new Map())
   // A single-mode drag previews the builder world through the ONE descriptor
   // (INV 5): arm is phase 'drag-preview', and the id it mints is carried to the
-  // matching commit/cancel so a stale end-event from a superseded drag is
-  // ignored. A COMMITTED drop dispatches drag-commit in the SAME pointerup
-  // batch as the drop's OPEN_TAB_AT (which flips viewMode to 'panes'), so the
-  // descriptor and the tree flip as ONE transaction (INV 7) — the passive
-  // sync-committed reconcile stays a pure hydration net, never the beat path.
-  // A rejected/no-op drop cancels and mutates nothing.
+  // matching end so a stale event from a superseded drag is ignored.
+  // OPEN_TAB_AT owns any committed mode flip. Ending the drag can only clear
+  // its transient preview; the shared workspace transition boundary above
+  // synchronizes presentation from the reducer's actual result in that same
+  // pointerup batch. A rejected/no-op drop cancels and mutates nothing.
   const dragPreviewIdRef = useRef(null)
-  const onModeDragPreview = useCallback((active, { committed = false } = {}) => {
+  const onModeDragPreview = useCallback((active) => {
     if (active) {
       dragPreviewIdRef.current = mode.dragArm()
     } else {
-      if (committed) mode.dragCommit(dragPreviewIdRef.current)
-      else mode.dragCancel(dragPreviewIdRef.current)
+      mode.dragCancel(dragPreviewIdRef.current)
       dragPreviewIdRef.current = null
     }
   }, [mode, workspaceStateRef])
@@ -1217,10 +1262,9 @@ export default function Shell() {
       plan,
       update: () => {
         dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: to })
-        mode.toggle({ cause, to })
       },
     })
-  }, [dispatchWorkspace, mode, modeView, projection, contentRect])
+  }, [dispatchWorkspace, modeView, projection, contentRect])
   // The single-tap navigation toggle passed to ShellBrand (which owns the logo
   // gesture and static Builder cue). The HOLD / swipe / Shift+Enter mode toggle is
   // handleToggleViewMode above, passed to ShellBrand as onToggleMode.
@@ -1242,7 +1286,6 @@ export default function Shell() {
     openDrawer,
   ])
   useWorkspaceDrag({
-    enabled: paneModel.WORKSPACE_SPLITS_ENABLED,
     contentElRef,
     sceneInputsRef,
     workspaceStateRef,
@@ -1250,8 +1293,10 @@ export default function Shell() {
     labelForTabRef,
     dragActiveRef,
     drawerOpenRef,
+    drawerRowGesturesRef,
     closeDrawer,
     openDrawer,
+    openTabMenuAtRef,
     onPreviewBuilder: onModeDragPreview,
   })
 
@@ -1267,7 +1312,6 @@ export default function Shell() {
   // case click into the shell chrome (a strip tab or the divider) first, then
   // press the chord.
   useEffect(() => {
-    if (!paneModel.WORKSPACE_SPLITS_ENABLED) return undefined
     const onKey = (e) => {
       if (!undoKeyPressed(e) || isEditableTarget(document.activeElement)) return
       e.preventDefault()
@@ -1275,7 +1319,7 @@ export default function Shell() {
       // through the controller FIRST (INV 2/3) so its re-entry/exit deal fires as one
       // gesture, not a passive sync a render later. undo.restoreViewMode reverts the
       // snapshot's mode; every other undo carries the current mode forward
-      // (restoredMode === current), so mode.undo is a no-op there. The presentation
+      // (restoredMode === current), so no mode presentation change is needed there. The presentation
       // plan is built from the tree the beat animates: re-entering builder deals in
       // the RESTORED tree; exiting to single deals the CURRENT tiled tree out.
       const wsState = workspaceStateRef.current
@@ -1300,7 +1344,6 @@ export default function Shell() {
             cause: 'undo',
             plan,
             update: () => {
-              mode.undo({ restoredMode })
               dispatchWorkspace({ type: 'UNDO_LAST' })
             },
           })
@@ -1311,7 +1354,7 @@ export default function Shell() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [dispatchWorkspace, mode, modeView])
+  }, [dispatchWorkspace, modeView])
 
   // No per-mutation undo toast: the reducer still mints a fresh undo slot on
   // every workspace mutation (its `toast` label included, for the reducer's own
@@ -1380,7 +1423,6 @@ export default function Shell() {
     doc: document,
     nav: navigator,
     storage: sessionStorage,
-    cacheStorage: typeof caches !== 'undefined' ? caches : null,
     queryClient,
     persistWorkspaceSnapshot,
     workspaceStateRef,
@@ -1684,8 +1726,11 @@ export default function Shell() {
       void openAppWithIntent(target.app, target.intent)
     } else if (target?.view === 'chat') {
       navToRef.current('chat', { chatId: target.chatId })
+      if (target.focusComposer === true && supportsDesktopPaneComposerFocus()) {
+        requestComposer(target.chatId, { focus: true })
+      }
     }
-  }, [openAppWithIntent])
+  }, [openAppWithIntent, requestComposer])
 
   const coldDeepLinkHandledRef = useRef(false)
   useEffect(() => {
@@ -1877,7 +1922,7 @@ export default function Shell() {
       // A zero-chat install waits for the live-confirmed bootstrap effect below so a
       // stale empty list cannot manufacture a server row.
       const ws = workspaceStateRef.current.ws
-      const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+      const single = ws.viewMode === 'single'
       const focusedPaneEmpty = !ws.panes[ws.focusedPaneId]?.activeTabKey
       if (single && ws.singleScreen == null && chats.length > 0
           && pendingNewChatRef.current == null) {
@@ -1930,7 +1975,7 @@ export default function Shell() {
           reason: 'deleted',
         })
         const ws = workspaceStateRef.current.ws
-        const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+        const single = ws.viewMode === 'single'
         const builderEmpty = !single && !ws.panes[ws.focusedPaneId]?.activeTabKey
         const fallback = chats.find(c => c.id !== probedChatId)
         if (builderEmpty && fallback) {
@@ -2210,6 +2255,11 @@ export default function Shell() {
         // in the visible set, not equality with one global id, so a chat visible
         // in a background split gets no false dot (finding D-iii).
         if (!visibleChatIdsRef.current.has(String(chatId))) {
+          // Do not fetch or parse the hidden transcript here. Several agents can
+          // finish while the owner is reading another chat, and those unsolicited
+          // detail responses contend with the first native scroll frame. The
+          // retained ChatView consumes this run signal when it becomes visible;
+          // an unmounted chat uses the existing versioned activation read.
           setAttentionChatIds(prev => {
             if (prev.has(chatId)) return prev
             const next = new Set(prev)
@@ -2265,7 +2315,8 @@ export default function Shell() {
     confirmChatDeleted, confirmChatIdentityIsLive, confirmChatRecovered,
     loadTheme, markChatRunActivity, markChatRunFinished,
     markChatRunState, markStreamingEnd, markStreamingStart,
-    onNotificationCreated, placeInWorkspace, refreshApps, refreshChats, warmAppCode,
+    onNotificationCreated, placeInWorkspace, queryClient,
+    refreshApps, refreshChats, warmAppCode,
   ])
 
   // Shell-level SSE subscription for system events. Stays open for
@@ -2477,7 +2528,7 @@ export default function Shell() {
       // watcher will retry after that beat without issuing another detail/POST call.
       if (chatId != null) pending.resolvedChatId = chatId
       const ws = workspaceStateRef.current.ws
-      const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+      const single = ws.viewMode === 'single'
       if (!single || ws.singleScreen != null) {
         if (pendingNewChatRef.current && pendingNewChatRef.current.token === pending.token) {
           pendingNewChatRef.current = null
@@ -2537,9 +2588,42 @@ export default function Shell() {
     // plus fresh detail probe still prove that it is untouched before reuse, so
     // a send from another browser cannot turn this convenience into reopening a
     // conversation that has already started.
+    //
     const ws = workspaceStateRef.current.ws
+    // Standard is one destination surface, so acknowledge an explicit New-chat
+    // tap immediately instead of leaving the drawer/old transcript painted for
+    // the whole async allocation. Builder stays additive and therefore waits
+    // for the concrete id before opening its new tab.
+    const presentsImmediately = focusComposer && ws.viewMode === 'single'
+    if (presentsImmediately && newChatPresentationRef.current) return
+    const presentation = presentsImmediately
+      ? {
+          chatId: null,
+          navigationEpoch: navigationEpochRef.current,
+          viewMode: ws.viewMode,
+          drawerEntryOpen: drawerPushedRef.current,
+        }
+      : null
+    if (presentation) {
+      newChatPresentationRef.current = presentation
+      setNewChatPresentation(presentation)
+    }
+    const retirePresentation = () => {
+      if (!presentation || newChatPresentationRef.current !== presentation) return
+      newChatPresentationRef.current = null
+      setNewChatPresentation(current => (
+        current === presentation ? null : current
+      ))
+    }
+    // A phone keyboard can only be raised from the tap's live user-activation
+    // task. The modal drawer remains history-open but is no longer displayed,
+    // so no asynchronous traversal can blur this lease before the chat-bound
+    // composer accepts it. The lease also carries any early typing.
+    const touchFocusLeased = !!focusComposer && beginTouchComposerFocusLease(
+      composerFocusLeaseRef.current,
+    )
     const resumeId = (
-      (!SPLITS || ws.viewMode === 'single')
+      (ws.viewMode === 'single')
       && activeChatIdRef.current == null
       && !draft
       && !forceNew
@@ -2559,7 +2643,27 @@ export default function Shell() {
         ? { draft, forceNew, exclude }
         : { candidate: resumeCandidate, draft, forceNew, exclude },
     )
+    if (presentation && (
+      newChatPresentationRef.current !== presentation
+      || !newChatPresentationIsCurrent(presentation, {
+        navigationEpoch: navigationEpochRef.current,
+        viewMode: workspaceStateRef.current.ws.viewMode,
+        drawerEntryOpen: drawerPushedRef.current,
+        activeView: activeViewRef.current,
+        activeChatId: activeChatIdRef.current,
+      })
+    )) {
+      retirePresentation()
+      if (touchFocusLeased) {
+        releaseComposerFocusLease(composerFocusLeaseRef.current)
+      }
+      return
+    }
     if (chatId == null) {
+      retirePresentation()
+      if (touchFocusLeased) {
+        releaseComposerFocusLease(composerFocusLeaseRef.current)
+      }
       // Don't leave a dead, drawer-still-open tap. Offline / failed create surface a
       // toast; an in-flight second tap just closes the drawer (the first create lands).
       if (reason === 'offline') showToast("You're offline.")
@@ -2568,13 +2672,21 @@ export default function Shell() {
       return
     }
 
+    const alreadyPresented = presentation
+      && activeViewRef.current === 'chat'
+      && String(activeChatIdRef.current) === String(chatId)
+
     const changesRoute = activeViewRef.current !== 'chat'
       || String(activeChatIdRef.current) !== String(chatId)
     const recordsHistory = changesRoute
       && !!(draft || forceNew || drawerPushedRef.current || recordHistory)
-    if (draft) {
-      const draftText = String(draft)
-      stageComposerHandoff(chatId, draftText, { autoSend })
+    const suppliedDraft = draft ? String(draft) : ''
+    const leasedDraft = touchFocusLeased ? composerFocusLeaseRef.current?.value || '' : ''
+    const draftText = suppliedDraft || leasedDraft
+    if (draftText) {
+      stageComposerHandoff(chatId, draftText, {
+        autoSend: suppliedDraft ? autoSend : false,
+      })
     }
     // Keep history writes inside useNavigation so the entry gets its route,
     // unique identity, and monotonic cursor synchronously. The former direct
@@ -2589,8 +2701,40 @@ export default function Shell() {
       const ws = workspaceStateRef.current.ws
       applyModeDestination({ view: 'chat', chatId, appId: null, paneId: ws.focusedPaneId })
     }
-    if (focusComposer) requestComposer(chatId, { focus: true })
+    if (presentation) {
+      if (alreadyPresented) {
+        retirePresentation()
+      } else {
+        const resolvedPresentation = {
+          ...presentation,
+          chatId: String(chatId),
+          // Adopt the epoch of the navigation that owns this destination (navTo
+          // above bumped it). newChatPresentationIsCurrent keeps the cover while
+          // this epoch still holds, bridging the render before `activeChatId`
+          // commits so the outgoing chat never flashes through.
+          navigationEpoch: navigationEpochRef.current,
+        }
+        newChatPresentationRef.current = resolvedPresentation
+        setNewChatPresentation(current => (
+          current === presentation ? resolvedPresentation : current
+        ))
+      }
+    }
+    if (focusComposer) {
+      requestComposer(chatId, {
+        draft: draftText || undefined,
+        focus: true,
+      })
+    }
   }
+
+  // Single screen owns one compose surface; Builder treats New chat as an
+  // additive tab action in the focused pane.
+  function startUserChat() {
+    const forceNew = workspaceStateRef.current.ws.viewMode === 'panes'
+    return newChat({ forceNew, focusComposer: true, recordHistory: true })
+  }
+
   // Keep the latest-newChat ref current so handleAppError's crash-report
   // fallback starts a chat with this render's live closure.
   newChatRef.current = newChat
@@ -2607,7 +2751,7 @@ export default function Shell() {
     const pending = pendingNewChatRef.current
     if (!pending || pending.token !== pendingNewChatToken) return
     const ws = workspaceStateRef.current.ws
-    const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+    const single = ws.viewMode === 'single'
     if (!single || ws.singleScreen != null) {
       // No longer an empty single slot (re-toggled to builder, or a slot was set by
       // another path) — drop the request.
@@ -2618,10 +2762,29 @@ export default function Shell() {
   }, [pendingNewChatToken, materializeNewChatRevision, modeView.active, modeState.transition,
       workspace.viewMode, workspace.singleScreen, workspaceStateRef])
 
-  function selectChat(id) {
+  function selectChat(id, { focusComposer = true } = {}) {
+    const chatId = String(id)
+    const paintedWorld = effectiveViewMode === 'single'
+      ? STANDARD_CHAT_WORLD
+      : BUILDER_CHAT_WORLD
+    const destinationAlreadyPainted = visibleChatPanes.some(owner => (
+      owner.world === paintedWorld
+      && String(owner.chatId) === chatId
+      && (paintedWorld !== BUILDER_CHAT_WORLD
+        || focusedPaneViewId == null
+        || String(owner.paneId) === String(focusedPaneViewId))
+      && String(presentedChatBySurface.get(
+        paintedWorld === BUILDER_CHAT_WORLD && focusedPaneViewId != null
+          ? FOCUSED_BUILDER_CHAT_SURFACE
+          : String(owner.paneId),
+      ) ?? '') === chatId
+    ))
+    const preserveDrawerPresentation = modalDrawerOpen
+      && !(activeView === 'chat' && String(activeChatId) === chatId)
+      && !destinationAlreadyPainted
     clearChatAttention(id)
-    navTo('chat', { chatId: id })
-    focusDesktopChatPaneComposer(id)
+    navTo('chat', { chatId: id, preserveDrawerPresentation })
+    if (focusComposer) focusDesktopChatPaneComposer(id)
   }
 
   async function deleteChat(id) {
@@ -2681,7 +2844,7 @@ export default function Shell() {
       reason: 'deleted',
     })
     const wsAfterClose = workspaceStateRef.current.ws
-    const single = !paneModel.WORKSPACE_SPLITS_ENABLED || wsAfterClose.viewMode === 'single'
+    const single = wsAfterClose.viewMode === 'single'
     const focusedAfterClose = wsAfterClose.panes[wsAfterClose.focusedPaneId]
     if (!single && !focusedAfterClose?.activeTabKey) {
       // Exclude the just-deleted id: it's still in `chats` until the
@@ -2856,7 +3019,7 @@ export default function Shell() {
     // the starter chat then.
     if (chats.length === 0 && activeChatId === null && activeView === 'chat') {
       const ws = workspaceStateRef.current.ws
-      const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+      const single = ws.viewMode === 'single'
       if (single && ws.singleScreen == null) requestEmptySingleNewChat()
       else newChat()
     }
@@ -2877,9 +3040,7 @@ export default function Shell() {
       data-mode-phase={modeView.active?.phase || modeState.transition?.phase || 'idle'}
       data-mode-epoch={modeView.active?.id || modeState.transition?.id || undefined}
       data-workspace-visual-state={workspaceVisualState}
-      className={`shell${immersiveActive ? ' shell--immersive' : ''}`
-      + `${desktopSidebarReserved ? ' shell--drawer-docked' : ''}`
-      + `${builderModeActive && paneModel.BUILDER_POWER_CHROME ? ' shell--builder-power' : ''}`}>
+      className={`shell${immersiveActive ? ' shell--immersive' : ''}${desktopSidebarReserved ? ' shell--drawer-docked' : ''}`}>
       <a
         className="shell__skip-link"
         href="#main-content"
@@ -2890,6 +3051,14 @@ export default function Shell() {
       >
         Skip to content
       </a>
+      <textarea
+        ref={composerFocusLeaseRef}
+        className="shell__composer-focus-lease"
+        tabIndex={-1}
+        aria-label="New chat message"
+        autoComplete="off"
+        onBlur={(event) => { event.currentTarget.value = '' }}
+      />
       {/* The existing brand toggle remains the visible close affordance while the
           mobile drawer is modal. Keep the workspace inert below, but do not inert
           the header: doing so lets the scrim intercept the toggle and strands the
@@ -2901,7 +3070,6 @@ export default function Shell() {
       >
         <ShellBrand
           brandRef={brandButtonRef}
-          splitsEnabled={paneModel.WORKSPACE_SPLITS_ENABLED}
           navigationOpen={navigationOpen}
           builderModeActive={builderModeActive}
           // The live descriptor drives the logo's hold→completion spring (round 4
@@ -2918,7 +3086,7 @@ export default function Shell() {
             className="shell__rail-action"
             aria-label="New chat shortcut"
             title="New chat"
-            onClick={() => newChat({ focusComposer: true, recordHistory: true })}
+            onClick={startUserChat}
           >
             <NewChatNavIcon aria-hidden="true" />
           </button>
@@ -2960,12 +3128,14 @@ export default function Shell() {
       </header>
 
       <Drawer
-        open={navigationOpen}
+        open={displayedNavigationOpen}
         persistent={persistentDrawer}
         width={desktopSidebarWidth}
         onWidthChange={setDesktopSidebarWidth}
-        interactionLocked={drawerModeTransitioning}
-        onClose={drawerModeTransitioning ? undefined : closeDrawer}
+        interactionLocked={drawerModeTransitioning || drawerNavigationCover}
+        onClose={drawerModeTransitioning || drawerNavigationCover
+          ? undefined
+          : closeDrawer}
         apps={apps}
         appsStatus={appsStatus}
         onRetryApps={() => appsQuery.refetch()}
@@ -2977,7 +3147,7 @@ export default function Shell() {
         activeChatId={activeChatId}
         onChat={selectChat}
         onApp={(id) => navTo('canvas', { appId: id })}
-        onNewChat={() => newChat({ focusComposer: true, recordHistory: true })}
+        onNewChat={startUserChat}
         onDeleteChat={deleteChat}
         onDeleteApp={deleteApp}
         onDeleteAppData={deleteAppData}
@@ -2988,11 +3158,15 @@ export default function Shell() {
         appsActive={appsVisibleAsTab}
         onAppsOpen={() => navTo('apps')}
         appsHost={appsDirectoryHost}
+        nowPlaying={nowPlaying}
+        onNowPlayingOpen={handleNowPlayingOpen}
+        onNowPlayingControl={handleNowPlayingControl}
         streamingChatIds={streamingChatIds}
         attentionChatIds={attentionChatIds}
         newAppIds={appAttentionSet}
         settingsWarning={providerAuth.needsAttention}
         dragActiveRef={dragActiveRef}
+        drawerRowGesturesRef={drawerRowGesturesRef}
       />
 
       {showWalkthrough && (
@@ -3046,7 +3220,7 @@ export default function Shell() {
           // Tag it with the sole pane's id so the drag controller resolves a
           // source pane exactly as it does for a WorkspaceChrome strip; dragging
           // a tab out with ≥2 tabs present splits the pane.
-          data-pane-strip={paneModel.WORKSPACE_SPLITS_ENABLED ? workspace.focusedPaneId : undefined}
+          data-pane-strip={workspace.focusedPaneId}
           data-mode-pane-vt={navViewStyle ? navPaneId : undefined}
           style={navViewStyle || undefined}
           onKeyDown={(e) => stripKeyDown(e, openTabs, (tab) => closeTab(tab))}
@@ -3066,7 +3240,7 @@ export default function Shell() {
                 active={active}
                 revealKey={tabRevealRevision}
                 tabIndex={active ? 0 : -1}
-                dragKey={paneModel.WORKSPACE_SPLITS_ENABLED ? key : undefined}
+                dragKey={key}
                 onActivate={() => {
                   const { view, opts } = tabModel.tabNavTarget(tab)
                   navTo(view, opts)
@@ -3162,6 +3336,7 @@ export default function Shell() {
               onIntentDelivered={handleAppIntentDelivered}
               onAppError={handleAppError}
               onHostRequest={handleAppHostRequest}
+              onMediaSession={handleMediaSession}
             />
             </ErrorBoundary>
           </div>
@@ -3172,10 +3347,13 @@ export default function Shell() {
             their projected pane geometry even while hidden. During a chat change
             the last painted chat remains as an inert opaque same-world cover until
             the incoming chat reports a stable frame. */}
-        {chatPaneLayers.map(({ world, paneId, chatId, role, surfaceKey }) => {
+        {chatPaneLayers.map(({
+          world, paneId, presentationPaneId, chatId, role, surfaceKey,
+        }) => {
           const tabKey = `chat:${chatId}`
           const standardOwner = world === STANDARD_CHAT_WORLD
-          const paneActiveKey = paneModel.activeKeyForOwner(workspace, paneId) || tabKey
+          const layoutPaneId = presentationPaneId ?? paneId
+          const paneActiveKey = paneModel.activeKeyForOwner(workspace, layoutPaneId) || tabKey
           const builderRect = standardOwner ? null : builderChatTabRects.get(paneActiveKey)
           const builderPainted = !standardOwner
             && effectiveViewMode === 'panes'
@@ -3206,10 +3384,10 @@ export default function Shell() {
               bottom: 'auto',
             }
             : null
-          const chatViewStyle = paned
+          const chatViewStyle = builderRect
             ? {
               ...posStyle,
-              ...modeViewTransitionStyle('pane', paneId, surfaceKey),
+              ...(paned ? modeViewTransitionStyle('pane', layoutPaneId, surfaceKey) : {}),
             }
             : undefined
           return (
@@ -3220,7 +3398,7 @@ export default function Shell() {
               aria-labelledby={tabPanel ? paneTabDomId(paneId, tabKey) : undefined}
               data-chat-world={world}
               data-chat-id={chatId}
-              data-mode-pane-vt={paned ? paneId : undefined}
+              data-mode-pane-vt={paned ? layoutPaneId : undefined}
               data-tab-key={!standardOwner && (multiPane || focusedPaneViewId != null)
                 && role !== 'held'
                 ? tabKey : undefined}
@@ -3241,8 +3419,8 @@ export default function Shell() {
                 ? 'true' : undefined}
               onPointerDownCapture={paned && role === 'active' && !modeBeatActive
                 ? (event) => {
-                  const wasFocused = workspaceStateRef.current.ws.focusedPaneId === paneId
-                  dispatchWorkspace({ type: 'FOCUS', paneId })
+                  const wasFocused = workspaceStateRef.current.ws.focusedPaneId === layoutPaneId
+                  dispatchWorkspace({ type: 'FOCUS', paneId: layoutPaneId })
                   if (supportsDesktopPaneComposerFocus()
                     && shouldFocusComposerAfterPanePointer({
                       wasFocused,
@@ -3259,11 +3437,13 @@ export default function Shell() {
                 chatId={chatId}
                 paneId={paneId}
                 apps={apps}
-                // Single view-mode paints only the focused pane full-bleed, so every
-              // NON-focused chat pane stops doing work (streaming/scroll) — the
-              // chat analogue of visibleAppIds soloing the focused app. Panes mode
-              // keeps every visible chat pane doing work.
-              visible={surfaceVisible && chatPanesVisible && role !== 'held'}
+                // Runtime activity and painting are independent during a handoff:
+                // staging owns the work while held remains the visual cover.
+                runtimeActive={surfaceVisible && chatPanesVisible && role !== 'held'}
+                keepTranscriptPainted={surfaceVisible && role === 'held'}
+                focusedPresentation={!standardOwner
+                  && focusedPaneViewId != null
+                  && String(layoutPaneId) === String(focusedPaneViewId)}
                 paneContentHeight={builderRect ? builderRect.h : null}
                 // Select before the memo boundary. Passing the replacement Map
                 // would rerender every visible chat pane for another chat's run.
@@ -3278,6 +3458,7 @@ export default function Shell() {
                 markVoiceListening={markVoiceListening}
                 refreshApps={refreshApps}
                 acknowledgeAppPreview={handleAppPreviewSeen}
+                refreshChats={refreshChats}
                 markChatOwnerActivity={markChatOwnerActivity}
                 loadTheme={loadTheme}
                 navTo={stablePaneNavTo}
@@ -3386,19 +3567,35 @@ export default function Shell() {
           </div>
           )
         })()}
-        {/* New Chat landing (round 4 item 3) — the first-class surface a null single
-            slot paints (never chats[0], never a blank <main>). */}
+        {/* One New Chat landing owns both the resting null slot and the immediate
+            user-initiated cover while its chat row is allocated. */}
         {(() => {
+          const presentingNewChat = newChatPresentation != null
+          const releasingNewChat = !!newChatPresentation?.releasing
           const newChatSurface = fullBleedKey === EMPTY_SINGLE_SURFACE_KEY
+            || presentingNewChat
           if (!newChatSurface) return null
           return (
             <div
               key="home-new-chat"
-              className="shell__view shell__view--active shell__chat-view"
+              className={`shell__view shell__view--active shell__chat-view`
+                + `${presentingNewChat ? ' shell__new-chat-presentation' : ''}`
+                + `${releasingNewChat ? ' shell__new-chat-presentation--releasing' : ''}`}
+              data-new-chat-presentation={presentingNewChat
+                ? newChatPresentation.chatId || 'allocating'
+                : undefined}
+              aria-busy={(presentingNewChat && !releasingNewChat) || undefined}
+              onAnimationEnd={releasingNewChat
+                ? event => {
+                  if (event.target === event.currentTarget
+                    && event.animationName === 'shell-new-chat-release') {
+                    finishNewChatPresentationRelease(newChatPresentation)
+                  }
+                }
+                : undefined}
             >
               <NewChatLanding
-                // Retry state only on the resting surface — never mid-reveal.
-                failure={newChatSurface ? newChatLandingFailure : null}
+                failure={presentingNewChat ? null : newChatLandingFailure}
                 onRetry={requestEmptySingleNewChat}
               />
             </div>
@@ -3459,7 +3656,7 @@ export default function Shell() {
         action={toast?.action}
         onDismiss={dismissToast}
       />
-      {tabActionsAvailable && tabMenu && (() => {
+      {tabMenu && (() => {
         const menuPane = workspace.panes[tabMenu.paneId]
         const menuTabIndex = menuPane?.tabs.findIndex(
           tab => tabModel.tabKey(tab) === tabMenu.tabKey,

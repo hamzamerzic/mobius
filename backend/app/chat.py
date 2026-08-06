@@ -30,7 +30,6 @@ from app import (
   skills as skills_platform,
 )
 from app.broadcast import (
-  ChatBroadcast,
   clear_active_broadcast_if,
   create_broadcast,
   get_broadcast,
@@ -151,22 +150,14 @@ _SKILL_TEXT_CACHE: str | None = None
 # sink save. Hand durable-marker clearing back to that run's wrapper so
 # the marker survives until persistence is complete.
 _clear_after_terminal_generation: dict[str, int] = {}
-# Outcome paired with the generation handoff above. Explicit Stop and the
-# liveness watchdog share the same safe "bump, let the runner finalize, then
-# clear" mechanism, but they are different durable outcomes.
+# Terminal outcome paired with each handoff generation: explicit Stop uses
+# ``stopped``; restart draining uses ``interrupted``.
 _clear_after_terminal_status: dict[str, str] = {}
 
-# Liveness watchdog. Derived-only in v1: no persisted run-state enum.
-PROGRESS_TIMEOUT = 600.0
-STALLED_TURN_MESSAGE = (
-  "The turn stalled (no activity for 10 minutes) and was stopped. Your "
-  "message is safe — tap Resume to pick up where it left off."
-)
 # Drain-gated restart (design §2.2). `draining` is the process-wide gate: while
 # set, new POST /messages sends append to the durable queue instead of starting
-# turns, and both liveness sweeps stand down so they can't race the drain's own
-# interrupt (the stalled-live watchdog exempts it via `_stall_exemption`; the
-# wedged-marker sweep returns early). `_restart_draining_chats` records the chats
+# turns, and the finished-run marker sweep stands down so it cannot race the
+# drain's own interrupt. `_restart_draining_chats` records the chats
 # whose live turn the drain interrupted, so each turn's terminal transition
 # (run_chat's finally) leaves its exact run intact long enough for the drain to
 # move it to the existing durable continuation state. If that transaction fails,
@@ -265,42 +256,6 @@ def bump_run_generation(chat_id: str) -> int:
   return registry.bump_generation(chat_id)
 
 
-def last_event_age_secs(
-  bc: ChatBroadcast | None,
-  now: float | None = None,
-) -> float | None:
-  """Age in seconds of the broadcast's last event, from monotonic time."""
-  if bc is None or bc.last_event_at is None:
-    return None
-  if now is None:
-    now = time.monotonic()
-  return max(0.0, now - bc.last_event_at)
-
-
-def is_broadcast_stale(
-  bc: ChatBroadcast | None,
-  now: float | None = None,
-) -> bool:
-  """The one staleness predicate used by watchdog and debug status."""
-  age = last_event_age_secs(bc, now)
-  return age is not None and age > PROGRESS_TIMEOUT
-
-
-def _run_age_secs(
-  run: models.ChatRun | None,
-  now: datetime | None = None,
-) -> float | None:
-  """Age in seconds of the current durable run, when derivable."""
-  if run is None or run.started_at is None:
-    return None
-  if now is None:
-    now = datetime.now(UTC).replace(tzinfo=None)
-  started = run.started_at
-  if started.tzinfo is not None:
-    started = started.astimezone(UTC).replace(tzinfo=None)
-  return max(0.0, (now - started).total_seconds())
-
-
 def _parked_until_for_chat(
   db: Session,
   chat_id: str,
@@ -312,9 +267,9 @@ def _parked_until_for_chat(
   ``resume_pending``. A fresh turn
   on a previously-parked chat inserts a newer "running" row (and StartTurn /
   PromotePending close the stale park via `_close_running_runs`), so an
-  orphaned park can never exempt the NEW live turn from the stall watchdog or
-  keep the health surface reporting "parked". Query failures read as
-  not-parked — the liveness checks must never crash on this probe.
+  orphaned park can never suppress recovery for the NEW live turn. Query
+  failures read as not-parked — recovery checks must never crash on this
+  probe.
   """
   try:
     # id.desc() is a deterministic tiebreak: two rows CAN share a started_at
@@ -370,78 +325,6 @@ def _restart_manual_hold_for_chat(db: Session, chat_id: str) -> bool:
     and run[0] == "interrupted"
     and run[1] == "restart"
   )
-
-
-def _is_future_park(
-  parked_until: datetime | None,
-  now: datetime | None = None,
-) -> bool:
-  if parked_until is None:
-    return False
-  if now is None:
-    now = datetime.now(UTC).replace(tzinfo=None)
-  if parked_until.tzinfo is not None:
-    parked_until = parked_until.astimezone(UTC).replace(tzinfo=None)
-  return parked_until > now
-
-
-def _stall_exemption(
-  db: Session,
-  chat_id: str,
-  now: datetime | None = None,
-) -> str | None:
-  """Derived exemptions from design 2.1: question, park, or draining."""
-  if draining:
-    return "draining"
-  # The registry entry can outlive its future while a provider callback
-  # unwinds. Only a genuinely unresolved future is a human wait; treating a
-  # completed entry as exempt forever strands the SDK process when it wedges
-  # after answer delivery.
-  if questions.is_waiting(chat_id):
-    return "pending_question"
-  if _is_future_park(_parked_until_for_chat(db, chat_id), now):
-    return "parked"
-  return None
-
-
-def live_run_health_fields(
-  chat_id: str,
-  db: Session,
-  *,
-  now_monotonic: float | None = None,
-  now_wall: datetime | None = None,
-) -> dict:
-  """Derived liveness surface for one chat, shared by debug status."""
-  if now_monotonic is None:
-    now_monotonic = time.monotonic()
-  if now_wall is None:
-    now_wall = datetime.now(UTC).replace(tzinfo=None)
-  bc = get_broadcast(chat_id)
-  from app.run_state import running_run
-  run = running_run(db, chat_id)
-  parked_until = _parked_until_for_chat(db, chat_id)
-  stale = is_broadcast_stale(bc, now_monotonic)
-  exemption = _stall_exemption(db, chat_id, now_wall)
-  if exemption == "pending_question":
-    state = "pending_question"
-  elif exemption == "parked":
-    state = "parked"
-  elif exemption == "draining":
-    state = "draining"
-  elif stale:
-    state = "stale"
-  else:
-    state = "live"
-  return {
-    "state": state,
-    "last_event_age_secs": last_event_age_secs(bc, now_monotonic),
-    "run_age_secs": _run_age_secs(run, now_wall),
-    "subscriber_count": len(bc.subscribers) if bc is not None else 0,
-    "stale": stale,
-    "parked_until": (
-      parked_until.isoformat() if parked_until is not None else None
-    ),
-  }
 
 
 def forget_chat(chat_id: str) -> None:
@@ -1067,7 +950,7 @@ async def sweep_wedged_runs(db: Session) -> list[str]:
   try:
     cutoff = datetime.now(UTC).replace(tzinfo=None) - _WEDGED_RUN_MIN_AGE
     stale = (
-      # The watchdog needs only run identity. A long-running chat can have a
+      # Recovery needs only run identity. A long-running chat can have a
       # multi-megabyte transcript; hydrating it every minute while merely
       # checking registry/broadcast state repeats the same allocator problem
       # the idle-pending projection below avoids.
@@ -1289,98 +1172,6 @@ async def _stop_handle_with_escalation(
     return False, True
 
 
-async def sweep_stalled_live_runs(db: Session) -> list[str]:
-  """Interrupt live SDK turns whose broadcast has been silent too long.
-
-  This is the runtime liveness watchdog from design 2.3. It uses only derived
-  state: the registry says which turns are live, `ChatBroadcast.last_event_at`
-  says whether progress is stale, and `_stall_exemption` checks the v1
-  exemptions without introducing a persisted run-state enum.
-
-  The interrupt path deliberately mirrors Stop's generation handoff but skips
-  Stop's user-facing queue collapse: pending_messages are not cleared and
-  pending questions are not cancelled. The runner is allowed to unwind through
-  its normal `_complete_turn` path, so the single-writer actor still owns the
-  terminal transcript write and run-marker cleanup.
-  """
-  log = _get_logger()
-  interrupted: list[str] = []
-  now_monotonic = time.monotonic()
-  now_wall = datetime.now(UTC).replace(tzinfo=None)
-  for chat_id in sorted(registry.all_alive_chat_ids()):
-    handles = registry.get_handles(chat_id)
-    if not handles:
-      # Broadcast creation starts the stale clock, but the watchdog only acts
-      # once a live SDK handle exists. Pre-handle stalls remain visible in
-      # /api/debug/status and are not interrupted from this sweep.
-      continue
-    bc = get_broadcast(chat_id)
-    if not is_broadcast_stale(bc, now_monotonic):
-      continue
-    exemption = _stall_exemption(db, chat_id, now_wall)
-    if exemption is not None:
-      # Pending questions and limit parks can remain open for hours. The sweep
-      # runs every minute, so INFO here turns one healthy exemption into an
-      # unbounded stream of duplicate chat.log lines. Debug status already
-      # exposes the live state; retain the per-tick trace only in debug mode.
-      log.debug(
-        "stalled-live watchdog skipped chat_id=%s exemption=%s",
-        chat_id, exemption,
-      )
-      continue
-    sink = get_active_sink(chat_id)
-    # `resumable` rides the event LIVE now that events.process_event carries
-    # the whitelisted extras onto the persisted block — the stalled note gets
-    # its one-tap Resume without waiting for a boot reconcile.
-    if sink is not None:
-      # A stall is a benign timeout, not a failure — `pause.kind='stall'`
-      # renders it in the calm "Paused" family, not the danger-red error card.
-      sink.publish(_pause_note(STALLED_TURN_MESSAGE, kind="stall"))
-    elif bc is not None:
-      # Transport-only fallback for the rare inconsistent state where a handle
-      # is live but chat.py no longer has its sink. Do not persist directly.
-      bc.publish(_pause_note(STALLED_TURN_MESSAGE, kind="stall"))
-      log.warning(
-        "stalled-live watchdog has no active sink for chat_id=%s; "
-        "published transport error only",
-        chat_id,
-      )
-
-    stopped_gen = current_run_generation(chat_id)
-    if not isinstance(stopped_gen, int):
-      log.warning(
-        "stalled-live watchdog skipped chat_id=%s with non-finite generation",
-        chat_id,
-      )
-      continue
-    bump_run_generation(chat_id)
-    _clear_after_terminal_generation[chat_id] = stopped_gen
-    _clear_after_terminal_status[chat_id] = "interrupted"
-
-    all_interrupted = True
-    escalated = False
-    for handle in handles:
-      stopped, used_force = await _stop_handle_with_escalation(
-        chat_id,
-        handle,
-        source="stalled-live watchdog",
-      )
-      escalated = escalated or used_force
-      all_interrupted = all_interrupted and stopped
-    if escalated:
-      # agent-browser daemons intentionally detach from the SDK group. Their
-      # CHAT_ID/session routing is the separate, identity-safe cleanup key.
-      await _close_browser_session(chat_id)
-    if all_interrupted:
-      interrupted.append(chat_id)
-  if interrupted:
-    log.warning(
-      "stalled-live watchdog interrupted %d chat(s): %s",
-      len(interrupted), ", ".join(interrupted),
-    )
-  return interrupted
-
-
 async def drain_all_for_restart(
   timeout: float = DRAIN_TIMEOUT,
   *,
@@ -1412,8 +1203,8 @@ async def drain_all_for_restart(
       best-effort: a commit that loses the race with SIGKILL is repaired by
       boot reconcile, which finalizes the marker with a generic interrupted
       note that is equally resumable);
-    - mirrors the stalled-live watchdog's clean-interrupt handoff — bump the
-      generation so the turn-end drain sees a stale generation and does NOT
+    - mirrors explicit Stop's clean-interrupt handoff — bump the generation so
+      the turn-end drain sees a stale generation and does NOT
       promote the queue — BUT records the chat in `_restart_draining_chats` so
       the turn's finally does not clear the exact run before this drain can
       transition it. After every handle stops, the same writer transaction used
@@ -1643,8 +1434,25 @@ CONTINUATION_SWEEP_BATCH_SIZE = 100
 # not delay an opted-in chat after its reset, but a bad/early reset timestamp
 # also must not launch a whole parked batch in one burst.
 LIMIT_AUTO_RESUME_STAGGER_SECS = 30.0
+# Planned restarts restore work that was already concurrent, but relaunching a
+# large set in one event-loop pass can starve readiness. Pace that exact set in
+# small batches; RuntimeSupervisors drains a successful remainder promptly.
+RESTART_AUTO_RESUME_BATCH_SIZE = 2
 _next_limit_auto_resume_at = 0.0
 _RESTART_AUTHORIZATION_UNSET = object()
+
+
+@dataclass(frozen=True)
+class ContinuationSweepResult:
+  """Durable outcomes from one continuation pass.
+
+  ``restart_deferred`` means an eligible planned-restart park remains due.
+  Callers may promptly run another pass only when this pass also made progress;
+  a no-progress result falls back to the ordinary retry cadence.
+  """
+
+  resolved: tuple[str, ...] = ()
+  restart_deferred: bool = False
 
 
 def _limit_auto_resume_now() -> float:
@@ -1672,36 +1480,15 @@ def _claim_limit_auto_resume_slot(now: float | None = None) -> bool:
 
 
 def _has_unanswered_question(chat: models.Chat | None) -> bool:
-  """Whether the durable tail is waiting for an owner answer.
+  """Whether the chat is parked on an open AskUserQuestion.
 
-  A restart pause is appended after the question while draining, so ignore that
-  one product-owned tail block before applying the same tail-question invariant
-  as the transcript UI. This is read-only and bounded to the latest assistant
-  row; it never scans tool output or historical questions.
+  Reads the durable `pending_question_id` marker (models.Chat) — the
+  position-independent source of truth, set when the card is asked and cleared
+  when it is answered or the turn ends. A resumable pause (provider limit /
+  planned restart) keeps it, so an interrupted-but-open question still blocks
+  auto-resume here instead of being resumed past and orphaned.
   """
-  if chat is None:
-    return False
-  try:
-    from app.chat_transcript import materialized_messages
-    messages = materialized_messages(chat)
-  except Exception:
-    messages = list(chat.messages or [])
-  if not messages or messages[-1].get("role") != "assistant":
-    return False
-  blocks = list(messages[-1].get("blocks") or [])
-  while blocks:
-    tail = blocks[-1]
-    if not (
-      tail.get("type") == "error"
-      and (tail.get("pause") or {}).get("kind") == "restart"
-    ):
-      break
-    blocks.pop()
-  return bool(
-    blocks
-    and blocks[-1].get("type") == "question"
-    and not blocks[-1].get("answers")
-  )
+  return chat is not None and chat.pending_question_id is not None
 
 
 async def _auto_resume_chat(
@@ -1919,11 +1706,10 @@ async def sweep_reset_parks(
   restart_authorization: str | None | object = (
     _RESTART_AUTHORIZATION_UNSET
   ),
-) -> list[str]:
+) -> ContinuationSweepResult:
   """Notify and optionally continue due durable recovery rows.
 
-  The third lifespan sweep (same 60s loop shape as the wedged-marker and
-  stalled-live sweeps). A due park is a `chat_runs` row still
+  A due park is a `chat_runs` row whose
   ``status`` is ``parked`` or ``resume_pending`` and whose
   `parked_until` has passed. Provider limits use their reset time; a planned
   restart is parked by the drain itself with a due time of now. Each pass
@@ -1941,9 +1727,11 @@ async def sweep_reset_parks(
       at most one starts per sweep and launches are spaced even when unrelated
       chats are live. App-attributed provider-limit runs never auto-resume.
       Planned-restart continuations reclaim the exact set that was already live
-      before the restart, preserve each run's attribution, and may resume
-      independently. A staggered enabled chat stays pending for a later tick,
-      while notify-only chats in the same due batch still resolve normally.
+      before the restart and preserve each run's attribution. A pass launches a
+      small restart batch, then the supervisor promptly drains the durable
+      remainder without waiting for those turns to finish. A staggered enabled
+      chat stays pending while notify-only chats in the same due batch still
+      resolve normally.
       App-attributed messages newly queued behind either kind of park still
       require an ordinary app-owned handoff rather than being swept into the
       synthetic continuation.
@@ -1953,8 +1741,9 @@ async def sweep_reset_parks(
   """
   log = _get_logger()
   resolved: list[str] = []
+  restart_deferred = False
   if draining:
-    return resolved
+    return ContinuationSweepResult()
   now = datetime.now(UTC).replace(tzinfo=None)
   try:
     due = (
@@ -1968,9 +1757,9 @@ async def sweep_reset_parks(
     )
   except Exception:
     log.exception("sweep_reset_parks: query failed")
-    return resolved
+    return ContinuationSweepResult()
   if not due:
-    return resolved
+    return ContinuationSweepResult()
   chat_ids = {run.chat_id for run in due}
   try:
     chats = {
@@ -1983,7 +1772,7 @@ async def sweep_reset_parks(
     }
   except Exception:
     log.exception("sweep_reset_parks: chat batch query failed")
-    return resolved
+    return ContinuationSweepResult()
   accepted_restart_nonce = restart_authorization
   if any(run.park_reason == "restart" for run in due):
     if restart_authorization is _RESTART_AUTHORIZATION_UNSET:
@@ -2042,6 +1831,7 @@ async def sweep_reset_parks(
     return auto_resume_rejection(chat, run) is None
 
   limit_resume_started = False
+  restart_resume_started = 0
   for run in due:
     chat_id = run.chat_id
     chat = chats.get(chat_id)
@@ -2057,6 +1847,12 @@ async def sweep_reset_parks(
       # One provider-limit continuation per sweep. Leave this park untouched,
       # but keep walking so a later notify-only chat is not held hostage by
       # another chat's auto-resume preference.
+      continue
+    if (
+      restart_auto_resume
+      and restart_resume_started >= RESTART_AUTO_RESUME_BATCH_SIZE
+    ):
+      restart_deferred = True
       continue
     if auto_resume:
       try:
@@ -2123,9 +1919,12 @@ async def sweep_reset_parks(
       )
       if resume_started:
         resolved.append(chat_id)
-        if not restart_auto_resume:
+        if restart_auto_resume:
+          restart_resume_started += 1
+        else:
           limit_resume_started = True
       elif restart_auto_resume:
+        restart_deferred = True
         log.warning(
           "restart continuation remained pending after scheduling attempt "
           "chat_id=%s run_token=%s; next event/fallback sweep will retry",
@@ -2197,7 +1996,7 @@ async def sweep_reset_parks(
       "continuation sweep resolved %d park(s): %s",
       len(resolved), ", ".join(resolved),
     )
-  return resolved
+  return ContinuationSweepResult(tuple(resolved), restart_deferred)
 
 
 async def _clear_pending(chat_id: str) -> list[str]:
@@ -2269,6 +2068,15 @@ def _publish_chat_run_finished(chat_id: str) -> None:
   if chat_id:
     get_system_broadcast().publish({
       "type": "chat_run_finished",
+      "chatId": chat_id,
+    })
+
+
+def _publish_chat_scratch_releasable(chat_id: str) -> None:
+  """Hint that physical turn cleanup finished; consumers recheck ownership."""
+  if chat_id:
+    get_system_broadcast().publish({
+      "type": "chat_scratch_releasable",
       "chatId": chat_id,
     })
 
@@ -2632,9 +2440,12 @@ async def _close_browser_session(chat_id: str) -> None:
   targets = {BrowserSessionTarget(session=f"chat-{chat_id}")}
   try:
     from app.browser_profiles import browser_session_targets_for_chat
-    targets.update(
-      await asyncio.to_thread(browser_session_targets_for_chat, chat_id)
-    )
+    scan = await asyncio.to_thread(browser_session_targets_for_chat, chat_id)
+    targets.update(scan.targets)
+    if not scan.complete:
+      log.warning(
+        "agent-browser session discovery incomplete for chat %s", chat_id,
+      )
   except Exception as exc:
     log.warning(
       "agent-browser session discovery failed for chat %s: %s",
@@ -3532,6 +3343,7 @@ async def run_chat(
   # (which `_run_chat_impl` doesn't catch) leaves the marker set for
   # reconciliation rather than silently wiping it — the safe default.
   disposition = chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
+  runtime_settled = False
   try:
     disposition = await _run_chat_impl(
       messages, chat_id=chat_id, session_id=session_id,
@@ -3539,6 +3351,44 @@ async def run_chat(
       attachments=attachments, timezone=timezone, viewport=viewport,
       run_token=run_token,
     )
+    runtime_settled = True
+  except asyncio.CancelledError:
+    raise
+  except Exception as exc:
+    # A setup-time exception in this detached task previously vanished
+    # ("Task exception was never retrieved"): the run row stayed 'running',
+    # the broadcast never settled, and every send presented as an eternal
+    # spinner while the container reported healthy — the 2026-08-04
+    # missing-column outage. Surface the terminal failure exactly like the
+    # other failure paths and durably fail the run. The queue marker keeps
+    # its FAILED_LEAVE_MARKER default above, so reconciliation still sees
+    # the evidence it needs.
+    _get_logger().exception(
+      "chat turn failed before the agent started chat_id=%s", chat_id,
+    )
+    bc = get_broadcast(chat_id) if chat_id else None
+    if bc is not None:
+      bc.publish({
+        "type": "error",
+        "message": (
+          "This turn failed before the agent could start "
+          f"({type(exc).__name__}). Your message is saved; the full error "
+          "is in the server log."
+        ),
+      })
+      bc.publish({"type": "done"})
+      bc.mark_completed()
+    if chat_id:
+      _publish_chat_run_finished(chat_id)
+      try:
+        await _finish_run_strict(
+          chat_id, run_token or "", terminal_status="failed",
+        )
+      except Exception:
+        _get_logger().warning(
+          "setup-failure FinishRun did not persist chat_id=%s "
+          "(reconciliation will repair)", chat_id, exc_info=True,
+        )
   finally:
     stopped_gen = _clear_after_terminal_generation.get(chat_id)
     clear_stopped_run = run_gen is not None and stopped_gen == run_gen
@@ -3631,6 +3481,24 @@ async def run_chat(
       _get_logger().debug(
         "terminal disposition chat_id=%s %s", chat_id, disposition.value,
       )
+    if runtime_settled and chat_id:
+      # chat_run_finished is intentionally earlier for responsive shell UI.
+      # Scratch needs a stricter physical boundary: _run_chat_impl has returned
+      # after browser cleanup, and a complete empty process inventory proves no
+      # detached Chromium session still inherits this turn's TMPDIR. The
+      # scratch owner rechecks both runtime and durable run identity again.
+      try:
+        from app.browser_profiles import browser_session_targets_for_chat
+        browser_scan = await asyncio.to_thread(
+          browser_session_targets_for_chat, chat_id,
+        )
+        if browser_scan.complete and not browser_scan.targets:
+          _publish_chat_scratch_releasable(chat_id)
+      except Exception:
+        _get_logger().debug(
+          "agent scratch release hint skipped chat_id=%s",
+          chat_id, exc_info=True,
+        )
     # Turn-end chat-note guarantee: when the chat SETTLED (no pending
     # follow-up), the platform's sole publisher updates its three summary
     # granularities. Runs AFTER the reply is sent → no user-facing latency;
@@ -3653,6 +3521,27 @@ async def run_chat(
         )
     except Exception:
       _get_logger().debug("chat-note guarantee skipped", exc_info=True)
+
+    # Auto-wake a delegation's parent chat when the child subagent settles.
+    # Gated to durable, non-resuming terminals; runs after the reply is sent and
+    # is best-effort (like the chat-note guarantee above) so it can never affect
+    # this turn. A non-delegation chat is a single indexed miss and returns fast.
+    try:
+      if chat_id and disposition in _DELEGATION_WAKE_DISPOSITIONS:
+        from app.delegations import wake_parent_after_child_settled
+        await wake_parent_after_child_settled(chat_id)
+    except Exception:
+      _get_logger().debug("delegation parent-wake skipped", exc_info=True)
+
+
+# The durable, settled, non-resuming terminals where a delegation child's
+# result is final and its ChatRun terminal status has committed (FinishRun ran
+# inside drain_and_release before the disposition returned). FAILED_LEAVE_MARKER
+# is excluded — the terminal isn't durable there; the boot reconcile covers it.
+_DELEGATION_WAKE_DISPOSITIONS = frozenset({
+  chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED,
+  chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED,
+})
 
 
 def _chat_note_mtime(data_dir: str, chat_id: str) -> float:
@@ -3793,6 +3682,9 @@ async def _sync_chat_title(data_dir: str, chat_id: str) -> None:
 # to when no real client viewport exists for the turn.
 DEFAULT_VIEWPORT_WIDTH = 412
 DEFAULT_VIEWPORT_HEIGHT = 915
+DEFAULT_VIEWPORT_PIXEL_RATIO = 1.0
+MIN_VIEWPORT_PIXEL_RATIO = 0.5
+MAX_VIEWPORT_PIXEL_RATIO = 4.0
 AVAILABLE_SKILLS_CONTEXT_LIMIT = 64
 
 def bounded_agent_browser_args(existing: str | None) -> str:
@@ -3806,14 +3698,14 @@ def bounded_agent_browser_args(existing: str | None) -> str:
 
 
 def viewport_env(viewport: dict | None) -> dict[str, str]:
-  """Returns the VIEWPORT_* env vars for an agent turn.
+  """Returns the display geometry env vars for an agent turn.
 
-  The React shell sends `{width, height}` with every message POST and
-  browser tooling requires integer CSS pixels even when layout APIs report
-  fractional pane geometry. Normalize the pair here so every provider gets
-  the same executable viewport contract. Shell-less turns have no sender, so
-  a missing or malformed viewport falls back to the documented default instead
-  of leaving the vars unset and failing every screenshot in those contexts.
+  The React shell sends `{width, height, pixelRatio}` with every message POST.
+  Width and height describe CSS layout; pixelRatio preserves the physical
+  density that makes text and one-pixel details match the partner's display.
+  Normalize this untrusted boundary once so every provider receives the same
+  executable capture contract. Shell-less turns have no sender, so malformed
+  or missing values fall back to documented defaults.
   """
   vp_w = (viewport or {}).get("width")
   vp_h = (viewport or {}).get("height")
@@ -3827,7 +3719,21 @@ def viewport_env(viewport: dict | None) -> dict[str, str]:
   ):
     dimensions = (DEFAULT_VIEWPORT_WIDTH, DEFAULT_VIEWPORT_HEIGHT)
   width, height = (max(1, round(value)) for value in dimensions)
-  return {"VIEWPORT_WIDTH": str(width), "VIEWPORT_HEIGHT": str(height)}
+  try:
+    pixel_ratio = float((viewport or {}).get("pixelRatio"))
+  except (TypeError, ValueError):
+    pixel_ratio = DEFAULT_VIEWPORT_PIXEL_RATIO
+  if not math.isfinite(pixel_ratio) or pixel_ratio <= 0:
+    pixel_ratio = DEFAULT_VIEWPORT_PIXEL_RATIO
+  pixel_ratio = min(
+    MAX_VIEWPORT_PIXEL_RATIO,
+    max(MIN_VIEWPORT_PIXEL_RATIO, pixel_ratio),
+  )
+  return {
+    "VIEWPORT_WIDTH": str(width),
+    "VIEWPORT_HEIGHT": str(height),
+    "VIEWPORT_PIXEL_RATIO": f"{pixel_ratio:g}",
+  }
 
 
 def _skill_context_value(value: object, limit: int) -> str:
@@ -3978,9 +3884,8 @@ async def _run_chat_impl_with_db(
   if run_token is None:
     run_token = alloc_run_token()
 
-  app_context_block, app_context_env = _build_app_context(
-    db, chat_id, settings.data_dir,
-  )
+  app_context_block = ""
+  app_context_env: dict[str, str] = {}
   chat_row = None
   chat_overrides: dict | None = None
   if chat_id:
@@ -3993,6 +3898,20 @@ async def _run_chat_impl_with_db(
       log.exception(
         "failed to load per-chat agent_settings chat_id=%s", chat_id,
       )
+  from app.delegations import policy_for_chat
+  run_policy = policy_for_chat(db, chat_id) if chat_row is not None else None
+  if run_policy is None:
+    app_context_block, app_context_env = _build_app_context(
+      db, chat_id, settings.data_dir,
+    )
+  else:
+    # Delegation prompts are plain bounded tasks even if their text happens to
+    # begin with an owner-only slash command.
+    goal_objective = None
+    goal_clear = False
+    goal_mode = False
+    goal_continue = False
+    is_slash_command = False
 
   # Chats created before native Codex goal handling have the /goal objective in
   # their durable transcript but no provider-side ThreadGoal yet.  Either the
@@ -4035,7 +3954,7 @@ async def _run_chat_impl_with_db(
   # the command's length limit. Keep it out of the persisted prompt snapshot as
   # well, so later turns reuse the stable constitution bytes.
   startup_context = ""
-  if not session_id:
+  if not session_id and run_policy is None:
     # `build_memory_block` is pure; the activity emit + envelope live here.
     eligible_chat_ids = {
       row[0]
@@ -4094,7 +4013,7 @@ async def _run_chat_impl_with_db(
       if skills_block:
         startup_context = f"{startup_context}\n\n{skills_block}"
 
-  if app_context_block:
+  if app_context_block and run_policy is None:
     # The report BODY goes right after the </app_context> line, but only on
     # the FIRST turn (`not session_id`): the small app-context id/path lines
     # are cheap and stay per-turn, while the report body is large and
@@ -4111,7 +4030,7 @@ async def _run_chat_impl_with_db(
     else:
       user_message = f"{block}\n\n{user_message}"
 
-  if not session_id:
+  if not session_id and run_policy is None:
     compaction_brief = _latest_compaction_brief(chat_row)
     if compaction_brief:
       block = (
@@ -4125,6 +4044,20 @@ async def _run_chat_impl_with_db(
         user_message = f"{user_message}\n\n{block}"
       else:
         user_message = f"{block}\n\n{user_message}"
+
+  # A planned restart can replace the parent provider process while durable
+  # child tasks keep running. Re-attach their immutable ids/statuses to every
+  # ordinary parent turn so a resumed agent waits on the existing child rather
+  # than launching a duplicate. Delegated children never receive this block,
+  # which also enforces the depth-one boundary.
+  if run_policy is None and chat_id and run_token:
+    from app.delegations import active_parent_context
+    delegation_context = active_parent_context(db, chat_id, run_token)
+    if delegation_context:
+      if is_slash_command:
+        user_message = f"{user_message}\n\n{delegation_context}"
+      else:
+        user_message = f"{delegation_context}\n\n{user_message}"
 
   # Per-turn time context (EVERY turn, not just the first) so the agent has a
   # clock + a sense of recency (how long since the user last wrote). Prepended
@@ -4169,11 +4102,15 @@ async def _run_chat_impl_with_db(
     db.close()
     return disposition
 
-  agent_token = auth.create_access_token(
-    {"sub": owner.username},
-    expires_delta=timedelta(hours=2),
-    token_epoch=owner.token_epoch,
-  )
+  if run_policy is not None:
+    from app.delegations import mint_app_token
+    agent_token = mint_app_token(db, run_policy)
+  else:
+    agent_token = auth.create_access_token(
+      {"sub": owner.username},
+      expires_delta=timedelta(hours=2),
+      token_epoch=owner.token_epoch,
+    )
 
   # Build the base environment shared by all providers.
   scripts_dir = Path(__file__).parent.parent / "scripts"
@@ -4191,17 +4128,21 @@ async def _run_chat_impl_with_db(
     "CHAT_ID": chat_id,
   })
   base_env.update(app_context_env)
+  if run_policy is not None:
+    base_env.update({
+      "MOBIUS_SUBAGENT_DEPTH": "1",
+      "MOBIUS_DELEGATION_ID": run_policy.delegation_id,
+      "MOBIUS_SUBAGENT_PROVIDER": run_policy.provider,
+    })
   # Overrides any inherited TMPDIR from _safe_keys: agent scratch belongs on
   # the bounded data volume, never the container's unbounded overlay. TMP and
   # TEMP travel with it so a tool reading either does not escape back to /tmp.
   from app.agent_scratch import scratch_for_chat
   scratch = scratch_for_chat(chat_id)
   base_env["TMPDIR"] = base_env["TMP"] = base_env["TEMP"] = str(scratch)
-  # Partner viewport (sent by the React shell on each turn). The agent
-  # uses these when taking screenshots so the framing matches what the
-  # partner actually sees — preview_shell.sh reads them, mini-app
-  # screenshots in the seed/skill recipes use them. Always set: shell-less
-  # turns get the documented 412x915 default (see viewport_env).
+  # Partner display geometry (sent by the React shell on each turn). CSS
+  # width/height preserve framing; pixel ratio preserves physical text/detail
+  # density. Always set: shell-less turns receive documented defaults.
   base_env.update(viewport_env(viewport))
   # Per-chat persistent Chrome profile for agent-browser. Default
   # (no AGENT_BROWSER_PROFILE) spins up a fresh ephemeral profile per
@@ -4239,8 +4180,12 @@ async def _run_chat_impl_with_db(
   # PATCH /api/chats/{id}; the file remains the fallback every chat
   # starts from. Computed once here and threaded into the SDK runner
   # for each provider.
-  agent_settings = effective_agent_settings(
-    settings.data_dir, chat_overrides, provider=provider_id,
+  agent_settings = (
+    {"model": run_policy.model, "effort": run_policy.effort}
+    if run_policy is not None
+    else effective_agent_settings(
+      settings.data_dir, chat_overrides, provider=provider_id,
+    )
   )
 
   # Snapshot-on-first-send: if the chat has no overrides yet (created
@@ -4256,7 +4201,7 @@ async def _run_chat_impl_with_db(
   # picker PATCH from another coroutine can only interleave at await
   # points; if one is added here, a concurrent PATCH could clobber the
   # user's pick.
-  if chat_row is not None and chat_overrides is None:
+  if run_policy is None and chat_row is not None and chat_overrides is None:
     snapshot = {}
     for k in ("model", "effort", "effort_by_provider"):
       if k not in agent_settings:
@@ -4285,13 +4230,19 @@ async def _run_chat_impl_with_db(
   # request; live app state is never recomposed for an established chat.
   runner_agent_settings = agent_settings
   custom_prompt = _custom_system_prompt(chat_overrides)
-  from app.system_prompts import prompt_for_chat
+  from app.system_prompts import exact_prompt_for_chat, prompt_for_chat
   try:
-    system_prompt = prompt_for_chat(
-      chat_row,
-      custom_prompt if custom_prompt else _read_skill_text(),
-      db,
-      persist=True,
+    system_prompt = (
+      exact_prompt_for_chat(
+        chat_row, run_policy.system_prompt, db, persist=True,
+      )
+      if run_policy is not None
+      else prompt_for_chat(
+        chat_row,
+        custom_prompt if custom_prompt else _read_skill_text(),
+        db,
+        persist=True,
+      )
     )
     db.commit()
   except Exception:
@@ -4310,6 +4261,56 @@ async def _run_chat_impl_with_db(
     db.close()
     return disposition
 
+  # Bind the recall recognizer while `db` is still live. This MUST happen
+  # before the db.close() below: resolving it lazily at a sink site would check
+  # out a fresh connection during the turn, which is precisely the pool
+  # exhaustion that close is there to prevent. It is also the semantically
+  # right moment — the recognizer is bound at the instant the agent is told
+  # the provider's path.
+  from app.memory_provider import resolve_recall_binding
+  recall_binding = resolve_recall_binding(db)
+
+  # Snapshot owner-managed MCP connections while this request session is still
+  # live. Provider turns can wait for hours, so neither runner may query the
+  # registry after the pool-release boundary below. The detached plan contains
+  # only plain values; a registry/decryption failure degrades this turn to the
+  # provider's native tools instead of breaking chat.
+  try:
+    from app.connectors import build_turn_plan
+    # Connections follow the owner's own chats. A delegated child run or an
+    # app-attributed chat (embedded app panels, headless scheduled runs) must
+    # not inherit the owner's remote services; a per-app grant can opt in at
+    # this call site if a background app ever genuinely needs one. When the
+    # run has a chat_id but its row could not be loaded, attribution is
+    # unknown — fail closed rather than grant.
+    include_owner_connectors = (
+      run_policy is None
+      and (
+        not chat_id
+        or (chat_row is not None and chat_row.created_by_app_id is None)
+      )
+    )
+    if not include_owner_connectors:
+      reason = (
+        "delegated run policy" if run_policy is not None
+        else "chat attribution unavailable" if chat_row is None
+        else "app-attributed chat"
+      )
+      log.info(
+        "owner MCP connections withheld (%s) chat_id=%s", reason, chat_id,
+      )
+    connector_turn_plan = build_turn_plan(
+      db,
+      include_owner_connectors=include_owner_connectors,
+    )
+  except Exception:
+    log.warning(
+      "MCP connection snapshot skipped chat_id=%s",
+      chat_id,
+      exc_info=True,
+    )
+    connector_turn_plan = None
+
   # This is deliberately request-scoped rather than part of the immutable
   # snapshot persisted above. On resumed turns `startup_context` is empty.
   if startup_context:
@@ -4321,7 +4322,11 @@ async def _run_chat_impl_with_db(
   # prompt/settings snapshot commits.
   resumed_context_fallback = (
     _build_resumed_context(chat_row)
-    if session_id and provider.name in ("Claude Code", "Codex")
+    if (
+      session_id
+      and provider.name in ("Claude Code", "Codex")
+      and (run_policy is None or run_policy.allow_session_reseed)
+    )
     else None
   )
 
@@ -4367,7 +4372,9 @@ async def _run_chat_impl_with_db(
         _log_superseded_run(chat_id, "no-agent-metrics")
         db.close()
         return chat_queue.TerminalDisposition.STALE_NO_ACTION
-      sink = _ChatEventSink(bc, chat_id, run_token=run_token)
+      sink = _ChatEventSink(
+        bc, chat_id, run_token=run_token, recall_binding=recall_binding,
+      )
       register_active_sink(chat_id, sink)
       sink.publish({"type": "text", "content": NO_AGENT_CONNECTED_MESSAGE})
       return await _complete_turn(
@@ -4393,7 +4400,11 @@ async def _run_chat_impl_with_db(
     db.close()
     return disposition
   data_dir = Path(settings.data_dir)
-  cwd = str(data_dir) if data_dir.exists() else str(Path.cwd())
+  cwd = (
+    run_policy.cwd
+    if run_policy is not None
+    else str(data_dir) if data_dir.exists() else str(Path.cwd())
+  )
 
   # SDK dispatch: route both Claude and Codex through their official
   # Agent SDK runners.
@@ -4410,18 +4421,21 @@ async def _run_chat_impl_with_db(
     # skills="all". Gated on the same skills_enabled flag; when off it prunes its
     # own shims. Best-effort: skill discovery is advisory, so a sync failure must
     # never block the turn from starting.
-    try:
-      from app.codex_skills import sync_codex_skills
-      from app.providers import skills_enabled as _skills_enabled
-      sync_codex_skills(settings.data_dir, _skills_enabled(settings.data_dir))
-    except Exception:
-      log.exception("codex skills sync failed chat_id=%s", chat_id)
+    if run_policy is None:
+      try:
+        from app.codex_skills import sync_codex_skills
+        from app.providers import skills_enabled as _skills_enabled
+        sync_codex_skills(settings.data_dir, _skills_enabled(settings.data_dir))
+      except Exception:
+        log.exception("codex skills sync failed chat_id=%s", chat_id)
     sdk_env = provider.build_env(
       base_env=base_env,
       data_dir=settings.data_dir,
       chat_id=chat_id,
     )
-    sink = _ChatEventSink(bc, chat_id, run_token=run_token)
+    sink = _ChatEventSink(
+      bc, chat_id, run_token=run_token, recall_binding=recall_binding,
+    )
     register_active_sink(chat_id, sink)
     runner_result: dict = {}
     # The provider can run for hours.  Everything needed to launch it is now
@@ -4450,6 +4464,8 @@ async def _run_chat_impl_with_db(
         goal_mode=goal_mode,
         goal_continue=goal_continue,
         fallback_goal_objective=fallback_goal_objective,
+        run_policy=run_policy,
+        connector_plan=connector_turn_plan,
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
@@ -4553,6 +4569,25 @@ async def _run_chat_impl_with_db(
     if session_id and not _resumable(
       session_id, cwd, sdk_env.get("CLAUDE_CONFIG_DIR")
     ):
+      if run_policy is not None and not run_policy.allow_session_reseed:
+        from app.delegations import REVIEW_REQUIRED_MARKER
+        sink = _ChatEventSink(
+          bc, chat_id, run_token=run_token, recall_binding=recall_binding,
+        )
+        register_active_sink(chat_id, sink)
+        sink.publish({
+          "type": "error",
+          "message": (
+            f"{REVIEW_REQUIRED_MARKER}: The delegated write session could "
+            "not be resumed after restart. Its durable history is intact, but "
+            "Möbius will not replay write work automatically. Review the child "
+            "history and start a new task if another pass is needed."
+          ),
+        })
+        return await _complete_turn(
+          bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
+          provider_id=provider_id, cost_usd=0, close_browser=False,
+        )
       log.warning(
         "claude session %s for chat %s has no resumable transcript; "
         "starting fresh and reseeding from DB transcript",
@@ -4569,7 +4604,9 @@ async def _run_chat_impl_with_db(
       # frontend stream consumer renders no "notice" type anyway. The
       # warning log is the operator-facing signal.
       claude_session_id = None
-    sink = _ChatEventSink(bc, chat_id, run_token=run_token)
+    sink = _ChatEventSink(
+      bc, chat_id, run_token=run_token, recall_binding=recall_binding,
+    )
     register_active_sink(chat_id, sink)
     # As in the Codex path, do not pin a pooled connection while the provider
     # is thinking or waiting for user input.  Resume fallback has already
@@ -4588,7 +4625,12 @@ async def _run_chat_impl_with_db(
         pending_questions=questions._pending,
         db=db,
         agent_settings=runner_agent_settings,
-        skills_enabled=_skills_enabled(settings.data_dir),
+        skills_enabled=(
+          False if run_policy is not None
+          else _skills_enabled(settings.data_dir)
+        ),
+        run_policy=run_policy,
+        connector_plan=connector_turn_plan,
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")

@@ -23,12 +23,18 @@ function twoPanes() {
 
 // ── viewMode field + persistence (design: view-mode toggle, forgiving parse) ──
 
-test('first boot workspaces default to an empty standard single-screen mode', () => {
+test('the fresh seed defaults to single mode with no slot (the seed lives in RESET_FLAT)', () => {
+  // Two-worlds: seedFromFlatTabs is a PURE constructor — single mode, but NO
+  // single-screen slot. An absent slot is the empty New-Chat home, never a borrow of
+  // the focused Builder pane. The real first-boot seed (legacy/flat active chat →
+  // Standard) lives in the RESET_FLAT reducer; see singleScreenSlot.test.js.
   assert.equal(freshWorkspace().viewMode, 'single')
-  assert.equal(paneModel.activeContentRoute(freshWorkspace()).chatId, '5')
+  assert.equal('singleScreen' in freshWorkspace(), false, 'the constructor writes no slot')
+  assert.equal(paneModel.activeContentRoute(freshWorkspace()).chatId, null, 'an unseeded slot is the home')
   const firstBoot = paneModel.parseWorkspace(null)
   assert.equal(firstBoot.viewMode, 'single')
-  assert.equal(paneModel.activeContentRoute(firstBoot).chatId, null)
+  assert.equal('singleScreen' in firstBoot, false, 'an empty first boot has no departing item — slot absent')
+  assert.equal(paneModel.activeContentRoute(firstBoot).chatId, null, 'empty first boot starts at home')
 })
 
 test('setViewMode sets the mode and is same-reference on a no-op', () => {
@@ -177,35 +183,7 @@ test('UNDO_LAST restores the captured tree but KEEPS the current view-mode', () 
   assert.equal(undone.ws.viewMode, 'single', 'the view-mode flip is NOT reverted')
 })
 
-// ── M3: the fresh/fallback seed has one standard world in every flag state ────
-// parseWorkspace returns seedFromFlatTabs directly on the fresh/fallback/invalid
-// paths (no re-normalize), so the seed itself must carry the mode both rendering
-// and activeContentRoute read. The splits kill switch still clamps every other
-// candidate to that same single-screen world.
-test('M3: with splits OFF a fresh/fallback seed is single and activeContentRoute reads the slot', async () => {
-  const prevLS = globalThis.localStorage
-  globalThis.localStorage = { getItem: (k) => (k === 'mobius:workspace-splits' ? '0' : null) }
-  try {
-    const pmOff = await import('../paneModel.js?m3-splits-off')
-    assert.equal(pmOff.WORKSPACE_SPLITS_ENABLED, false)
-    // The fresh fallback seed (empty raw → seedFromFlatTabs) is clamped to single.
-    const fresh = pmOff.parseWorkspace('')
-    assert.equal(fresh.viewMode, 'single', 'the seed itself is single when splits are off')
-    // Reproduce the review simulation: focused builder tab A, single-world slot B.
-    let ws = pmOff.seedFromFlatTabs([makeTab('chat', 'A')])
-    assert.equal(ws.viewMode, 'single', 'seedFromFlatTabs clamps at the parse layer')
-    ws = pmOff.setSingleScreen(ws, { kind: 'chat', id: 'B' })
-    const route = pmOff.activeContentRoute(ws)
-    assert.equal(route.view, 'chat')
-    assert.equal(route.chatId, 'B', 'reads the single-world SLOT, not the hidden builder focus A')
-  } finally {
-    if (prevLS === undefined) delete globalThis.localStorage
-    else globalThis.localStorage = prevLS
-  }
-})
-
-test('M3: with splits ON a fresh seed still starts in standard mode', () => {
-  assert.equal(paneModel.WORKSPACE_SPLITS_ENABLED, true)
+test('M3: a fresh seed starts in standard mode and activeContentRoute reads the slot', () => {
   let ws = paneModel.seedFromFlatTabs([makeTab('chat', 'A')])
   assert.equal(ws.viewMode, 'single')
   ws = paneModel.setSingleScreen(ws, { kind: 'chat', id: 'B' })

@@ -21,11 +21,11 @@ import {
 } from './streamReducers.js'
 import {
   readStoredStreamSnapshot,
-  bufferStreamSnapshot,
+  writeStoredStreamSnapshot,
   clearStoredStreamSnapshot,
-  flushStoredStreamSnapshot,
 } from './streamSnapshotCache.js'
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
+import { agentViewport } from '../../lib/agentViewport.js'
 import { ChatTransportError, chatHttpError } from './sendErrors.js'
 import {
   reportNetworkReachable,
@@ -45,6 +45,11 @@ import {
 // SQLite no longer has that fixed checkout ceiling, but 45s keeps rolling
 // deployments / slower external DBs on the safe side of the same contract.
 export const SEND_POST_TIMEOUT_MS = 45000
+
+export function streamCatchUpOwnerMatches(owner, current) {
+  return owner?.generation === current?.generation
+    && String(owner?.chatId ?? '') === String(current?.chatId ?? '')
+}
 
 // Delay before the wake/online reattach surfaces as a visible
 // "Reconnecting…" note. Real mobile reattach can spend time waking the
@@ -96,6 +101,9 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  * each. Adding a new event type requires editing BOTH the backend
  * emitter AND the dispatch switch below in this file.
  *
+ *   stream_snapshot       Server-reduced assistant items at the exact
+ *                         subscription boundary { items }. Seeds reconnect
+ *                         catch-up so prior deltas need not be replayed.
  *   text                  Streamed assistant token chunk
  *                         { content }. Buffered + drained by rAF.
  *   text_boundary         Next text starts a fresh assistant block.
@@ -164,9 +172,12 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  *   but must not treat this as a terminal run boundary.
  * @param {(event: object) => void} [callbacks.onSystemEvent]
  *   Fired for non-chat SSE events (theme/app/shell). Not buffered.
- * @param {(opts?: {force?: boolean}) => void} [callbacks.onNeedsRefresh]
+ * @param {(opts?: {force?: boolean}) => void|Promise<void>} [callbacks.onNeedsRefresh]
  *   Fired when the stream returns 204 outside the post-send race
  *   window — caller should refetch persisted DB state.
+ * @param {() => void} [callbacks.onCatchUpSettled]
+ *   Fired after subscribe-time replay commits, or after its terminal /
+ *   disconnected fallback refresh settles.
  * @param {(info: {ts: number|null, message: object|null}) => void} [callbacks.onQueuedTurnStarting]
  *   Fired when the backend is about to promote queued follow-ups; `ts`
  *   identifies the first pending entry in the promoted group and `message`
@@ -218,14 +229,18 @@ export default function useStreamConnection(chatId, {
   onConnectionLost,
   onSystemEvent,
   onNeedsRefresh,
+  onCatchUpSettled,
   onQueuedTurnStarting,
   onSteeredIntoTurn,
   onSteerDeliveryFailed,
   onLiveQuestion,
 }) {
-  const initialStoredStreamItems = readStoredStreamSnapshot(chatId)
-  const [streamItems, _setStreamItems] = useState(initialStoredStreamItems)
-  const latestItemsRef = useRef(initialStoredStreamItems)
+  // sessionStorage reads and JSON parsing are synchronous. Lazy initialization
+  // keeps them off every frame-paced render while a reply is revealing.
+  const [streamItems, _setStreamItems] = useState(
+    () => readStoredStreamSnapshot(chatId),
+  )
+  const latestItemsRef = useRef(streamItems)
   // Snapshot of the last non-empty latestItemsRef value. Written every
   // time items become non-empty; never cleared by a reconnect reset.
   // On retry exhaustion we promote from this ref so the user sees the
@@ -234,7 +249,7 @@ export default function useStreamConnection(chatId, {
   // CONTRACT: updated before any reconnect changes latestItemsRef.
   // Reconnect no longer wipes the visible stream while catch-up is in flight;
   // the snapshot is still the fallback if replay fails before catch_up_done.
-  const lastGoodItemsRef = useRef(initialStoredStreamItems)
+  const lastGoodItemsRef = useRef(streamItems)
   // Set to true from the first event of a catch-up burst on a new
   // connection. The previous visible snapshot remains intact until the
   // catch-up commits; if replay stalls on a tool-only pause or drops before
@@ -256,12 +271,6 @@ export default function useStreamConnection(chatId, {
     const next = typeof updater === 'function' ? updater(latestItemsRef.current) : updater
     if (next.length > 0) lastGoodItemsRef.current = next
     latestItemsRef.current = next
-    // Keep the latest reconnect snapshot in the cache's write-behind buffer.
-    // sessionStorage serialization happens only at lifecycle/terminal flush
-    // boundaries, never on this frame-paced reveal path.
-    if (next.length > 0) {
-      bufferStreamSnapshot(activeStreamChatIdRef.current, next)
-    }
     _setStreamItems(next)
   }
 
@@ -309,6 +318,7 @@ export default function useStreamConnection(chatId, {
   }
 
   const abortRef = useRef(null)
+  const connectionGenerationRef = useRef(0)
   const keptSocketDeadmanTimerRef = useRef(null)
   const retryCount = useRef(0)
   const chatIdRef = useRef(chatId)
@@ -318,6 +328,12 @@ export default function useStreamConnection(chatId, {
   // would otherwise persist the old stream snapshot under the new chat's key.
   const activeStreamChatIdRef = useRef(chatId)
   chatIdRef.current = chatId
+  const persistLatestStreamSnapshot = useCallback(() => {
+    writeStoredStreamSnapshot(
+      activeStreamChatIdRef.current,
+      latestItemsRef.current,
+    )
+  }, [])
 
   // Tracks setTimeout handles for reconnect attempts so unmount can
   // cancel them. Without this, a timer scheduled by the SSE loop can
@@ -390,8 +406,8 @@ export default function useStreamConnection(chatId, {
   // screenshots match the partner's framing). interactive-widget=
   // resizes-content shrinks innerHeight when the keyboard opens — and
   // POST /messages typically fires WITH the keyboard open — so the raw
-  // value is keyboard-poisoned. Max-tracking mirrors the same defensive
-  // trick useScrollMode applies to the spacer (fullViewHRef).
+  // value is keyboard-poisoned. Max-tracking is specific to agent screenshot
+  // framing; the visible chat spacer intentionally responds to the keyboard.
   const maxInnerHeightRef = useRef(
     typeof window !== 'undefined' ? window.innerHeight : 0
   )
@@ -504,6 +520,7 @@ export default function useStreamConnection(chatId, {
   }, [])
 
   const disconnect = useCallback(({ clearStreaming = false } = {}) => {
+    connectionGenerationRef.current += 1
     clearKeptSocketDeadman()
     // Salvage any text that's in the typewriter buffer but hasn't
     // been drained into streamItems yet. Without this, Stop loses
@@ -543,10 +560,9 @@ export default function useStreamConnection(chatId, {
     // captures its ts from the initial DB fetch, not from streamItems;
     // clearing streamItems here does not interact with that gate.
     disconnect()
-    // disconnect() flushes any final text reveal into setStreamItems. The
-    // recovery snapshot is write-behind, so land that completed old-chat frame
-    // before activeStreamChatIdRef moves to the next chat below.
-    flushStoredStreamSnapshot(activeStreamChatIdRef.current)
+    // disconnect() moves any final text reveal into latestItemsRef. Persist that
+    // completed old-chat frame before the next effect changes the active id.
+    persistLatestStreamSnapshot()
     setStreamItems([])
     textBufferRef.current = ''
     textBufferItemIdRef.current = null
@@ -559,7 +575,7 @@ export default function useStreamConnection(chatId, {
     // Answers belong to the chat we're leaving; carrying them into the next
     // chat could re-arm a same-keyed question with a foreign answer.
     answersByQuestionKeyRef.current.clear()
-  }, [chatId, disconnect])
+  }, [chatId, disconnect, persistLatestStreamSnapshot])
 
   useEffect(() => {
     activeStreamChatIdRef.current = chatId
@@ -569,19 +585,17 @@ export default function useStreamConnection(chatId, {
     _setStreamItems(stored)
   }, [chatId])
 
-  // Lifecycle exits synchronously flush the latest buffered recovery snapshot.
-  // Chat switches, terminal promotion, and pane visibility own their equivalent
-  // boundaries at the call sites where those transitions happen.
+  // Persist only at lifecycle boundaries. Chat switches and unmounts use the
+  // cleanup above; document hiding is handled by the existing visibility
+  // listener below.
   useEffect(() => {
-    const flushSelf = () => flushStoredStreamSnapshot(activeStreamChatIdRef.current)
-    window.addEventListener('pagehide', flushSelf)
-    window.addEventListener(BEFORE_SHELL_RELOAD_EVENT, flushSelf)
+    window.addEventListener('pagehide', persistLatestStreamSnapshot)
+    window.addEventListener(BEFORE_SHELL_RELOAD_EVENT, persistLatestStreamSnapshot)
     return () => {
-      window.removeEventListener('pagehide', flushSelf)
-      window.removeEventListener(BEFORE_SHELL_RELOAD_EVENT, flushSelf)
-      flushSelf()
+      window.removeEventListener('pagehide', persistLatestStreamSnapshot)
+      window.removeEventListener(BEFORE_SHELL_RELOAD_EVENT, persistLatestStreamSnapshot)
     }
-  }, [])
+  }, [persistLatestStreamSnapshot])
 
   useEffect(() => {
     function trackMaxHeight() {
@@ -605,6 +619,8 @@ export default function useStreamConnection(chatId, {
   onSystemEventRef.current = onSystemEvent
   const onNeedsRefreshRef = useRef(onNeedsRefresh)
   onNeedsRefreshRef.current = onNeedsRefresh
+  const onCatchUpSettledRef = useRef(onCatchUpSettled)
+  onCatchUpSettledRef.current = onCatchUpSettled
   const onQueuedTurnStartingRef = useRef(onQueuedTurnStarting)
   onQueuedTurnStartingRef.current = onQueuedTurnStarting
   const onSteeredIntoTurnRef = useRef(onSteeredIntoTurn)
@@ -635,6 +651,10 @@ export default function useStreamConnection(chatId, {
   const connectToStream = useCallback(async (resetState = false) => {
     activeStreamChatIdRef.current = chatIdRef.current
     disconnect()
+    const catchUpOwner = {
+      generation: ++connectionGenerationRef.current,
+      chatId: chatIdRef.current,
+    }
 
     if (resetState) {
       // Keep the currently visible stream while a reconnect catch-up is in
@@ -653,11 +673,32 @@ export default function useStreamConnection(chatId, {
     abortRef.current = controller
     lastReadAtRef.current = 0
 
+    const settleOwnedCatchUp = () => {
+      if (!streamCatchUpOwnerMatches(catchUpOwner, {
+        generation: connectionGenerationRef.current,
+        chatId: chatIdRef.current,
+      })) return
+      onCatchUpSettledRef.current?.()
+    }
+
+    const refreshThenSettleCatchUp = (options) => {
+      const refresh = onNeedsRefreshRef.current?.(options)
+      // Refresh failures already render their own error. Either outcome must
+      // release the outgoing chat rather than leave the handoff stranded.
+      Promise.resolve(refresh).then(settleOwnedCatchUp, settleOwnedCatchUp)
+    }
+
     try {
-      const res = await fetch(`${BASE}/api/chats/${chatIdRef.current}/stream`, {
-        headers: getAuthHeaders(),
-        signal: controller.signal,
-      })
+      const res = await fetch(
+        `${BASE}/api/chats/${chatIdRef.current}/stream`,
+        {
+          headers: {
+            ...getAuthHeaders(),
+            'X-Mobius-Stream-Snapshot': '1',
+          },
+          signal: controller.signal,
+        },
+      )
 
       // Stale-connection guard. Between scheduling this fetch and its
       // resolution, the connection we belong to may have been torn down
@@ -718,7 +759,7 @@ export default function useStreamConnection(chatId, {
         // and ChatView clearing its running state.
         onStreamEndRef.current?.()
         setIsStreaming(false)
-        onNeedsRefreshRef.current?.({ force: true, terminal204: true })
+        refreshThenSettleCatchUp({ force: true, terminal204: true })
         return
       }
 
@@ -742,6 +783,7 @@ export default function useStreamConnection(chatId, {
       // temporary blank/thinking state while a long catch-up replay is parsed.
       let isCatchUp = true
       let catchUpItems = []
+      let seededByServerSnapshot = false
 
       const applyStreamItems = (updater) => {
         if (!isCatchUp) {
@@ -784,6 +826,7 @@ export default function useStreamConnection(chatId, {
         // commit after the reveal cap); a pre-reveal mount commit is covered by
         // hide-then-reveal and a kept socket produces no commit at all.
         setCatchUpCommitSeq(s => s + 1)
+        settleOwnedCatchUp()
       }
 
       const patchCatchUpQuestionAnswers = (questionId, answers) => {
@@ -842,7 +885,21 @@ export default function useStreamConnection(chatId, {
             continue
           }
 
-          if (event.type === 'text_boundary') {
+          if (event.type === 'stream_snapshot') {
+            // ChatEventSink reduced every content event before publishing it,
+            // so this is the complete assistant surface at subscribe time.
+            // Replace only the off-screen catch-up buffer; live deltas queued
+            // after that boundary are still handled by the normal reducers.
+            if (isCatchUp) {
+              catchUpItems = Array.isArray(event.items)
+                ? event.items.filter(Boolean)
+                : []
+              seededByServerSnapshot = true
+              textBufferRef.current = ''
+              textBufferItemIdRef.current = null
+              forceNewTextBlockRef.current = false
+            }
+          } else if (event.type === 'text_boundary') {
             flushBuffer()
             forceNewTextBlockRef.current = true
           } else if (event.type === 'text') {
@@ -1103,7 +1160,12 @@ export default function useStreamConnection(chatId, {
               // arrival instead, the A1 blocks that followed it survived here
               // and replayed as the head of A2 — the duplication, reproduced on
               // every reconnect.
-              catchUpItems = []
+              // Full-log replay has accumulated A1 before this cut and must
+              // drop it. A server snapshot is already reduced *after* every
+              // prior cut, so it contains only the current A2 surface; keep
+              // that payload while the authoritative DB refresh restores the
+              // sealed A1 + user rows this socket may have missed.
+              if (!seededByServerSnapshot) catchUpItems = []
               forceNewTextBlockRef.current = false
               // Dropping the replayed segment only reconstructs the transcript
               // if those DB rows are actually loaded, and this branch is exactly
@@ -1162,11 +1224,6 @@ export default function useStreamConnection(chatId, {
             // next turn (a queued continuation streams on the same hook and
             // must not inherit a stale answer for a re-used question key).
             answersByQuestionKeyRef.current.clear()
-            // Terminal promotion (design §2 flush contract): land the final
-            // streamed frame synchronously before the promote, so a reload
-            // landing between `done` and ChatView's clearStreamItems restores
-            // the terminal content, not an earlier stored frame.
-            flushStoredStreamSnapshot(activeStreamChatIdRef.current)
             // Promote before flipping `isStreaming` false. `flushBuffer()`,
             // `commitCatchUp()`, and setStreamItems keep latestItemsRef
             // synchronous, so the old rAF delay was unnecessary and created a
@@ -1196,9 +1253,7 @@ export default function useStreamConnection(chatId, {
       if (!wantsReconnectRef.current) {
         // EOF without an explicit done is still terminal here. Promote and
         // clear running state in the same batch so the final live row does not
-        // briefly collapse into the generic thinking dots. Flush the pending
-        // buffered snapshot first (terminal-promotion flush, design §2).
-        flushStoredStreamSnapshot(activeStreamChatIdRef.current)
+        // briefly collapse into the generic thinking dots.
         clearReconnectingNote()
         onStreamEndRef.current?.()
         setIsStreaming(false)
@@ -1260,7 +1315,7 @@ export default function useStreamConnection(chatId, {
         // before the refresh restored `running` from the server.
         requestAnimationFrame(() => {
           onConnectionLostRef.current?.()
-          onNeedsRefreshRef.current?.({ force: true })
+          refreshThenSettleCatchUp({ force: true })
         })
       } else {
         setConnectionError('retrying')
@@ -1371,10 +1426,7 @@ export default function useStreamConnection(chatId, {
         : window.innerHeight
       const maxH = maxInnerHeightRef.current || 0
       const keyboardLikely = maxH > 0 && cur < maxH - 100
-      body.viewport = {
-        width: window.innerWidth,
-        height: keyboardLikely ? maxH : cur,
-      }
+      body.viewport = agentViewport(window, keyboardLikely ? maxH : cur)
       // Time-box the send POST. It normally returns 202 immediately (the turn
       // runs as a background task), so a hang means a dead socket (mobile
       // sleep, lost network) or a wedged backend — without this the await
@@ -1565,6 +1617,9 @@ export default function useStreamConnection(chatId, {
     function onVisible() {
       const now = Date.now()
       if (document.visibilityState === 'hidden') {
+        // visibilitychange is the last reliable lifecycle signal before a
+        // mobile browser freezes or discards the page.
+        persistLatestStreamSnapshot()
         hiddenAtRef.current = now
         lastHiddenDurationRef.current = null
         lastWakeAtRef.current = 0
@@ -1624,7 +1679,7 @@ export default function useStreamConnection(chatId, {
       document.removeEventListener('visibilitychange', onVisible)
       window.removeEventListener('online', onOnline)
     }
-  }, [])
+  }, [persistLatestStreamSnapshot])
 
   // Exposed so ChatView's promoteStreamToMessages can wipe the live
   // streamItems right after copying them into `messages`. Without this,
@@ -1674,13 +1729,6 @@ export default function useStreamConnection(chatId, {
     })
   }
 
-  // Flush the pending buffered stream snapshot on demand. ChatView calls this
-  // on the visibility-swap boundary (a pane hidden) — the one flush trigger the
-  // hook can't observe on its own — completing the design §2 flush contract.
-  const flushStreamSnapshot = useCallback(() => {
-    flushStoredStreamSnapshot(activeStreamChatIdRef.current)
-  }, [])
-
   return {
     streamItems,
     latestItemsRef,
@@ -1695,6 +1743,5 @@ export default function useStreamConnection(chatId, {
     disconnect,
     clearStreamItems,
     patchQuestionAnswers,
-    flushStreamSnapshot,
   }
 }

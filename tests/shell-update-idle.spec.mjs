@@ -156,13 +156,9 @@ async function seedTwoPaneBuilder(page, firstChatId, secondChatId) {
   })
   workspace = paneModel.focusPane(workspace, 'p0')
   const blob = paneModel.serializeWorkspace(workspace)
-  const legacy = JSON.stringify(paneModel.flatten(workspace)
-    .map(tab => ({ kind: tab.kind, id: tab.id })))
-  await page.addInitScript(([workspaceKey, workspaceBlob, openTabs]) => {
-    localStorage.setItem('mobius:workspace-splits', '1')
-    sessionStorage.setItem(workspaceKey, workspaceBlob)
-    sessionStorage.setItem('mobius-open-tabs', openTabs)
-  }, [paneModel.STORAGE_KEY, blob, legacy])
+  await page.addInitScript(([workspaceKey, workspaceBlob]) => {
+    localStorage.setItem(workspaceKey, workspaceBlob)
+  }, [paneModel.STORAGE_KEY, blob])
 }
 
 async function sendMessage(page, text) {
@@ -391,6 +387,15 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
   })
 
   test('an idle apply lands the page on the new SW generation, not the outgoing one', async ({ page }) => {
+    // This case drives FOUR real service-worker generation steps (install gen A,
+    // a second gen-A keeper client, install-and-wait gen B, then the mount-time
+    // handoff) plus TWO full page reloads. Those sequential real-SW waits are
+    // legitimately slow and, under parallel-CI load, their cumulative time
+    // (~86s worst case) can exceed Playwright's default 60s per-test budget —
+    // the classic pass-when-fast, time-out-when-slow flake. The behaviour under
+    // test is correct (it settles reliably given enough time); this is genuinely
+    // slow work, not a race, so grant it the extended budget.
+    test.slow()
     // Publish a genuinely new, WAITING service worker (a real update cycle — the
     // window feature 207 bit, biased to a client's FIRST cycle after install),
     // drive the idle apply through the shell's own recovery path, and assert the

@@ -10,11 +10,17 @@ import {
 import { flushSync } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
+import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
 import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
-import { retainChatDetailQuery } from '../../queryClient.js'
 import useStreamConnection from './useStreamConnection.js'
-import useScrollMode from './useScrollMode.js'
+import useScrollMode, {
+  isNearContentBottom,
+  remapSavedReadingAnchor,
+  retireSavedReadingPosition,
+  savedReadingAnchorHasNestedPart,
+  savedReadingAnchorKey,
+} from './useScrollMode.js'
 import useVoiceInput from './useVoiceInput.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { getOnlineSnapshot } from '../../lib/connectivityStore.js'
@@ -54,16 +60,33 @@ import {
 } from './providerSwitch.js'
 import { questionKey } from './questionKey.js'
 import { clearChatQuestionDrafts } from './questionDraft.js'
+import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 import { resolveStopResend } from './resolveStopResend.js'
 import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
 import { shouldDismissComposerKeyboardOnSubmit } from './composerKeyboardPolicy.js'
 import { updateChatRuntimeCache } from './chatRuntimeCache.js'
 import {
+  assistantAnchorKey,
+  chatCacheEntryState,
   chatDetailCacheValue,
-  chatEntryPhase,
   chatSnapshotMatchesRuntime,
+  mergeRecentMessagesIntoLoadedWindow,
+  messageKey,
+  messageMatchesKey,
+  optimisticHandoffWindow,
 } from '../../lib/chatDetailCache.js'
+import {
+  chatSearchRevealFor,
+  clearChatSearchReveal,
+  consumeChatSearchActivation,
+  reconcileChatSearchActivation,
+  subscribeChatSearchReveal,
+} from '../../lib/chatSearchReveal.js'
+import {
+  highlightSearchTerms,
+} from '../../lib/searchTermHighlight.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
+import { stopChatSpeech } from './chatSpeechPlayer.js'
 import { sendFailureMessage } from './sendFailure.js'
 import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, findTrailingAssistantPartialIndex, streamItemsHaveRenderableContent } from './streamPromotion.js'
 import {
@@ -74,13 +97,13 @@ import {
   answerKeepsCurrentTurn,
   builtAppPulseDecision,
   canFastForwardQueue,
-  cidOf,
   coldTranscriptRenderFrames,
   continuationRowsFromPromotedMessage,
   isContinuationMessage,
   isOwnerUserMessage,
-  mergeRecentMessagesIntoLoadedWindow,
+  jumpToLatestShown,
   openAppCtaViewModel,
+  shouldShowOpenAppCta,
   shouldAttachRunningStream,
   shouldRetryStopAfterConfirm,
   stopConfirmedIdle,
@@ -91,6 +114,7 @@ import {
   stripInternalUserMessageFields,
   systemEventForChat,
 } from './chatRuntimeState.js'
+import { cidOf } from './messageIdentity.js'
 import {
   cidForSendAttempt,
   sendDraftIdentity,
@@ -117,6 +141,7 @@ import {
 } from './buildPhaseRail.js'
 import {
   goalObjectiveAtRunStart,
+  goalObjectiveFromRuntime,
   latestGoalObjective,
   progressRailViewModel,
 } from './goalProgress.js'
@@ -133,6 +158,16 @@ _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
 const STOP_RETRY_DELAYS_MS = [0, 250, 700, 1200]
 const CHAT_FETCH_TIMEOUT_MS = 15000
 const MESSAGE_META_VISIBLE_MS = 5000
+// How long the settled "Open <app>" CTA lingers after a turn ends before it
+// auto-dismisses itself (a durable "final" acknowledgement). An ephemeral nudge,
+// not a permanent chat-foot fixture.
+const OPEN_APP_CTA_AUTO_DISMISS_MS = 8000
+// The floating jump-to-latest control appears once the reader holds a position
+// this far above the CONTENT tail (reserved spacer room is phantom, per the
+// send-snapshot bottom rule). Deliberately wider than the 50px near-bottom
+// band: settling a line or two up must not summon a control, a real upward
+// scroll should.
+const JUMP_TO_LATEST_GAP_PX = 200
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -231,6 +266,7 @@ export default function ChatView({
   onChatMissing,
   builtApps = NO_BUILT_APPS,
   onOpenApp,
+  onDismissApp,
   onInternalNav,
   onMessageStart,
   onOwnerActivity,
@@ -247,8 +283,8 @@ export default function ChatView({
   // Multi-pane workspace (design §2): when this chat renders inside a tiled
   // pane, Shell passes the pane's projected CONTENT height (pane rect minus the
   // strip). A change means a committed geometry event (divider commit,
-  // projection/mode flip, rotation, pane open/close) — forwarded to the scroll
-  // controller's paneResized() below. Null for a single-pane chat (today's
+  // projection/mode flip, rotation, pane open/close) — forwarded as a signal to
+  // the scroll controller's paneResized() below. Null for a single-pane chat (today's
   // behavior — the controller's own ResizeObserver owns resize there).
   paneContentHeight = null,
   // True when this mounted chat is hidden behind the full-workspace Settings
@@ -256,14 +292,43 @@ export default function ChatView({
   // Settings, which aborted the mic; now it stays mounted, so we must stop voice
   // capture explicitly or the microphone would keep listening off-screen.
   hidden = false,
+  // A chat-to-chat handoff keeps the outgoing hidden runtime as the visual
+  // cover until its replacement is ready. It must relinquish runtime work
+  // without also blanking the already-rendered transcript.
+  keepTranscriptPainted = false,
   // Shell chat-to-chat handoff: fired from a layout effect once this mounted
   // chat has a stable frame to paint. Empty/error chats are already stable;
   // transcript chats wait for useScrollMode's existing hide-then-reveal gate.
   onDisplayReady = null,
 }) {
   const queryClient = useQueryClient()
+  useEffect(() => () => stopChatSpeech({ chatId }), [chatId])
   const hiddenRef = useRef(hidden)
   hiddenRef.current = hidden
+  // A drawer search may target a ChatView that is already mounted. Subscribe
+  // to its tiny transient intent store so same-chat searches do not require a
+  // route/remount to run the anchor reveal.
+  const [, setSearchRevealVersion] = useState(0)
+  const searchActivationRef = useRef(null)
+  searchActivationRef.current = reconcileChatSearchActivation(
+    searchActivationRef.current,
+    chatId,
+    chatSearchRevealFor(chatId),
+  )
+  useEffect(() => subscribeChatSearchReveal(chatId, () => {
+    const next = reconcileChatSearchActivation(
+      searchActivationRef.current,
+      chatId,
+      chatSearchRevealFor(chatId),
+    )
+    if (next === searchActivationRef.current) return
+    searchActivationRef.current = next
+    setSearchRevealVersion(version => version + 1)
+  }), [chatId])
+  const searchReveal = searchActivationRef.current.reveal
+  const searchRevealConsumed = searchActivationRef.current.consumedId === searchReveal?.id
+  const searchRevealCleanupRef = useRef(() => {})
+  useEffect(() => () => searchRevealCleanupRef.current(), [])
   const inputRef = useRef(null)
   const handleInternalNav = useCallback((url) => {
     onInternalNav?.(url)
@@ -273,12 +338,13 @@ export default function ChatView({
   // the composer disables send and says so, rather than failing into a
   // dead stream.
   const online = useOnlineStatus()
-  // Read the query cache synchronously on mount. If we've viewed this
-  // chat before, messages render immediately on remount — no empty
-  // placeholder, no fetch wait, no flash. The query is then refreshed
-  // in the background by the initial useEffect below.
-  // Synchronous cache read on mount. If we've viewed this chat before
-  // and the persister hydrated, useState starts populated → no flash.
+  // Read the query cache synchronously on mount. If we've viewed this chat
+  // before, its complete transcript window builds the hidden restoration DOM
+  // immediately. A complete cache that covers the saved reading coordinate may
+  // paint while the version handshake runs; every other cache supplies hidden
+  // restoration geometry without becoming freshness authority.
+  // If the persister hydrated, useState starts populated; if it races with a
+  // cold mount, the authoritative activation read self-heals the miss.
   // The persister itself races with mount on cold load; PersistQuery-
   // ClientProvider's `onSuccess` flushes mid-flight render trees, so
   // for already-warm in-memory caches (same session) this is exact;
@@ -287,7 +353,6 @@ export default function ChatView({
   // back through the versioned activation handoff, so any miss self-heals on
   // the first authoritative detail read.
   const cached = queryClient.getQueryData(chatMessagesQueryKey(chatId))
-  useEffect(() => retainChatDetailQuery(queryClient, chatId), [chatId, queryClient])
   const transcriptCacheKey = useMemo(() => chatMessagesQueryKey(chatId), [chatId])
   const {
     messages,
@@ -301,12 +366,43 @@ export default function ChatView({
     () => composerHistoryFromMessages(messages),
     [messages],
   )
-  const [loading, setLoading] = useState(!cached)
-  // Cached content is a real first paint even for a running chat. The initial
-  // refresh remains authoritative and the stream catches up any active tail,
-  // but neither needs to keep an already-useful transcript hidden.
-  const cachedEntryPhase = chatEntryPhase(cached)
-  const [initialEntryPhase, setInitialEntryPhase] = useState(cachedEntryPhase)
+  // A canonical cache is useful restoration geometry, not freshness authority.
+  // It may prepare beneath the outgoing cover only when it contains the reader's
+  // saved coordinate; an incomplete restoration window stays hidden until the
+  // anchor-addressed read repairs or retires that coordinate.
+  const initialSavedAnchorKey = savedReadingAnchorKey(chatId)
+  const initialActivationAnchorKey = searchReveal?.anchorKey || initialSavedAnchorKey
+  const initialCacheEntryState = chatCacheEntryState(
+    cached,
+    initialActivationAnchorKey,
+    !searchReveal && savedReadingAnchorHasNestedPart(chatId),
+  )
+  const [loading, setLoading] = useState(initialCacheEntryState === 'missing')
+  const [initialEntryPhase, setInitialEntryPhase] = useState(
+    initialCacheEntryState === 'paintable'
+      ? 'cached'
+      : initialCacheEntryState === 'validating'
+        ? 'cache-validating'
+        : initialCacheEntryState,
+  )
+  // Cached rows are safe restoration geometry, but their persisted liveness can
+  // be stale. Do not publish a chat-to-chat handoff until this activation's
+  // runtime/detail verdict has arrived: otherwise an apparently idle cache can
+  // be promoted, then disappear when the server reports a running turn and the
+  // stream catch-up gate closes one frame later.
+  const [activationSettled, setActivationSettled] = useState(false)
+  const acceptCachedReadingCoordinate = useCallback(() => {
+    // The scroll owner has proved the exact nested part against committed DOM.
+    setInitialEntryPhase(current => (
+      current === 'cache-validating' ? 'cached' : current
+    ))
+    setLoading(false)
+  }, [])
+  const acceptInitialStreamCatchUp = useCallback(() => {
+    setInitialEntryPhase(current => (
+      current === 'stream-catchup' ? 'ready' : current
+    ))
+  }, [])
   // On a failed initial /chats/{id} fetch, loadError flips in the catch so
   // the UI can render a retry message. Setting loading false alone would
   // render the empty-state UI ("What's on your mind?") as if the chat had no
@@ -321,6 +417,13 @@ export default function ChatView({
   // Terminal live-to-settled commits bump this sequence. The corresponding
   // layout effect settles an armed prompt pin against the committed DOM.
   const [pinnedSettleSeq, setPinnedSettleSeq] = useState(0)
+  // A touch fast-forward dismisses the software keyboard only after the
+  // authoritative steer cut has rendered its user row. Closing it at request
+  // time resized the chat while that row did not exist yet, so the old tail
+  // re-anchored once and the steered row pinned in a second visible movement.
+  const steerKeyboardDismissRequestRef = useRef(null)
+  const [committedSteerKeyboardDismiss, setCommittedSteerKeyboardDismiss] =
+    useState(null)
   // Server-hydrated running marker. `sending` is the local UI flag and
   // `isStreaming` belongs to the SSE hook; both can briefly be false across
   // app/chat remounts or reconnect windows even though the backend still has
@@ -420,10 +523,11 @@ export default function ChatView({
   )
   const setActiveGoalState = useCallback((objective) => {
     setActiveGoalObjective(objective)
-    queryClient.setQueryData(chatMessagesQueryKey(chatId), existing => {
-      if (existing?.activeGoalObjective === objective) return existing
-      return { ...(existing || {}), activeGoalObjective: objective }
-    })
+    updateChatRuntimeCache(
+      queryClient,
+      chatMessagesQueryKey(chatId),
+      { activeGoalObjective: objective },
+    )
   }, [chatId, queryClient])
 
   useEffect(() => () => {
@@ -510,9 +614,13 @@ export default function ChatView({
   const publishComposerRoom = useCallback(() => {
     const chatEl = chatRef.current
     if (!chatEl) return
+    const viewportHeight = clientLengthToLayout(
+      window.visualViewport?.height || window.innerHeight,
+      captureLayoutSpace(chatEl),
+    )
     const room = composerRoom({
       paneHeight: chatEl.clientHeight,
-      viewportHeight: window.visualViewport?.height || window.innerHeight,
+      viewportHeight,
     })
     // Write only on a real change: this also runs from a ResizeObserver on
     // `.chat`, and an unconditional style write there is an easy feedback loop.
@@ -535,16 +643,10 @@ export default function ChatView({
       handleComposerInputChange(composerRequest.draft)
     }
 
-    if (!composerRequest.focus) {
-      onComposerRequestHandled?.(token)
-      return
-    }
-
     if (!shouldApplyComposerFocusRequest({
       focusRequest: composerRequest,
       chatId,
       embedded,
-      isTouchPrimary: _isTouchPrimary,
     })) {
       onComposerRequestHandled?.(token)
       return
@@ -675,15 +777,15 @@ export default function ChatView({
     anchorPagination,
     captureSendIntent,
     commitSendIntent,
-    freezeChatExit,
     freezeForegroundReturn,
     freezeQuestionSubmission,
     freezeQueuedSubmission,
     revealConversationTail,
+    revealAnchor,
     reapplyActiveMode,
     settleSendIntent,
     settleStreamingPin,
-    composerResized,
+    composerEdited,
     paneResized,
   } = useScrollMode({
     chatId,
@@ -694,16 +796,17 @@ export default function ChatView({
     footRef,
     messages,
     messagesRef,
-    pendingMessagesLength: pendingQueue.pendingMessages.length,
     loadingOlderRef: loadingOlder,
     initialEntryPhase,
+    onCachedCoordinateReady: acceptCachedReadingCoordinate,
+    ownsReadingPosition: !hidden,
   })
 
   // Forward committed pane-geometry changes to the scroll controller. A new
-  // projected height (divider commit, projection/mode flip, rotation) sets the
-  // layout-derived floor and re-applies the active mode under the reader gate
-  // (design §2). Skipped entirely for single-pane chats (paneContentHeight
-  // null) so today's resize behavior is untouched.
+  // projected height (divider commit, projection/mode flip, rotation) signals
+  // that the committed DOM geometry should re-apply the active mode under the
+  // reader gate (design §2). Skipped entirely for single-pane chats
+  // (paneContentHeight null) so today's resize behavior is untouched.
   //
   // Must be a layout effect: this is the only automatic scroll write in the
   // controller that would otherwise run after paint. Every other one is
@@ -712,16 +815,21 @@ export default function ChatView({
   // post-paint shows the reader a frame at the old scroll position before the
   // correction lands — visible as a jump when pane geometry changes.
   useLayoutEffect(() => {
-    if (paneContentHeight != null) paneResized(paneContentHeight)
+    if (paneContentHeight != null) paneResized()
   }, [paneContentHeight, paneResized])
 
-  // Settings used to unmount the active chat. Retained pane identity is useful
-  // for split/unsplit transitions, but hiding a pane must still perform the old
-  // leave/return lifecycle: freeze its reader position while geometry is live,
-  // then let the load effect below disconnect while hidden and refresh on show.
+  // A hidden retained owner is not an active runtime. The scroll controller
+  // owns the visible -> hidden reading-position handoff; this layer only arms
+  // freshness so the surface cannot paint stale history when it returns.
   useLayoutEffect(() => {
-    if (hidden) freezeChatExit()
-  }, [hidden, freezeChatExit])
+    if (!hidden) return
+    if (keepTranscriptPainted) return
+    // Arm the freshness + restoration gate while this surface is still
+    // physically hidden. A retained ChatView must not reappear with the
+    // transcript from its previous visible lifetime for even one frame.
+    setInitialEntryPhase('history')
+    setLoading(true)
+  }, [hidden, keepTranscriptPainted])
 
   function rememberSendIntent(cid, intent) {
     if (!cid || !intent) return
@@ -740,13 +848,6 @@ export default function ChatView({
     const intent = sendIntentByCidRef.current.get(cid) || null
     sendIntentByCidRef.current.delete(cid)
     return intent
-  }
-
-  function replaceSendIntent(cid, intent) {
-    if (!cid || !intent) return null
-    const previous = sendIntentByCidRef.current.get(cid) || null
-    sendIntentByCidRef.current.set(cid, intent)
-    return previous
   }
 
   function restoreReplacedSendIntent(cid, replacement, previous) {
@@ -846,15 +947,16 @@ export default function ChatView({
         sendingRef.current = false
       }
       if (data.running || (!preserveLocalTurn && !staleSnapshot)) {
-        setServerRunningState(!!data.running)
+        setServerRunningLocalState(!!data.running)
       }
-      setActiveGoalState(data.running
-        ? (data.active_goal_objective || latestGoalObjective(msgs))
-        : '')
+      const runtimeGoalObjective = goalObjectiveFromRuntime(
+        data, latestGoalObjective(msgs),
+      )
+      setActiveGoalObjective(runtimeGoalObjective)
       setLiveQuestionId(data.pending_question_id || null)
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
-        activeGoalObjective: data.active_goal_objective || '',
+        activeGoalObjective: runtimeGoalObjective,
         pending_messages: data.pending_messages || [],
         pending_question_id: data.pending_question_id || null,
       })
@@ -883,7 +985,6 @@ export default function ChatView({
     commitMessages,
     pendingQueue.hydrate,
     queryClient,
-    setActiveGoalState,
   ])
 
   // Active-turn runtime reconciliation. The SSE stream is authoritative for
@@ -923,12 +1024,22 @@ export default function ChatView({
         setSending(false)
         sendingRef.current = false
       }
-      setServerRunningState(!!data.running)
-      setActiveGoalState(data.running ? (data.active_goal_objective || '') : '')
+      // Apply local UI state directly, then publish the complete runtime
+      // snapshot once. The side-effecting field setters are for independent
+      // optimistic transitions; using them here made one poll emit up to three
+      // persisted-cache updates for a single server response.
+      setServerRunningLocalState(!!data.running)
+      const cachedGoalObjective = queryClient.getQueryData(
+        chatMessagesQueryKey(chatId),
+      )?.activeGoalObjective
+      const runtimeGoalObjective = goalObjectiveFromRuntime(
+        data, cachedGoalObjective,
+      )
+      setActiveGoalObjective(runtimeGoalObjective)
       setLiveQuestionId(data.pending_question_id || null)
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
-        activeGoalObjective: data.active_goal_objective || '',
+        activeGoalObjective: runtimeGoalObjective,
         pending_messages: serverPending,
         pending_question_id: data.pending_question_id || null,
       })
@@ -942,9 +1053,7 @@ export default function ChatView({
   }, [
     chatId,
     pendingQueue.hydrate,
-    pendingQueue.pendingMessagesRef,
     queryClient,
-    setActiveGoalState,
   ])
 
   const handleCompactionStored = useCallback(
@@ -993,8 +1102,8 @@ export default function ChatView({
     disconnect,
     clearStreamItems,
     patchQuestionAnswers,
-    flushStreamSnapshot,
   } = useStreamConnection(chatId, {
+    onCatchUpSettled: acceptInitialStreamCatchUp,
     onConnectionLost: () => {
       // Browser transport ownership is uncertain here: the backend turn may
       // still be parked on a question or producing output. Preserve the
@@ -1121,11 +1230,11 @@ export default function ChatView({
       // segment. That ordering is what makes promoting the live
       // stream here correct; it is not a guess about where the server cut.
       //
-      // It still follows the one visible-row scroll rule. Automatic queue
-      // promotion keeps the original submit snapshot; an explicit fast-forward
-      // captures a fresh snapshot when pressed, because that is the deliberate
-      // action making the row visible. Whether it pins or holds, the row gets
-      // the same permanent bottom reservation as a normal send.
+      // It still follows the one visible-row scroll rule. Queue promotion and
+      // explicit fast-forward keep the original submit snapshot until a real
+      // reader scroll replaces it; tray/footer reflow alone is not intent.
+      // Whether it pins or holds, the row gets the same permanent bottom
+      // reservation as a normal send.
       //
       // Current backends carry a non-empty `messages` array, each row with its
       // stable cid (card-221: every row carries one). During rolling deploys an
@@ -1158,6 +1267,16 @@ export default function ChatView({
         // Never infer a delayed pin from the reader's later position.
         fallbackWillPin: steeredIsFirstUser,
       })
+      const keyboardDismissRequest = steerKeyboardDismissRequestRef.current
+      if (keyboardDismissRequest
+          && keyboardDismissRequest.chatId === String(chatId)
+          && keyboardDismissRequest.cid === pinCid) {
+        steerKeyboardDismissRequestRef.current = null
+        // This state update batches with the transcript commit below. The
+        // layout effect waits for the exact row, after useScrollMode has
+        // applied its pin/hold, before allowing keyboard geometry to change.
+        setCommittedSteerKeyboardDismiss(keyboardDismissRequest)
+      }
       // Dedup by ts so a reconnect's catch-up replay of the same event
       // can't double-insert the steered user message. Insert by transcript ts
       // instead of blindly appending: if a fetch/replay already committed the
@@ -1180,6 +1299,9 @@ export default function ChatView({
       const cids = Array.isArray(consumePendingCids)
         ? consumePendingCids
         : []
+      if (cids.includes(steerKeyboardDismissRequestRef.current?.cid)) {
+        steerKeyboardDismissRequestRef.current = null
+      }
       pendingQueue.releaseSteerReservation(cids)
       forgetSendIntent({ cidList: cids })
       // A direct Cmd/Ctrl+Enter steer has no local tray row. The same
@@ -1188,6 +1310,35 @@ export default function ChatView({
       fetchMessages({ force: true })
     },
   })
+
+  // useScrollMode's layout effect is registered before this one. At a steer
+  // cut it therefore commits the new row's PIN_USER_MSG/ANCHOR_AT position
+  // first; only then may a still-focused, otherwise-unchanged touch composer
+  // close its keyboard. A draft edit or focus move during a deferred provider
+  // cut is newer owner intent and must not be interrupted by the old tap.
+  useLayoutEffect(() => {
+    const request = committedSteerKeyboardDismiss
+    if (!request) return
+    if (request.chatId !== String(chatId)) {
+      setCommittedSteerKeyboardDismiss(null)
+      return
+    }
+    const scrollEl = scrollRef.current
+    const escapedCid = typeof CSS !== 'undefined' && CSS.escape
+      ? CSS.escape(request.cid)
+      : request.cid
+    const committedRow = scrollEl?.querySelector(
+      `.chat__msg--user[data-cid="${escapedCid}"]`,
+    )
+    if (!committedRow) return
+
+    setCommittedSteerKeyboardDismiss(null)
+    const inputEl = inputRef.current
+    if (document.activeElement === inputEl
+        && inputValueRef.current === request.draft) {
+      inputEl.blur()
+    }
+  }, [chatId, committedSteerKeyboardDismiss, inputValueRef])
   // The composer clears before this boundary, so a slow picker save delays
   // transport without swallowing text entered after Send.
   const sendAfterSettingsSaved = useCallback(async (text, attachments, options) => {
@@ -1321,40 +1472,13 @@ export default function ChatView({
     const becameVisible = wasHiddenRef.current && !hidden
     wasHiddenRef.current = hidden
     if (!becameVisible) return
-
-    // The visible world keeps the shared query cache current while this owner is
-    // retained off-screen. Reconcile that recent page into this owner's loaded
-    // window before it paints, preserving any older rows it paged in earlier.
-    const latest = queryClient.getQueryData(chatMessagesQueryKey(chatId))
-    if (latest?.messages) {
-      const refreshed = mergeRecentMessagesIntoLoadedWindow({
-        loadedMessages: messagesRef.current,
-        loadedOffset: offsetRef.current,
-        recentMessages: latest.messages,
-        recentOffset: latest.offset || 0,
-      })
-      commitMessages(refreshed.messages, refreshed.offset)
-      setServerRunningState(!!latest.running)
-      setSending(!!latest.running)
-      setLiveQuestionId(latest.pending_question_id || null)
-      pendingQueue.hydrate(latest.pending_messages || [])
-      // Match the upstream entry gate without depending on the separate warm-
-      // running-cache optimization: settled cache may reveal immediately;
-      // running history still waits for its authoritative catch-up.
-      setInitialEntryPhase(latest.running ? 'history' : 'cached')
-      setLoading(false)
-    }
-
     // Composer drafts are chat-scoped across workspace worlds. A hidden retained
     // owner does not receive input events, so reconcile from the durable draft at
     // the visibility boundary before its first painted frame.
     restoreDurableDraft()
   }, [
     chatId,
-    commitMessages,
     hidden,
-    pendingQueue.hydrate,
-    queryClient,
     restoreDurableDraft,
   ])
 
@@ -1389,23 +1513,6 @@ export default function ChatView({
   useEffect(() => {
     if (hidden && listeningRef.current) stopVoiceRef.current?.()
   }, [hidden, listeningRef])
-
-  // Visibility-swap flush (design §2 flush contract). When this pane is hidden
-  // — projected out of the visible pair, or covered by full-workspace Settings —
-  // land the pending trailing stream snapshot synchronously. A hidden pane may
-  // soon unmount (phone projection) or the shell may reload while it's off-
-  // screen; without this flush the multi-pane throttle could strand its last
-  // streamed frame and the reconnect fallback would roll back.
-  //
-  // Adjacent to the `freezeChatExit` hidden-boundary effect above but NOT a
-  // duplicate: that freezes the reader's SCROLL MODE (sessionStorage 'chat-mode'
-  // / _scrollModes); this flushes the STREAM SNAPSHOT ('chat-stream-items:*').
-  // Different stores, different concerns — both correctly fire on the same
-  // hide, since the sibling's retain-behind-Settings keeps this ChatView mounted
-  // (so this effect runs rather than the unmount-flush).
-  useEffect(() => {
-    if (hidden) flushStreamSnapshot?.()
-  }, [hidden, flushStreamSnapshot])
 
   // Snapshot stream into a permanent message. Idempotent — both
   // handleStop and onStreamEnd may call this.
@@ -1498,81 +1605,40 @@ export default function ChatView({
     if (el && !hidden) reconcileComposerTextarea(el, input)
   }, [chatId, hidden, input])
 
-  // Notify the scroll owner when `.chat__foot` geometry may have changed.
-  // The controller publishes the matching list clearance and spacer in one
-  // guarded layout pass so an observer cannot move the reader indirectly.
+  // Composer room depends on the pane and visual viewport, not footer
+  // geometry. The scroll controller observes the actual footer and scroll
+  // viewport so transcript clearance and anchoring share one owner.
   useEffect(() => {
-    const footEl = footRef.current
-    if (!footEl) return
-
-    let raf1 = 0
-    let raf2 = 0
-    // The room is published unconditionally; the foot measurement goes through
-    // the scroll controller, which may decline while the reader owns the
-    // scroll. Keeping them in one settle sequence means the cap and the list
-    // padding still land from the same events.
-    const applyNow = () => {
-      publishComposerRoom()
-      composerResized()
-    }
-    const applySoon = () => {
-      applyNow()
-      if (raf1) cancelAnimationFrame(raf1)
-      if (raf2) cancelAnimationFrame(raf2)
-      raf1 = requestAnimationFrame(() => {
-        applyNow()
-        raf2 = requestAnimationFrame(applyNow)
-      })
-    }
     const reconcileForegroundGeometry = () => {
       // Chromium can restore form/layout state independently when a document
       // returns from background or the back-forward cache. Reconcile the
-      // textarea first; measuring only the outer foot would preserve a stale
-      // multi-line height on an empty composer.
+      // textarea before publishing the restored room.
       reconcileComposerTextarea(inputRef.current, inputValueRef.current)
-      applySoon()
+      publishComposerRoom()
     }
     const onVisible = () => {
       if (document.visibilityState === 'visible') reconcileForegroundGeometry()
     }
 
-    applySoon()
-    const ro = typeof ResizeObserver !== 'undefined'
-      ? new ResizeObserver(applySoon)
-      : null
-    ro?.observe(footEl)
-    // The pane is the room's other input, and it can change without any window
-    // or viewport event at all — dragging a workspace split resizes this chat
-    // while the window stands still. Observe it directly rather than hoping a
-    // neighbouring event fires.
+    publishComposerRoom()
+    // A workspace split can resize this pane while the window stands still.
     const paneRo = typeof ResizeObserver !== 'undefined'
       ? new ResizeObserver(publishComposerRoom)
       : null
     if (chatRef.current) paneRo?.observe(chatRef.current)
-    window.addEventListener('resize', applySoon)
+    window.addEventListener('resize', publishComposerRoom)
     window.addEventListener('pageshow', reconcileForegroundGeometry)
-    window.visualViewport?.addEventListener('resize', applySoon)
-    window.visualViewport?.addEventListener('scroll', applySoon)
+    window.visualViewport?.addEventListener('resize', publishComposerRoom)
     document.addEventListener('visibilitychange', onVisible)
 
     return () => {
-      if (raf1) cancelAnimationFrame(raf1)
-      if (raf2) cancelAnimationFrame(raf2)
-      ro?.disconnect()
       paneRo?.disconnect()
-      window.removeEventListener('resize', applySoon)
+      window.removeEventListener('resize', publishComposerRoom)
       window.removeEventListener('pageshow', reconcileForegroundGeometry)
-      window.visualViewport?.removeEventListener('resize', applySoon)
-      window.visualViewport?.removeEventListener('scroll', applySoon)
+      window.visualViewport?.removeEventListener('resize', publishComposerRoom)
       document.removeEventListener('visibilitychange', onVisible)
     }
-  }, [composerResized, publishComposerRoom])
-
-  useEffect(() => {
-    composerResized()
-    const raf = requestAnimationFrame(composerResized)
-    return () => cancelAnimationFrame(raf)
-  }, [builtApps, sending, buildPhases, composerResized])
+  }, [publishComposerRoom])
 
   useEffect(() => {
     const latest = buildPhases[buildPhases.length - 1]
@@ -1619,13 +1685,59 @@ export default function ChatView({
     // changes this dependency and re-runs the version + stream handshake
     // without losing the pane's DOM identity.
     if (hidden) return
+    setActivationSettled(false)
     let cancelled = false
     const initialLoadController = new AbortController()
     const queryKey = chatMessagesQueryKey(chatId)
     const activationCache = queryClient.getQueryData(queryKey)
+    const savedAnchorKey = savedReadingAnchorKey(chatId)
+    const searchAnchorKey = searchReveal?.anchorKey || null
+    // A search selection is a deliberate one-shot navigation, so it wins over
+    // the stored reader coordinate for this activation. It never remaps or
+    // retires that saved position.
+    const activationAnchorKey = searchAnchorKey || savedAnchorKey
+    const searchActivation = !!searchAnchorKey
+    const anchorMatchIn = (snapshot) => {
+      if (!activationAnchorKey || !Array.isArray(snapshot?.messages)) return null
+      const baseOffset = Number.isInteger(snapshot.offset) ? snapshot.offset : 0
+      const localIndex = snapshot.messages.findIndex((message, index) => (
+        messageMatchesKey(message, baseOffset + index, activationAnchorKey)
+      ))
+      if (localIndex < 0) return null
+      const messageIndex = baseOffset + localIndex
+      return {
+        canonicalKey: messageKey(snapshot.messages[localIndex], messageIndex),
+        localIndex,
+      }
+    }
+    const remapAnchorMatch = (match) => {
+      if (!searchActivation && match?.canonicalKey && match.canonicalKey !== savedAnchorKey) {
+        remapSavedReadingAnchor(chatId, savedAnchorKey, match.canonicalKey)
+      }
+    }
+    const activationAnchorMatch = anchorMatchIn(activationCache)
+    const cacheCoversSavedAnchor = !activationAnchorKey || !!activationAnchorMatch
+    const activationCacheEntryState = chatCacheEntryState(
+      activationCache,
+      activationAnchorKey,
+      !searchActivation && savedReadingAnchorHasNestedPart(chatId),
+    )
+    remapAnchorMatch(activationAnchorMatch)
     chatIdStaleRef.current = false
     setLoadError(false)
-    setInitialEntryPhase(chatEntryPhase(activationCache))
+    setLoading(activationCacheEntryState === 'missing')
+    const activationEntryPhase = activationCacheEntryState === 'paintable'
+      ? 'cached'
+      : activationCacheEntryState === 'validating'
+        ? 'cache-validating'
+        : activationCacheEntryState
+    setInitialEntryPhase(current => (
+      // Mount-time layout validation can finish before this passive activation
+      // effect runs. Do not re-close a cache gate the scroll owner just proved.
+      activationEntryPhase === 'cache-validating' && current === 'cached'
+        ? current
+        : activationEntryPhase
+    ))
 
     const gen = fetchGenRef.current
     const requestJson = async (path, label) => {
@@ -1640,10 +1752,14 @@ export default function ChatView({
 
     const settleRuntime = (runtime, visibleMessages) => {
       const running = !!runtime.running
+      const attachesToStream = shouldAttachRunningStream({
+        running,
+        pendingQuestionId: runtime.pending_question_id,
+      })
       setServerRunningLocalState(running)
-      setActiveGoalState(running
-        ? (runtime.active_goal_objective || latestGoalObjective(visibleMessages))
-        : '')
+      setActiveGoalObjective(goalObjectiveFromRuntime(
+        runtime, latestGoalObjective(visibleMessages),
+      ))
       hadMessagesRef.current = visibleMessages.length > 0
       setLiveQuestionId(runtime.pending_question_id || null)
       setBridgeMountInputs({
@@ -1652,15 +1768,15 @@ export default function ChatView({
           ? visibleMessages[visibleMessages.length - 1]
           : null,
       })
-      setInitialEntryPhase('ready')
+      // Persisted rows are not the complete surface of a running turn. Keep
+      // the outgoing chat visible until the subscribe-time replay commits.
+      setInitialEntryPhase(attachesToStream ? 'stream-catchup' : 'ready')
       setLoading(false)
+      setActivationSettled(true)
       pendingQueue.hydrate(runtime.pending_messages || [])
       if (running) {
         setSending(true)
-        if (shouldAttachRunningStream({
-          running,
-          pendingQuestionId: runtime.pending_question_id,
-        })) {
+        if (attachesToStream) {
           connectToStream(false)
         }
       } else {
@@ -1673,22 +1789,57 @@ export default function ChatView({
       let runtime = null
       let detailCache = null
       let reused = false
+      let anchorRetired = false
 
-      if (typeof activationCache?.updated_at === 'string') {
+      if (cacheCoversSavedAnchor && typeof activationCache?.updated_at === 'string') {
         runtime = await requestJson(
           `/chats/${chatId}/runtime`,
           'CHAT_RUNTIME_FAILED',
         )
-        if (chatSnapshotMatchesRuntime(activationCache, runtime)) {
-          detailCache = activationCache
+        // A terminal background refresh can win while this tiny runtime read is
+        // in flight. Re-read the cache before accepting reuse so an older
+        // captured object can never overwrite the fresher publication.
+        const latestCache = queryClient.getQueryData(queryKey)
+        const latestAnchorMatch = anchorMatchIn(latestCache)
+        const latestCoversSavedAnchor = !activationAnchorKey || !!latestAnchorMatch
+        remapAnchorMatch(latestAnchorMatch)
+        if (latestCoversSavedAnchor && chatSnapshotMatchesRuntime(latestCache, runtime)) {
+          detailCache = latestCache
           reused = true
         }
       }
       if (!reused) {
+        const anchorParam = activationAnchorKey
+          ? `&anchor=${encodeURIComponent(activationAnchorKey)}`
+          : ''
         runtime = await requestJson(
-          `/chats/${chatId}?limit=20&compact=1`,
+          `/chats/${chatId}?limit=20&compact=1${anchorParam}`,
           'CHAT_LOAD_FAILED',
         )
+        const runtimeAnchorMatch = anchorMatchIn(runtime)
+        if (activationAnchorKey && runtime.requested_anchor_found === true) {
+          if (!runtimeAnchorMatch) {
+            throw new Error('CHAT_READING_ANCHOR_NOT_FOUND')
+          }
+          remapAnchorMatch(runtimeAnchorMatch)
+        } else if (activationAnchorKey && runtime.requested_anchor_found === false) {
+          // Only the authoritative false + absent-row combination proves that
+          // the durable coordinate is gone. A contradictory response is a
+          // protocol error; retiring on it would destroy a valid location.
+          if (runtimeAnchorMatch) {
+            throw new Error('CHAT_READING_ANCHOR_NOT_FOUND')
+          }
+          if (!searchActivation) {
+            retireSavedReadingPosition(chatId)
+            anchorRetired = true
+          } else {
+            clearChatSearchReveal(chatId, searchReveal?.id)
+          }
+        } else {
+          // Rolling servers may omit the coverage bit. A row that is present
+          // can still be canonicalized safely; absence without the bit cannot.
+          remapAnchorMatch(runtimeAnchorMatch)
+        }
         detailCache = chatDetailCacheValue(runtime)
       }
 
@@ -1713,14 +1864,19 @@ export default function ChatView({
       }
 
       if (reused) {
-        // One narrow publication updates queue/liveness only when those fields
-        // changed. The retained messages and their DOM remain untouched.
+        // One narrow cache publication updates queue/liveness only. Reconcile
+        // the mounted hidden owner from the newest version-matched cache object
+        // before readiness so a concurrent terminal refresh wins this race.
+        const runtimeGoalObjective = goalObjectiveFromRuntime(
+          runtime, latestGoalObjective(msgs),
+        )
         updateChatRuntimeCache(queryClient, queryKey, {
           running: !!runtime.running,
-          activeGoalObjective: runtime.active_goal_objective || '',
+          activeGoalObjective: runtimeGoalObjective,
           pending_messages: runtime.pending_messages || [],
           pending_question_id: runtime.pending_question_id || null,
         })
+        applyMessagesToView(msgs, detailCache.offset)
         settleRuntime(runtime, msgs)
         return
       }
@@ -1729,16 +1885,25 @@ export default function ChatView({
       // rows. Runtime config belongs to this server response even when the
       // mounted transcript is temporarily ahead of it.
       setChatInfo(detailCache.chatInfo)
-      if (serverSnapshotBehindLocal(msgs, messagesRef.current)) {
-        queryClient.setQueryData(queryKey, existing => ({
-          ...detailCache,
-          // The local suffix is not proven by this server version. Preserve it
-          // for the visible optimistic handoff but make the next activation
-          // take the authoritative detail path.
-          updated_at: null,
-          messages: existing?.messages || messagesRef.current,
-          offset: existing?.offset ?? offsetRef.current,
-        }))
+      if (!anchorRetired && serverSnapshotBehindLocal(msgs, messagesRef.current)) {
+        queryClient.setQueryData(queryKey, existing => {
+          const handoffWindow = optimisticHandoffWindow(
+            existing,
+            messagesRef.current,
+            offsetRef.current,
+          )
+          return {
+            ...detailCache,
+            // The local suffix is not proven by this server version. Preserve
+            // the latest cache/mounted owner for the optimistic handoff but
+            // make the next activation take the authoritative detail path.
+            updated_at: null,
+            activeGoalObjective: goalObjectiveFromRuntime(
+              runtime, latestGoalObjective(messagesRef.current),
+            ),
+            ...handoffWindow,
+          }
+        })
         settleRuntime(runtime, messagesRef.current)
         return
       }
@@ -1746,17 +1911,46 @@ export default function ChatView({
       // Keep an already-loaded older prefix while replacing its overlapping
       // recent page. Publish the complete detail snapshot once, then update the
       // mounted view without a second query-cache notification.
-      const refreshed = mergeRecentMessagesIntoLoadedWindow({
-        loadedMessages: messagesRef.current,
-        loadedOffset: offsetRef.current,
-        recentMessages: msgs,
-        recentOffset: runtime.offset || 0,
-      })
+      const refreshed = anchorRetired
+        ? {
+            messages: msgs,
+            offset: detailCache.offset,
+          }
+        : mergeRecentMessagesIntoLoadedWindow({
+            loadedMessages: messagesRef.current,
+            loadedOffset: offsetRef.current,
+            recentMessages: msgs,
+            recentOffset: runtime.offset || 0,
+          })
       queryClient.setQueryData(queryKey, {
         ...detailCache,
+        activeGoalObjective: goalObjectiveFromRuntime(
+          runtime, latestGoalObjective(refreshed.messages),
+        ),
         messages: refreshed.messages,
         offset: refreshed.offset,
       })
+
+      // A return with a complete local window is a warm restoration even when
+      // the version changed while away. Apply the authoritative replacement and
+      // readiness in the SAME React batch (the transition callback runs
+      // synchronously); the cold prefix scheduler must never turn a warm return
+      // into a delayed all-at-once burst.
+      //
+      // SWITCH-PERF: defer this apply the same way the cold path below does.
+      // startTransition marks only the render non-urgent, so the heavy transcript
+      // reflow lands OFF the discrete switch tap instead of blocking it (the
+      // ~90ms on-device reflow). This keeps switching responsive at the layer that
+      // owns the transcript, without deferring the shell's nav dispatch — which
+      // raced chat bootstrap/materialization and double-created starter chats.
+      if (activationCache && cacheCoversSavedAnchor && !anchorRetired) {
+        startTransition(() => {
+          applyMessagesToView(refreshed.messages, refreshed.offset)
+          settleRuntime(runtime, refreshed.messages)
+        })
+        return
+      }
+
       const renderFrames = coldTranscriptRenderFrames(refreshed.messages)
       if (renderFrames.length === 1) {
         // An ordinary cold transcript stays one interruptible commit. Readiness
@@ -1801,9 +1995,23 @@ export default function ChatView({
     loadActivation()
       .catch((err) => {
         if (cancelled) return
+        // Offline degradation may use a complete cached restoration window,
+        // but never a truncated one that cannot resolve the saved address.
+        const cacheIsSafeFallback = activationCache
+          && cacheCoversSavedAnchor
+          && err?.message !== 'CHAT_READING_ANCHOR_NOT_FOUND'
+        if (cacheIsSafeFallback) {
+          applyMessagesToView(activationCache.messages, activationCache.offset)
+        } else {
+          // The mounted state was seeded from cache before validation. Clear an
+          // incomplete or server-rejected window before making the error state
+          // paintable; otherwise those old rows would leak through this branch.
+          applyMessagesToView([], 0)
+        }
         setInitialEntryPhase('ready')
-        setLoadError(true)
+        setLoadError(!cacheIsSafeFallback)
         setLoading(false)
+        setActivationSettled(true)
         // A confirmed 404 means this chat is gone (deleted out-of-band, or an
         // off-list chat the restore probe had memoized as existing). Tell the
         // shell so it demotes to a live chat instead of stranding the user on a
@@ -1823,7 +2031,7 @@ export default function ChatView({
       loadingOlder.current = false
       disconnect()
     }
-  }, [chatId, loadNonce, hidden])
+  }, [chatId, loadNonce, hidden, searchReveal?.id, searchReveal?.anchorKey])
 
 
   // Paginate older messages. Captures a pre-prepend anchor so we can
@@ -1895,7 +2103,23 @@ export default function ChatView({
       .catch(() => { loadingOlder.current = false })
   }
 
+  // Jump-to-latest visibility (contract R5a): a pure geometry READ — it never
+  // writes scrollTop, so it lives outside the scroll controller's ownership
+  // gates. Recomputed from every scroll event (gesture or programmatic) and
+  // from every commit via the dependency-less layout effect below: a stream
+  // growing beneath a held ANCHOR_AT emits no scroll event, but each growth
+  // tick re-renders this component. The guarded setState keeps those
+  // recomputes render-free until the boolean actually flips.
+  const [awayFromLatest, setAwayFromLatest] = useState(false)
+  const updateJumpToLatest = useCallback(() => {
+    const el = scrollRef.current
+    const away = !!el && !isNearContentBottom(el, JUMP_TO_LATEST_GAP_PX)
+    setAwayFromLatest(prev => (prev === away ? prev : away))
+  }, [])
+  useLayoutEffect(updateJumpToLatest)
+
   function handleScroll() {
+    updateJumpToLatest()
     const el = scrollRef.current
     if (!el || loadingOlder.current || loading) return
     // Gesture guard: applyMode's programmatic scrolls (e.g., PIN_USER_MSG
@@ -2622,6 +2846,10 @@ export default function ChatView({
       // The 202 means the answer write committed. Settle the durable and live
       // card sources only now; an optimistic pre-request answer made transient
       // failures look final and erased the retryable per-tab question draft.
+      const keepsCurrentTurn = answerKeepsCurrentTurn(response)
+      const recoveredRows = keepsCurrentTurn
+        ? []
+        : (startedMessagesFromResponse(response) || [])
       if (resolvedAnswers) {
         commitMessages(prev => {
           const updated = [...prev]
@@ -2635,7 +2863,10 @@ export default function ChatView({
             })
             updated[lastIdx] = msg
           }
-          return updated
+          // Recovery commits a hidden continuation before its reply starts.
+          // Mirror the backend's canonical rows so the live reply mounts at
+          // the same transcript position its durable row will occupy.
+          return appendMessageBatch(updated, recoveredRows)
         })
         // A mid-turn question may still live in streamItems rather than the
         // durable message list. Keep both render sources in agreement.
@@ -2650,7 +2881,7 @@ export default function ChatView({
       // Unknown future modes also retire the bridge: preserving the completed
       // question row and appending is safer than overwriting it with output
       // from a turn whose ownership semantics this client does not know.
-      if (!answerKeepsCurrentTurn(response)) {
+      if (!keepsCurrentTurn) {
         bridgeHook.markBridged()
         activeAssistantDataKeyRef.current = null
       }
@@ -3061,23 +3292,27 @@ export default function ChatView({
     let explicitSteerIntent = null
     let previousSendIntent = null
     try {
-      const steerIsFirstUser = isFirstVisibleUserMessage()
-      // Fast-forward is a deliberate visibility action, unlike automatic
-      // queue drain. Capture the reader's ACTUAL position now: bottom pins,
-      // reading elsewhere holds. A later real scroll during the POST still
-      // invalidates this opaque intent inside the scroll controller. Capturing
-      // also cancels any older quiet settlement, which is what previously
-      // overwrote the new pin and made the row bounce before settling.
+      previousSendIntent = sendIntentByCidRef.current.get(steerCid) || null
+      // Preserve queue-time intent through tray reflow. The controller replaces
+      // it after real reader movement and retires any older gesture settlement.
       explicitSteerIntent = captureSendIntent({
-        isFirstUserMsg: steerIsFirstUser,
+        isFirstUserMsg: isFirstVisibleUserMessage(),
+        previousIntent: previousSendIntent,
       })
-      previousSendIntent = replaceSendIntent(steerCid, explicitSteerIntent)
-      // Queue-only sends deliberately retain mobile focus. Fast-forward is
-      // the explicit hand-off point, but snapshot reader position BEFORE
-      // blurring: keyboard dismissal resizes the viewport and can otherwise
-      // corrupt the pin decision. Both composer and per-row steer actions
-      // share this path.
-      if (_isTouchPrimary) inputRef.current?.blur()
+      rememberSendIntent(steerCid, explicitSteerIntent)
+      // Queue-only sends deliberately retain mobile focus. Remember a touch
+      // fast-forward's focus/draft now, but do not blur yet: the authoritative
+      // cut must render and pin the steered row before keyboard geometry
+      // changes. Both composer and per-row steer actions share this path.
+      const inputEl = inputRef.current
+      steerKeyboardDismissRequestRef.current = null
+      if (_isTouchPrimary && document.activeElement === inputEl) {
+        steerKeyboardDismissRequestRef.current = {
+          chatId: String(chatId),
+          cid: steerCid,
+          draft: inputValueRef.current,
+        }
+      }
       // The queued tray is part of the footer height. Reserve these rows from
       // presentation before the request so the tray closes once, at the
       // deliberate steer action. The records remain in pendingQueue until the
@@ -3113,6 +3348,9 @@ export default function ChatView({
         onOwnerActivityRef.current?.()
       }
       if (result?.status !== 'steered') {
+        if (steerKeyboardDismissRequestRef.current?.cid === steerCid) {
+          steerKeyboardDismissRequestRef.current = null
+        }
         restoreReplacedSendIntent(
           steerCid,
           explicitSteerIntent,
@@ -3124,6 +3362,9 @@ export default function ChatView({
       // other status: release the unchanged queue back to the tray and let it
       // drain at turn-end.
     } catch {
+      if (steerKeyboardDismissRequestRef.current?.cid === steerCid) {
+        steerKeyboardDismissRequestRef.current = null
+      }
       restoreReplacedSendIntent(
         steerCid,
         explicitSteerIntent,
@@ -3223,6 +3464,26 @@ export default function ChatView({
   // re-enter FOLLOW_BOTTOM. No-op when the turn isn't active or the tab is hidden.
   // (The fast-forward identity/readiness gates are computed separately below.)
   const turnActive = sending || isStreaming || serverRunning
+
+  // Auto-dismiss the settled "Open <app>" CTA a few seconds after the turn
+  // ends, so it reads as an ephemeral nudge rather than a permanent chat-foot
+  // fixture. Only the settled (post-turn) CTA times out; a live in-turn preview
+  // link stays put while the app is still being built. Dismissal is the same
+  // durable "final" acknowledgement that opening performs — minus the
+  // navigation — so the button never reappears on a later refetch, and a click
+  // that lands first simply advances the same server truth and cancels this.
+  // (Declared here, after `turnActive`, so its dep array is out of the TDZ.)
+  useEffect(() => {
+    if (turnActive || !onDismissApp) return
+    const timers = builtApps
+      .filter(app => shouldShowOpenAppCta(app, false))
+      .map(app => setTimeout(
+        () => onDismissApp(app), OPEN_APP_CTA_AUTO_DISMISS_MS,
+      ))
+    if (timers.length === 0) return
+    return () => timers.forEach(clearTimeout)
+  }, [builtApps, turnActive, onDismissApp])
+
   useEffect(() => {
     if (!turnActive) return
     // Ordinary live turns set this synchronously at their run-start seam. This
@@ -3398,11 +3659,71 @@ export default function ChatView({
     : null
   const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
 
-  // The scroll safety cap may reveal an otherwise empty DOM while the initial
-  // request is still in flight. That protects a standalone ChatView from being
-  // hidden forever, but it is not a valid shell handoff: keep the outgoing chat
-  // painted until this chat has authoritative content, emptiness, or an error.
-  const displayReady = !loading && (revealed || showEmpty || showLoadError)
+  // A safe cached window can prepare while its freshness check runs. History
+  // and progressive preparation remain hidden; `cached` is granted only after
+  // the saved-coordinate coverage check above.
+  const transcriptPaintable = (
+    initialEntryPhase === 'cached' || initialEntryPhase === 'ready'
+  ) && revealed
+  const displayReady = activationSettled
+    && !loading
+    && (transcriptPaintable || showEmpty || showLoadError)
+
+  // The requested server window contains the matching row through the tail.
+  // Resolve the result's alias only after validation made the visible transcript
+  // paintable. The saved reading coordinate stays untouched until the owner
+  // next scrolls or otherwise chooses a new position.
+  useLayoutEffect(() => {
+    if (!searchReveal || searchRevealConsumed || !displayReady) return
+    if (hidden) {
+      // More than one physical ChatView can retain this logical chat. A hidden
+      // copy must neither reveal nor consume the one intent; the visible copy
+      // owns it, and the TTL clears a navigation that never becomes visible.
+      return
+    }
+    const localIndex = messages.findIndex((message, index) => (
+      messageMatchesKey(message, offset + index, searchReveal.anchorKey)
+    ))
+    if (localIndex < 0) return
+    const canonicalKey = messageKey(messages[localIndex], offset + localIndex)
+    const row = [...(scrollRef.current?.querySelectorAll('.chat__msg[data-key]') || [])]
+      .find(element => element.dataset.key === canonicalKey)
+    if (!canonicalKey || !row) return
+
+    searchRevealCleanupRef.current()
+    row.classList.add('chat__msg--search-reveal')
+    const highlight = highlightSearchTerms(row, searchReveal.terms)
+    row.focus({ preventScroll: true })
+    if (!revealAnchor(canonicalKey, 96, highlight.firstRange)) {
+      row.classList.remove('chat__msg--search-reveal')
+      highlight.clear()
+      return
+    }
+    const timer = setTimeout(() => {
+      row.classList.remove('chat__msg--search-reveal')
+      highlight.clear()
+    }, 2600)
+    searchRevealCleanupRef.current = () => {
+      clearTimeout(timer)
+      row.classList.remove('chat__msg--search-reveal')
+      highlight.clear()
+    }
+    searchActivationRef.current = consumeChatSearchActivation(
+      searchActivationRef.current,
+      searchReveal.id,
+    )
+    clearChatSearchReveal(chatId, searchReveal.id)
+  }, [
+    chatId,
+    displayReady,
+    hidden,
+    messages,
+    offset,
+    revealAnchor,
+    searchReveal,
+    searchRevealConsumed,
+  ])
+
   useLayoutEffect(() => {
     if (displayReady) onDisplayReady?.(chatId)
   }, [chatId, displayReady, onDisplayReady])
@@ -3439,25 +3760,27 @@ export default function ChatView({
   // A pending AskUserQuestion freezes the turn until the user answers,
   // but the card can sit outside the viewport (the user scrolled away,
   // or content streamed in around it) — the chat then just looks hung.
-  // Detect a pending card in whichever surface currently renders it:
-  // the live stream (a question item without answers) or the durable
-  // tail-question invariant on the last visible assistant message (the
-  // same rule MsgContent's blockAnswerable enforces; recovery preserves
-  // that tail question even when the original process was interrupted).
+  // "A question is open" is the chat's durable pending_question_id
+  // (liveQuestionId) — set when the card is asked, cleared when it is answered
+  // or the turn ends, and KEPT across a resumable interruption. Trusting that
+  // marker instead of the card's block position is what lets a still-open card
+  // trailed by parallel output or a terminal error keep blocking the composer.
+  // The live-stream branch covers the window before the question_id persists.
   const pendingQuestionInStream = activeAssistantIsStreaming
     && streamItems.some(it => it.type === 'question' && !it.answers)
-  const pendingQuestionInMessages = (() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].hidden) continue
-      const msg = messages[i]
-      if (msg.role !== 'assistant' || !msg.blocks?.length) return false
-      const tail = msg.blocks[msg.blocks.length - 1]
-      return !!(tail.type === 'question' && !tail.answers
-        && (!liveQuestionId || tail.question_id === liveQuestionId))
-    }
-    return false
-  })()
-  const hasPendingQuestion = pendingQuestionInStream || pendingQuestionInMessages
+  const hasPendingQuestion = pendingQuestionInStream || !!liveQuestionId
+
+  // Answerability id: prefer the durable pending_question_id marker; during the
+  // streaming window BEFORE that marker persists (or reaches the client via a
+  // runtime poll), fall back to the live streamed question's own id so its card
+  // is answerable immediately. This mirrors the composer lock, which already
+  // trusts pendingQuestionInStream. Without it, a freshly-streamed question is
+  // un-answerable until the marker lands — the regression that broke the
+  // AskUserQuestion / Q&A e2e flows.
+  const answerableQuestionId = liveQuestionId
+    || (pendingQuestionInStream
+      ? streamItems.find(it => it.type === 'question' && !it.answers)?.question_id ?? null
+      : null)
 
   // A live question parks Codex's JSON-RPC reader inside request_user_input.
   // turn/steer cannot be acknowledged until that question is released, so a
@@ -3477,7 +3800,7 @@ export default function ChatView({
     && turnActive
 
   // ── Sticky "tap to resume" affordance ──────────────────────────────
-  // A turn paused by a drain-gated restart, a stall, or a provider-limit park
+  // A turn paused by a drain-gated restart or a provider-limit park
   // persists a resumable error block at the tail of the last assistant message
   // (the same tail invariant MsgContent's Resume gate enforces). Like a pending
   // question, that card can sit outside the viewport after a scroll — the chat
@@ -3485,7 +3808,9 @@ export default function ChatView({
   // nudge + SR status can name the recovery. A pause is terminal (the turn has
   // ended), so it only ever lives in `messages`, never in a live stream item.
   const pendingResumeBlock = tailResumableBlock(messages)
-  const hasPendingResume = !!pendingResumeBlock
+  // An open question is the single blocker: answering it IS the continuation,
+  // so don't surface a competing Resume (which the backend would now refuse).
+  const hasPendingResume = !!pendingResumeBlock && !hasPendingQuestion
   const pendingLimitResetAt = pendingResumeBlock?.pause?.resets_at || null
   useEffect(() => {
     if (!embedded || !autoResumeEnabled || !pendingLimitResetAt) {
@@ -3588,21 +3913,21 @@ export default function ChatView({
   // The ONE active <li> carries this data-key for both DB and live payloads.
   // ANCHOR_AT resolves `[data-key]`, so source selection must never change it.
   // The first committed source owns the key: a DB-first bridge seeds the
-  // partial's durable key, while a live-first answer keeps its synthetic key
-  // even if a related DB partial arrives later.
+  // partial's durable key, while a live-first answer keeps its absolute
+  // transcript-position alias even if a related DB partial arrives later.
   //
   // Fast-forward can insert a user row AFTER the mounted partial while the
   // stream remains live. Therefore bridge identity is ts-based across the
   // full message list, not "last message only." For multi-turn flow (no
   // bridge), the previous assistant is rendered alongside the streaming
-  // <li> (different turns), so the streaming <li> gets its own synthetic key
-  // rather than reusing a previous assistant row's key.
+  // <li> (different turns). The live row therefore uses the absolute index its
+  // eventual durable row will occupy, not the previous assistant's key.
   const streamingDataKey = chooseActiveAssistantDataKey({
     latched: activeAssistantDataKeyRef.current,
     mirroredMsg: activeMirrorMsg,
     mirrorIndex: activeMirrorMsgIdx,
     hasLivePayload: hasLiveAssistantPayload,
-    chatId,
+    appendIndex: offset + messages.length,
   })
   useLayoutEffect(() => {
     if (!turnActive) {
@@ -3776,7 +4101,7 @@ export default function ChatView({
         className="chat__scroll"
         ref={scrollRef}
         onScroll={handleScroll}
-        style={revealed ? undefined : { visibility: 'hidden' }}
+        style={transcriptPaintable ? undefined : { visibility: 'hidden' }}
       >
         {/* The reservation is a permanent geometry invariant for every
             non-empty chat, including after unmount/remount. Keep the list's
@@ -3832,7 +4157,10 @@ export default function ChatView({
             // data-key is queried by applyMode when restoring an
             // ANCHOR_AT mode. msg.id (server-assigned UUID) is ideal;
             // fall back to role+ts which is also stable across renders.
-            const dataKey = msg.id || `${msg.role}-${msg.ts ?? i}`
+            const dataKey = messageKey(msg, offset + i)
+            const anchorKey = msg.role === 'assistant'
+              ? assistantAnchorKey(offset + i)
+              : null
             // User rows key + pin on the stable cid so the optimistic→confirm
             // display-ts update never remounts the row (which would drop the
             // pin target mid-swap). data-ts stays for the revealed metadata row.
@@ -3844,8 +4172,10 @@ export default function ChatView({
             <li
               key={userCid || msg.id || msg.ts || `${msg.role}-${i}`}
               className={`chat__msg chat__msg--${continuationMarker ? 'marker' : msg.role}`}
+              tabIndex={-1}
               ref={i === lastUserIdx ? setLastUserMsgRef : null}
               data-key={dataKey}
+              data-anchor-key={anchorKey === dataKey ? undefined : anchorKey}
               data-cid={userCid || undefined}
               data-ts={ownerUserMessage && msg.ts ? String(msg.ts) : undefined}
               onClick={hasMessageMeta
@@ -3876,7 +4206,7 @@ export default function ChatView({
                 }
                 submissionBlocked={providerSwitching}
                 isLastMsg={isLastMsg}
-                liveQuestionId={liveQuestionId}
+                liveQuestionId={answerableQuestionId}
                 suppressedQuestionKeys={streamItemQuestionKeys}
                 pendingQuestionRef={pendingQuestionRef}
                 resumeCardRef={resumeCardRef}
@@ -3884,6 +4214,9 @@ export default function ChatView({
               <MessageMetaRow
                 timestamp={ownerUserMessage ? msg.ts : null}
                 copyText={copyText}
+                speechText={msg.role === 'assistant' ? copyText : ''}
+                speechKey={dataKey}
+                speechChatId={chatId}
                 visible={visibleMessageMetaKey === dataKey}
               />
             </li>
@@ -3909,7 +4242,7 @@ export default function ChatView({
               }
               onAutoResumeChange={handleAutoResumeChange}
               submissionBlocked={providerSwitching}
-              liveQuestionId={liveQuestionId}
+              liveQuestionId={answerableQuestionId}
               // Same publication channel as the durable rows above: while the
               // turn is live THIS surface owns the pending question card, so
               // the offscreen observer follows the handoff automatically.
@@ -4007,6 +4340,26 @@ export default function ChatView({
                   : 'Turn paused — tap to resume'}
               </button>
             )}
+            {/* Jump-to-latest: same one-shot tail navigation as the nudges
+                (contract R5a — lands as a settled hold, never live-follow),
+                shown once the reader has scrolled away from the end. Yields
+                to a visible nudge, which goes to the same place with more
+                context. */}
+            {jumpToLatestShown({
+              awayFromTail: awayFromLatest,
+              questionNudgeShown: hasPendingQuestion && pendingCardOffscreen,
+              resumeNudgeShown: hasPendingResume && resumeCardOffscreen,
+            }) && (
+              <button
+                type="button"
+                className="chat__jump-latest"
+                aria-label="Jump to the latest message"
+                title="Jump to latest"
+                onClick={revealConversationTail}
+              >
+                <ArrowDown size={18} strokeWidth={2.25} aria-hidden="true" />
+              </button>
+            )}
           </div>
           </>
         )}
@@ -4045,6 +4398,7 @@ export default function ChatView({
           chatId={chatId}
           input={input}
           onInputChange={handleComposerInputChange}
+          onInputIntent={composerEdited}
           onSubmit={handleSubmit}
           onSubmitSteer={handleSubmitSteer}
           inputRef={inputRef}
@@ -4103,6 +4457,7 @@ export default function ChatView({
                 onChangeChatInfo={mergeChatInfo}
                 providerSwitchState={providerSwitchState}
                 settingsSaveTailRef={settingsSaveTailRef}
+                composerInputRef={inputRef}
                 onOpenInspector={() => setShowInspector(true)}
                 onOpenSummary={() => setShowSummary(true)}
                 embedded={embedded}

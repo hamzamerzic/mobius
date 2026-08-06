@@ -90,13 +90,11 @@ export function filterInstalledApps(apps = [], query = '') {
   ))
 }
 
-export function appInitials(name) {
-  const words = String(name || '')
-    .replace(/[^a-z0-9]+/gi, ' ')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-  if (words.length === 0) return 'A'
-  if (words.length === 1) return words[0].slice(0, 2).toLocaleUpperCase()
-  return `${words[0][0]}${words[1][0]}`.toLocaleUpperCase()
+// The shared menu names a row by identity, so it must survive that row
+// disappearing mid-render (deleted, filtered, or refreshed away) as ordinary
+// absence rather than a crash.
+export function findDrawerMenuItem(menu, chats = [], apps = []) {
+  if (!menu) return null
+  const items = menu.kind === 'chat' ? (chats || []) : (apps || [])
+  return items.find(item => item?.id === menu.id) || null
 }

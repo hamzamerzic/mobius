@@ -146,6 +146,8 @@ function useChatsQuery({ reconcile } = {}) {
   })
 }
 
+
+
 async function fetchAppToken(appId) {
   const res = await api.auth.provider.appToken(appId)
   const data = await jsonOrThrow(res, 'app-token fetch failed:')
@@ -382,18 +384,10 @@ export const chatQueries = {
   messages: {
     key: (chatId) => ['chat-messages', chatId],
     fetch: fetchChatMessages,
-    prefetch: (queryClient, chatId) => {
-      const key = ['chat-messages', chatId]
-      if (queryClient.getQueryData(key)) return Promise.resolve(false)
-      return queryClient.prefetchQuery({
-        queryKey: key,
-        queryFn: ({ signal }) => fetchChatMessages(chatId, { signal }),
-        staleTime: Infinity,
-      }).then(() => true)
-    },
     remove: (queryClient, chatId) => queryClient.removeQueries({ queryKey: ['chat-messages', chatId] }),
   },
 }
+
 
 export const authQueries = {
   provider: {

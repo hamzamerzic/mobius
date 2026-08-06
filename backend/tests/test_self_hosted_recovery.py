@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -90,18 +91,90 @@ def test_lifecycle_directs_crashed_services_through_credential_rotation():
   assert script.count("scripts/mobiusctl recovery reopen") >= 3
 
 
+def test_mobiusctl_is_recovery_only(tmp_path):
+  script_path = ROOT / "scripts" / "mobiusctl"
+  script = script_path.read_text()
+  assert "Usage: scripts/mobiusctl recovery start|reopen|status|finish" in script
+  assert "update_self_host" not in script
+  assert "MOBIUS_PLATFORM_RELEASE_REF" not in script
+
+  result = subprocess.run(
+    [str(script_path), "update"],
+    cwd=ROOT,
+    env={
+      **os.environ,
+      "MOBIUS_RECOVERY_LOCK_DIR": str(tmp_path),
+      "MOBIUS_RECOVERY_STATE_FILE": str(tmp_path / "recovery.env"),
+    },
+    text=True,
+    capture_output=True,
+    timeout=10,
+  )
+  assert result.returncode == 64
+  assert "Usage: scripts/mobiusctl recovery" in result.stderr
+
+
+def test_linked_worktree_lifecycle_targets_the_live_compose_project(tmp_path):
+  linked = tmp_path / "some-linked-worktree"
+  scripts = linked / "scripts"
+  scripts.mkdir(parents=True)
+  copied = scripts / "mobiusctl"
+  shutil.copy2(ROOT / "scripts" / "mobiusctl", copied)
+  state = tmp_path / "recovery.env"
+  _write_recovery_state(state)
+  fake_env, log = _fake_docker(tmp_path)
+
+  result = subprocess.run(
+    [str(copied), "recovery", "finish"],
+    cwd=linked,
+    env={
+      **os.environ,
+      **fake_env,
+      "MOBIUS_RECOVERY_STATE_FILE": str(state),
+      "MOBIUS_RECOVERY_LOCK_DIR": str(tmp_path),
+    },
+    text=True,
+    capture_output=True,
+    timeout=10,
+  )
+
+  assert result.returncode == 0, result.stderr
+  commands = log.read_text().splitlines()
+  assert commands[:3] == [
+    "compose -p mobius --profile recovery "
+    f"--env-file {state} stop recovery recovery-target",
+    "compose -p mobius --profile recovery "
+    f"--env-file {state} rm -f recovery recovery-target",
+    "compose -p mobius --profile recovery "
+    f"--env-file {state} ps -aq recovery recovery-target",
+  ]
+  assert "compose -p mobius up -d --force-recreate app" in commands
+  assert "compose -p mobius ps -q app" in commands
+  assert all("some-linked-worktree" not in command for command in commands)
+  # The pinned project and the compose volume key resolve to the live volume,
+  # independent of the linked worktree's basename.
+  target_volume = _compose()["services"]["recovery-target"]["volumes"][0]
+  assert f"mobius_{target_volume.split(':')[0]}" == "mobius_app_data"
+
+
 def test_app_sudo_is_full_root_by_default_with_operator_kill_switch():
   app_env = _compose()["services"]["app"]["environment"]
   assert "MOBIUS_AGENT_SUDO=${MOBIUS_AGENT_SUDO:-1}" in app_env
 
 
-def test_stack_release_ref_is_exact_and_unstamped_normal_builds_fail_closed():
+def test_self_host_uses_ordinary_update_channel_and_builds_fail_closed():
   compose = _compose()
   app = compose["services"]["app"]
-  assert (
-    "MOBIUS_PLATFORM_RELEASE_REF=${MOBIUS_PLATFORM_RELEASE_REF:-"
-    "refs/heads/stack/external-recovery-v1}"
-  ) in app["environment"]
+  assert not any(
+    item.startswith("MOBIUS_PLATFORM_RELEASE_REF=")
+    for item in app["environment"]
+  )
+  assert "MOBIUS_PLATFORM_RELEASE_REF" not in (
+    ROOT / ".env.example"
+  ).read_text()
+  assert "MOBIUS_PLATFORM_RELEASE_REF" not in (
+    ROOT / "scripts" / "mobiusctl"
+  ).read_text()
 
   dockerfile = (ROOT / "Dockerfile").read_text()
   guard = dockerfile.index("an exact 40-character BUILD_SHA is required")
@@ -138,15 +211,20 @@ def test_managed_boot_never_serves_a_persistent_tree_without_baked_release():
   assert fallback_refusal < network_clone
 
 
-def test_self_host_docs_launch_and_update_from_the_protected_stack_branch():
+def test_self_host_docs_launch_from_main_and_update_inside_mobius():
   readme = (ROOT / "README.md").read_text()
-  assert "git clone --branch stack/external-recovery-v1 --single-branch" in readme
-  assert "git pull --ff-only origin stack/external-recovery-v1" in readme
-  launch = readme.index("git clone --branch stack/external-recovery-v1")
-  first_update = readme.index("scripts/mobiusctl update", launch)
-  recovery = readme.index("scripts/mobiusctl recovery start", first_update)
-  assert launch < first_update < recovery
-  assert "An unstamped `docker build`" in readme
+  assert "git clone https://github.com/mobius-os/mobius.git" in readme
+  assert "BUILD_SHA=\"$(git rev-parse HEAD)\"" in readme
+  assert "docker compose up -d --build" in readme
+  assert "select **Check for updates**" in readme
+  assert "select **Restart to finish**" in readme
+  assert "scripts/mobiusctl update" not in readme
+  assert "git pull --ff-only" not in readme
+  assert "stack/external-recovery-v1" not in readme
+  launch = readme.index("git clone https://github.com/mobius-os/mobius.git")
+  recovery = readme.index("scripts/mobiusctl recovery start", launch)
+  in_app_update = readme.index("select **Check for updates**", recovery)
+  assert launch < recovery < in_app_update
 
 
 def _mobiusctl(tmp_path, action, *, state=None, extra_env=None):
@@ -155,11 +233,7 @@ def _mobiusctl(tmp_path, action, *, state=None, extra_env=None):
   env["MOBIUS_RECOVERY_STATE_FILE"] = str(state_path)
   env["MOBIUS_RECOVERY_LOCK_DIR"] = str(tmp_path)
   env.update(extra_env or {})
-  command = [str(ROOT / "scripts" / "mobiusctl")]
-  if action == "update":
-    command.append("update")
-  else:
-    command.extend(("recovery", action))
+  command = [str(ROOT / "scripts" / "mobiusctl"), "recovery", action]
   result = subprocess.run(
     command,
     cwd=ROOT,
@@ -200,12 +274,6 @@ def _fake_docker(tmp_path):
     "#!/bin/sh\n"
     "printf '%s\\n' \"$*\" >>\"$DOCKER_LOG\"\n"
     "case \"$*\" in\n"
-    "  *'up -d --build --force-recreate'*)\n"
-    "    printf 'build-env|%s|%s|%s\\n' \"${BUILD_SHA:-}\" "
-    "\"${BUILD_DATE:-}\" \"${MOBIUS_PLATFORM_RELEASE_REF:-}\" "
-    ">>\"$DOCKER_LOG\" ;;\n"
-    "esac\n"
-    "case \"$*\" in\n"
     "  *\"${DOCKER_FAIL_MATCH:-__never__}\"*) exit 42 ;;\n"
     "  *\"${DOCKER_BLOCK_MATCH:-__never__}\"*)\n"
     "    : >\"$DOCKER_BLOCK_READY\"\n"
@@ -235,32 +303,11 @@ def _fake_docker(tmp_path):
     "exit 0\n"
   )
   docker.chmod(0o755)
-  git = bin_dir / "git"
-  git.write_text(
-    "#!/bin/sh\n"
-    "printf '%s\\n' \"$*\" >>\"$GIT_LOG\"\n"
-    "case \"$*\" in\n"
-    "  *'rev-parse --is-inside-work-tree'*) exit 0 ;;\n"
-    "  *'rev-parse --verify HEAD^{commit}'*)\n"
-    "    printf '%s\\n' \"${GIT_HEAD:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}\"; exit 0 ;;\n"
-    "  *'status --porcelain --untracked-files=normal'*)\n"
-    "    printf '%s' \"${GIT_STATUS:-}\"; exit 0 ;;\n"
-    "  *'fetch --no-tags origin '*) exit \"${GIT_FETCH_RC:-0}\" ;;\n"
-    "  *'rev-parse --verify refs/remotes/origin/'*'^{commit}'*)\n"
-    "    printf '%s\\n' \"${GIT_REMOTE_TIP:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}\"; exit 0 ;;\n"
-    "  *'merge-base --is-ancestor '*) exit \"${GIT_ANCESTRY_RC:-0}\" ;;\n"
-    "  *'show -s --format=%cs '*) printf '%s\\n' \"${GIT_BUILD_DATE:-2026-08-01}\"; exit 0 ;;\n"
-    "esac\n"
-    "exit 0\n"
-  )
-  git.chmod(0o755)
   log = tmp_path / "docker.log"
-  git_log = tmp_path / "git.log"
   return {
     "PATH": f"{bin_dir}:{os.environ['PATH']}",
     "DOCKER_LOG": str(log),
     "DOCKER_LEGACY_REMOVED": str(tmp_path / "legacy.removed"),
-    "GIT_LOG": str(git_log),
   }, log
 
 
@@ -415,112 +462,6 @@ def test_start_refuses_mismatched_legacy_identity_and_restores_app(tmp_path):
   commands = log.read_text().splitlines()
   assert "rm -f legacy-recovery-id" not in commands
   assert any("up -d app" in line for line in commands)
-
-
-def test_update_retires_legacy_only_after_recreated_app_is_healthy(tmp_path):
-  fake_env, log = _fake_docker(tmp_path)
-  fake_env["DOCKER_LEGACY_ID"] = "legacy-recovery-id"
-
-  result, _state = _mobiusctl(
-    tmp_path, "update", extra_env=fake_env,
-  )
-
-  assert result.returncode == 0, result.stderr
-  assert (tmp_path / "legacy.removed").exists()
-  commands = log.read_text().splitlines()
-  recreate = next(
-    i for i, line in enumerate(commands)
-    if "up -d --build --force-recreate" in line
-  )
-  health = next(
-    i for i, line in enumerate(commands) if ".State.Health" in line
-  )
-  removal = next(
-    i for i, line in enumerate(commands) if line == "rm -f legacy-recovery-id"
-  )
-  assert recreate < health < removal
-
-
-def test_update_builds_exact_clean_checkout_from_full_stack_ref(tmp_path):
-  fake_env, log = _fake_docker(tmp_path)
-  head = "1" * 40
-  tip = "2" * 40
-  fake_env.update({"GIT_HEAD": head, "GIT_REMOTE_TIP": tip})
-
-  result, _state = _mobiusctl(
-    tmp_path, "update", extra_env=fake_env,
-  )
-
-  assert result.returncode == 0, result.stderr
-  git_commands = Path(fake_env["GIT_LOG"]).read_text().splitlines()
-  assert any(
-    "fetch --no-tags origin "
-    "+refs/heads/stack/external-recovery-v1:"
-    "refs/remotes/origin/stack/external-recovery-v1" in line
-    for line in git_commands
-  )
-  assert any(f"merge-base --is-ancestor {head} {tip}" in line for line in git_commands)
-  assert (
-    f"build-env|{head}|2026-08-01|"
-    "refs/heads/stack/external-recovery-v1"
-  ) in log.read_text().splitlines()
-
-
-@pytest.mark.parametrize(
-  ("extra", "message"),
-  [
-    ({"GIT_ANCESTRY_RC": "1"}, "not contained"),
-    ({"GIT_STATUS": " M Dockerfile\\n"}, "uncommitted files"),
-    ({"MOBIUS_PLATFORM_RELEASE_REF": "stack/external-recovery-v1"},
-     "full refs/heads"),
-  ],
-)
-def test_update_rejects_unpublished_dirty_or_short_release_identity(
-  tmp_path, extra, message,
-):
-  fake_env, log = _fake_docker(tmp_path)
-  fake_env.update(extra)
-
-  result, _state = _mobiusctl(
-    tmp_path, "update", extra_env=fake_env,
-  )
-
-  assert result.returncode != 0
-  assert message in result.stderr
-  assert not log.exists() or all(
-    "up -d --build --force-recreate" not in line
-    for line in log.read_text().splitlines()
-  )
-
-
-def test_update_refuses_active_recovery_state_before_docker_changes(tmp_path):
-  state = tmp_path / "recovery.env"
-  _write_recovery_state(state)
-  fake_env, log = _fake_docker(tmp_path)
-
-  result, _ = _mobiusctl(
-    tmp_path, "update", state=state, extra_env=fake_env,
-  )
-
-  assert result.returncode != 0
-  assert "finish it before updating" in result.stderr
-  assert not log.exists()
-
-
-def test_update_refuses_present_isolated_recovery_services(tmp_path):
-  fake_env, log = _fake_docker(tmp_path)
-  fake_env["DOCKER_REMAINING_MATCH"] = "ps -aq recovery recovery-target"
-
-  result, _state = _mobiusctl(
-    tmp_path, "update", extra_env=fake_env,
-  )
-
-  assert result.returncode != 0
-  assert "finish them before updating" in result.stderr
-  assert all(
-    "up -d --build --force-recreate" not in line
-    for line in log.read_text().splitlines()
-  )
 
 
 @pytest.mark.parametrize("ttl", ["299", "86401", "0300", "1.5"])
@@ -688,7 +629,7 @@ def test_lifecycle_lock_rejects_concurrent_finish_or_reopen(tmp_path):
       extra_env={**fake_env, "MOBIUS_RECOVERY_LOCK_WAIT_SECONDS": "0"},
     )
     assert second.returncode == 75
-    assert "Another Mobius recovery/update lifecycle is active" in second.stderr
+    assert "Another Mobius recovery lifecycle is active" in second.stderr
   finally:
     release.touch()
     first_stdout, first_stderr = first.communicate(timeout=5)

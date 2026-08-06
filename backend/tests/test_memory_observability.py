@@ -15,16 +15,63 @@ from app.memory_observability import (
 
 
 def test_process_identity_uses_command_ownership_not_generic_host_name():
+  # A configured service runs from its own directory behind a generic host, so
+  # it is attributed from the owner's registry rather than the executable name.
   assert _process_identity(
     123,
     "gunicorn",
     "/data/tandoor/venv/bin/gunicorn recipes.wsgi",
+    ("tandoor",),
   ) == ("app_service", "tandoor")
   assert _process_identity(
     124,
     "chrome",
     "--user-data-dir=/data/agent-browser-profiles/chat-example",
   ) == ("browser", "chat-example")
+
+
+def test_process_identity_attributes_any_configured_service_not_a_fixed_name():
+  # The classifier must carry no hardcoded service name: an unrelated service
+  # the owner configures is attributed on exactly the same path.
+  assert _process_identity(
+    126,
+    "gunicorn",
+    "/data/paperless/venv/bin/gunicorn paperless.wsgi",
+    ("paperless", "tandoor"),
+  ) == ("app_service", "paperless")
+  # An unconfigured service is not invented from its command line.
+  assert _process_identity(
+    127,
+    "gunicorn",
+    "/data/paperless/venv/bin/gunicorn paperless.wsgi",
+    (),
+  ) == ("other", None)
+
+
+def test_process_identity_keeps_whole_app_slug_containing_the_letter_s():
+  # Regression: the app-path class excluded the literal letter "s" instead of
+  # whitespace, truncating "news-2" to "new" and dropping "skills" entirely.
+  assert _process_identity(
+    128,
+    "python3",
+    "python3 app-job-runner.py 61 /data/apps/news-2/job.sh",
+  ) == ("app_service", "news-2")
+  assert _process_identity(
+    129,
+    "python3",
+    "python3 app-job-runner.py 79 /data/apps/skills/job.sh",
+  ) == ("app_service", "skills")
+
+
+def test_process_identity_does_not_let_a_short_slug_claim_an_unrelated_process():
+  # Slug matching is anchored, so a configured service cannot capture every
+  # process whose command line merely contains those letters.
+  assert _process_identity(
+    130,
+    "worker",
+    "worker --label tandoorish-helper",
+    ("tandoor",),
+  ) == ("other", None)
 
 
 def test_process_identity_does_not_expose_arbitrary_command_arguments():

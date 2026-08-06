@@ -1,8 +1,11 @@
 """Base boot creates chat continuity only; graph memory belongs to its app."""
 
-import importlib.util
 import hashlib
+import importlib.util
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -41,16 +44,41 @@ def test_base_skill_boot_never_seeds_app_owned_memory_skill(tmp_path, monkeypatc
   (seed / "files.md").write_text("base owned", encoding="utf-8")
   monkeypatch.setattr(module, "_SEED_CANDIDATES", [seed])
   monkeypatch.setattr(module, "SKILLS", skills)
-  monkeypatch.setattr(module, "VERSION_FILE", skills / ".seed-version")
   monkeypatch.setattr(module, "_chown_mobius", lambda _path: None)
 
   module.init()
 
   assert (skills / "files.md").read_text(encoding="utf-8") == "base owned"
+  assert not (skills / ".seed-version").exists()
   assert not (skills / "memory.md").exists()
 
   baked_seed = SCRIPTS / "seed-skills"
   assert not (baked_seed / "memory.md").exists()
+
+
+def test_init_skills_absolute_entrypoint_imports_sibling_app(tmp_path):
+  """Warm boot imports app.skills when invoked outside the backend cwd."""
+  skills = tmp_path / "data" / "shared" / "skills"
+  skills.mkdir(parents=True)
+  (skills / "owner.md").write_text("owner skill", encoding="utf-8")
+  env = os.environ.copy()
+  env.pop("PYTHONPATH", None)
+  env["DATA_DIR"] = str(tmp_path / "data")
+
+  result = subprocess.run(
+    [sys.executable, str(SCRIPTS / "init_skills.py")],
+    cwd=tmp_path,
+    env=env,
+    capture_output=True,
+    text=True,
+    timeout=30,
+    check=False,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert "init_skills: reconcile skipped" not in result.stdout
+  assert "init_skills: skills-index.md regenerated" in result.stdout
+  assert (skills / "skills-index.md").is_file()
 
 
 def test_later_boot_preserves_existing_memory_skill_but_does_not_reseed_it(
@@ -65,7 +93,6 @@ def test_later_boot_preserves_existing_memory_skill_but_does_not_reseed_it(
   (skills / "memory.md").write_text("installed app copy", encoding="utf-8")
   monkeypatch.setattr(module, "_SEED_CANDIDATES", [seed])
   monkeypatch.setattr(module, "SKILLS", skills)
-  monkeypatch.setattr(module, "VERSION_FILE", skills / ".seed-version")
   monkeypatch.setattr(module, "_chown_mobius", lambda _path: None)
 
   module.init()
@@ -87,7 +114,6 @@ def test_later_boot_migrates_only_unmodified_graph_aware_base_skill(
   live.write_text(old, encoding="utf-8")
   monkeypatch.setattr(module, "_SEED_CANDIDATES", [seed])
   monkeypatch.setattr(module, "SKILLS", skills)
-  monkeypatch.setattr(module, "VERSION_FILE", skills / ".seed-version")
   monkeypatch.setattr(module, "_chown_mobius", lambda _path: None)
   monkeypatch.setattr(module, "_UNMODIFIED_MIGRATIONS", {
     "reflection.md": {hashlib.sha256(old.encode()).hexdigest()},
@@ -104,13 +130,21 @@ def test_later_boot_migrates_only_unmodified_graph_aware_base_skill(
 def test_controlled_skills_have_fix_forward_migrations():
   module = _load("init_skills")
 
-  assert module.SEED_VERSION == "23"
   assert module._UNMODIFIED_MIGRATIONS["cron.md"] == {
     "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
     "ed100cb496b887a7951adc967e92cda1449c4f8594f7859fbd32762221d24914",
     "76ab03fd128157715b388b16146239217f57bba62c5248b8192a39639d0200b1",
     "e4539739815b80b4c52ca2c56f2a4055e7a4a12cd1843c0cb5077a149547acd1",
+    "55a350281a94ecabf35297d4aef019eedaed28378ac0a2a440815120c6219ba7",
     "16055ea6ba6e4663636f87fde9868aa98d49ab39c5037ff90fa673d96c259cd9",
+  }
+  assert module._UNMODIFIED_MIGRATIONS["embedded-app-agent.md"] == {
+    "e58970bb7357030b9ac9c72e3b547d3bc93cdb75a1442dc5bb92db6174beebad",
+  }
+  # The slug-keyed app lookup that silently found nothing whenever the install
+  # took a fallback slug. Untouched copies must migrate to the manifest-id form.
+  assert module._UNMODIFIED_MIGRATIONS["workflows-app.md"] == {
+    "895dfa031e1a633ceac9a1f16895d43e5084d052c0616bd79a7a4005d06ba324",
   }
   assert module._UNMODIFIED_MIGRATIONS["images.md"] == {
     "248ea31e13d2d2d84a5acfca13526aa8ebfa3d90e9ee4bf55cfb72d47937f7d1",

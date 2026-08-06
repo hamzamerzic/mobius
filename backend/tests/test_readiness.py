@@ -40,6 +40,51 @@ def test_ready_returns_200_when_writer_running(client):
   assert body["boot_id"]
 
 
+def test_writer_probe_transactions_end_before_readiness():
+  """Boot and recreate must release SELECT 1 before advertising readiness."""
+  actions = []
+  actor = None
+
+  class _ProbeSession:
+    def __init__(self, name):
+      self.name = name
+
+    def execute(self, *_args, **_kwargs):
+      actions.append((f"{self.name}:execute", actor._session_ready.is_set()))
+
+    def rollback(self):
+      actions.append((f"{self.name}:rollback", actor._session_ready.is_set()))
+
+    def close(self):
+      actions.append((f"{self.name}:close", actor._session_ready.is_set()))
+
+  actor = chat_writer.ChatWriterActor(lambda: _ProbeSession("boot"))
+  actor.start()
+  try:
+    assert actor._session_ready.wait(timeout=5)
+    assert actions[:2] == [
+      ("boot:execute", False),
+      ("boot:rollback", False),
+    ]
+  finally:
+    actor.stop(timeout=5)
+
+  actions.clear()
+  old = _ProbeSession("old")
+  fresh = _ProbeSession("fresh")
+  actor = chat_writer.ChatWriterActor(lambda: fresh)
+  actor._db = old
+  actor._session_ready.set()
+  actor._recreate_session()
+  assert actions == [
+    ("old:rollback", False),
+    ("old:close", False),
+    ("fresh:execute", False),
+    ("fresh:rollback", False),
+  ]
+  assert actor._session_ready.is_set()
+
+
 def test_ready_returns_503_when_writer_fatal_then_recovers(client):
   """A fatal actor flips /api/ready to 503; restoring a healthy writer
   returns it to 200. The restore is the point — a fatal singleton left

@@ -974,9 +974,641 @@ def _add_chat_run_goal_objective(eng) -> None:
       ), {"objective": objective, "run_id": run_id})
 
 
+def _add_chat_run_root_identity(eng) -> None:
+  """Give every physical run a stable logical identity across continuations."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chat_runs" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chat_runs")}
+  with eng.begin() as conn:
+    if "root_run_id" not in columns:
+      conn.execute(text(
+        "ALTER TABLE chat_runs ADD COLUMN root_run_id VARCHAR(64) NULL"
+      ))
+    # Idempotent backfill: pre-feature physical runs are each their own logical
+    # root. New continuation writes inherit explicitly in chat_writer.
+    conn.execute(text(
+      "UPDATE chat_runs SET root_run_id = id WHERE root_run_id IS NULL"
+    ))
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_chat_runs_root_run_id "
+      "ON chat_runs (root_run_id)"
+    ))
+    if eng.dialect.name == "postgresql":
+      conn.execute(text(
+        "ALTER TABLE chat_runs ALTER COLUMN root_run_id SET NOT NULL"
+      ))
+
+
+def _require_app_identity(eng) -> None:
+  """Make every app row retain its canonical URL and source identities.
+
+  Fresh databases receive ordinary NOT NULL + CHECK constraints from the ORM
+  model. SQLite cannot add those constraints to an existing table without a
+  high-risk table rebuild, so upgraded databases enforce the identical write
+  boundary with small BEFORE triggers after proving every stored row is ready.
+  PostgreSQL can promote the columns directly.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "apps" not in inspector.get_table_names():
+    return
+  app_columns = {column["name"] for column in inspector.get_columns("apps")}
+  with eng.begin() as conn:
+    # Frozen migration copy. Historical identities must not change when the
+    # lifecycle helper evolves after this migration has shipped.
+    def slugify_for_source_dir(name: str) -> str:
+      slug = "".join(
+        ch if ch.isalnum() else "-" for ch in (name or "").lower()
+      ).strip("-")
+      while "--" in slug:
+        slug = slug.replace("--", "-")
+      slug = slug or "app"
+      if slug.isdigit():
+        slug = f"app-{slug}"
+      return slug
+
+    apps_root = Path(get_settings().data_dir) / "apps"
+    used_slugs = {
+      str(slug)
+      for (slug,) in conn.execute(text(
+        "SELECT slug FROM apps "
+        "WHERE slug IS NOT NULL AND length(trim(slug)) > 0"
+      ))
+    }
+    missing_slugs = conn.execute(text(
+      "SELECT id, name FROM apps "
+      "WHERE slug IS NULL OR length(trim(slug)) = 0 ORDER BY id"
+    )).all()
+    for app_id, name in missing_slugs:
+      base = slugify_for_source_dir(str(name or ""))
+      slug = base
+      suffix = 2
+      while slug in used_slugs:
+        slug = f"{base}-{suffix}"
+        suffix += 1
+      conn.execute(text(
+        "UPDATE apps SET slug = :slug WHERE id = :app_id"
+      ), {"slug": slug, "app_id": app_id})
+      used_slugs.add(slug)
+    source_projection = "jsx_source" if "jsx_source" in app_columns else "NULL"
+    apps_root_resolved = apps_root.resolve()
+    existing_sources = conn.execute(text(
+      "SELECT id, source_dir FROM apps "
+      "WHERE source_dir IS NOT NULL AND length(trim(source_dir)) > 0 "
+      "ORDER BY id"
+    )).all()
+    canonical_sources: dict[str, int] = {}
+    canonical_updates: list[tuple[int, str]] = []
+    for app_id, stored_source in existing_sources:
+      try:
+        resolved_path = Path(stored_source).resolve()
+      except (OSError, RuntimeError) as exc:
+        raise RuntimeError(
+          f"cannot require app identity: app {app_id} has an invalid source_dir"
+        ) from exc
+      if (
+        resolved_path.parent != apps_root_resolved
+        or resolved_path.name.isdigit()
+      ):
+        raise RuntimeError(
+          "cannot require app identity: app "
+          f"{app_id} source_dir is outside the canonical apps root"
+        )
+      resolved = str(resolved_path)
+      prior_owner = canonical_sources.get(resolved)
+      if prior_owner is not None:
+        raise RuntimeError(
+          "cannot require app identity: apps "
+          f"{prior_owner} and {app_id} resolve to the same source_dir"
+        )
+      canonical_sources[resolved] = app_id
+      if str(stored_source) != resolved:
+        canonical_updates.append((app_id, resolved))
+    for app_id, resolved in canonical_updates:
+      conn.execute(text(
+        "UPDATE apps SET source_dir = :source_dir WHERE id = :app_id"
+      ), {"source_dir": resolved, "app_id": app_id})
+    reserved_sources = set(canonical_sources)
+    missing_sources = conn.execute(text(
+      f"SELECT id, slug, {source_projection} AS jsx_source FROM apps "
+      "WHERE source_dir IS NULL OR length(trim(source_dir)) = 0"
+    )).all()
+    for app_id, slug, jsx_source in missing_sources:
+      if not slug or not str(slug).strip():
+        raise RuntimeError(
+          f"cannot require app identity: app {app_id} has no slug"
+        )
+      # URL slugs on very old/corrupt rows were never a filesystem trust
+      # boundary. Preserve the URL identity in SQLite, but derive the source
+      # basename through the same sanitizer used for newly allocated apps.
+      source_basename = slugify_for_source_dir(str(slug))
+      source_dir = apps_root / source_basename
+      app_git = None
+      if isinstance(jsx_source, str):
+        from app import app_git
+
+        def reusable_legacy_tree(path: Path) -> bool:
+          marker = path / ".mobius-identity-migration"
+          try:
+            migration_owned = marker.read_text(encoding="utf-8") == (
+              f"0004_app_identity_required:{app_id}\n"
+            )
+          except (FileNotFoundError, OSError):
+            migration_owned = False
+          try:
+            names = {child.name for child in path.iterdir()}
+          except (FileNotFoundError, OSError):
+            names = set()
+          # A crash before the atomic marker publish can leave only the new
+          # directory (or its marker temp); a crash in the older implementation
+          # could leave only ensure_repo's clean seed. Neither contains owner
+          # source, so this app may safely resume the same deterministic path.
+          if names <= {
+            ".git",
+            ".gitignore",
+            ".mobius-identity-migration",
+            ".mobius-identity-migration.tmp",
+          }:
+            return True
+          try:
+            same_entry = (path / "index.jsx").read_text(
+              encoding="utf-8"
+            ) == jsx_source
+          except (FileNotFoundError, OSError):
+            return False
+          if not same_entry:
+            return False
+          # A valid marker plus the stored source is exactly the partial state
+          # this migration itself can leave between write and commit. Without
+          # the marker, accept only an already-clean equivalent repository.
+          return migration_owned or (
+            app_git.is_repo(path) and not app_git.worktree_dirty(path)
+          )
+
+      # Allocate every missing identity, even when an extremely old schema has
+      # no stored JSX. Reservations cover existing rows and earlier assignments
+      # in this transaction. Resolved containment rejects symlinks that escape
+      # apps_root before any mkdir, marker, or Git operation can touch them.
+      candidate_number = 0
+      while True:
+        if candidate_number == 0:
+          candidate = source_dir
+        elif candidate_number == 1:
+          candidate = apps_root / f"{source_basename}-legacy-{app_id}"
+        else:
+          candidate = apps_root / (
+            f"{source_basename}-legacy-{app_id}-{candidate_number}"
+          )
+        candidate_number += 1
+        try:
+          resolved_path = candidate.resolve()
+        except (OSError, RuntimeError):
+          # A pathological occupied basename (for example a symlink loop) does
+          # not get to brick boot; allocate the next deterministic sibling.
+          continue
+        resolved = str(resolved_path)
+        if (
+          resolved_path.parent != apps_root_resolved
+          or resolved_path.name.isdigit()
+          or resolved in reserved_sources
+        ):
+          continue
+        if candidate.exists():
+          if app_git is None or not reusable_legacy_tree(candidate):
+            continue
+        source_dir = candidate
+        reserved_sources.add(resolved)
+        break
+
+      if isinstance(jsx_source, str):
+        source_dir.mkdir(parents=True, exist_ok=True)
+        marker = source_dir / ".mobius-identity-migration"
+        marker_temp = source_dir / ".mobius-identity-migration.tmp"
+        marker_temp.write_text(
+          f"0004_app_identity_required:{app_id}\n", encoding="utf-8"
+        )
+        os.replace(marker_temp, marker)
+        try:
+          app_git.ensure_repo(source_dir)
+          # Keep the durable ownership marker through the source commit without
+          # accepting it as app source. A crash at any earlier boundary can now
+          # retry the same directory deterministically.
+          exclude = source_dir / ".git" / "info" / "exclude"
+          exclude.parent.mkdir(parents=True, exist_ok=True)
+          existing_exclude = (
+            exclude.read_text(encoding="utf-8")
+            if exclude.exists()
+            else ""
+          )
+          if ".mobius-identity-migration" not in existing_exclude.splitlines():
+            exclude.write_text(
+              existing_exclude.rstrip("\n")
+              + ("\n" if existing_exclude else "")
+              + ".mobius-identity-migration\n",
+              encoding="utf-8",
+            )
+          entry = source_dir / "index.jsx"
+          # The marker proves this directory belongs to this migration, so a
+          # partial prior write is safe to replace with the stored revision.
+          entry.write_text(jsx_source, encoding="utf-8")
+          if entry.read_text(encoding="utf-8") != jsx_source:
+            raise RuntimeError(
+              f"cannot require app identity: legacy source for app {app_id} "
+              "does not match its stored revision"
+            )
+          app_git.commit_local(
+            source_dir, "Materialize legacy app source identity"
+          )
+          if app_git.worktree_dirty(source_dir):
+            raise RuntimeError(
+              "cannot require app identity: materialized source for app "
+              f"{app_id} "
+              "is not clean"
+            )
+          marker.unlink(missing_ok=True)
+        except Exception:
+          # Deliberately retain the marker: it is the crash/retry ownership
+          # proof and is excluded from app history once Git exists.
+          raise
+        if app_git.worktree_dirty(source_dir):
+          raise RuntimeError(
+            "cannot require app identity: materialized source for app "
+            f"{app_id} "
+            "is not clean"
+          )
+      conn.execute(text(
+        "UPDATE apps SET source_dir = :source_dir WHERE id = :app_id"
+      ), {
+        "source_dir": str(source_dir),
+        "app_id": app_id,
+      })
+    invalid = conn.execute(text(
+      "SELECT COUNT(*) FROM apps "
+      "WHERE slug IS NULL OR length(trim(slug)) = 0 "
+      "OR source_dir IS NULL OR length(trim(source_dir)) = 0"
+    )).scalar_one()
+    if invalid:
+      raise RuntimeError(
+        f"cannot require app identity: {invalid} app row(s) are incomplete"
+      )
+    duplicate_sources = conn.execute(text(
+      "SELECT source_dir FROM apps GROUP BY source_dir HAVING COUNT(*) > 1"
+    )).all()
+    if duplicate_sources:
+      raise RuntimeError(
+        "cannot require app identity: duplicate source_dir values exist"
+      )
+    conn.execute(text(
+      "CREATE UNIQUE INDEX IF NOT EXISTS ix_apps_source_dir "
+      "ON apps (source_dir)"
+    ))
+    if eng.dialect.name == "sqlite":
+      predicate = (
+        "NEW.slug IS NULL OR length(trim(NEW.slug)) = 0 "
+        "OR NEW.source_dir IS NULL OR length(trim(NEW.source_dir)) = 0"
+      )
+      conn.execute(text(
+        "CREATE TRIGGER IF NOT EXISTS apps_require_identity_insert "
+        f"BEFORE INSERT ON apps WHEN {predicate} BEGIN "
+        "SELECT RAISE(ABORT, 'apps require slug and source_dir'); END"
+      ))
+      conn.execute(text(
+        "CREATE TRIGGER IF NOT EXISTS apps_require_identity_update "
+        f"BEFORE UPDATE OF slug, source_dir ON apps WHEN {predicate} BEGIN "
+        "SELECT RAISE(ABORT, 'apps require slug and source_dir'); END"
+      ))
+    elif eng.dialect.name == "postgresql":
+      conn.execute(text(
+        "ALTER TABLE apps ALTER COLUMN slug SET NOT NULL"
+      ))
+      conn.execute(text(
+        "ALTER TABLE apps ALTER COLUMN source_dir SET NOT NULL"
+      ))
+      checks = {
+        item.get("name")
+        for item in sa_inspect(conn).get_check_constraints("apps")
+      }
+      if "ck_apps_slug_nonempty" not in checks:
+        conn.execute(text(
+          "ALTER TABLE apps ADD CONSTRAINT ck_apps_slug_nonempty "
+          "CHECK (length(trim(slug)) > 0)"
+        ))
+      if "ck_apps_source_dir_nonempty" not in checks:
+        conn.execute(text(
+          "ALTER TABLE apps ADD CONSTRAINT ck_apps_source_dir_nonempty "
+          "CHECK (length(trim(source_dir)) > 0)"
+        ))
+
+
+def _add_chat_has_messages(eng) -> None:
+  """Materialize transcript emptiness for the drawer's hot list query."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chats" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chats")}
+  if "has_messages" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE chats ADD COLUMN has_messages BOOLEAN "
+      "NOT NULL DEFAULT FALSE"
+    ))
+    # One deliberate upgrade-time scan replaces the same scan on every drawer
+    # refresh. Inspect the JSON value rather than relying on its serialization.
+    if "messages" in columns:
+      conn.execute(text(
+        "UPDATE chats SET has_messages = CASE "
+        "WHEN json_array_length(messages) > 0 "
+        "THEN TRUE ELSE FALSE END"
+      ))
+
+
+def _create_chat_search_tables(eng) -> None:
+  """Install the disposable normalized search schema for each database."""
+  from sqlalchemy import text
+
+  dialect = eng.dialect.name
+  if dialect not in {"sqlite", "postgresql"}:
+    raise RuntimeError(f"unsupported chat-search database: {dialect}")
+
+  # Search rows are derived from chats. Replace the runtime-created generation
+  # once rather than preserving a permanent schema detector in the
+  # request path; the first search repopulates these empty canonical tables.
+  with eng.begin() as conn:
+    if dialect == "sqlite":
+      conn.execute(text("DROP TABLE IF EXISTS chat_search_fts"))
+    for table_name in (
+      "chat_search_docs",
+      "chat_search_state",
+      "chat_search_meta",
+    ):
+      conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+
+    id_type = "INTEGER" if dialect == "sqlite" else "BIGSERIAL"
+    conn.execute(text(
+      "CREATE TABLE chat_search_docs ("
+      f"id {id_type} PRIMARY KEY, "
+      "chat_id VARCHAR(64) NOT NULL, "
+      "msg_idx INTEGER NOT NULL, "
+      "ts BIGINT, "
+      "role VARCHAR(16), "
+      "text TEXT NOT NULL"
+      ")"
+    ))
+    # One composite index owns both row identity and chat-local scans; a
+    # separate chat_id index would duplicate its leftmost prefix.
+    conn.execute(text(
+      "CREATE UNIQUE INDEX ix_chat_search_docs_chat_message "
+      "ON chat_search_docs (chat_id, msg_idx)"
+    ))
+    conn.execute(text(
+      "CREATE TABLE chat_search_state ("
+      "chat_id VARCHAR(64) PRIMARY KEY, "
+      "indexed_updated_at TEXT NOT NULL"
+      ")"
+    ))
+
+    if dialect == "sqlite":
+      conn.execute(text(
+        "CREATE VIRTUAL TABLE chat_search_fts USING fts5("
+        "text, content='chat_search_docs', content_rowid='id', "
+        "tokenize='unicode61 remove_diacritics 2'"
+        ")"
+      ))
+      conn.execute(text(
+        "CREATE TRIGGER chat_search_docs_ai "
+        "AFTER INSERT ON chat_search_docs BEGIN "
+        "INSERT INTO chat_search_fts(rowid, text) VALUES (new.id, new.text); "
+        "END"
+      ))
+      conn.execute(text(
+        "CREATE TRIGGER chat_search_docs_ad "
+        "AFTER DELETE ON chat_search_docs BEGIN "
+        "INSERT INTO chat_search_fts(chat_search_fts, rowid, text) "
+        "VALUES ('delete', old.id, old.text); "
+        "END"
+      ))
+
+
+def _add_connectors_table(eng) -> None:
+  """Create the provider-neutral MCP registry without replacing preview rows."""
+  from app.models import Connector
+
+  Connector.__table__.create(bind=eng, checkfirst=True)
+
+
+def _add_connector_capability_identity(eng) -> None:
+  """Give every connector an immutable identity for broker authorization."""
+  import secrets
+  from sqlalchemy import inspect as sa_inspect, text
+
+  columns = {
+    column["name"] for column in sa_inspect(eng).get_columns("connectors")
+  }
+  with eng.begin() as conn:
+    if "capability_id" not in columns:
+      conn.execute(text(
+        "ALTER TABLE connectors ADD COLUMN capability_id VARCHAR(64) NULL"
+      ))
+    rows = conn.execute(text(
+      "SELECT id FROM connectors "
+      "WHERE capability_id IS NULL OR length(trim(capability_id)) = 0"
+    )).all()
+    for (connector_id,) in rows:
+      conn.execute(text(
+        "UPDATE connectors SET capability_id = :capability_id WHERE id = :id"
+      ), {
+        "capability_id": secrets.token_hex(32),
+        "id": connector_id,
+      })
+    conn.execute(text(
+      "CREATE UNIQUE INDEX IF NOT EXISTS ix_connectors_capability_id "
+      "ON connectors (capability_id)"
+    ))
+    if eng.dialect.name == "postgresql":
+      conn.execute(text(
+        "ALTER TABLE connectors ALTER COLUMN capability_id SET NOT NULL"
+      ))
+    elif eng.dialect.name == "sqlite":
+      predicate = (
+        "NEW.capability_id IS NULL "
+        "OR length(trim(NEW.capability_id)) = 0"
+      )
+      conn.execute(text(
+        "CREATE TRIGGER IF NOT EXISTS connectors_require_capability_insert "
+        f"BEFORE INSERT ON connectors WHEN {predicate} BEGIN "
+        "SELECT RAISE(ABORT, 'connectors require capability_id'); END"
+      ))
+      conn.execute(text(
+        "CREATE TRIGGER IF NOT EXISTS connectors_require_capability_update "
+        f"BEFORE UPDATE OF capability_id ON connectors WHEN {predicate} BEGIN "
+        "SELECT RAISE(ABORT, 'connectors require capability_id'); END"
+      ))
+
+
+def orm_schema_gaps(eng) -> list[str]:
+  """ORM-mapped columns/tables the live database lacks (``table.column``).
+
+  Runs after ``create_all`` + migrations, so any gap is a written-code bug
+  (a declared column with no migration), not a pending upgrade. Such a gap
+  is invisible at boot and fatal at first query — the 2026-08-04 outage
+  hung every chat turn on one missing ``apps`` column while the container
+  reported healthy.
+  """
+  from sqlalchemy import inspect as sa_inspect
+
+  inspector = sa_inspect(eng)
+  live_tables = set(inspector.get_table_names())
+  gaps: list[str] = []
+  for table in Base.metadata.sorted_tables:
+    if table.name not in live_tables:
+      gaps.append(f"{table.name} (missing table)")
+      continue
+    live = {column["name"] for column in inspector.get_columns(table.name)}
+    gaps.extend(
+      f"{table.name}.{column.name}"
+      for column in table.columns
+      if column.name not in live
+    )
+  return gaps
+
+
+def _add_app_connections_manage(eng) -> None:
+  """Grant column for the Connections mini-app's registry access.
+
+  Numbered migration, NOT a ``_converge_legacy_schema`` ALTER: 0001 is a
+  recorded one-shot, so a column added there never reaches a database that
+  already ran it — the exact gap behind the 2026-08-04 silent-turn outage.
+  Schema-gated for the hand-patched production database and for fresh
+  installs whose tables are created from ORM metadata.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  columns = {
+    column["name"] for column in sa_inspect(eng).get_columns("apps")
+  }
+  if "connections_manage" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE apps ADD COLUMN connections_manage BOOLEAN "
+      "NOT NULL DEFAULT FALSE"
+    ))
+
+
+def _add_chat_pending_question_id(eng) -> None:
+  """Add the durable open-AskUserQuestion marker (models.Chat).
+
+  Backfill only chats with a nonterminal durable run and an unanswered question
+  in their latest visible assistant message. That preserves a question parked
+  at upgrade without reviving historical cards on completed chats.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chats" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chats")}
+  if "pending_question_id" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE chats ADD COLUMN pending_question_id VARCHAR(64) NULL"
+    ))
+    tables = set(inspector.get_table_names())
+    if "chat_runs" not in tables or not {"id", "messages"}.issubset(columns):
+      return
+    run_columns = {
+      column["name"] for column in inspector.get_columns("chat_runs")
+    }
+    if not {"chat_id", "status"}.issubset(run_columns):
+      return
+    active_rows = conn.execute(text(
+      "SELECT c.id, c.messages FROM chats c "
+      "WHERE c.pending_question_id IS NULL "
+      + ("AND c.deleted_at IS NULL " if "deleted_at" in columns else "")
+      + "AND EXISTS ("
+      "SELECT 1 FROM chat_runs r WHERE r.chat_id = c.id "
+      "AND r.status IN ('running', 'parked', 'resume_pending'))"
+    )).all()
+    for chat_id, raw_messages in active_rows:
+      try:
+        messages = (
+          json.loads(raw_messages)
+          if isinstance(raw_messages, str)
+          else list(raw_messages or [])
+        )
+      except (TypeError, ValueError, json.JSONDecodeError):
+        continue
+      question_id = None
+      for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("hidden"):
+          continue
+        if message.get("role") != "assistant":
+          break
+        for block in reversed(message.get("blocks") or []):
+          if not isinstance(block, dict):
+            continue
+          candidate = block.get("question_id")
+          if (
+            block.get("type") == "question"
+            and not block.get("answers")
+            and isinstance(candidate, str)
+            and 0 < len(candidate) <= 64
+          ):
+            question_id = candidate
+            break
+        break
+      if question_id is not None:
+        conn.execute(text(
+          "UPDATE chats SET pending_question_id = :question_id "
+          "WHERE id = :chat_id AND pending_question_id IS NULL"
+        ), {"chat_id": chat_id, "question_id": question_id})
+
+
+def _add_delegation_parent_wake(eng) -> None:
+  """Add the delegation parent auto-wake columns (models.Delegation).
+
+  ``notify_parent_on_complete`` (opt-in, default FALSE) and ``parent_woken_at``
+  (nullable retry latch). Existing rows keep the safe defaults: no wake
+  fires for delegations created before the upgrade.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "delegations" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("delegations")}
+  with eng.begin() as conn:
+    if "notify_parent_on_complete" not in columns:
+      conn.execute(text(
+        "ALTER TABLE delegations ADD COLUMN notify_parent_on_complete "
+        "BOOLEAN NOT NULL DEFAULT FALSE"
+      ))
+    if "parent_woken_at" not in columns:
+      conn.execute(text(
+        "ALTER TABLE delegations ADD COLUMN parent_woken_at DATETIME NULL"
+      ))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
+  ("0003_chat_run_root_identity", _add_chat_run_root_identity),
+  ("0004_app_identity_required", _require_app_identity),
+  ("0005_connectors", _add_connectors_table),
+  ("0006_connector_capability_identity", _add_connector_capability_identity),
+  ("0007_chat_has_messages", _add_chat_has_messages),
+  ("0008_chat_search_documents", _create_chat_search_tables),
+  ("0009_app_connections_manage", _add_app_connections_manage),
+  ("0010_chat_pending_question_id", _add_chat_pending_question_id),
+  ("0011_delegation_parent_wake", _add_delegation_parent_wake),
 )
 
 

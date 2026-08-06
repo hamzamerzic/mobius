@@ -1,88 +1,57 @@
-/*
- * Tests for versioned live-stream sessionStorage cache helpers.
- */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
   streamSnapshotKey,
   readStoredStreamSnapshot,
-  bufferStreamSnapshot,
+  writeStoredStreamSnapshot,
   clearStoredStreamSnapshot,
   reclaimStoredStreamSnapshots,
-  flushStoredStreamSnapshot,
-  _resetStreamSnapshotBufferForTests,
 } from '../streamSnapshotCache.js'
 
 function makeStorage() {
   const map = new Map()
+  const calls = { set: 0 }
   return {
     map,
+    calls,
     get length() { return map.size },
     key(index) { return [...map.keys()][index] ?? null },
     getItem(key) { return map.has(key) ? map.get(key) : null },
-    setItem(key, value) { map.set(key, value) },
+    setItem(key, value) { calls.set += 1; map.set(key, value) },
     removeItem(key) { map.delete(key) },
   }
 }
 
-// A storage that counts setItem/removeItem so the write-behind tests can assert
-// "nothing serialized yet" vs "exactly one write" instead of only end-state.
-function makeSpyStorage() {
-  const map = new Map()
-  const calls = { set: 0, remove: 0 }
-  return {
-    map,
-    calls,
-    getItem(key) { return map.has(key) ? map.get(key) : null },
-    setItem(key, value) { calls.set += 1; map.set(key, value) },
-    removeItem(key) { calls.remove += 1; map.delete(key) },
-  }
-}
-
-test('stream snapshot buffer/flush uses v2 key', () => {
+test('stream snapshots use the v2 key and ignore empty reconnect state', () => {
   const storage = makeStorage()
   const items = [{ type: 'text', content: 'partial' }]
 
-  bufferStreamSnapshot('chat-a', items, storage)
-  flushStoredStreamSnapshot('chat-a')
+  writeStoredStreamSnapshot('chat-a', items, storage)
+  writeStoredStreamSnapshot('chat-a', [], storage)
 
   assert.deepEqual(readStoredStreamSnapshot('chat-a', storage), items)
   assert.equal(storage.map.has(streamSnapshotKey('chat-a')), true)
+  assert.equal(storage.calls.set, 1)
 })
 
-test('stream snapshot ignores empty buffers so reconnect reset keeps visible cache', () => {
+test('clear removes the current snapshot', () => {
   const storage = makeStorage()
-  const items = [{ type: 'tool', tool: 'Bash', status: 'running' }]
-
-  bufferStreamSnapshot('chat-a', items, storage)
-  bufferStreamSnapshot('chat-a', [], storage)
-  flushStoredStreamSnapshot('chat-a')
-
-  assert.deepEqual(readStoredStreamSnapshot('chat-a', storage), items)
-})
-
-test('clear removes the current key', () => {
-  const storage = makeStorage()
-  storage.setItem(streamSnapshotKey('chat-a'), JSON.stringify([{ type: 'text', content: 'new' }]))
+  writeStoredStreamSnapshot('chat-a', [{ type: 'text', content: 'new' }], storage)
 
   clearStoredStreamSnapshot('chat-a', storage)
 
   assert.equal(storage.map.has(streamSnapshotKey('chat-a')), false)
 })
 
-test('quota reclamation drops only stream cache, including pending writes', () => {
-  _resetStreamSnapshotBufferForTests()
+test('quota reclamation drops only regenerable stream snapshots', () => {
   const storage = makeStorage()
   storage.setItem('draft:chat-a', 'owner data')
-  storage.setItem(streamSnapshotKey('settled'), '[{"type":"text"}]')
-  bufferStreamSnapshot('pending', [{ type: 'text', content: 'later' }], storage)
+  storage.setItem(streamSnapshotKey('running-chat'), '[{"type":"text"}]')
 
   assert.equal(reclaimStoredStreamSnapshots(storage), 1)
   assert.equal(storage.getItem('draft:chat-a'), 'owner data')
-  assert.equal(storage.getItem(streamSnapshotKey('settled')), null)
-  assert.equal(storage.getItem(streamSnapshotKey('pending')), null)
-  _resetStreamSnapshotBufferForTests()
+  assert.equal(storage.getItem(streamSnapshotKey('running-chat')), null)
 })
 
 test('read returns [] for corrupt or absent values', () => {
@@ -101,56 +70,10 @@ test('default cache is optional when an opaque sandbox denies sessionStorage', (
   })
   try {
     assert.deepEqual(readStoredStreamSnapshot('chat-a'), [])
-    assert.doesNotThrow(() => bufferStreamSnapshot('chat-a', [{ type: 'text' }]))
+    assert.doesNotThrow(() => writeStoredStreamSnapshot('chat-a', [{ type: 'text' }]))
     assert.doesNotThrow(() => clearStoredStreamSnapshot('chat-a'))
   } finally {
     if (descriptor) Object.defineProperty(globalThis, 'sessionStorage', descriptor)
     else delete globalThis.sessionStorage
   }
-})
-
-// ── Write-behind + lossless flush contract ──────────────────────────────────
-// The snapshot is the remount/reconnect fallback, so buffering without a flush
-// would reintroduce partial-text rollback. These lock in latest-wins buffering
-// for every chat and a synchronous flush at every lifecycle boundary.
-
-test('single-chat rapid writes stay buffered instead of blocking each reveal frame', () => {
-  _resetStreamSnapshotBufferForTests()
-  const s = makeSpyStorage()
-  bufferStreamSnapshot('c1', [{ type: 'text', content: 'a' }], s)
-  bufferStreamSnapshot('c1', [{ type: 'text', content: 'ab' }], s)
-  bufferStreamSnapshot('c1', [{ type: 'text', content: 'abc' }], s)
-  // Rapid writes stay in memory — nothing serialized yet.
-  assert.equal(s.calls.set, 0)
-  assert.deepEqual(readStoredStreamSnapshot('c1', s), [])
-  // The flush lands exactly one write carrying the LATEST items (lossless).
-  flushStoredStreamSnapshot('c1')
-  assert.equal(s.calls.set, 1)
-  assert.deepEqual(readStoredStreamSnapshot('c1', s), [{ type: 'text', content: 'abc' }])
-  _resetStreamSnapshotBufferForTests()
-})
-
-test('a flush boundary writes synchronously and is idempotent', () => {
-  _resetStreamSnapshotBufferForTests()
-  const s = makeSpyStorage()
-  bufferStreamSnapshot('c1', [{ type: 'text', content: 'x' }], s)
-  flushStoredStreamSnapshot('c1')
-  assert.equal(s.calls.set, 1)
-  // No pending write remains — a second flush at a later boundary is a no-op.
-  flushStoredStreamSnapshot('c1')
-  assert.equal(s.calls.set, 1)
-  _resetStreamSnapshotBufferForTests()
-})
-
-test('clear drops a pending buffered write so it cannot resurrect', () => {
-  _resetStreamSnapshotBufferForTests()
-  const s = makeSpyStorage()
-  bufferStreamSnapshot('c1', [{ type: 'text', content: 'stale' }], s)
-  clearStoredStreamSnapshot('c1', s)
-  assert.equal(s.calls.remove, 1)
-  // A later lifecycle flush cannot resurrect the dropped write.
-  flushStoredStreamSnapshot('c1')
-  assert.equal(s.calls.set, 0)
-  assert.deepEqual(readStoredStreamSnapshot('c1', s), [])
-  _resetStreamSnapshotBufferForTests()
 })

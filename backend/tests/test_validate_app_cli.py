@@ -1,6 +1,7 @@
 """The app validator uses the same compile contract as installation."""
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -42,6 +43,25 @@ def test_validator_accepts_an_installable_app(tmp_path):
   assert "OK" in result.stdout
 
 
+def test_validator_stays_zero_configuration_outside_a_runtime(tmp_path):
+  """A developer checkout has no settings; the build lease must not need any."""
+  _write_app(tmp_path, "export default function App(){ return <div /> }")
+  env = os.environ.copy()
+  for key in ("DATA_DIR", "SECRET_KEY"):
+    env.pop(key, None)
+
+  result = subprocess.run(
+    [sys.executable, str(SCRIPT), str(tmp_path)],
+    capture_output=True,
+    text=True,
+    check=False,
+    env=env,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert "OK" in result.stdout
+
+
 def test_validator_rejects_a_bundle_compile_failure(tmp_path):
   _write_app(
     tmp_path,
@@ -49,7 +69,7 @@ def test_validator_rejects_a_bundle_compile_failure(tmp_path):
   )
   result = _run(tmp_path)
   assert result.returncode == 1
-  # The source-closure check catches this before esbuild, which is still part of
+  # The source-closure check catches this before Rolldown, which is still part of
   # the same preflight contract and avoids reporting a duplicate compile error.
   assert "resolves to no file" in result.stderr
 
@@ -208,7 +228,7 @@ def test_validator_rejects_css_imports(tmp_path):
   assert "CSS imports are not supported" in result.stderr
 
 
-def test_validator_compiles_only_the_declared_synthetic_tree(tmp_path):
+def test_validator_rejects_css_before_following_nested_imports(tmp_path):
   _write_app(
     tmp_path,
     "import './a.css';\nexport default function App(){ return <div /> }",
@@ -221,8 +241,8 @@ def test_validator_compiles_only_the_declared_synthetic_tree(tmp_path):
 
   result = _run(tmp_path)
   assert result.returncode == 1
-  assert "Could not resolve" in result.stderr
-  assert "b.css" in result.stderr
+  assert "CSS imports are not supported" in result.stderr
+  assert "b.css" not in result.stderr
 
 
 def test_validator_rejects_symlinked_package_files(tmp_path):

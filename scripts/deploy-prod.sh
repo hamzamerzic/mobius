@@ -31,6 +31,8 @@
 #                           prune unused build cache older than this after success (24)
 #   DEPLOY_BUILD_CACHE_MAX_GB
 #                           target maximum retained build cache after success (8)
+#   MOBIUS_IMAGE            stable Compose app image tag used for build,
+#                           preflight, cutover, and rollback (default: mobius)
 #
 # Safety: only the `docker compose build` step prompts (it's slow and
 # has OOM'd this 7.6GB host before). Everything else auto-proceeds.
@@ -508,10 +510,6 @@ valid_gateway_origin() {
 # rather than mounting keeps prod at permanent parity with the file CI
 # validates — the pre-edge setup drifted for months because the external proxy
 # had its own hand-written copy of these vhosts.
-#
-# EDGE_CSP_MODE=report-only downgrades the shell Content-Security-Policy to
-# Report-Only for a staged rollout (violations appear in the browser console
-# without breaking the page); default is enforce.
 install_edge_fragment() {
   external_prod_caddy_running || return 0
   local edge_dir="${MOBIUS_EDGE_DIR:-$HOME/projects/edge}"
@@ -565,18 +563,6 @@ install_edge_fragment() {
     rm -f "$rendered"
     exit 1
   fi
-  case "${EDGE_CSP_MODE:-enforce}" in
-    enforce) ;;
-    report-only)
-      sed -i 's|>Content-Security-Policy |>Content-Security-Policy-Report-Only |g' "$rendered"
-      info "edge fragment CSP rendered as Report-Only (EDGE_CSP_MODE=report-only)"
-      ;;
-    *)
-      rm -f "$rendered"
-      fail "EDGE_CSP_MODE must be 'enforce' or 'report-only'."
-      exit 1
-      ;;
-  esac
   # edgectl is transactional: a bad render never replaces the installed
   # fragment, a failed reload restores it, and the previously SERVED fragment
   # stays available as `edgectl rollback mobius`.
@@ -948,11 +934,23 @@ info "target: ${C_BOLD}${TARGET}${C_RESET} (${CONTAINER})"
 # crash-loop at runtime (a SyntaxError fails Python at import, not
 # `docker build` — exactly the 2026-05-30 conflict-marker outage), and the
 # recreate has already replaced the live container by the time we notice.
-# PREV_IMAGE is the image ID (stable); IMAGE_TAG is the tag compose
-# resolves (e.g. `mobius-app`) that we re-point at it to restore.
+# ── deploy image identity
+# PREV_IMAGE is the immutable ID of what is serving now. IMAGE_TAG is the
+# stable tag Compose resolves for THIS deploy, which can intentionally differ
+# from the old container's Config.Image during a one-time tag migration. Using
+# the Compose tag everywhere is load-bearing: otherwise preflight can boot the
+# old image and rollback can re-tag a reference Compose never recreates.
 PREV_IMAGE=$(docker inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || echo "")
-IMAGE_TAG=$(docker inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null || echo "")
-info "rollback image: ${IMAGE_TAG:-<unknown>} (${PREV_IMAGE:0:19}…)"
+RUNNING_IMAGE_REF=$(
+  docker inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null || echo ""
+)
+# Keep this identical to docker-compose.yml's image expression, then export it
+# so Compose cannot implicitly load a different .env value after the preflight
+# and rollback target has been chosen.
+IMAGE_TAG=${MOBIUS_IMAGE:-mobius}
+export MOBIUS_IMAGE="$IMAGE_TAG"
+info "deploy image: ${IMAGE_TAG}; rollback source: ${PREV_IMAGE:0:19}… (running ref: ${RUNNING_IMAGE_REF:-<unknown>})"
+# ── end deploy image identity
 ROLLBACK_TAG=""
 PREVIOUS_ROLLBACK_IMAGE=""
 if [ -n "$IMAGE_TAG" ]; then

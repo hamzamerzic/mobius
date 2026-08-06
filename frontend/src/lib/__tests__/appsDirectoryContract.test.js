@@ -15,11 +15,6 @@ const itemActionMenu = readFileSync(
   'utf8',
 )
 const shell = readFileSync(resolve(src, 'components/Shell/Shell.jsx'), 'utf8')
-const shellCss = readFileSync(resolve(src, 'components/Shell/Shell.css'), 'utf8')
-const workspaceChrome = readFileSync(
-  resolve(src, 'components/Shell/WorkspaceChrome.jsx'),
-  'utf8',
-)
 const tabModel = readFileSync(resolve(src, 'components/Shell/tabModel.js'), 'utf8')
 const navigationIcons = readFileSync(resolve(src, 'components/navigationIcons.js'), 'utf8')
 
@@ -30,9 +25,9 @@ test('Apps is a single drawer destination and the old full app list is gone', ()
   assert.match(drawer, /pinnedItems\.map\(\(\{ kind, item \}\)/)
 })
 
-test('the directory preserves app management on every card', () => {
-  assert.match(drawer, /variant="card"/)
-  assert.match(drawer, /<DrawerItemMenu[\s\S]*?surface=\{surface\}/)
+test('directory cards preserve app management through shared row actions', () => {
+  assert.match(drawer, /variant="card"[\s\S]*?actions=\{rowActions\}/,
+    'app cards must keep the shared row action surface')
   for (const action of ['Install to home screen', 'Share app', 'Delete data', 'Rename']) {
     assert.match(itemActionMenu, new RegExp(action))
   }
@@ -50,11 +45,11 @@ test('phone and web share one searchable launcher tab', () => {
   const dragImports = drawer.match(
     /import \{([\s\S]*?)\} from '\.\.\/Shell\/dragController\.js'/,
   )?.[1] || ''
-  assert.match(dragImports, /DRAWER_HOLD_MS/)
+  assert.match(dragImports, /PRESS_MENU_HOLD_MS/)
   assert.match(dragImports, /PRE_HOLD_MOVE_PX/)
-  assert.match(drawer, /setTimeout\(\(\) => \{[\s\S]*?toggleMenu[\s\S]*?DRAWER_HOLD_MS\)/)
+  assert.match(drawer, /setTimeout\(\(\) => \{[\s\S]*?openItemMenuAt[\s\S]*?PRESS_MENU_HOLD_MS\)/)
   assert.doesNotMatch(drawer, /520/)
-  assert.match(drawer, /menuPlacement=\{openMenu/)
+  assert.match(drawer, /placement=\{menu\?\.placement\}/)
   assert.match(itemActionMenu, /placeContextMenu/)
   assert.match(itemActionMenu, /stopImmediatePropagation/)
   const phoneMenu = drawerCss.match(
@@ -73,14 +68,6 @@ test('chat and app rows share one placed action menu contract', () => {
   assert.doesNotMatch(itemActionMenu, /drawer__item-action-header|drawer__item-action-handle/)
   assert.match(itemActionMenu, /itemKind === 'app' && \(/,
     'Delete data must stay app-only')
-})
-
-test('desktop density keeps the shell at native document scale', () => {
-  const desktop = shellCss.match(/@media \(min-width: 1024px\) \{[\s\S]*$/)?.[0] || ''
-  assert.doesNotMatch(desktop, /(?:^|[;{])\s*zoom\s*:/)
-  assert.match(shellCss, /document remains at native[\s\S]*geometry share one space/)
-  assert.doesNotMatch(drawer, /clientDeltaToLocal/)
-  assert.doesNotMatch(workspaceChrome, /clientPointToLocal/)
 })
 
 test('the app directory distinguishes loading, errors, and confirmed emptiness', () => {

@@ -11,6 +11,7 @@ import {
   platformUpdateStatusLabel,
 } from '../../lib/platformUpdateState.js'
 import { settleBackgroundAgentSave } from '../../lib/backgroundAgentSave.js'
+import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 import {
   PROVIDER_AVAILABILITY_PHASE,
   resolveProviderAvailability,
@@ -21,7 +22,6 @@ import {
 } from '../../lib/restartReadiness.js'
 import { updateCheckOutcome, updateCheckLabel } from '../../lib/updateCheckPhase.js'
 import * as themeService from '../../lib/themeService.js'
-import { CLAUDE_MODELS, CODEX_MODELS } from '../ProviderModelPicker/ProviderModelPicker.jsx'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
@@ -53,16 +53,12 @@ const UPDATE_CHECKED_RESET_MS = 2200
 const RETURN_VIEW_KEY = 'mobius:return-view'
 const RESTART_SHELL_READY_PATH = '/shell/'
 const PLATFORM_APPLY_STATES = new Set([
-  'restart_needed', 'up_to_date', 'conflict', 'rolled_back',
+  'restart_needed', 'activation_needed', 'up_to_date', 'conflict', 'rolled_back',
 ])
 const PROVIDER_CHOICES = [
   { id: 'claude', label: 'Claude Code' },
   { id: 'codex', label: 'OpenAI Codex' },
 ]
-const FALLBACK_MODEL_ROWS = {
-  claude: CLAUDE_MODELS.map((m) => ({ id: m.value, label: m.label, available: true })),
-  codex: CODEX_MODELS.map((m) => ({ id: m.value, label: m.label, available: true })),
-}
 const DEFAULT_BACKGROUND_MODELS = {
   claude: 'claude-opus-4-8',
   codex: 'gpt-5.6-terra',
@@ -73,12 +69,8 @@ function defaultEffort(provider) {
   return efforts.find(e => e.value === 'medium')?.value || efforts[0]?.value || ''
 }
 
-function defaultModel(provider) {
-  return FALLBACK_MODEL_ROWS[provider]?.[0]?.id || ''
-}
-
 function defaultBackgroundModel(provider) {
-  return DEFAULT_BACKGROUND_MODELS[provider] || defaultModel(provider)
+  return DEFAULT_BACKGROUND_MODELS[provider] || ''
 }
 
 function isKnownProvider(provider) {
@@ -166,7 +158,9 @@ function BackgroundProviderRow({
   const Logo = info?.Logo
   const configured = configuredProviders.has(row.provider)
   const enabled = configured && row.enabled !== false
-  const selectedModel = enabled ? (row.model || defaultModel(row.provider)) : ''
+  const selectedModel = enabled
+    ? (row.model || defaultBackgroundModel(row.provider))
+    : ''
   const selectedRow = models.find((m) => m.id === selectedModel)
   const efforts = info?.efforts || []
   const selectedEfforts = modelEfforts(efforts, selectedRow)
@@ -536,7 +530,7 @@ export default function SettingsView({
         effort_levels: m.effort_levels,
       }))
     }
-    return FALLBACK_MODEL_ROWS[provider] || []
+    return []
   }, [modelRegistryQuery.data])
 
   const persistBackgroundAgents = useCallback((draft, companionSettings = {}) => {
@@ -643,18 +637,7 @@ export default function SettingsView({
     })
   }, [])
 
-  const backgroundIndexFromY = useCallback((clientY, slots) => {
-    const rows = slots || backgroundRowRefs.current
-      .map((node) => {
-        if (!node) return null
-        const rect = node.getBoundingClientRect()
-        return {
-          top: rect.top,
-          height: rect.height,
-          center: rect.top + rect.height / 2,
-        }
-      })
-      .filter(Boolean)
+  const backgroundIndexFromY = useCallback((pointerY, rows) => {
     if (!rows.length) return 0
     // Partition by the MIDPOINT between adjacent slot centers, not the
     // centers themselves: the dragged row's projected center starts on its
@@ -663,7 +646,7 @@ export default function SettingsView({
     // Midpoints mean "drag past halfway to swap" — a tiny nudge eases back.
     for (let index = 0; index < rows.length - 1; index++) {
       const boundary = (rows[index].center + rows[index + 1].center) / 2
-      if (clientY < boundary) return index
+      if (pointerY < boundary) return index
     }
     return rows.length - 1
   }, [])
@@ -674,27 +657,37 @@ export default function SettingsView({
   const startBackgroundReorder = useCallback((index, pointer) => {
     const node = backgroundRowRefs.current[index] || pointer?.node
     if (!node) return
+    const layoutSpace = captureLayoutSpace(node)
+    const toLayoutY = clientY => clientLengthToLayout(
+      clientY - layoutSpace.clientTop,
+      layoutSpace,
+    )
     const rowRect = node.getBoundingClientRect()
     const rows = backgroundRowRefs.current
     const slots = rows.map((rowNode) => {
       if (!rowNode) return null
       const rect = rowNode.getBoundingClientRect()
+      const top = toLayoutY(rect.top)
+      const height = clientLengthToLayout(rect.height, layoutSpace)
       return {
-        top: rect.top,
-        height: rect.height,
-        center: rect.top + rect.height / 2,
+        top,
+        height,
+        center: top + height / 2,
       }
     }).filter(Boolean)
     const captureNode = pointer?.captureNode || node
     try { captureNode.setPointerCapture?.(pointer?.pointerId) } catch { /* best-effort */ }
-    const grabY = typeof pointer?.clientY === 'number' ? pointer.clientY : rowRect.top
+    const grabY = toLayoutY(
+      typeof pointer?.clientY === 'number' ? pointer.clientY : rowRect.top,
+    )
     backgroundPointerYRef.current = grabY
     const next = {
       fromIndex: index,
       toIndex: index,
-      grabOffsetY: grabY - rowRect.top,
-      rowHeight: rowRect.height,
+      grabOffsetY: grabY - toLayoutY(rowRect.top),
+      rowHeight: clientLengthToLayout(rowRect.height, layoutSpace),
       slots,
+      layoutSpace,
     }
     setBackgroundDrag(next)
   }, [])
@@ -706,29 +699,34 @@ export default function SettingsView({
     // handlers never read stale React state.
     const start = backgroundDragRef.current
     if (!start) return undefined
-    const { fromIndex, grabOffsetY, rowHeight, slots } = start
+    const { fromIndex, grabOffsetY, rowHeight, slots, layoutSpace } = start
     const originTop = slots[fromIndex]?.top ?? 0
     const minOffset = slots.length ? slots[0].top - originTop : 0
     const maxOffset = slots.length ? slots[slots.length - 1].top - originTop : 0
-    const followOffset = (clientY) => {
-      const raw = clientY - grabOffsetY - originTop
+    const followOffset = (pointerY) => {
+      const raw = pointerY - grabOffsetY - originTop
       return Math.max(minOffset, Math.min(maxOffset, raw))
     }
+    const toLayoutY = clientY => clientLengthToLayout(
+      clientY - layoutSpace.clientTop,
+      layoutSpace,
+    )
 
     const onPointerMove = (event) => {
       event.preventDefault()
       const current = backgroundDragRef.current
       if (!current) return
-      backgroundPointerYRef.current = event.clientY
+      const pointerY = toLayoutY(event.clientY)
+      backgroundPointerYRef.current = pointerY
       // Move the held row imperatively so it tracks the finger 1:1
       // without re-rendering the whole panel every frame.
       const node = backgroundRowRefs.current[fromIndex]
       if (node) {
-        node.style.transform = `translateY(${followOffset(event.clientY)}px) scale(1.02)`
+        node.style.transform = `translateY(${followOffset(pointerY)}px) scale(1.02)`
       }
       // Only re-render (to slide the other rows aside) when the target
       // slot actually changes.
-      const dragCenterY = event.clientY - grabOffsetY + rowHeight / 2
+      const dragCenterY = pointerY - grabOffsetY + rowHeight / 2
       const toIndex = backgroundIndexFromY(dragCenterY, slots)
       setBackgroundDrag((c) => (
         c && c.toIndex !== toIndex ? { ...c, toIndex } : c
@@ -739,8 +737,9 @@ export default function SettingsView({
       event.preventDefault()
       const current = backgroundDragRef.current
       if (!current) return
-      backgroundPointerYRef.current = event.clientY
-      const dragCenterY = event.clientY - grabOffsetY + rowHeight / 2
+      const pointerY = toLayoutY(event.clientY)
+      backgroundPointerYRef.current = pointerY
+      const dragCenterY = pointerY - grabOffsetY + rowHeight / 2
       const toIndex = backgroundIndexFromY(dragCenterY, slots)
       // Commit synchronously on release. If the row didn't change slots,
       // just drop the drag and let the base CSS transition ease it back
@@ -1145,7 +1144,7 @@ export default function SettingsView({
         setPlatform(current => platformStatusFromApply(current, body))
       }
       await refreshPlatform()
-      if (state === 'restart_needed' || state === 'up_to_date') {
+      if (state === 'restart_needed' || state === 'activation_needed' || state === 'up_to_date') {
         return { ok: true, state }
       }
       if (state === 'conflict' || state === 'rolled_back') {
@@ -1326,7 +1325,7 @@ export default function SettingsView({
 
   const version = versionQuery.data
   // Show the upstream commit the local platform is reconciled to as the
-  // user-facing version. A reconcile/rebase can create a local served commit
+  // user-facing version. A reconcile/merge can create a local served commit
   // whose SHA does not exist on GitHub even though it fully contains
   // origin/main; keep that identity as a secondary diagnostic instead of
   // presenting it as the published Möbius version.
@@ -1338,14 +1337,19 @@ export default function SettingsView({
     : null
   // Derived state for the single "Möbius" update row (see the section below).
   const platformConflict = platform?.state === 'conflict'
-  // A text-clean update that failed the post-rebase import probe was rolled back
+  // A text-clean update that failed the post-merge import probe was rolled back
   // to the previous served version — the update is still available, but its last
   // apply needs a repair pass, so the row says so distinctly rather than reading
   // as a plain "New update available".
   const platformRolledBack = platform?.state === 'rolled_back'
-  const platformRestart = !!platform?.needs_restart
+  const platformActivationLevel = platform?.activation?.level || (
+    platform?.needs_restart ? 'server_restart' : 'live'
+  )
+  const platformRestart = platformActivationLevel === 'server_restart'
+  const platformExternalActivation = !['live', 'server_restart'].includes(
+    platformActivationLevel,
+  )
   const updateAvailable = !!platform?.available
-  const platformUpdatesDisabled = !!platform?.updates_disabled
   const mobiusUpdating =
     platformPhase === 'applying' || updatePhase === 'checking'
   const checkUpdatesLabel = updateCheckLabel(updatePhase)
@@ -1661,7 +1665,7 @@ export default function SettingsView({
           <div className="settings__row settings__row--top">
             <div className="settings__update">
               <StatusDot
-                color={platformConflict || platformRolledBack || platformRestart || updateAvailable ? '--accent' : '--green'}
+                color={platformConflict || platformRolledBack || platformRestart || platformExternalActivation || updateAvailable ? '--accent' : '--green'}
               >
                 {platformUpdateStatusLabel(platform)}
               </StatusDot>
@@ -1689,7 +1693,29 @@ export default function SettingsView({
                       : 'Resolve in chat'}
                 </button>
               ) : null
-            ) : platformUpdatesDisabled ? null : platformRestart ? (
+            ) : platformExternalActivation ? (
+              updateAvailable ? (
+                <button
+                  ref={platformActionRef}
+                  className="settings__btn settings__btn--sm settings__btn--nowrap"
+                  type="button"
+                  onClick={openUpdateReview}
+                  disabled={mobiusUpdating || platformPhase !== 'idle'}
+                >
+                  {mobiusUpdating ? 'Updating…' : 'Review update'}
+                </button>
+              ) : (
+                <button
+                  ref={platformActionRef}
+                  className="settings__btn settings__btn--outline settings__btn--sm settings__btn--nowrap"
+                  type="button"
+                  onClick={checkForUpdates}
+                  disabled={updatePhase === 'checking' || platformPhase !== 'idle'}
+                >
+                  {updatePhase === 'idle' ? 'Check for more' : checkUpdatesLabel}
+                </button>
+              )
+            ) : platformRestart ? (
               <div
                 className="settings__update-actions"
                 role="group"
@@ -1755,17 +1781,19 @@ export default function SettingsView({
               </button>
             )}
           </div>
-          {platformUpdatesDisabled && !platformConflict && (
-            <div className="settings__notice" role="status">
-              {platform?.update_disabled_reason
-                || 'Updates are managed by this deployment. Redeploy the next image to upgrade.'}
-            </div>
-          )}
           {platformPhase === 'restarting' && (
             <div className="settings__notice" role="status">
               {platformRestartSlow
                 ? 'This is taking longer than usual. Möbius is still checking.'
                 : 'Restart signal sent. The page will reload shortly.'}
+            </div>
+          )}
+          {platformExternalActivation && (
+            <div className="settings__notice settings__notice--stacked" role="status">
+              {(platform?.activation?.guidance || []).map((line) => (
+                <span key={line}>{line}</span>
+              ))}
+              <span>A server restart alone will not complete this update.</span>
             </div>
           )}
           {platformError && (

@@ -50,7 +50,12 @@ def _make_pending(future: asyncio.Future) -> PendingQuestion:
   )
 
 
-def _seed_question_block(chat_id: str, question_id: str) -> None:
+def _seed_question_block(
+  chat_id: str,
+  question_id: str,
+  *,
+  user_content: str = "go",
+) -> None:
   """Persist an assistant message carrying the open question block.
 
   C2 routes the answer write through the actor's AnswerQuestion, which
@@ -64,7 +69,7 @@ def _seed_question_block(chat_id: str, question_id: str) -> None:
   try:
     chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
     chat.messages = [
-      {"role": "user", "content": "go", "ts": 1},
+      {"role": "user", "content": user_content, "ts": 1},
       {
         "role": "assistant",
         "content": "",
@@ -224,7 +229,22 @@ def test_answer_recovers_durable_question_without_live_pending(
 
   async def go():
     qid = "q-recovered"
-    _seed_question_block(chat.id, qid)
+    _seed_question_block(
+      chat.id, qid, user_content="/goal finish the migration",
+    )
+    db = SessionLocal()
+    try:
+      db.add(models.ChatRun(
+        id="rt-interrupted-goal",
+        chat_id=chat.id,
+        status="interrupted",
+        provider="codex",
+        goal_objective="finish the migration",
+        started_at=datetime.now(UTC),
+      ))
+      db.commit()
+    finally:
+      db.close()
     _set_pending_messages(
       chat.id,
       [{"role": "user", "content": "queued-visible", "ts": 3}],
@@ -251,6 +271,11 @@ def test_answer_recovers_durable_question_without_live_pending(
     assert scheduled, "recovered answer should start a hidden continuation"
     assert scheduled[0]["next_user"]["hidden"] is True
     assert scheduled[0]["next_user"]["content"] == "- Pick one: b"
+    assert scheduled[0]["next_user"]["kind"] == "continuation"
+    assert (
+      scheduled[0]["next_user"]["continuation_reason"]
+      == "question_answer"
+    )
 
     db = SessionLocal()
     try:
@@ -265,9 +290,10 @@ def test_answer_recovers_durable_question_without_live_pending(
       assert [m["content"] for m in row.pending_messages] == [
         "queued-visible"
       ]
-      assert db.query(models.ChatRun).filter_by(
+      running = db.query(models.ChatRun).filter_by(
         chat_id=chat.id, status="running",
-      ).count() == 1
+      ).one()
+      assert running.goal_objective == "finish the migration"
     finally:
       db.close()
 
@@ -482,3 +508,56 @@ def test_answer_returns_410_after_grace_when_nothing_registers(
     assert questions.get(chat.id) is None
 
   asyncio.run(go())
+
+
+def test_open_question_survives_trailing_output_and_blocks_plain_send(
+  client, auth, chat,
+):
+  """The reported bug: a still-open card buried behind later output.
+
+  A parked question followed by parallel/subagent output and a terminal error
+  is NOT the tail block, yet it is still open. The durable `pending_question_id`
+  marker — not block position — decides that, so the read API reports it and a
+  plain follow-up is refused (409) instead of silently orphaning the card.
+  """
+  qid = "q-buried-behind-error"
+  db = SessionLocal()
+  try:
+    row = db.query(models.Chat).filter(models.Chat.id == chat.id).first()
+    row.messages = [
+      {"role": "user", "content": "clean up the new-chat debt", "ts": 1},
+      {
+        "role": "assistant",
+        "content": "",
+        "ts": 2,
+        "blocks": [
+          {
+            "type": "question",
+            "question_id": qid,
+            "questions": [
+              {"id": "q1", "question": "How far?", "options": ["a", "b"]}
+            ],
+          },
+          {"type": "text", "content": "subagent findings streamed in after"},
+          {"type": "error", "message": "You've hit your session limit"},
+        ],
+      },
+    ]
+    row.pending_question_id = qid
+    db.commit()
+  finally:
+    db.close()
+
+  # The read API reports the open question though it is not the tail block.
+  detail = client.get(f"/api/chats/{chat.id}?limit=20", headers=auth)
+  assert detail.status_code == 200
+  assert detail.json()["pending_question_id"] == qid
+
+  # A plain follow-up is refused while the question is open (no silent orphan);
+  # only an answer (or Stop) may advance the turn.
+  blocked = client.post(
+    f"/api/chats/{chat.id}/messages",
+    json={"content": "never mind - do this other thing instead"},
+    headers=auth,
+  )
+  assert blocked.status_code == 409, blocked.text

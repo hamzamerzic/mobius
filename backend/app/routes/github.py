@@ -61,8 +61,8 @@ from app import (
   app_git,
   fs_locks,
   github_auth,
+  github_pre_pr_checks,
   models,
-  release_channel,
   source_status,
 )
 from app.config import get_settings
@@ -115,6 +115,7 @@ from app.github_contribution_git import (
   _run_cmd,
   _assert_clean_worktree,
   _assert_coauthor_trailer,
+  _conflicts_with_recorded_upstream,
   _connected_git_identity,
   _head_commit_metadata,
   _head_sha_patch,
@@ -140,7 +141,6 @@ from app.github_contributions import (
   _validate_submit_app,
   _recheck_submit_app,
   _safe_repo_path,
-  _record_targets_platform,
   _safe_equivalence_source_path,
   _equivalence_source_repo,
   _record_pending_equivalence,
@@ -628,6 +628,10 @@ _REVIEW_STATUS_MESSAGES = {
   "missing_coauthor": (
     "The staged commit is missing its Möbius Agent co-author marker."
   ),
+  "upstream_conflict": (
+    "This no longer merges cleanly with the branch it targets, so it has to "
+    "be refreshed before it can be sent."
+  ),
   "invalid_stack": "The linked PR chain no longer matches its reviewed order.",
   "parent_merged": (
     "A parent PR has merged, so the remaining private layer must be refreshed "
@@ -696,6 +700,12 @@ def _inspect_prepared_review(
         author_name=author_name,
         author_email=author_email,
       )
+    # Last, because it is the only verdict here that is not about the staged
+    # checkout: the source can match its review exactly and still be
+    # unmergeable. A dirty or moved checkout is the more urgent thing to say,
+    # so those are reported first.
+    if _conflicts_with_recorded_upstream(record, repo, branch):
+      return _review_status_problem(record_id, code="upstream_conflict")
   except ContributionSubmitError as exc:
     return _review_status_problem(
       record_id,
@@ -813,6 +823,229 @@ async def contribution_review_status(
   }
 
 
+def _claim_pre_pr_checks(
+  *, app_id: int, record_id: str, db: Session, expected_nonce: str | None,
+) -> tuple[dict, Path, Path, str]:
+  record_path, diff_path = _record_paths(app_id, record_id)
+  _recheck_submit_app(db, app_id, expected_nonce)
+  record = _read_record(record_path)
+  if record.get("status") != "prepared":
+    raise HTTPException(
+      status_code=409,
+      detail="This contribution is no longer waiting for approval.",
+    )
+  if not github_pre_pr_checks.supports_pre_pr_checks(record):
+    raise HTTPException(
+      status_code=409,
+      detail=(
+        "Pre-PR GitHub checks are currently available for standalone Möbius "
+        "platform contributions only."
+      ),
+    )
+  if github_pre_pr_checks.pre_pr_checks_active(record.get("pre_pr_checks")):
+    raise HTTPException(
+      status_code=409,
+      detail="GitHub checks are already starting or running for this review.",
+    )
+  request_id = secrets.token_hex(16)
+  claimed_at = _now_iso()
+  claimed = {
+    **record,
+    "pre_pr_checks": {
+      "state": "dispatching",
+      "request_id": request_id,
+      "observed_at": claimed_at,
+    },
+    "updated_at": claimed_at,
+  }
+  _write_record(record_path, claimed)
+  return claimed, record_path, diff_path, request_id
+
+
+def _settle_pre_pr_checks(
+  *,
+  record_path: Path,
+  request_id: str,
+  record_patch: dict,
+  pre_pr_checks: dict,
+) -> dict:
+  current = _read_record(record_path)
+  live = current.get("pre_pr_checks")
+  if (
+    current.get("status") != "prepared"
+    or not isinstance(live, dict)
+    or live.get("request_id") != request_id
+  ):
+    raise HTTPException(
+      status_code=409,
+      detail="This contribution changed while GitHub checks were starting.",
+    )
+  now = _now_iso()
+  updated = {
+    **current,
+    **record_patch,
+    "pre_pr_checks": {
+      **pre_pr_checks,
+      "request_id": request_id,
+    },
+    "updated_at": now,
+  }
+  _write_record(record_path, updated)
+  return updated
+
+
+@router.post(
+  "/contributions/{app_id}/{record_id}/pre-pr-checks",
+  dependencies=[Depends(reject_cross_site)],
+)
+@_limiter.limit("10/minute")
+async def run_pre_pr_checks(
+  request: Request,
+  app_id: int,
+  record_id: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Push one reviewed branch to the owner's fork and start Tests.
+
+  The owner confirms this action separately from Send. It never creates a pull
+  request, but it may create/update the personal fork, enable its allowlisted
+  Tests workflow, and push the exact reviewed branch before dispatching it.
+  """
+  expected_nonce = _validate_submit_app(app_id, principal, db)
+  db.close()
+  async with fs_locks.app_storage_lock(app_id):
+    claimed, record_path, diff_path, request_id = _claim_pre_pr_checks(
+      app_id=app_id,
+      record_id=record_id,
+      db=db,
+      expected_nonce=expected_nonce,
+    )
+  db.close()
+
+  record_patch = {}
+  failure = None
+  try:
+    plan = claimed.get("plan") or {}
+    repo_path = _safe_repo_path(plan.get("repo_path"))
+    async with fs_locks.source_dir_lock(str(repo_path)):
+      pre_pr_checks, record_patch = await asyncio.to_thread(
+        github_pre_pr_checks.dispatch_pre_pr_checks,
+        claimed,
+        diff_path,
+      )
+  except ContributionSubmitError as exc:
+    record_patch = dict(exc.record_patch)
+    pre_pr_checks = record_patch.pop("pre_pr_checks", None)
+    if not isinstance(pre_pr_checks, dict):
+      pre_pr_checks = {
+        **(claimed.get("pre_pr_checks") or {}),
+        "state": "error",
+        "message": exc.message,
+        "observed_at": _now_iso(),
+      }
+    failure = (exc.status_code, {
+      "message": exc.message,
+      "detail": exc.detail,
+      "code": exc.code,
+    })
+  except Exception as exc:
+    log.exception("Pre-PR GitHub checks failed for %s/%s", app_id, record_id)
+    message = "Could not start GitHub checks for this contribution."
+    pre_pr_checks = {
+      **(claimed.get("pre_pr_checks") or {}),
+      "state": "error",
+      "message": message,
+      "observed_at": _now_iso(),
+    }
+    failure = (500, {"message": message})
+
+  async with fs_locks.app_storage_lock(app_id):
+    _recheck_submit_app(db, app_id, expected_nonce)
+    db.close()
+    record = _settle_pre_pr_checks(
+      record_path=record_path,
+      request_id=request_id,
+      record_patch=record_patch,
+      pre_pr_checks=pre_pr_checks,
+    )
+  if failure is not None:
+    status_code, detail = failure
+    raise HTTPException(
+      status_code=status_code,
+      detail={**detail, "record": record},
+    )
+  return {"record": record}
+
+
+@router.post(
+  "/contributions/{app_id}/pre-pr-checks/refresh",
+  dependencies=[Depends(reject_cross_site)],
+)
+@_limiter.limit("30/minute")
+async def refresh_pre_pr_checks(
+  request: Request,
+  app_id: int,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Refresh active pre-PR workflow runs while Contribute is open."""
+  _validate_submit_app(app_id, principal, db)
+  db.close()
+  contribution_dir = _contributions_dir(app_id)
+  async with fs_locks.app_storage_lock(app_id):
+    candidates = []
+    if contribution_dir.exists():
+      for path in sorted(contribution_dir.glob("*.json"))[:500]:
+        record = _read_record_tolerant(path)
+        if (
+          record is not None
+          and github_pre_pr_checks.pre_pr_checks_active(
+            record.get("pre_pr_checks")
+          )
+        ):
+          candidates.append((path, record))
+  if not candidates:
+    return {"refreshed": []}
+
+  refreshed = []
+  for path, record in candidates:
+    try:
+      checks = await asyncio.to_thread(
+        github_pre_pr_checks.refresh_pre_pr_check, record,
+      )
+    except ContributionSubmitError as exc:
+      checks = {
+        **(record.get("pre_pr_checks") or {}),
+        "state": "error",
+        "message": exc.message,
+        "observed_at": _now_iso(),
+      }
+    if isinstance(checks, dict):
+      refreshed.append((path, record, checks))
+
+  results = []
+  async with fs_locks.app_storage_lock(app_id):
+    for path, prior, checks in refreshed:
+      current = _read_record_tolerant(path)
+      if current is None or current.get("status") != "prepared":
+        continue
+      current_checks = current.get("pre_pr_checks")
+      prior_checks = prior.get("pre_pr_checks")
+      if (
+        not isinstance(current_checks, dict)
+        or not isinstance(prior_checks, dict)
+        or current_checks.get("request_id") != prior_checks.get("request_id")
+      ):
+        continue
+      if checks == prior_checks:
+        continue
+      updated = {**current, "pre_pr_checks": checks, "updated_at": _now_iso()}
+      _write_record(path, updated)
+      results.append(updated)
+  return {"refreshed": results}
+
+
 # Paths touched by a stored diff, for the chat card's "what am I sending" list.
 # Use the canonical per-file header rather than `+++`: added source is allowed
 # to begin with those characters, so scanning hunk contents can invent a path
@@ -894,14 +1127,6 @@ def _chat_review_projection(record: dict, app_id: int) -> dict:
           and total > 0 else None
         ),
       }
-  contribution_disabled_reason = (
-    release_channel.CONTRIBUTION_DISABLED_REASON
-    if (
-      release_channel.platform_contributions_disabled()
-      and _record_targets_platform(record)
-    )
-    else ""
-  )
   return {
     "id": record_id,
     "type": text(record.get("type")),
@@ -915,8 +1140,8 @@ def _chat_review_projection(record: dict, app_id: int) -> dict:
     "files": _diff_file_paths(diff_path),
     "labels": labels,
     "last_submit_error": text(record.get("last_submit_error")),
+    "last_submit_error_detail": text(record.get("last_submit_error_detail")),
     "updated_at": text(record.get("updated_at")),
-    "contribution_disabled_reason": contribution_disabled_reason,
     # `is_stack` keeps an invalid/legacy stack safely non-sendable. `stack`
     # carries only the display identity/order the chat needs to collapse every
     # valid layer into one review-together card; branch ancestry stays private.
@@ -1097,10 +1322,11 @@ async def submit_contribution(
         record_path=record_path,
         message=exc.message,
         record_patch=exc.record_patch,
+        detail=exc.detail,
       )
     raise HTTPException(
       status_code=exc.status_code,
-      detail={"message": exc.message, "record": record},
+      detail={"message": exc.message, "detail": exc.detail, "record": record},
     )
   except Exception as exc:
     log.exception("Contribution submit failed for %s/%s", app_id, record_id)
@@ -1258,11 +1484,13 @@ async def submit_contribution_stack(
               exc.message,
               failed_id=str(record.get("id") or ""),
               record_patch=exc.record_patch,
+              detail=exc.detail,
             )
           raise HTTPException(
             status_code=exc.status_code,
             detail={
               "message": exc.message,
+              "detail": exc.detail,
               "records": snapshots,
               "submitted": submitted_urls,
             },
@@ -1298,10 +1526,11 @@ async def submit_contribution_stack(
         rows,
         exc.message,
         record_patch=exc.record_patch,
+        detail=exc.detail,
       )
     raise HTTPException(
       status_code=exc.status_code,
-      detail={"message": exc.message, "records": snapshots},
+      detail={"message": exc.message, "detail": exc.detail, "records": snapshots},
     ) from exc
   except Exception as exc:
     log.exception("Contribution stack submit failed for app %s", app_id)
@@ -1475,11 +1704,32 @@ async def cleanup_contribution_staging(
     record = _read_record(record_path)
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
   repo = _safe_repo_path(plan.get("repo_path"))
-  equivalence_repos = _equivalence_source_repo(record)
+  try:
+    equivalence_repos = await asyncio.to_thread(
+      _equivalence_source_repo, record,
+    )
+  except Exception:
+    # Provenance is best-effort at this terminal boundary. A stale installed
+    # source must not retain a disposable checkout, but a valid linked
+    # worktree still needs its real owner lock while Git unregisters it.
+    try:
+      primary_repo = await asyncio.to_thread(
+        app_git.primary_worktree_path, repo,
+      )
+    except Exception:
+      primary_repo = None
+    lock_repo = primary_repo or repo
+  else:
+    lock_repo = equivalence_repos[0] if equivalence_repos else repo
   upstream_sha = None
   if record.get("status") == "merged":
-    upstream_sha = await asyncio.to_thread(_merged_upstream_sha, record, repo)
-  lock_repo = equivalence_repos[0] if equivalence_repos else repo
+    try:
+      upstream_sha = await asyncio.to_thread(_merged_upstream_sha, record, repo)
+    except Exception:
+      log.warning(
+        "terminal contribution upstream lookup failed %s/%s",
+        app_id, record_id, exc_info=True,
+      )
   async with fs_locks.source_dir_lock(str(lock_repo)):
     try:
       await asyncio.to_thread(_settle_equivalence, record, upstream_sha)
