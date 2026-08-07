@@ -1,5 +1,6 @@
 const DEFAULT_MAX_SECONDS = 30
 const MAX_SECONDS = 60
+const START_TIMEOUT_MS = 5_000
 
 export function normalizeMicrophoneSeconds(value) {
   const seconds = Number(value)
@@ -32,22 +33,19 @@ export async function startMicrophoneCapture({
     throw new Error('Audio recording is unavailable in this browser.')
   }
 
-  const stream = await mediaDevices.getUserMedia({
-    audio: {
-      echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: false,
-    },
-  })
-
+  let stream
   let context
   let source
   let processor
   let silent
-  let timer
+  let recordingTimer
+  let startTimer
   let settled = false
   let resolveDone
   let rejectDone
+  let resolveReady
+  let rejectReady
+  let readySettled = false
   const chunks = []
   let sampleCount = 0
 
@@ -55,14 +53,32 @@ export async function startMicrophoneCapture({
     resolveDone = resolve
     rejectDone = reject
   })
+  // A capture may be cancelled or fail before the first audio callback. Keep
+  // the promise observable to callers without producing a global unhandled
+  // rejection in that setup window.
+  done.catch(() => {})
+  const ready = new Promise((resolve, reject) => {
+    resolveReady = resolve
+    rejectReady = reject
+  })
+  ready.catch(() => {})
+
+  function settleReady(error = null) {
+    if (readySettled) return
+    readySettled = true
+    clearTimeout(startTimer)
+    if (error) rejectReady(error)
+    else resolveReady({ sampleRate: context.sampleRate })
+  }
 
   function cleanup() {
-    clearTimeout(timer)
+    clearTimeout(recordingTimer)
+    clearTimeout(startTimer)
     if (processor) processor.onaudioprocess = null
     cleanupNode(processor)
     cleanupNode(silent)
     cleanupNode(source)
-    stream.getTracks().forEach((track) => track.stop())
+    stream?.getTracks?.().forEach((track) => track.stop())
     try { context?.close?.() } catch {}
   }
 
@@ -73,6 +89,15 @@ export async function startMicrophoneCapture({
     if (cancelled) {
       const error = new Error('Recording cancelled.')
       error.name = 'AbortError'
+      settleReady(error)
+      rejectDone(error)
+      return done
+    }
+
+    if (!readySettled) {
+      const error = new Error('The microphone did not start delivering audio. Check your microphone permissions and input, then try again.')
+      error.name = 'NotReadableError'
+      settleReady(error)
       rejectDone(error)
       return done
     }
@@ -88,8 +113,19 @@ export async function startMicrophoneCapture({
   }
 
   try {
+    // Construct and resume this while the originating click can still carry
+    // user activation. A microphone permission prompt may consume that
+    // activation; creating the context after it returns can leave the graph
+    // permanently suspended and therefore unable to deliver PCM callbacks.
     context = new AudioContextCtor()
-    if (context.state === 'suspended') await context.resume?.()
+    if (context.state === 'suspended') Promise.resolve(context.resume?.()).catch(() => {})
+    stream = await mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      },
+    })
     source = context.createMediaStreamSource(stream)
     processor = context.createScriptProcessor(4096, 1, 1)
     silent = context.createGain()
@@ -103,6 +139,10 @@ export async function startMicrophoneCapture({
     processor.onaudioprocess = (event) => {
       if (settled) return
       const input = event.inputBuffer.getChannelData(0)
+      if (!readySettled) {
+        settleReady()
+        recordingTimer = setTimeout(() => finish(false), seconds * 1000 + 100)
+      }
       const remaining = maxFrames - sampleCount
       if (remaining <= 0) {
         finish(false)
@@ -119,19 +159,18 @@ export async function startMicrophoneCapture({
       }
       if (sampleCount >= maxFrames) finish(false)
     }
-    timer = setTimeout(() => finish(false), seconds * 1000 + 100)
+    startTimer = setTimeout(() => finish(false), START_TIMEOUT_MS)
   } catch (error) {
     cleanup()
     settled = true
+    settleReady(error)
     rejectDone(error)
-    // Avoid an unhandled rejection when setup itself fails before a caller can
-    // receive the returned control object.
-    done.catch(() => {})
     throw error
   }
 
   return {
     sampleRate: context.sampleRate,
+    ready,
     done,
     stop: () => finish(false),
     cancel: () => finish(true),

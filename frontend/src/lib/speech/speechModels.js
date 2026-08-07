@@ -15,6 +15,8 @@ const ENGLISH_VOICES = Object.freeze([
 const CLONED_PROFILES_KEY = 'mobius:speech:cloned-profiles:v1'
 const MIN_CLONE_PCM_BYTES = 24_000 * 3 * 2
 const MAX_CLONE_PCM_BYTES = 24_000 * 8 * 2
+const MIN_CLONE_SIGNAL_RMS = 0.001
+const MIN_CLONE_SIGNAL_RANGE = 0.005
 
 function asset(file, id) {
   const value = POCKET_TTS_V2_ASSETS[file]
@@ -250,10 +252,31 @@ function bytesFromBase64(value) {
   return bytes
 }
 
-function modelCloneSamples(model) {
-  if (!model?.cloned) return null
+export function hasUsableCloneSignal(samples) {
+  if (!(samples instanceof Float32Array) || samples.length === 0) return false
+  let total = 0
+  let min = Infinity
+  let max = -Infinity
+  for (let index = 0; index < samples.length; index += 1) {
+    const sample = samples[index]
+    if (!Number.isFinite(sample) || Math.abs(sample) > 1) return false
+    total += sample
+    min = Math.min(min, sample)
+    max = Math.max(max, sample)
+  }
+  if (max - min < MIN_CLONE_SIGNAL_RANGE) return false
+  const mean = total / samples.length
+  let variance = 0
+  for (let index = 0; index < samples.length; index += 1) {
+    const difference = samples[index] - mean
+    variance += difference * difference
+  }
+  return Math.sqrt(variance / samples.length) >= MIN_CLONE_SIGNAL_RMS
+}
+
+function clonePcmSamples(pcm16Base64) {
   let bytes
-  try { bytes = bytesFromBase64(model.clonePcm16Base64) } catch (error) {
+  try { bytes = bytesFromBase64(pcm16Base64) } catch (error) {
     throw profileStorageError('The saved voice recording is damaged.', error)
   }
   if (bytes.byteLength < MIN_CLONE_PCM_BYTES
@@ -264,6 +287,19 @@ function modelCloneSamples(model) {
   const pcm16 = new Int16Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 2))
   const samples = new Float32Array(pcm16.length)
   for (let index = 0; index < pcm16.length; index += 1) samples[index] = pcm16[index] / 32_768
+  return samples
+}
+
+function modelCloneSamples(model) {
+  if (!model?.cloned) return null
+  const samples = clonePcmSamples(model.clonePcm16Base64)
+  if (!hasUsableCloneSignal(samples)) {
+    throw profileStorageError(
+      'The saved voice recording contains no audible speech. Record it again.',
+      undefined,
+      'silent_recording',
+    )
+  }
   return samples
 }
 
@@ -305,6 +341,11 @@ export function saveClonedSpeechProfile(profile, storage = globalThis.localStora
   if (current.error) throw current.error
   const saved = normalizeClonedProfile(profile)
   if (!saved) throw new TypeError('The cloned voice profile is invalid.')
+  if (!hasUsableCloneSignal(clonePcmSamples(saved.pcm16Base64))) {
+    const error = new TypeError('The cloned voice profile contains no audible speech.')
+    error.code = 'silent_recording'
+    throw error
+  }
   const next = [...current.profiles.filter((item) => item.languageId !== saved.languageId), saved]
   storage?.setItem?.(CLONED_PROFILES_KEY, JSON.stringify(next))
   return clonedModel(saved)
