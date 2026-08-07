@@ -1,66 +1,71 @@
 // Generated from the locally quantized Pocket TTS v2 assets.
-// The shell verifies every chunk before retaining it in the device cache.
-const LOCAL_SPEECH_ROOT = 'https://mobius.local/speech-models/pocket-tts-v2'
+//
+// Keep these on the public, versioned Voice release rather than an instance
+// hostname: a new deployment has no local model volume yet, and the device
+// asset relay deliberately rejects a non-public source before it can fetch a
+// range. The shell still retains verified chunks locally after the first
+// download, so this URL is only needed to populate a device's cache.
+const SPEECH_RELEASE_ROOT = 'https://github.com/mobius-os/app-voice/releases/download/models-v2'
 
 export const POCKET_TTS_V2_ASSETS = Object.freeze({
   "english-alba.safetensors": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/english-alba.safetensors`,
+    url: `${SPEECH_RELEASE_ROOT}/english-alba.safetensors`,
     bytes: 6_194_424,
     chunks: Object.freeze([
       Object.freeze({ bytes: 6_194_424, sha256: '69c32db63ca56843d994f81f343f62e0bf2d73f7e4c9bc73e44bb1110b1d8845' }),
     ]),
   }),
   "english-azelma.safetensors": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/english-azelma.safetensors`,
+    url: `${SPEECH_RELEASE_ROOT}/english-azelma.safetensors`,
     bytes: 7_963_896,
     chunks: Object.freeze([
       Object.freeze({ bytes: 7_963_896, sha256: '9f3e69f29075f991fd47774566865ef0e0e637cb5a35992c9919761b5b84b1de' }),
     ]),
   }),
   "english-cosette.safetensors": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/english-cosette.safetensors`,
+    url: `${SPEECH_RELEASE_ROOT}/english-cosette.safetensors`,
     bytes: 6_194_424,
     chunks: Object.freeze([
       Object.freeze({ bytes: 6_194_424, sha256: 'c4fdc15f5a3a20c44dd0064a37e87d15d25562936e8dbad7e07b9832015a545d' }),
     ]),
   }),
   "english-eponine.safetensors": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/english-eponine.safetensors`,
+    url: `${SPEECH_RELEASE_ROOT}/english-eponine.safetensors`,
     bytes: 6_931_704,
     chunks: Object.freeze([
       Object.freeze({ bytes: 6_931_704, sha256: 'bda3b76a384ff355fe0350736387765946304ae8ca16e59f60ea3296a1c99cc6' }),
     ]),
   }),
   "english-fantine.safetensors": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/english-fantine.safetensors`,
+    url: `${SPEECH_RELEASE_ROOT}/english-fantine.safetensors`,
     bytes: 6_538_488,
     chunks: Object.freeze([
       Object.freeze({ bytes: 6_538_488, sha256: '51a8a4355d7f912d4959e4b1918314fda85ad47eba0a33a1d78a4a505d3465f5' }),
     ]),
   }),
   "english-javert.safetensors": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/english-javert.safetensors`,
+    url: `${SPEECH_RELEASE_ROOT}/english-javert.safetensors`,
     bytes: 6_194_424,
     chunks: Object.freeze([
       Object.freeze({ bytes: 6_194_424, sha256: '0ae88e03ca4e76a0e16cbf321a807428febda9d9e9bc0358c02e7f9c9e2c263b' }),
     ]),
   }),
   "english-jean.safetensors": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/english-jean.safetensors`,
+    url: `${SPEECH_RELEASE_ROOT}/english-jean.safetensors`,
     bytes: 6_194_424,
     chunks: Object.freeze([
       Object.freeze({ bytes: 6_194_424, sha256: '90be4b8f50bb4d2dbe27e3fb4e31417cf6a57928931f0a60426a1748821a3d12' }),
     ]),
   }),
   "english-marius.safetensors": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/english-marius.safetensors`,
+    url: `${SPEECH_RELEASE_ROOT}/english-marius.safetensors`,
     bytes: 6_194_424,
     chunks: Object.freeze([
       Object.freeze({ bytes: 6_194_424, sha256: '04f84efcb77a0547ba582c058db496f7ff4920891d49d37b9950d128422582a8' }),
     ]),
   }),
   "english-q8.gguf": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/english-q8.gguf`,
+    url: `${SPEECH_RELEASE_ROOT}/english-q8.gguf`,
     bytes: 148_242_752,
     chunks: Object.freeze([
       Object.freeze({ bytes: 8_388_608, sha256: 'dd2940cea9ecd60e8380c660f701ea79c2c8d6c5a665ee41e3c102fb5c8c1e62' }),
@@ -84,21 +89,21 @@ export const POCKET_TTS_V2_ASSETS = Object.freeze({
     ]),
   }),
   "english-tokenizer.model": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/english-tokenizer.model`,
+    url: `${SPEECH_RELEASE_ROOT}/english-tokenizer.model`,
     bytes: 59_339,
     chunks: Object.freeze([
       Object.freeze({ bytes: 59_339, sha256: 'd461765ae179566678c93091c5fa6f2984c31bbe990bf1aa62d92c64d91bc3f6' }),
     ]),
   }),
   "german-juergen.safetensors": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/german-juergen.safetensors`,
+    url: `${SPEECH_RELEASE_ROOT}/german-juergen.safetensors`,
     bytes: 6_243_576,
     chunks: Object.freeze([
       Object.freeze({ bytes: 6_243_576, sha256: '826efa0f02676cb34743e329ff3042f406b9aa05e6110e7ce9a342e289e5f29c' }),
     ]),
   }),
   "german-q8.gguf": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/german-q8.gguf`,
+    url: `${SPEECH_RELEASE_ROOT}/german-q8.gguf`,
     bytes: 148_242_752,
     chunks: Object.freeze([
       Object.freeze({ bytes: 8_388_608, sha256: '613e917b84d4e02a23d24cdb50e15c8f860b7d8abd1b992af42e928e49a39b4d' }),
@@ -122,21 +127,21 @@ export const POCKET_TTS_V2_ASSETS = Object.freeze({
     ]),
   }),
   "german-tokenizer.model": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/german-tokenizer.model`,
+    url: `${SPEECH_RELEASE_ROOT}/german-tokenizer.model`,
     bytes: 59_837,
     chunks: Object.freeze([
       Object.freeze({ bytes: 59_837, sha256: '389079b9c67cd17ff1c565d53bc695df390b4ca8abf2300947e659585edd9d2a' }),
     ]),
   }),
   "italian-giovanni.safetensors": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/italian-giovanni.safetensors`,
+    url: `${SPEECH_RELEASE_ROOT}/italian-giovanni.safetensors`,
     bytes: 4_621_552,
     chunks: Object.freeze([
       Object.freeze({ bytes: 4_621_552, sha256: 'e2b47d9d63ad18cfb2e98591b714a0464456a739b1b4316b6427fcf9d5ea671f' }),
     ]),
   }),
   "italian-q8.gguf": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/italian-q8.gguf`,
+    url: `${SPEECH_RELEASE_ROOT}/italian-q8.gguf`,
     bytes: 148_242_752,
     chunks: Object.freeze([
       Object.freeze({ bytes: 8_388_608, sha256: '8a4271c9a4923e1c3ad2ad3bb1eb2043fbcb59a32e1641ecf31db83dd952a2d0' }),
@@ -160,14 +165,14 @@ export const POCKET_TTS_V2_ASSETS = Object.freeze({
     ]),
   }),
   "italian-tokenizer.model": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/italian-tokenizer.model`,
+    url: `${SPEECH_RELEASE_ROOT}/italian-tokenizer.model`,
     bytes: 60_078,
     chunks: Object.freeze([
       Object.freeze({ bytes: 60_078, sha256: '6583b974a11b90e14d8a4c8e9c43f06c3861b9ede6e5023a4c27ab5a3a7d4c39' }),
     ]),
   }),
   "portuguese-q8.gguf": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/portuguese-q8.gguf`,
+    url: `${SPEECH_RELEASE_ROOT}/portuguese-q8.gguf`,
     bytes: 148_242_752,
     chunks: Object.freeze([
       Object.freeze({ bytes: 8_388_608, sha256: 'fdff3004c4f0b934ec66aaa217742a41b511cf0d95c6a1decb8648911c0f9444' }),
@@ -191,28 +196,28 @@ export const POCKET_TTS_V2_ASSETS = Object.freeze({
     ]),
   }),
   "portuguese-rafael.safetensors": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/portuguese-rafael.safetensors`,
+    url: `${SPEECH_RELEASE_ROOT}/portuguese-rafael.safetensors`,
     bytes: 6_194_424,
     chunks: Object.freeze([
       Object.freeze({ bytes: 6_194_424, sha256: '7e7194d9ab6f1fb78db6f3a0574a605cd5ac666e6c78825f68028aa5e14592bd' }),
     ]),
   }),
   "portuguese-tokenizer.model": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/portuguese-tokenizer.model`,
+    url: `${SPEECH_RELEASE_ROOT}/portuguese-tokenizer.model`,
     bytes: 60_995,
     chunks: Object.freeze([
       Object.freeze({ bytes: 60_995, sha256: '3aa51309c55f114771c156aaeb86f6fc325991364aa3c38af74aecf1cbd0fade' }),
     ]),
   }),
   "spanish-lola.safetensors": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/spanish-lola.safetensors`,
+    url: `${SPEECH_RELEASE_ROOT}/spanish-lola.safetensors`,
     bytes: 5_948_664,
     chunks: Object.freeze([
       Object.freeze({ bytes: 5_948_664, sha256: '5ec51484cea179be24582c3d3326398c5175a6d4ed7e1f2eb3491f8933e5a243' }),
     ]),
   }),
   "spanish-q8.gguf": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/spanish-q8.gguf`,
+    url: `${SPEECH_RELEASE_ROOT}/spanish-q8.gguf`,
     bytes: 148_242_752,
     chunks: Object.freeze([
       Object.freeze({ bytes: 8_388_608, sha256: '9ea534afaf9b5b1a5ee13aed08ea85c9f552be7269072d433fc8f3d50e2fc6e0' }),
@@ -236,7 +241,7 @@ export const POCKET_TTS_V2_ASSETS = Object.freeze({
     ]),
   }),
   "spanish-tokenizer.model": Object.freeze({
-    url: `${LOCAL_SPEECH_ROOT}/spanish-tokenizer.model`,
+    url: `${SPEECH_RELEASE_ROOT}/spanish-tokenizer.model`,
     bytes: 60_895,
     chunks: Object.freeze([
       Object.freeze({ bytes: 60_895, sha256: 'aac2b96478e3e3068712bd5c45dc196f84b7341ea72587c33a2094957f0c1b0c' }),
