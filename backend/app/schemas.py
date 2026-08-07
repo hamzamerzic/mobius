@@ -372,9 +372,10 @@ class UpdateCheckOut(BaseModel):
 
   `update_available` is null (unknown) when a content compare can't run — no
   manifest_url, no git repo, no recorded upstream branch, or the upstream fetch
-  failed — so the caller falls back to version comparison. It is a real
-  true/false only when a byte-level compare actually ran, so a push that changed
-  code WITHOUT bumping the version still reads as an update.
+  failed. It is a real true/false only when a byte-level compare actually ran,
+  so a push that changed code WITHOUT bumping the version still reads as an
+  update. Versions are display labels only; consumers must not turn a version
+  comparison into an update decision.
 
   A durable conflict receipt has two materially different states. In
   `needs_resolution`, upstream is not yet incorporated into local source (or a
@@ -392,6 +393,16 @@ class UpdateCheckOut(BaseModel):
   needs_resolution: bool = False
   upstream_version: str | None = None
   local_version: str | None = None
+  # The recorded pristine source base. This is a real upstream Git commit for
+  # clone-backed installs and an installer-created snapshot commit otherwise.
+  # Keep the generic name: callers must not present every SHA as GitHub data.
+  installed_source_revision: str | None = None
+  # SHA-256 of the fetched manifest plus executable source used for this
+  # check. It is an inspectable candidate identity, not a replacement for the
+  # comparison result (the recorded upstream tree remains the authority).
+  candidate_source_digest: str | None = Field(
+    default=None, min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$",
+  )
   checked_at: datetime
 
 

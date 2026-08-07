@@ -4872,6 +4872,8 @@ def test_update_check_unchanged_upstream_is_false(
   assert payload["needs_resolution"] is False
   assert payload["upstream_version"] == "1.0.0"
   assert payload["local_version"] == "1.0.0"
+  assert payload["installed_source_revision"]
+  assert len(payload["candidate_source_digest"]) == 64
   assert payload["checked_at"]
 
 
@@ -5028,9 +5030,12 @@ def test_update_check_no_manifest_url_is_null(client, auth, db, tmp_path):
   assert res.status_code == 200, res.text
   payload = res.json()
   assert payload["update_available"] is None
-  # Version still flows through so the caller can fall back to comparing it.
+  # Version still flows through as a display label, but cannot become a
+  # substitute update signal when the source is unverifiable.
   assert payload["local_version"] == "3.0.0"
   assert payload["upstream_version"] is None
+  assert payload["installed_source_revision"] is None
+  assert payload["candidate_source_digest"] is None
 
 
 def test_update_check_no_git_repo_is_null(client, auth, db, tmp_path):
