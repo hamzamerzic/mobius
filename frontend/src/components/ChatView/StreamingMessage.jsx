@@ -1,6 +1,4 @@
 import MsgContent from './MsgContent.jsx'
-import MessageMetaRow from './MessageMetaRow.jsx'
-import { messageCopyText } from './messageCopy.js'
 
 
 /**
@@ -27,21 +25,12 @@ export default function StreamingMessage({
   pendingQuestionRef,
   resumeCardRef,
   isStreaming,
-  messageMetaVisible,
-  onMessageMetaClick,
 }) {
-  // A live answer is still changing under the reader, so copy appears only
-  // after the turn settles.
-  const copyText = isStreaming ? '' : messageCopyText(msg)
-
   return (
     <li
       className="chat__msg chat__msg--assistant"
       data-key={dataKey}
       data-active-assistant="true"
-      onClick={copyText && onMessageMetaClick
-        ? (event) => onMessageMetaClick(event, dataKey)
-        : undefined}
     >
       <MsgContent
         msg={msg}
@@ -63,10 +52,6 @@ export default function StreamingMessage({
         isActiveAnswer
         isStreaming={isStreaming}
         suppressedQuestionKeys={null}
-      />
-      <MessageMetaRow
-        copyText={copyText}
-        visible={messageMetaVisible}
       />
     </li>
   )

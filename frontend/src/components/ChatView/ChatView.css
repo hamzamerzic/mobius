@@ -398,9 +398,8 @@
   .chat__msg--search-reveal { animation: none; }
 }
 
-/* Tap-to-show message metadata. User timestamps and copy share one row, while
-   assistant rows show the copy action alone. ChatView clears the visible state
-   automatically after a short glance, so the row never remains expanded. */
+/* Tap-to-show metadata for user messages. Timestamp and copy share one row;
+   ChatView clears it automatically after a short glance. */
 .chat__msg-meta {
   display: inline-flex;
   align-items: center;
@@ -453,29 +452,6 @@
   opacity: 0.7;
   transition: opacity 140ms ease, color 140ms ease, background 140ms ease;
 }
-.chat__msg-speak {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 24px;
-  padding: 2px 5px;
-  border: 0;
-  border-radius: 7px;
-  background: none;
-  color: var(--muted);
-  line-height: 1;
-  cursor: pointer;
-  opacity: 0.7;
-  transition: opacity 140ms ease, color 140ms ease, background 140ms ease;
-}
-.chat__msg-speak:active { transform: scale(0.94); }
-.chat__msg-speak--active { color: var(--accent); opacity: 1; }
-.chat__msg-speak--error { color: var(--danger); opacity: 1; }
-.chat__msg-speak:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-  opacity: 1;
-}
 .chat__msg-copy:active { transform: scale(0.94); }
 .chat__msg-copy--copied { color: var(--accent); opacity: 1; }
 .chat__msg-copy:focus-visible {
@@ -486,10 +462,6 @@
 @media (hover: hover) and (pointer: fine) {
   .chat__msg-copy:hover {
     background: var(--surface2); /* CONTRACT: secondary opaque fill */
-    color: var(--text);
-  }
-  .chat__msg-speak:hover {
-    background: var(--surface2);
     color: var(--text);
   }
 }
