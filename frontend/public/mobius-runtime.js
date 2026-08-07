@@ -3236,6 +3236,10 @@ function synthesizeInFrame({ input, channel, openModelStream, maxTextChars }) {
 			stream?.control?.("start");
 			return;
 		}
+		if (data.type === "chunk-accepted") {
+			stream?.control?.("chunk-accepted");
+			return;
+		}
 		if (data.type === "load-complete") {
 			channel.event("loading", {
 				stage: "preparing",

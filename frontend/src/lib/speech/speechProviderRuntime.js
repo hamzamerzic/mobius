@@ -162,6 +162,15 @@ export function openSpeechCapability({
     const controller = new AbortController()
     let allowStart = () => {}
     const started = new Promise((resolve) => { allowStart = resolve })
+    let acknowledgeChunk = null
+    const waitForChunkAcknowledgement = () => new Promise((resolve) => {
+      acknowledgeChunk = resolve
+    })
+    const releaseChunk = () => {
+      const acknowledge = acknowledgeChunk
+      acknowledgeChunk = null
+      acknowledge?.()
+    }
     Promise.resolve().then(async () => {
       const snapshot = input?.engineId
         ? speechEngineLoadSnapshot(input.engineId)
@@ -184,7 +193,10 @@ export function openSpeechCapability({
       await streamSpeechModel(snapshot, {
         signal: controller.signal,
         onProgress: (percent) => channel.event('progress', { percent }),
-        onChunk: (value) => channel.event('chunk', value, [value.bytes]),
+        onChunk: async (value) => {
+          channel.event('chunk', value, [value.bytes])
+          await waitForChunkAcknowledgement()
+        },
       })
       return { modelId: snapshot.modelId }
     }).then(channel.result).catch(channel.error)
@@ -192,7 +204,9 @@ export function openSpeechCapability({
     return {
       control(action) {
         if (action === 'start') allowStart()
+        if (action === 'chunk-accepted') releaseChunk()
         if (action === 'cancel') {
+          releaseChunk()
           allowStart()
           if (!controller.signal.aborted) controller.abort(abortError())
         }

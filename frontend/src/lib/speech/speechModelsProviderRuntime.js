@@ -34,16 +34,29 @@ export function openSpeechModelsCapability({
   declaration,
   channel,
   storage = globalThis.localStorage,
+  dependencies,
 }) {
   const operation = input?.operation || 'catalog'
   const controller = new AbortController()
   let allowStart = () => {}
   const started = new Promise((resolve) => { allowStart = resolve })
+  // A frame-owned worker copies each incoming model chunk into its Wasm
+  // allocation. Do not release the next chunk until that copy is acknowledged:
+  // otherwise the frame queue can briefly hold an entire model.
+  let acknowledgeChunk = null
+  const waitForChunkAcknowledgement = () => new Promise((resolve) => {
+    acknowledgeChunk = resolve
+  })
+  const releaseChunk = () => {
+    const acknowledge = acknowledgeChunk
+    acknowledgeChunk = null
+    acknowledge?.()
+  }
   const modelId = input?.modelId || DEFAULT_SPEECH_MODEL_ID
   const engineId = input?.engineId || DEFAULT_SPEECH_ENGINE_ID
   const progress = (value) => channel.event('progress', value)
   const options = {
-    appId, declaration, signal: controller.signal, onProgress: progress, storage,
+    appId, declaration, signal: controller.signal, onProgress: progress, storage, dependencies,
   }
   const task = Promise.resolve().then(async () => {
     if (operation === 'catalog') return speechModelCatalog(options)
@@ -80,11 +93,15 @@ export function openSpeechModelsCapability({
       // consumer's memory while its engine is still warming up.
       await started
       await streamSpeechModel(snapshot, {
+        ...options,
         signal: controller.signal,
         onProgress: (percent) => progress({ percent }),
         // Hand each chunk straight to the consumer; buffering the whole model
         // here would duplicate 148 MB before it ever reaches the engine.
-        onChunk: (value) => channel.event('chunk', value, [value.bytes]),
+        onChunk: async (value) => {
+          channel.event('chunk', value, [value.bytes])
+          await waitForChunkAcknowledgement()
+        },
       })
       return { modelId: snapshot.modelId, assetBytes: snapshot.assetBytes }
     }
@@ -120,11 +137,13 @@ export function openSpeechModelsCapability({
   channel.ready({ state: 'starting', operation })
   task.then(channel.result).catch(channel.error)
   return {
-    control(action) {
-      if (action === 'start') allowStart()
-      if (action === 'cancel' && !controller.signal.aborted) {
-        allowStart()
-        controller.abort(abortError())
+      control(action) {
+        if (action === 'start') allowStart()
+        if (action === 'chunk-accepted') releaseChunk()
+        if (action === 'cancel' && !controller.signal.aborted) {
+          releaseChunk()
+          allowStart()
+          controller.abort(abortError())
       }
     },
   }
