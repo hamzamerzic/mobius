@@ -110,6 +110,46 @@ function runSpeechModelsOperation(input, storage) {
   })
 }
 
+test('a frame reader receives one model chunk at a time', async () => {
+  const events = []
+  let firstChunk
+  let secondChunk
+  const receivedFirst = new Promise((resolve) => { firstChunk = resolve })
+  const receivedSecond = new Promise((resolve) => { secondChunk = resolve })
+  let control
+  const result = new Promise((resolve, reject) => {
+    control = openSpeechModelsCapability({
+      appId: 61,
+      input: { operation: 'read', engineId: DEFAULT_SPEECH_ENGINE_ID },
+      declaration: { limits: SPEECH_MODEL_STORAGE_LIMITS },
+      dependencies: readySpeechAssetsFor(DEFAULT_SPEECH_MODEL_ID),
+      channel: {
+        ready() {},
+        event(name, value) {
+          if (name === 'manifest') control.control('start')
+          if (name !== 'chunk') return
+          events.push(value)
+          if (events.length === 1) firstChunk()
+          if (events.length === 2) secondChunk()
+        },
+        result: resolve,
+        error: reject,
+      },
+    })
+  })
+
+  await receivedFirst
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(events.length, 1)
+
+  control.control('chunk-accepted')
+  await receivedSecond
+  assert.equal(events.length, 2)
+
+  control.control('cancel')
+  await assert.rejects(result, (error) => error.name === 'AbortError')
+})
+
 test('speech model selection exposes only the public catalog contract', () => {
   const selected = speechModel(DEFAULT_SPEECH_MODEL_ID)
   assert.equal(selected.id, 'pocket-tts-alba')

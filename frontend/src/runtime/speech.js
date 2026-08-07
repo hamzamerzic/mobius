@@ -108,6 +108,10 @@ export function synthesizeInFrame({ input, channel, openModelStream, maxTextChar
       stream?.control?.('start')
       return
     }
+    if (data.type === 'chunk-accepted') {
+      stream?.control?.('chunk-accepted')
+      return
+    }
     if (data.type === 'load-complete') {
       channel.event('loading', { stage: 'preparing', percent: 100 })
       generateNext()
