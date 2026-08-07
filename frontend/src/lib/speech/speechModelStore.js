@@ -3,6 +3,7 @@ import {
   clonedSpeechLibraryStatus,
   DEFAULT_SPEECH_ENGINE_ID,
   DEFAULT_SPEECH_MODEL_ID,
+  hasUsableCloneSignal,
   isClonedSpeechModelId,
   publicSpeechEngine,
   publicSpeechModel,
@@ -423,6 +424,13 @@ export function saveSpeechClone({ language, name, samples, sampleRate }, { stora
   const resampled = resampleMono(boundedSamples, sampleRate)
   if (resampled.length < 24_000 * 3) {
     throw speechError('invalid_request', 'Record at least three seconds of clear speech.', 'TypeError')
+  }
+  if (!hasUsableCloneSignal(resampled)) {
+    throw speechError(
+      'invalid_request',
+      'We could not hear clear speech in that recording. Check your microphone and record again.',
+      'TypeError',
+    )
   }
   const targetStorage = storage || globalThis.localStorage
   let model
