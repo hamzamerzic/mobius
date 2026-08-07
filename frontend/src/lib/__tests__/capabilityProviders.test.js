@@ -6,6 +6,7 @@ import {
   createSpeechModelsProvider,
   createSpeechProvider,
 } from '../capabilityProviders.js'
+import { createCapabilityHost } from '../capabilityHost.js'
 
 test('microphone provider clamps app input to the reviewed manifest ceiling', async () => {
   let receivedSeconds
@@ -13,6 +14,7 @@ test('microphone provider clamps app input to the reviewed manifest ceiling', as
   const done = new Promise((resolve) => { resolveDone = resolve })
   const capture = {
     sampleRate: 48000,
+    ready: Promise.resolve(),
     done,
     stop() { resolveDone({ samples: new Float32Array(0), sampleRate: 48000 }) },
     cancel() {},
@@ -38,8 +40,67 @@ test('microphone provider clamps app input to the reviewed manifest ceiling', as
   assert.deepEqual(messages, [['ready', { sampleRate: 48000 }]])
   control.control('finish')
   await done
-  await Promise.resolve()
+  await new Promise((resolve) => setImmediate(resolve))
   assert.equal(messages.at(-1)[0], 'result')
+})
+
+test('microphone capture can be cancelled while waiting for its first audio frame', async () => {
+  let rejectReady
+  let rejectDone
+  let cancelCalls = 0
+  const ready = new Promise((resolve, reject) => { rejectReady = reject })
+  const done = new Promise((resolve, reject) => { rejectDone = reject })
+  ready.catch(() => {})
+  done.catch(() => {})
+  const capture = {
+    sampleRate: 48000,
+    ready,
+    done,
+    stop() {},
+    cancel() {
+      cancelCalls += 1
+      const error = new Error('Recording cancelled.')
+      error.name = 'AbortError'
+      rejectReady(error)
+      rejectDone(error)
+    },
+  }
+  const sent = []
+  const source = {}
+  const host = createCapabilityHost({
+    providers: {
+      'media.microphone.capture': createMicrophoneProvider({
+        startCapture: async () => capture,
+      }),
+    },
+    getDeclaration() {
+      return { version: 1, limits: { max_duration_ms: 8000 } }
+    },
+    isActive: () => true,
+    send(_source, message) { sent.push(message) },
+  })
+
+  host.handle(source, {
+    type: 'moebius:capability-open',
+    requestId: 'microphone-startup',
+    capability: 'media.microphone.capture',
+    version: 1,
+    input: { maxDurationMs: 8000 },
+  })
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(sent.some((message) => message.type === 'moebius:capability-ready'), false)
+  host.handle(source, {
+    type: 'moebius:capability-control',
+    requestId: 'microphone-startup',
+    capability: 'media.microphone.capture',
+    action: 'cancel',
+  })
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.equal(cancelCalls, 1)
+  assert.ok(sent.some((message) => (
+    message.type === 'moebius:capability-error' && message.name === 'AbortError'
+  )))
 })
 
 test('speech providers lazy-load the runtime and preserve the invoking app identity', async () => {

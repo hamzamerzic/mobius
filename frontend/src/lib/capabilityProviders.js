@@ -55,8 +55,13 @@ export function createMicrophoneProvider({ startCapture = startMicrophoneCapture
         maxSeconds: maxDurationMs / 1000,
         onLevel(level) { channel.event('level', level) },
       })
-      channel.ready({ sampleRate: capture.sampleRate })
-      capture.done.then((result) => {
+      // Return the control surface before waiting for the first PCM frame, so
+      // the app or lifecycle host can still cancel a stalled startup. The
+      // capability itself is not ready until the recorder has received audio.
+      capture.ready.then(() => {
+        channel.ready({ sampleRate: capture.sampleRate })
+        return capture.done
+      }).then((result) => {
         const samples = result.samples
         channel.result(
           { samples, sampleRate: result.sampleRate },

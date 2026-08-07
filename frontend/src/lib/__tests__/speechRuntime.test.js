@@ -51,6 +51,23 @@ function memoryStorage(initial = {}) {
   }
 }
 
+function voiceSamples(length = 24_000 * 3, amplitude = 0.25) {
+  const samples = new Float32Array(length)
+  for (let index = 0; index < samples.length; index += 1) {
+    samples[index] = Math.sin((index + 1) / 20) * amplitude
+  }
+  return samples
+}
+
+function silentPcm16Base64(length = 24_000 * 3) {
+  const bytes = new Uint8Array(new Int16Array(length).buffer)
+  let binary = ''
+  for (let offset = 0; offset < bytes.length; offset += 32_768) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 32_768))
+  }
+  return globalThis.btoa(binary)
+}
+
 function missingSpeechAssets() {
   return {
     cacheStorage: {
@@ -183,8 +200,7 @@ test('speech models download from the public versioned Voice release', () => {
 
 test('a recorded clone is resampled, persisted privately, and becomes a catalog model', () => {
   const storage = memoryStorage()
-  const source = new Float32Array(48_000 * 3)
-  for (let index = 0; index < source.length; index += 1) source[index] = Math.sin(index / 20) * 0.25
+  const source = voiceSamples(48_000 * 3)
   const saved = saveSpeechClone({
     language: 'German', name: 'My voice', samples: source, sampleRate: 48_000,
   }, { storage })
@@ -198,7 +214,7 @@ test('a recorded clone is resampled, persisted privately, and becomes a catalog 
 })
 
 test('clone load identity is deterministic for its recording content', () => {
-  const samples = new Float32Array(24_000 * 3).fill(0.25)
+  const samples = voiceSamples()
   const firstStorage = memoryStorage()
   const secondStorage = memoryStorage()
   const first = saveSpeechClone({
@@ -224,7 +240,7 @@ test('clone load identity is deterministic for its recording content', () => {
 
 test('invalid legacy clone revision metadata cannot wedge the voice library', () => {
   const storage = memoryStorage()
-  const samples = new Float32Array(24_000 * 3).fill(0.25)
+  const samples = voiceSamples()
   const saved = saveSpeechClone({
     language: 'English', name: 'Original', samples, sampleRate: 24_000,
   }, { storage })
@@ -242,8 +258,8 @@ test('invalid legacy clone revision metadata cannot wedge the voice library', ()
 
 test('replacing a same-language clone changes its content identity and reloads the engine', async (t) => {
   const storage = memoryStorage()
-  const firstSamples = new Float32Array(24_000 * 3).fill(0.1)
-  const secondSamples = new Float32Array(24_000 * 3).fill(0.5)
+  const firstSamples = voiceSamples(24_000 * 3, 0.1)
+  const secondSamples = voiceSamples(24_000 * 3, 0.5)
   const first = saveSpeechClone({
     language: 'English', name: 'First', samples: firstSamples, sampleRate: 24_000,
   }, { storage })
@@ -282,8 +298,7 @@ test('replacing a same-language clone changes its content identity and reloads t
 
 test('clone persistence trims oversized input to eight seconds before resampling', () => {
   const storage = memoryStorage()
-  const source = new Float32Array(48_000 * 9)
-  source.fill(0.25, 0, 48_000 * 8)
+  const source = voiceSamples(48_000 * 9)
   source.fill(0.75, 48_000 * 8)
   const saved = saveSpeechClone({
     language: 'English', name: 'Trimmed', samples: source, sampleRate: 48_000,
@@ -291,7 +306,49 @@ test('clone persistence trims oversized input to eight seconds before resampling
 
   const restored = speechModelLoadSnapshot(saved.id, storage).clonedVoiceSamples
   assert.equal(restored.length, 24_000 * 8)
-  assert.ok(Math.abs(restored.at(-1) - 0.25) < 0.001)
+  assert.ok(Math.abs(restored.at(-1) - source[48_000 * 8 - 2]) < 0.001)
+})
+
+test('silent or malformed clone recordings are rejected before storage changes', () => {
+  const storage = memoryStorage()
+  assert.throws(
+    () => saveSpeechClone({
+      language: 'English', name: 'Silent', samples: new Float32Array(24_000 * 3), sampleRate: 24_000,
+    }, { storage }),
+    (error) => error.code === 'invalid_request' && error.name === 'TypeError',
+  )
+  assert.throws(
+    () => saveSpeechClone({
+      language: 'English', name: 'Flat signal',
+      samples: new Float32Array(24_000 * 3).fill(0.25), sampleRate: 24_000,
+    }, { storage }),
+    (error) => error.code === 'invalid_request' && error.name === 'TypeError',
+  )
+  const malformed = voiceSamples()
+  malformed[0] = Number.NaN
+  assert.throws(
+    () => saveSpeechClone({
+      language: 'English', name: 'Malformed', samples: malformed, sampleRate: 24_000,
+    }, { storage }),
+    (error) => error.code === 'invalid_request' && error.name === 'TypeError',
+  )
+  assert.equal(storage.getItem('mobius:speech:cloned-profiles:v1'), null)
+})
+
+test('a legacy silent clone cannot reach the speech worker', () => {
+  const storage = memoryStorage()
+  const saved = saveSpeechClone({
+    language: 'English', name: 'Old clone', samples: voiceSamples(), sampleRate: 24_000,
+  }, { storage })
+  const library = JSON.parse(storage.getItem('mobius:speech:cloned-profiles:v1'))
+  library[0].pcm16Base64 = silentPcm16Base64()
+  storage.setItem('mobius:speech:cloned-profiles:v1', JSON.stringify(library))
+
+  assert.ok(speechModel(saved.id, storage))
+  assert.throws(
+    () => speechModelLoadSnapshot(saved.id, storage),
+    (error) => error.code === 'silent_recording',
+  )
 })
 
 test('clone saves do not re-read storage after the write succeeds', () => {
@@ -311,7 +368,7 @@ test('clone saves do not re-read storage after the write succeeds', () => {
 
   saveSpeechClone({
     language: 'English', name: 'Saved once',
-    samples: new Float32Array(24_000 * 3), sampleRate: 24_000,
+    samples: voiceSamples(), sampleRate: 24_000,
   }, { storage })
 
   assert.equal(libraryReads, 1)
@@ -324,7 +381,7 @@ test('clone persistence preserves a damaged library instead of overwriting it', 
   assert.throws(
     () => saveSpeechClone({
       language: 'English', name: 'Replacement',
-      samples: new Float32Array(24_000 * 3), sampleRate: 24_000,
+      samples: voiceSamples(), sampleRate: 24_000,
     }, { storage }),
     (error) => error.code === 'storage_corrupt',
   )
@@ -436,7 +493,7 @@ test('clone removal uses the same injected storage that supplied the model', asy
   const storage = memoryStorage()
   const saved = saveSpeechClone({
     language: 'Italian', name: 'Temporary',
-    samples: new Float32Array(24_000 * 3), sampleRate: 24_000,
+    samples: voiceSamples(), sampleRate: 24_000,
   }, { storage })
 
   await removeSpeechModel(saved.id, { storage })
@@ -449,7 +506,7 @@ test('clone removal does not verify after storage has already mutated', async ()
   const seed = memoryStorage()
   const saved = saveSpeechClone({
     language: 'Italian', name: 'Temporary',
-    samples: new Float32Array(24_000 * 3), sampleRate: 24_000,
+    samples: voiceSamples(), sampleRate: 24_000,
   }, { storage: seed })
   let library = seed.getItem('mobius:speech:cloned-profiles:v1')
   let mutated = false
@@ -477,11 +534,11 @@ test('engine load resolves one coherent clone storage snapshot', async (t) => {
   const secondStorage = memoryStorage()
   const first = saveSpeechClone({
     language: 'English', name: 'First',
-    samples: new Float32Array(24_000 * 3).fill(0.1), sampleRate: 24_000,
+    samples: voiceSamples(24_000 * 3, 0.1), sampleRate: 24_000,
   }, { storage: firstStorage })
   saveSpeechClone({
     language: 'English', name: 'Second',
-    samples: new Float32Array(24_000 * 3).fill(0.7), sampleRate: 24_000,
+    samples: voiceSamples(24_000 * 3, 0.7), sampleRate: 24_000,
   }, { storage: secondStorage })
   const libraries = [
     firstStorage.getItem('mobius:speech:cloned-profiles:v1'),
