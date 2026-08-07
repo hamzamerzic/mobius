@@ -130,9 +130,6 @@ export async function startMicrophoneCapture({
     processor = context.createScriptProcessor(4096, 1, 1)
     silent = context.createGain()
     silent.gain.value = 0
-    source.connect(processor)
-    processor.connect(silent)
-    silent.connect(context.destination)
 
     const seconds = normalizeMicrophoneSeconds(maxSeconds)
     const maxFrames = Math.max(1, Math.round(context.sampleRate * seconds))
@@ -160,6 +157,9 @@ export async function startMicrophoneCapture({
       if (sampleCount >= maxFrames) finish(false)
     }
     startTimer = setTimeout(() => finish(false), START_TIMEOUT_MS)
+    source.connect(processor)
+    processor.connect(silent)
+    silent.connect(context.destination)
   } catch (error) {
     cleanup()
     settled = true

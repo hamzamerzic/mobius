@@ -174,6 +174,62 @@ test('capture reports startup failure when no microphone frame arrives', async (
   assert.equal(processor.onaudioprocess, null)
 })
 
+test('an immediate first frame cannot leave the startup timeout armed', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let processor
+  let sourceConnected = false
+  const node = () => ({ connect() {}, disconnect() {} })
+  const frame = {
+    inputBuffer: { getChannelData: () => new Float32Array([0.25, -0.5, 0.125]) },
+  }
+  class FakeAudioContext {
+    constructor() {
+      this.sampleRate = 48_000
+      this.state = 'running'
+      this.destination = node()
+    }
+    createMediaStreamSource() {
+      return {
+        ...node(),
+        connect() {
+          sourceConnected = true
+          processor.onaudioprocess?.(frame)
+        },
+      }
+    }
+    createScriptProcessor() {
+      let handler = null
+      processor = { ...node() }
+      Object.defineProperty(processor, 'onaudioprocess', {
+        get: () => handler,
+        set(value) {
+          handler = value
+          if (sourceConnected) handler?.(frame)
+        },
+      })
+      return processor
+    }
+    createGain() { return { ...node(), gain: { value: 1 } } }
+    close() {}
+  }
+
+  const control = await startMicrophoneCapture({
+    mediaDevices: {
+      async getUserMedia() { return { getTracks: () => [{ stop() {} }] } },
+    },
+    AudioContextCtor: FakeAudioContext,
+    maxSeconds: 60,
+  })
+  await control.ready
+  let done = false
+  control.done.then(() => { done = true })
+  t.mock.timers.tick(5_000)
+  await Promise.resolve()
+
+  assert.equal(done, false)
+  await control.stop()
+})
+
 test('cancelling shell capture rejects and releases every resource', async () => {
   let processor
   let trackStops = 0
