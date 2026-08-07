@@ -837,10 +837,10 @@ async def update_check(
 
   `update_available` is null (unknown) whenever the compare can't run — no
   `manifest_url`, no git repo, no recorded upstream branch, or the upstream
-  fetch failed — and the caller then falls back to version comparison. A store
-  open must degrade, not error, so a network failure is a 200 with null rather
-  than a 5xx; only a genuinely invalid request (unknown app id) keeps its normal
-  HTTP error.
+  fetch failed. A store open must degrade, not error, so a network failure is a
+  200 with null rather than a 5xx; only a genuinely invalid request (unknown
+  app id) keeps its normal HTTP error. Version strings are returned for display
+  only and are never an availability fallback.
   """
   # Mirror update-preview's trust boundary exactly: an app token may check its
   # OWN app; an App-Store-style manager token (manage_apps) may check other
@@ -869,14 +869,17 @@ async def update_check(
   target_app_id = app.id
   manifest_url = app.manifest_url
   source_dir = app.source_dir
+  installed_source_revision = app.upstream_commit
 
   def _unknown() -> schemas.UpdateCheckOut:
-    # Null is "we can't tell git-natively" — NOT an error. The caller falls back
-    # to version comparison. Shared by every precondition-miss + fetch failure.
+    # Null is "we can't verify the source" — NOT an error. Do not manufacture
+    # an update from a mutable version label. Shared by every precondition miss
+    # and fetch failure.
     return schemas.UpdateCheckOut(
       update_available=None,
       upstream_version=None,
       local_version=local_version,
+      installed_source_revision=installed_source_revision,
       checked_at=checked_at,
     )
 
@@ -921,6 +924,7 @@ async def update_check(
       needs_resolution=state == "needs_resolution",
       upstream_version=str(receipt["manifest"].get("version") or "") or None,
       local_version=local_version,
+      installed_source_revision=str(receipt["upstream_commit"]),
       checked_at=checked_at,
     )
 
@@ -959,6 +963,12 @@ async def update_check(
   fetched_tree.update(fetched.source_files)
   if fetched.job_name and fetched.job_bytes is not None:
     fetched_tree[fetched.job_name] = fetched.job_bytes
+  candidate_source_digest = install._source_review_digest(
+    manifest=fetched.manifest,
+    entry_bytes=fetched.entry_bytes,
+    bundled_job=fetched.job_bytes,
+    source_files=fetched.source_files,
+  )
 
   # This final lock is the response's linearization fence. A concurrent install
   # can advance `upstream` and create a receipt while the network fetch is in
@@ -984,6 +994,8 @@ async def update_check(
     update_available=update_available,
     upstream_version=fetched.manifest.get("version"),
     local_version=local_version,
+    installed_source_revision=installed_source_revision,
+    candidate_source_digest=candidate_source_digest,
     checked_at=checked_at,
   )
 
