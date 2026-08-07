@@ -10,7 +10,6 @@ import { messageCopyText } from '../messageCopy.js'
 
 const copyButton = readFileSync(new URL('../MessageCopyButton.jsx', import.meta.url), 'utf8')
 const metaRow = readFileSync(new URL('../MessageMetaRow.jsx', import.meta.url), 'utf8')
-const streamingMessage = readFileSync(new URL('../StreamingMessage.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 
 test('messageCopyText joins prose blocks and skips activity chrome', () => {
@@ -52,8 +51,10 @@ test('the copy button is a plain tap target on the shared clipboard helper', () 
     'the copy affordance must never intercept press/hold — native selection stays intact')
 })
 
-test('only settled messages offer copy — a streaming answer is still changing', () => {
-  assert.match(streamingMessage, /isStreaming \? '' : messageCopyText\(msg\)/)
+test('only owner messages offer copy actions', () => {
+  assert.match(chatView, /const copyText = ownerUserMessage \? messageCopyText\(msg\) : ''/)
+  assert.doesNotMatch(chatView, /speechText=|speechKey=|speechChatId=/)
+  assert.doesNotMatch(chatView, /stopChatSpeech/)
 })
 
 test('copy follows the timestamp inside one tap-revealed metadata row', () => {

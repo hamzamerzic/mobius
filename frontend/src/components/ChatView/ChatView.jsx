@@ -86,7 +86,6 @@ import {
   highlightSearchTerms,
 } from '../../lib/searchTermHighlight.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
-import { stopChatSpeech } from './chatSpeechPlayer.js'
 import { sendFailureMessage } from './sendFailure.js'
 import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, findTrailingAssistantPartialIndex, streamItemsHaveRenderableContent } from './streamPromotion.js'
 import {
@@ -302,7 +301,6 @@ export default function ChatView({
   onDisplayReady = null,
 }) {
   const queryClient = useQueryClient()
-  useEffect(() => () => stopChatSpeech({ chatId }), [chatId])
   const hiddenRef = useRef(hidden)
   hiddenRef.current = hidden
   // A drawer search may target a ChatView that is already mounted. Subscribe
@@ -4166,7 +4164,7 @@ export default function ChatView({
             // pin target mid-swap). data-ts stays for the revealed metadata row.
             const ownerUserMessage = isOwnerUserMessage(msg)
             const userCid = ownerUserMessage ? cidOf(msg) : null
-            const copyText = messageCopyText(msg)
+            const copyText = ownerUserMessage ? messageCopyText(msg) : ''
             const hasMessageMeta = Boolean(copyText || (ownerUserMessage && msg.ts))
             return (
             <li
@@ -4214,9 +4212,6 @@ export default function ChatView({
               <MessageMetaRow
                 timestamp={ownerUserMessage ? msg.ts : null}
                 copyText={copyText}
-                speechText={msg.role === 'assistant' ? copyText : ''}
-                speechKey={dataKey}
-                speechChatId={chatId}
                 visible={visibleMessageMetaKey === dataKey}
               />
             </li>
@@ -4256,8 +4251,6 @@ export default function ChatView({
               // ", in progress" — instead of settling early. Source selection
               // still gates resume/question routing above (review 2026-07-17).
               isStreaming={activeAssistantIsStreaming || turnActive}
-              messageMetaVisible={visibleMessageMetaKey === streamingDataKey}
-              onMessageMetaClick={showMessageMeta}
             />
           )}
 
