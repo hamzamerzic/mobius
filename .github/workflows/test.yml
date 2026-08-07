@@ -32,7 +32,10 @@ concurrency:
 jobs:
   privacy:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    # Hosted runners can take more than two minutes just to provision and
+    # check out a fresh repository. Leave room for the actual privacy gates
+    # to run rather than reporting a cancelled setup as a failed check.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
         with:
@@ -117,7 +120,9 @@ jobs:
     # rotted — drift in themeService.js + DOM-stub gaps cascaded for ~5
     # days before anyone noticed. CI guards that gap.
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    # A cold hosted runner may spend several minutes provisioning Node and the
+    # npm cache before this bounded unit suite starts.
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v7
       - name: Set up Node with npm cache
