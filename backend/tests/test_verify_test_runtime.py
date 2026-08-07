@@ -743,7 +743,12 @@ def test_recurring_core_digest_workflow_keeps_dynamic_and_frozen_identity_separa
   )
   assert postpublish < final_current
 
-  assert "permissions:\n  contents: read\n  packages: write\n" in workflow
+  # The publisher dispatches its governed follow-on workflow, so it needs
+  # Actions write in addition to the read-only repository and registry grants.
+  assert (
+    "permissions:\n  actions: write\n  contents: read\n  packages: write\n"
+    in workflow
+  )
   assert "environment: external-recovery-release" in workflow
   assert "group: mobius-core-image-publication" in workflow
   assert "cancel-in-progress: false" in workflow
