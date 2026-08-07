@@ -120,7 +120,9 @@ def test_linked_worktree_lifecycle_targets_the_live_compose_project(tmp_path):
   scripts.mkdir(parents=True)
   copied = scripts / "mobiusctl"
   shutil.copy2(ROOT / "scripts" / "mobiusctl", copied)
-  state = tmp_path / "recovery.env"
+  state_home = tmp_path / "state"
+  state = state_home / "mobius" / "mobius" / "recovery.env"
+  state.parent.mkdir(parents=True)
   _write_recovery_state(state)
   fake_env, log = _fake_docker(tmp_path)
 
@@ -130,8 +132,7 @@ def test_linked_worktree_lifecycle_targets_the_live_compose_project(tmp_path):
     env={
       **os.environ,
       **fake_env,
-      "MOBIUS_RECOVERY_STATE_FILE": str(state),
-      "MOBIUS_RECOVERY_LOCK_DIR": str(tmp_path),
+      "XDG_STATE_HOME": str(state_home),
     },
     text=True,
     capture_output=True,
@@ -155,6 +156,37 @@ def test_linked_worktree_lifecycle_targets_the_live_compose_project(tmp_path):
   # independent of the linked worktree's basename.
   target_volume = _compose()["services"]["recovery-target"]["volumes"][0]
   assert f"mobius_{target_volume.split(':')[0]}" == "mobius_app_data"
+
+
+def test_legacy_checkout_recovery_state_remains_usable_until_finished(tmp_path):
+  linked = tmp_path / "old-installation"
+  scripts = linked / "scripts"
+  scripts.mkdir(parents=True)
+  copied = scripts / "mobiusctl"
+  shutil.copy2(ROOT / "scripts" / "mobiusctl", copied)
+  legacy_state = linked / ".mobius-recovery.env"
+  _write_recovery_state(legacy_state)
+  fake_env, log = _fake_docker(tmp_path)
+
+  result = subprocess.run(
+    [str(copied), "recovery", "status"],
+    cwd=linked,
+    env={
+      **os.environ,
+      **fake_env,
+      "XDG_STATE_HOME": str(tmp_path / "new-state"),
+    },
+    text=True,
+    capture_output=True,
+    timeout=10,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert legacy_state.exists()
+  assert log.read_text().splitlines() == [
+    "compose -p mobius --profile recovery "
+    f"--env-file {legacy_state} ps recovery-target recovery",
+  ]
 
 
 def test_app_sudo_is_full_root_by_default_with_operator_kill_switch():

@@ -10,7 +10,26 @@ PROJECT_DIR=$(dirname "$SCRIPT_DIR")
 # Pin the installation identity just like deploy-prod.sh. A linked worktree's
 # directory name must never select a fresh project/volume or miss the live app.
 COMPOSE_PROJECT=${MOBIUS_COMPOSE_PROJECT:-mobius}
-STATE_FILE=${MOBIUS_RECOVERY_STATE_FILE:-"$PROJECT_DIR/.mobius-recovery.env"}
+# Credentials and the lifecycle lock belong to the Compose installation, not
+# whichever checkout invokes this command. This keeps start/reopen/finish one
+# coherent lifecycle across linked worktrees.
+USER_STATE_HOME=${XDG_STATE_HOME:-"$HOME/.local/state"}
+RECOVERY_STATE_DIR=${MOBIUS_RECOVERY_STATE_DIR:-"$USER_STATE_HOME/mobius/$COMPOSE_PROJECT"}
+mkdir -p "$RECOVERY_STATE_DIR"
+chmod 0700 "$RECOVERY_STATE_DIR"
+if [ -n "${MOBIUS_RECOVERY_STATE_FILE:-}" ]; then
+  STATE_FILE=$MOBIUS_RECOVERY_STATE_FILE
+else
+  STATE_FILE="$RECOVERY_STATE_DIR/recovery.env"
+  # Releases before installation-scoped state kept an active recovery beside
+  # the checkout. Continue that recovery from the legacy file until `finish`
+  # removes it; the next `start` will create state in the XDG location.
+  LEGACY_STATE_FILE="$PROJECT_DIR/.mobius-recovery.env"
+  if [ ! -e "$STATE_FILE" ] && [ ! -L "$STATE_FILE" ] &&
+     { [ -e "$LEGACY_STATE_FILE" ] || [ -L "$LEGACY_STATE_FILE" ]; }; then
+    STATE_FILE=$LEGACY_STATE_FILE
+  fi
+fi
 RECOVERY_TARGET_MIN_TTL_SECONDS=300
 RECOVERY_TARGET_MAX_TTL_SECONDS=86400
 RECOVERY_TARGET_DEFAULT_TTL_SECONDS=3600
@@ -43,7 +62,7 @@ esac
 # target both mount /data. Lock the installation directory itself (no
 # attacker-replaceable lock file), and bound contention so automation fails
 # loudly instead of hanging forever.
-LOCK_DIR=${MOBIUS_RECOVERY_LOCK_DIR:-$PROJECT_DIR}
+LOCK_DIR=${MOBIUS_RECOVERY_LOCK_DIR:-$RECOVERY_STATE_DIR}
 LOCK_WAIT=${MOBIUS_RECOVERY_LOCK_WAIT_SECONDS:-30}
 [ -d "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ] || {
   echo "Invalid recovery lock directory: $LOCK_DIR" >&2
