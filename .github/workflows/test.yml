@@ -105,8 +105,14 @@ jobs:
           caddy validate --config /etc/caddy/Caddyfile
       - name: Run pytest
         working-directory: backend
+        # -n auto fans the suite across the runner's CPUs. Each xdist worker is
+        # a separate process that imports conftest independently, so it gets its
+        # own tempfile.mkdtemp() DATA_DIR and its own SQLite engine — the suite
+        # is already process-isolated, so parallelism adds no cross-test
+        # contention. pytest-cov combines the per-worker coverage data before
+        # applying --cov-fail-under.
         run: >-
-          pytest -q --durations=25
+          pytest -q -n auto --dist worksteal --durations=25
           --cov=app --cov-report=term:skip-covered --cov-fail-under=83
 
   frontend-unit:
