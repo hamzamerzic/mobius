@@ -84,7 +84,11 @@ from claude_agent_sdk.types import (
 )
 
 from app import activity
-from app.claude_events import _clip_task_text, dispatch_sdk_message
+from app.claude_events import (
+  _clip_task_text,
+  dispatch_sdk_message,
+  update_inflight_tasks,
+)
 from app.claude_sdk_contract import transport_exit_error, transport_process_pid
 from app.process_groups import (
   isolated_process_group_id,
@@ -114,6 +118,37 @@ def _claude_cli_path() -> str:
   ):
     return _ISOLATED_CLAUDE_CLI
   return _CLAUDE_CLI
+
+
+async def _drain_background_tasks(client, bc, inflight, session_id, chat_id):
+  """Let still-running background subagents/tasks finish before the turn reaps.
+
+  The main agent's terminal ResultMessage ends the TURN, not the background
+  tasks it spawned — the SDK keeps the channel open past the result frame
+  ("result frame ends one turn, not necessarily the run"). The turn-end
+  process-group reap would kill any task still running and lose its work. So at a
+  genuine terminal we keep the connected client and keep reading its stream,
+  dispatching each event and clearing tasks as they settle, until every tracked
+  task finishes; then the caller returns into the normal reap.
+
+  Wait for the real work, not an arbitrary clock. Only drainable delegated-agent
+  tasks are tracked (see ``update_inflight_tasks``), and those reliably reach a
+  terminal status, so this returns as soon as the subagents actually settle —
+  there is deliberately no time cap. Fail-safe: on ANY stream error it returns so
+  the reap proceeds; a real Stop raises CancelledError (BaseException), which
+  propagates untouched and aborts the wait at once.
+  """
+  try:
+    async for sdk_msg in client.receive_messages():
+      dispatch_sdk_message(sdk_msg, bc, session_id)
+      update_inflight_tasks(sdk_msg, inflight)
+      if not inflight:
+        return
+  except Exception as exc:
+    log.warning(
+      "background-task drain ended early chat_id=%s inflight=%d: %s",
+      chat_id, len(inflight), exc,
+    )
 
 
 def _claude_process_group_id(client: ClaudeSDKClient) -> int | None:
@@ -1099,6 +1134,9 @@ async def run_claude_sdk_turn(
       # recovery in the terminal branch below), so a genuinely-empty resume
       # can never loop.
       did_auto_requery = False
+      # task_ids of background subagents/tasks still running, tracked across the
+      # requery loop so a terminal result knows whether to drain before reaping.
+      inflight_tasks: set = set()
       while True:
         async for sdk_msg in client.receive_response():
           # Persist the session id ONLY from real conversation messages.
@@ -1124,6 +1162,7 @@ async def run_claude_sdk_turn(
           current_session_id, terminal = dispatch_sdk_message(
             sdk_msg, bc, current_session_id,
           )
+          update_inflight_tasks(sdk_msg, inflight_tasks)
           if terminal is None:
             # A steer fires its interrupt synchronously in
             # ActiveClaudeClient.steer() (a soft interrupt on the same
@@ -1189,6 +1228,16 @@ async def run_claude_sdk_turn(
           cost_usd = terminal.get("cost_usd")
           if rate_limit_resets_at is not None:
             terminal.setdefault("rate_limit_resets_at", rate_limit_resets_at)
+          # Background subagents/tasks the agent launched but did not block on
+          # are still live at this terminal result. The turn-end reap would kill
+          # them mid-work; keep the connected client and drain until they finish,
+          # THEN return into the reap. Skipped on a Stop — the owner asked to
+          # stop, so honor it immediately. Fail-safe: on any stream error the
+          # drain returns and the reap proceeds exactly as before.
+          if inflight_tasks and not active_client.interrupt_requested:
+            await _drain_background_tasks(
+              client, bc, inflight_tasks, current_session_id, chat_id,
+            )
           return terminal
         else:
           # The stream ended without a terminal ResultMessage. Any buffered
