@@ -202,7 +202,7 @@ Partner-facing messages describe what the app does and how it feels, not how it'
 ### Chat rendering
 
 - **Math**: `$...$` (inline) and `$$...$$` (block) render KaTeX.
-- **Currency**: escape dollar signs used as currency (for example, `\$62.5k`) so they are not interpreted as math delimiters.
+- **Currency**: ALWAYS write a currency dollar sign as `\$` — for example `\$5`, `\$7–9/turn`, `\$62.5k`. A bare `$` opens KaTeX math and pairs with the next `$` on the line, silently swallowing every word between two amounts into a garbled formula. This is easiest to forget in a message with more than one amount (`$7 ... $5`), which is exactly the case that breaks — so escape every currency `$`, without exception.
 - **Images**: any `/api/` image URL in markdown renders inline. Two or more
   adjacent image-only Markdown blocks automatically render as a horizontally
   scrollable filmstrip; use that form for a related set and keep a lone image
