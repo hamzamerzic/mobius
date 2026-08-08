@@ -73,6 +73,7 @@ export function shouldDeferShellReload({
   activeChatId,
   multiPaneBuilderVisible = false,
   streamingChatIds,
+  activeChatWaitingOnQuestion = false,
   passiveRebuild = false,
   voiceDictationActive = false,
   lastUserInteractionAt = 0,
@@ -100,7 +101,16 @@ export function shouldDeferShellReload({
   // through the ordinary apply-on-idle policy below.
   if (passiveRebuild && activeView === 'chat' && activeChatId != null) return true
   if (hasProtectedEditingContent(activeElement)) return true
-  if (hasActiveChatTurn({ activeView, activeChatId, streamingChatIds })) return true
+  // A turn parked on the owner's AskUserQuestion answer is `running` (so the
+  // active chat is in streamingChatIds) but is NOT streaming tokens: the card is
+  // durably persisted and reloading re-renders it from server state without
+  // touching the server-owned turn. So it never counts as a live turn here —
+  // otherwise an unanswered question pins a pending shell update indefinitely
+  // while the owner reads the card.
+  if (
+    !activeChatWaitingOnQuestion
+    && hasActiveChatTurn({ activeView, activeChatId, streamingChatIds })
+  ) return true
   // A reload mid-dictation would drop the in-flight transcript, so hold it
   // while the mic is live.
   if (voiceDictationActive) return true

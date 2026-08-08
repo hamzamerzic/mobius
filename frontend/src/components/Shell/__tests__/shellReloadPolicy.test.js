@@ -41,6 +41,22 @@ test('only the actively viewed chat turn defers shell reloads', () => {
   }), false)
 })
 
+test('a question-parked active chat no longer defers the shell reload', () => {
+  const base = {
+    activeElement: el('body'),
+    activeView: 'chat',
+    activeChatId: 'c1',
+    streamingChatIds: new Set(['c1']),
+    lastUserInteractionAt: 0,
+    now: 10000,
+  }
+  assert.equal(shouldDeferShellReload(base), true, 'a streaming turn still holds')
+  assert.equal(shouldDeferShellReload({
+    ...base,
+    activeChatWaitingOnQuestion: true,
+  }), false, 'parked on the owner\'s answer is a safe apply boundary')
+})
+
 test('recent interaction defers visible shell reloads', () => {
   assert.equal(shouldDeferShellReload({
     activeElement: el('body'),
