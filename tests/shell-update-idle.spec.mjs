@@ -403,15 +403,23 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     // left waiting. That is generation identity: it landed on the new generation,
     // not back on the outgoing one.
     let swMarker = ''
+    // Serve /sw.js from a single cached fetch. updateViaCache:'none' plus the
+    // reg.update() calls below make the browser re-request it many times, and a
+    // live route.fetch() per hit is a real round-trip to the shared test backend
+    // the parallel workers already contend on — that contention, not any SW
+    // race, is what timed this case out. Served bytes are unchanged.
+    let swBase = null
     await page.route('**/sw.js', async (route) => {
-      const res = await route.fetch()
-      let body = await res.text()
+      if (!swBase) {
+        const res = await route.fetch()
+        swBase = { status: res.status(), headers: res.headers(), body: await res.text() }
+      }
       // A STABLE byte-append once armed → the browser installs ONE genuinely new,
       // leashed worker; later re-fetches stay byte-identical so it does not
       // reinstall. The bundle is unchanged — the new WORKER's identity is the
       // generation the page must land on.
-      if (swMarker) body += `\n//${swMarker}\n`
-      await route.fulfill({ status: res.status(), headers: res.headers(), body })
+      const body = swMarker ? `${swBase.body}\n//${swMarker}\n` : swBase.body
+      await route.fulfill({ status: swBase.status, headers: swBase.headers, body })
     })
     await setup(page, {
       streamRoute: route => route.fulfill(fulfillStream(sse([{ type: 'done' }]))),
