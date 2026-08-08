@@ -1,0 +1,52 @@
+name: Warm build cache
+
+# The e2e job restores the test image's large browser/CLI layers from the GHA
+# build cache but deliberately never writes it back — exporting from a
+# short-lived PR merge ref would duplicate those layers under GHA's ~10GB cap
+# and evict the shared entry other PRs rely on. So the cache is only refreshed
+# by release-candidate image builds; between releases its layers drift from main
+# (and can evict during quiet periods), and PRs fall back to a slow cold build.
+#
+# Keep main's cache current by rebuilding and exporting it daily from the
+# default branch, where PRs (whose base is main) can restore it.
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # The downloadable Buildx record duplicates the build summary already in the
+  # job log and is not used here.
+  DOCKER_BUILD_RECORD_UPLOAD: 'false'
+
+concurrency:
+  group: warm-build-cache
+  cancel-in-progress: true
+
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    # A full cold build can approach the same duration as the e2e build it feeds.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and export the test image cache
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          # No load or push: this run exists only to refresh the shared cache.
+          push: false
+          load: false
+          # Match the e2e build so the exported layers are the ones it restores.
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
