@@ -105,6 +105,13 @@ jobs:
           caddy validate --config /etc/caddy/Caddyfile
       - name: Run pytest
         working-directory: backend
+        # The full suite is the expensive half of this job and runs identically
+        # in the merge queue, which is the authoritative pre-merge gate. Skip it
+        # on the pull_request event so review-time feedback is just the fast
+        # static-analysis gates above; the merge_group run (and manual dispatch
+        # for pre-PR checks) still runs it in full. See the merge-queue note in
+        # the e2e job below.
+        if: github.event_name != 'pull_request'
         # -n auto fans the suite across the runner's CPUs. Each xdist worker is
         # a separate process that imports conftest independently, so it gets its
         # own tempfile.mkdtemp() DATA_DIR and its own SQLite engine — the suite
@@ -157,6 +164,19 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    # The browser suite is the single most expensive gate and runs identically
+    # in the merge queue, which is the authoritative pre-merge check. Skip it on
+    # the pull_request event so a PR isn't gated by two full suite-lengths (once
+    # here, once in the queue) before it can land; the merge_group run — and
+    # manual dispatch, used by pre-PR checks — still runs it in full.
+    #
+    # This relies on GitHub treating a job skipped via `if:` as a satisfied
+    # required status check on the PR (its documented behavior), with the
+    # merge_group run remaining the required gate. If a repository's protection
+    # instead requires `e2e` (and `backend`) to actually run on the PR and
+    # blocks on a skip, move those two out of the PR-required set so the merge
+    # queue is the gate — the merge_group context still enforces all four checks.
+    if: github.event_name != 'pull_request'
     # A cold hosted build can spend roughly 20 minutes populating the GHA cache
     # before Playwright starts. Leave enough room for the complete browser suite
     # and its diagnostic uploads instead of cancelling a healthy run mid-test.
