@@ -334,6 +334,11 @@ def _owner_chat_summary(chat, *, durable_running: bool = False) -> dict:
     "has_messages": bool(chat.has_messages),
     "created_by_app_id": chat.created_by_app_id,
     "running": durable_running or is_chat_running(chat.id),
+    # A turn parked on the owner's AskUserQuestion answer is `running` but is
+    # NOT streaming — nothing to interrupt, and the card is durable — so the
+    # shell excludes it from the reload-defer's active-turn test. The durable
+    # column is the source of truth (see `_open_question_id_for`).
+    "pending_question_id": chat.pending_question_id,
   }
 
 
@@ -558,6 +563,10 @@ def list_chats(
     # than pulling transcript/runtime JSON into the hot path.
     models.Chat.agent_settings_json,
     models.Chat.has_messages,
+    # Scalar "parked on the owner's AskUserQuestion answer" marker — lets the
+    # shell tell a parked turn from a live stream without decoding the messages
+    # JSON. Consumed by _owner_chat_summary below.
+    models.Chat.pending_question_id,
   ).filter(models.Chat.deleted_at.is_(None))
   chats = (
     q.order_by(
