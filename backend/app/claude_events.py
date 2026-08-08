@@ -37,6 +37,20 @@ except ImportError:
   TERMINAL_TASK_STATUSES = frozenset()
   TaskUpdatedMessage = None
 
+# Only *delegated agent* tasks reliably reach a terminal status, so only these
+# are safe to wait on before the turn-end reap. The SDK gates its own
+# task-lifecycle tracker on this exact set (claude_agent_sdk/_internal/query.py)
+# and warns that tracking anything else "will hang the query": a background shell
+# or Monitor is a long-running watch that by design never emits a terminal frame,
+# so adding it to the in-flight set would make the drain block to its full
+# timeout instead of returning. The constant lives in the SDK's private
+# internals (not exported from types), so mirror it with a best-effort import and
+# a hardcoded fallback that matches the current SDK value.
+try:
+  from claude_agent_sdk._internal.query import DEFERRING_TASK_TYPES
+except ImportError:
+  DEFERRING_TASK_TYPES = frozenset({"local_agent", "local_workflow"})
+
 from app import activity
 from app.sdk_emit import emit_unknown_enabled, unknown_event
 from app.tool_summaries import summarize_tool_input
@@ -209,6 +223,39 @@ def _claude_text_item_id(message_id: str | None, index: object) -> str | None:
   if message_id is None or index is None:
     return None
   return f"{message_id}:{index}"
+
+
+def update_inflight_tasks(sdk_msg: Any, inflight: set) -> None:
+  """Maintain the set of *drainable* background task_ids still running, keyed on
+  the SAME message types ``dispatch_sdk_message`` translates. A task_id is added
+  when a TaskStartedMessage for a DEFERRING_TASK_TYPES agent (``local_agent`` /
+  ``local_workflow`` — Task-tool subagents and Workflows) arrives, and removed on
+  its terminal signal — a TaskNotificationMessage (dispatch's ``task_done``), or a
+  TaskUpdatedMessage patch carrying a TERMINAL_TASK_STATUSES status (the path a
+  TaskStop-killed task reports through). The runner uses this set to decide
+  whether background work is still live at the turn's terminal result, so it can
+  drain it before reaping instead of killing it.
+
+  Only delegated-agent tasks are tracked: background shells and Monitors run
+  indefinitely by design and never emit a terminal frame, so adding one would
+  make the drain block until its bounded timeout rather than returning promptly.
+  The SDK gates its own tracker on the same set for exactly this reason. Purely
+  observational — never raises on shape drift.
+  """
+  if isinstance(sdk_msg, TaskStartedMessage):
+    if getattr(sdk_msg, "task_type", None) not in DEFERRING_TASK_TYPES:
+      return
+    task_id = getattr(sdk_msg, "task_id", None)
+    if task_id is not None:
+      inflight.add(task_id)
+  elif isinstance(sdk_msg, TaskNotificationMessage):
+    inflight.discard(getattr(sdk_msg, "task_id", None))
+  elif (
+    TaskUpdatedMessage is not None
+    and isinstance(sdk_msg, TaskUpdatedMessage)
+    and getattr(sdk_msg, "status", None) in TERMINAL_TASK_STATUSES
+  ):
+    inflight.discard(getattr(sdk_msg, "task_id", None))
 
 
 def dispatch_sdk_message(
