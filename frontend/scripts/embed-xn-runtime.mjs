@@ -9,13 +9,13 @@ import { fileURLToPath } from 'node:url'
 // JavaScript string/base64 literals instead would force `blob:` into the
 // shell's script policy, because the worker would have to rebuild them into
 // blob URLs at runtime.
-const XN_PTTS_REVISION = '4398678425e1b3d48d525024257830aec989bc58 + Möbius v2/cloning/streaming adapter'
-const EXPECTED_MODULE_SHA256 = 'ad08cdd24e0664b6085079d239ff7bb10d4443eee4dfea956d825d0696493563'
-const EXPECTED_WASM_SHA256 = 'e11ad32a0e454e5fed870efa186c2166c92fc0e674de7dc94882a27e62910768'
+const XN_PTTS_REVISION = '4398678425e1b3d48d525024257830aec989bc58 + Möbius v2/cloning/streaming adapter + encoder+BOS clone fix'
+const EXPECTED_MODULE_SHA256 = 'effca6832d011178fce0365bf95d47463ffb636f8a58b9818cc4af32779213c1'
+const EXPECTED_WASM_SHA256 = '5ec9ec652f001045c249139fc1fa84845eab756efbf7f4e680485bab7f3daff6'
 // The adapted runtime is a pure function of the pinned upstream module, so its
 // own hash is pinned too. That lets `--check` verify the shipped files without
 // needing the upstream inputs on disk.
-const EXPECTED_RUNTIME_SHA256 = 'f36b4dffc120ca6a49c94a491efc1028582fcae2bc97123d679a8c9b95486aaa'
+const EXPECTED_RUNTIME_SHA256 = '5b11e87a548a4f4228b6c598411ef6394eafd6adb1330838172db9ea472ef7de'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const runtimePath = resolve(root, 'src/lib/speech/pocketTtsXnRuntime.js')
 const wasmPath = resolve(root, 'public/speech/pocket-tts-xn.wasm')
