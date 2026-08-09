@@ -3583,6 +3583,7 @@ const MOVE_TOL_PX = 10;
 function makeImmersive({ appId } = {}) {
 	let hidden = false;
 	const listeners = /* @__PURE__ */ new Set();
+	const holds = /* @__PURE__ */ new WeakMap();
 	const hasParent = typeof window !== "undefined" && window.parent && window.parent !== window;
 	function notify() {
 		for (const cb of [...listeners]) try {
@@ -3630,10 +3631,9 @@ function makeImmersive({ appId } = {}) {
 			listeners.delete(cb);
 		};
 	}
-	function holdToToggle(el, opts = {}) {
+	function holdToToggle(el) {
 		if (!el || typeof el.addEventListener !== "function") return () => {};
-		if (el.__mobiusHold) return el.__mobiusHold;
-		const holdMs = typeof opts.holdMs === "number" ? opts.holdMs : HOLD_MS;
+		if (holds.has(el)) return holds.get(el);
 		let timer = null;
 		let startX = 0;
 		let startY = 0;
@@ -3683,7 +3683,7 @@ function makeImmersive({ appId } = {}) {
 					if (navigator.vibrate) navigator.vibrate(10);
 				} catch (e2) {}
 				toggle();
-			}, holdMs);
+			}, HOLD_MS);
 		}
 		function onPointerMove(e) {
 			if (timer === null) return;
@@ -3709,7 +3709,7 @@ function makeImmersive({ appId } = {}) {
 		el.addEventListener("contextmenu", onContextMenu);
 		const cleanup = () => {
 			release();
-			delete el.__mobiusHold;
+			holds.delete(el);
 			el.style.cursor = prev.cursor;
 			el.style.touchAction = prev.touchAction;
 			el.style.userSelect = prev.userSelect;
@@ -3722,7 +3722,7 @@ function makeImmersive({ appId } = {}) {
 			el.removeEventListener("click", onClickCapture, true);
 			el.removeEventListener("contextmenu", onContextMenu);
 		};
-		el.__mobiusHold = cleanup;
+		holds.set(el, cleanup);
 		return cleanup;
 	}
 	return {

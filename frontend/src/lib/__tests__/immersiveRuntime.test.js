@@ -44,7 +44,11 @@ test('holdToToggle is idempotent and cleanup restores the target', () => {
   })
 
   cleanup()
-  assert.equal(element.__mobiusHold, undefined)
   assert.deepEqual(element.style, before)
   for (const listeners of element.listeners.values()) assert.equal(listeners.length, 0)
+
+  const rewired = immersive.holdToToggle(element)
+  assert.notEqual(rewired, cleanup)
+  assert.equal(element.listeners.get('pointerdown').length, 1)
+  rewired()
 })

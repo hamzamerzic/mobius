@@ -239,13 +239,10 @@ function CanvasLoadingBrand({ appName }) {
 const AppCanvas = forwardRef(function AppCanvas({
   appId, version = 0, appName, appSlug, offlineCapable = false,
   capabilityContract = null,
-  immersive = false,
-  // The lighter "look like a standalone app" collapse (mode:'bar'): the shell
-  // hides its toolbar but keeps the status-bar strip, so unlike `immersive`
-  // (full-bleed) the app is NOT painted under the notch and needs no safe-area
-  // insets. It still counts as "chrome hidden" for the app's immersive helper
-  // echo, so the app's toggle()/`.hidden` stay correct.
-  barCollapsed = false,
+  // The shell's applied presentation for this app: full-bleed immersive,
+  // status-bar-preserving chrome collapse, or null. One value keeps safe-area
+  // forwarding and the runtime echo from observing contradictory booleans.
+  immersiveMode = null,
   // Whether this app is the currently-visible canvas (canvas view + active
   // app). One prop, two consumers:
   //   - `moebius:frame-visibility` — the shell keeps recently-used apps
@@ -422,8 +419,8 @@ const AppCanvas = forwardRef(function AppCanvas({
   // listener is live and it can receive frame-init/theme/insets. Per frame,
   // because the two buffered frames finish loading independently.
   const loadedDocsRef = useRef(new Set())
-  // version -> last immersive intent (bool) that frame declared. Recorded for
-  // EVERY frame, including a hidden incoming one whose real-time immersive post
+  // version -> last immersive request ({ value, mode }) that frame declared.
+  // Recorded for every frame, including a hidden incoming one whose real-time post
   // is withheld (only the visible frame drives chrome live). On a swap we replay
   // the promoted frame's recorded intent so an immersive game stays immersive
   // across a rebuild without a chrome flash.
@@ -735,7 +732,7 @@ const AppCanvas = forwardRef(function AppCanvas({
         // from the verified source, never the payload — but the mode is a
         // harmless presentation hint the frame may choose.
         const mode = msg.mode === 'bar' ? 'bar' : 'full'
-        frameImmersiveRef.current.set(srcVersion, value)
+        frameImmersiveRef.current.set(srcVersion, { value, mode })
         if (srcVersion === liveVersionRef.current && activeRef.current) {
           onImmersive?.(appId, value, mode)
         }
@@ -986,13 +983,14 @@ const AppCanvas = forwardRef(function AppCanvas({
   useEffect(() => {
     if (!appId) return
     const current = { appId, liveVersion: swap.liveVersion, active }
+    const intent = frameImmersiveRef.current.get(swap.liveVersion)
     const value = immersiveLifecycleValue(
       immersiveLifecycleRef.current,
       current,
-      frameImmersiveRef.current.get(swap.liveVersion),
+      intent?.value,
     )
     immersiveLifecycleRef.current = current
-    if (value !== null) onImmersive?.(appId, value)
+    if (value !== null) onImmersive?.(appId, value, intent?.mode)
   }, [appId, swap.liveVersion, active, onImmersive])
 
   // Unmount/eviction is a hard release even when no active-state render landed.
@@ -1066,9 +1064,9 @@ const AppCanvas = forwardRef(function AppCanvas({
   // pad away from the notch/home-indicator. env(safe-area-inset-*) reads 0
   // inside the sandboxed iframe, so the shell reads the real values off a
   // probe element and posts them; the frame applies them to :root as
-  // --mobius-safe-*. Only non-zero while THIS app is immersive — a windowed
-  // app's chrome already owns the inset padding, so it must receive zeros and
-  // not double-pad. Sent on iframe load (sendInsets in onLoad), whenever the
+  // --mobius-safe-*. Only non-zero in full-bleed mode. Windowed and
+  // bar-collapsed apps keep shell-owned inset padding and receive zeros, so they
+  // cannot double-pad. Sent on iframe load (sendInsets in onLoad), whenever the
   // immersive verdict flips, and on resize/orientationchange while immersive
   // (a rotation moves the cutout, so the cached insets would otherwise go
   // stale — see the geometry-change effect below).
@@ -1077,7 +1075,9 @@ const AppCanvas = forwardRef(function AppCanvas({
   // windowed frame whose chrome already owns the inset padding also gets zeros
   // so it can't double-pad.
   function sendInsets(v) {
-    const insets = (v === liveVersionRef.current && immersive) ? readDeviceInsets() : zeroInsets()
+    const insets = (v === liveVersionRef.current && immersiveMode === 'full')
+      ? readDeviceInsets()
+      : zeroInsets()
     postToFrame(v, { type: 'moebius:frame-insets', insets })
   }
 
@@ -1085,14 +1085,13 @@ const AppCanvas = forwardRef(function AppCanvas({
   // window.mobius.immersive helper stays authoritative — toggle()/`.hidden`
   // must reflect a release the shell made on its own (the floating exit button,
   // or an app switch that dropped the lease), not just the app's last request.
-  // The `immersive` prop is exactly that applied verdict (active canvas AND this
-  // app holds the lease). Only the live frame is the immersive holder, so a
+  // `immersiveMode` is exactly that applied verdict (active canvas AND this app
+  // holds the lease). Only the live frame is the immersive holder, so a
   // hidden/incoming buffered frame always learns `false`.
   function sendImmersiveState(v) {
     postToFrame(v, {
       type: 'moebius:immersive-state',
-      // Either flavor of hidden bar counts as "hidden" for the app helper.
-      value: v === liveVersionRef.current ? (immersive || barCollapsed) : false,
+      value: v === liveVersionRef.current && immersiveMode != null,
     })
   }
 
@@ -1151,7 +1150,7 @@ const AppCanvas = forwardRef(function AppCanvas({
       if (loadedDocsRef.current.has(v)) sendInsets(v)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [immersive, swap.liveVersion])
+  }, [immersiveMode, swap.liveVersion])
 
   // Keep the app's window.mobius.immersive helper in sync with the shell's
   // applied verdict (see sendImmersiveState). Same triggers as the insets echo.
@@ -1160,7 +1159,7 @@ const AppCanvas = forwardRef(function AppCanvas({
       if (loadedDocsRef.current.has(v)) sendImmersiveState(v)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [immersive, barCollapsed, swap.liveVersion])
+  }, [immersiveMode, swap.liveVersion])
 
   // Re-forward insets on viewport geometry change WHILE immersive. Rotating the
   // device or a window resize moves the notch/home-indicator (landscape puts
@@ -1171,7 +1170,7 @@ const AppCanvas = forwardRef(function AppCanvas({
   // listener is only attached while immersive (and torn down on exit). The
   // probe element resolves the fresh env() values after layout settles.
   useEffect(() => {
-    if (!immersive) return
+    if (immersiveMode !== 'full') return
     function onGeometryChange() { sendInsets(liveVersionRef.current) }
     window.addEventListener('resize', onGeometryChange)
     window.addEventListener('orientationchange', onGeometryChange)
@@ -1180,7 +1179,7 @@ const AppCanvas = forwardRef(function AppCanvas({
       window.removeEventListener('orientationchange', onGeometryChange)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [immersive])
+  }, [immersiveMode])
 
   if (!appId) {
     return (

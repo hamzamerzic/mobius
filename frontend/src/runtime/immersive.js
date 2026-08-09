@@ -23,6 +23,7 @@ const MOVE_TOL_PX = 10
 export function makeImmersive({ appId } = {}) {
   let hidden = false
   const listeners = new Set()
+  const holds = new WeakMap()
   const hasParent = typeof window !== 'undefined'
     && window.parent && window.parent !== window
 
@@ -85,10 +86,9 @@ export function makeImmersive({ appId } = {}) {
   // render via a callback ref — `ref={el => window.mobius.immersive.holdToToggle(el)}`
   // — the second call returns the same cleanup instead of double-wiring. Returns
   // a cleanup function.
-  function holdToToggle(el, opts = {}) {
+  function holdToToggle(el) {
     if (!el || typeof el.addEventListener !== 'function') return () => {}
-    if (el.__mobiusHold) return el.__mobiusHold
-    const holdMs = typeof opts.holdMs === 'number' ? opts.holdMs : HOLD_MS
+    if (holds.has(el)) return holds.get(el)
     let timer = null
     let startX = 0
     let startY = 0
@@ -139,7 +139,7 @@ export function makeImmersive({ appId } = {}) {
         fired = true
         try { if (navigator.vibrate) navigator.vibrate(10) } catch (e2) {}
         toggle()
-      }, holdMs)
+      }, HOLD_MS)
     }
     function onPointerMove(e) {
       if (timer === null) return
@@ -169,7 +169,7 @@ export function makeImmersive({ appId } = {}) {
 
     const cleanup = () => {
       release()
-      delete el.__mobiusHold
+      holds.delete(el)
       el.style.cursor = prev.cursor
       el.style.touchAction = prev.touchAction
       el.style.userSelect = prev.userSelect
@@ -182,7 +182,7 @@ export function makeImmersive({ appId } = {}) {
       el.removeEventListener('click', onClickCapture, true)
       el.removeEventListener('contextmenu', onContextMenu)
     }
-    el.__mobiusHold = cleanup
+    holds.set(el, cleanup)
     return cleanup
   }
 
