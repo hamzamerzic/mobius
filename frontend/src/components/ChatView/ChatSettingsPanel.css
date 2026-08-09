@@ -97,6 +97,17 @@
   }
 }
 
+/* The selected provider-default row is state, not another choice. */
+.csp-row--static {
+  cursor: default;
+}
+@media (hover: hover) and (pointer: fine) {
+  .csp-row--static:hover,
+  .csp-row--selected.csp-row--static:hover {
+    background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+  }
+}
+
 .csp-row--locked {
   opacity: 0.4;
   cursor: not-allowed;
