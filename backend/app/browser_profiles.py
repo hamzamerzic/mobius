@@ -246,6 +246,7 @@ def enforce_browser_profile_quota(
   low_water_bytes: int | None = None,
   inactive_days: int | None = None,
   active_profile_names: set[str] | None = None,
+  cache_only: bool = False,
 ) -> dict:
   """Prune caches, then inactive chat profiles to honor the byte budget.
 
@@ -255,6 +256,10 @@ def enforce_browser_profile_quota(
   mark, the oldest remaining inactive chat profiles yield too. Live sessions
   never do, and deliberately named sessions retain their full inactivity grace.
   Any protected overage is reported rather than mislabelled as reclaimed.
+
+  ``cache_only`` applies the same active-profile protection for a volume
+  admission check, but never removes a whole profile even if durable session
+  state keeps the root above the requested low-water mark.
   """
   root = Path(data_dir) / "agent-browser-profiles"
   now = now or datetime.now(UTC).replace(tzinfo=None)
@@ -363,7 +368,7 @@ def enforce_browser_profile_quota(
       if total <= low_water_bytes:
         break
 
-    if total > low_water_bytes:
+    if total > low_water_bytes and not cache_only:
       for profile in profile_candidates:
         if not profile["path"].exists():
           continue

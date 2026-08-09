@@ -236,10 +236,12 @@ fi
 # loop. Threshold = 3 because a transient OOM or SIGKILL can cause 1-2
 # false failures; three consecutive failures without a health success
 # strongly implies the platform code itself is broken.
+_crashloop_force_baked=0
+_crashloop_clone_ready=0
 if [ "$_boot_counter_enabled" -eq 1 ] &&
    [ "$_boot_counter" -ge 3 ] &&
    [ -f /data/.last-successful-boot ]; then
-  echo "PLATFORM-RESTORE: boot-attempt counter = $_boot_counter, re-cloning platform..." >&2
+  echo "PLATFORM-RESTORE: boot-attempt counter = $_boot_counter, evaluating re-clone capacity..." >&2
   # Crash-loop escape hatch: the platform imported OK (else the probe would
   # have already fallen back to baked) but keeps crashing at runtime. Move the
   # broken tree ASIDE so the next boot re-clones a fresh canonical
@@ -247,22 +249,39 @@ if [ "$_boot_counter_enabled" -eq 1 ] &&
   # TIMESTAMPED /data/platform.crashloop-prev.<ts> for inspection/recovery, not
   # deleted. A one-slot .crashloop-prev would let a SECOND crash-loop delete the
   # first preserved tree before the owner could inspect it, so we timestamp each
-  # quarantine and keep only the newest few. (slice B's deploy=merge
-  # reconciliation will refine this.)
+  # quarantine. Capacity policy always preserves the newest point and keeps
+  # older redundant history only while its byte budget permits.
   _cl_ts=$(date -u +%Y%m%dT%H%M%SZ)
+  _cl_admitted=0
   if [ -e /data/platform ] && [ -n "$(ls -A /data/platform 2>/dev/null)" ] &&
+     PYTHONPATH=/app python3 -P -m app.data_volume \
+       admit-crashloop --data-dir /data --platform-dir /data/platform; then
+    _cl_admitted=1
+  fi
+  if [ "$_cl_admitted" -eq 1 ] &&
      mv /data/platform "/data/platform.crashloop-prev.$_cl_ts" 2>/dev/null; then
     echo "PLATFORM-RESTORE: broken tree moved to /data/platform.crashloop-prev.$_cl_ts; next boot re-clones." >&2
     echo "crashloop-reclone /data/platform.crashloop-prev.$_cl_ts $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.platform-restore-active
     chown mobius:mobius /data/.platform-restore-active 2>/dev/null || true
-    # Retention cap: keep the newest 3 crashloop quarantines, prune older ones.
-    # Pruning runs AFTER the move so the tree just preserved this boot is always
-    # among the kept copies — we never delete the only/newest copy.
-    ls -1dt /data/platform.crashloop-prev.* 2>/dev/null | tail -n +4 | while IFS= read -r _old; do
-      rm -rf "$_old" 2>/dev/null || true
-    done
+    # Re-apply the byte budget after the just-moved tree becomes the newest
+    # recovery point. The helper never prunes that newest point.
+    if ! PYTHONPATH=/app python3 -P -m app.data_volume \
+      record-crashloop --data-dir /data; then
+      echo "WARNING: crash-loop recovery could not create safe clone headroom; serving baked floor." >&2
+      _crashloop_force_baked=1
+    else
+      _crashloop_clone_ready=1
+    fi
   else
-    echo "PLATFORM-RESTORE: no /data/platform to move aside (or mv failed); serving baked floor." >&2
+    if [ "$_cl_admitted" -eq 1 ]; then
+      echo "PLATFORM-RESTORE: platform move failed; live tree left in place and baked floor will serve." >&2
+      _crashloop_force_baked=1
+    else
+      echo "PLATFORM-RESTORE: re-clone not admitted; live tree left in place and baked floor will serve." >&2
+      if [ -e /data/platform ] && [ -n "$(ls -A /data/platform 2>/dev/null)" ]; then
+        _crashloop_force_baked=1
+      fi
+    fi
   fi
   # Reset counter after the restore attempt regardless of success, so
   # the next boot gets a clean slate. If the restore fixed things, the
@@ -780,8 +799,19 @@ fi
 
 chown -R mobius:mobius /data/platform 2>/dev/null || true
 
-if [ ! -d "$_platform_app" ]; then
-  if _platform_bootstrap && _platform_git_valid && _platform_import_probe; then
+if [ "$_crashloop_force_baked" -eq 1 ]; then
+  _platform_use_baked
+elif [ ! -d "$_platform_app" ]; then
+  _restore_capacity_ready=1
+  if [ "$_crashloop_clone_ready" -ne 1 ] &&
+     [ -f /data/.platform-restore-active ] &&
+     ! PYTHONPATH=/app python3 -P -m app.data_volume \
+       record-crashloop --data-dir /data; then
+    _restore_capacity_ready=0
+    echo "PLATFORM LAYER WARNING: crash-loop restore still lacks safe clone headroom." >&2
+  fi
+  if [ "$_restore_capacity_ready" -eq 1 ] &&
+     _platform_bootstrap && _platform_git_valid && _platform_import_probe; then
     _platform_use_direct
   else
     echo "PLATFORM LAYER WARNING: bootstrap did not produce an importable repo." >&2
