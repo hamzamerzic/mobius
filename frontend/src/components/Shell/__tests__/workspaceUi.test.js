@@ -641,6 +641,10 @@ test('pane surfaces and strips are captured individually; dividers remain outsid
   // Exit snapshots must also paint during the browser's pre-ready interval.
   assert.match(css, /html\[data-mode-view-transition="exit"\]::view-transition-new\(\*\)\s*,[\s\S]*?html\[data-mode-view-transition="exit"\]::view-transition-old\(\*\)\s*\{\s*opacity: 1;/)
   assert.match(css, /html\[data-mode-view-transition="exit"\]::view-transition-old\(mode-workspace\),[\s\S]*?mode-navigation-drawer\)\s*\{\s*opacity: 0;/)
+  assert.match(shell, /data-mode-strip-soft-entry=""/)
+  assert.match(modeViewTransitionSrc, /softEntry: element\.hasAttribute\('data-mode-strip-soft-entry'\)/)
+  assert.match(modeViewTransitionSrc, /const softStripEntering = direction === 'enter' && softEntry/)
+  assert.match(modeViewTransitionSrc, /softStripEntering[\s\S]*?opacity: 0, transform: 'translate3d\(0, 12px, 0\)'[\s\S]*?offset: 0\.55/)
 })
 
 test('navigation is a stationary foreground capture above travelling panes', () => {

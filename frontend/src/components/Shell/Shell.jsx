@@ -3256,6 +3256,7 @@ export default function Shell() {
           // a tab out with ≥2 tabs present splits the pane.
           data-pane-strip={workspace.focusedPaneId}
           data-mode-pane-vt={navViewStyle ? navPaneId : undefined}
+          data-mode-strip-soft-entry=""
           style={navViewStyle || undefined}
           onKeyDown={(e) => stripKeyDown(e, openTabs, (tab) => closeTab(tab))}
         >

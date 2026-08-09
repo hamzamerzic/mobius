@@ -36,7 +36,12 @@ function participantSnapshots(root, offsets) {
     if (!offset) continue
     const name = getComputedStyle(element).viewTransitionName
     if (!name || name === 'none') continue
-    out.push({ name, offset })
+    out.push({
+      name,
+      offset,
+      // Tiled strips stay attached to pane travel; only the single strip opts in.
+      softEntry: element.hasAttribute('data-mode-strip-soft-entry'),
+    })
   }
   return out
 }
@@ -167,14 +172,31 @@ export default function useModeViewTransition({ rootRef, durationMs }) {
         ))
       }
       const paneSide = direction === 'enter' ? 'new' : 'old'
-      for (const { name, offset } of snapshots) {
+      for (const { name, offset, softEntry } of snapshots) {
         const away = `translate3d(${offset.x}px, ${offset.y}px, 0)`
+        const softStripEntering = direction === 'enter' && softEntry
+        let keyframes
+        if (softStripEntering) {
+          keyframes = [
+            { opacity: 0, transform: 'translate3d(0, 12px, 0)', offset: 0 },
+            { opacity: 1, transform: 'translate3d(0, 0, 0)', offset: 0.55 },
+            { opacity: 1, transform: 'translate3d(0, 0, 0)', offset: 1 },
+          ]
+        } else if (direction === 'enter') {
+          keyframes = [
+            { opacity: 1, transform: away },
+            { opacity: 1, transform: 'translate3d(0, 0, 0)' },
+          ]
+        } else {
+          keyframes = [
+            { opacity: 1, transform: 'translate3d(0, 0, 0)' },
+            { opacity: 1, transform: away },
+          ]
+        }
         animations.push(animatePseudo(
           html,
           `::view-transition-${paneSide}(${name})`,
-          direction === 'enter'
-            ? [{ opacity: 1, transform: away }, { opacity: 1, transform: 'translate3d(0, 0, 0)' }]
-            : [{ opacity: 1, transform: 'translate3d(0, 0, 0)' }, { opacity: 1, transform: away }],
+          keyframes,
           timing,
           startTime,
         ))
