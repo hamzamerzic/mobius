@@ -10,10 +10,12 @@
    therefore invisible, live chats never animate their own layout, and every pane
    uses the one document timeline started by useModeViewTransition.
 
-   All snapshots are opt-in from opacity:0. Pane/content snapshots, the stationary
-   workspace, and the foreground navigation are enabled by Web Animations. Divider
-   snapshots deliberately remain at zero, appearing only with the final resting
-   Builder DOM. */
+   Snapshots normally opt in from opacity:0, then Web Animations starts their one
+   shared clock. Builder → Standard is the exception: its final Standard snapshot
+   and departing Builder panes are visible from the browser's first transition
+   frame. That preserves the intended Standard backdrop without an unnecessary
+   black frame while transition.ready is pending. Divider snapshots deliberately
+   remain at zero, appearing only with the final resting Builder DOM. */
 html[data-mode-view-transition] {
   view-transition-name: none;
 }
@@ -48,6 +50,18 @@ html[data-mode-view-transition]::view-transition-old(*),
 html[data-mode-view-transition]::view-transition-new(*) {
   animation: none;
   mix-blend-mode: normal;
+  opacity: 0;
+}
+
+/* Paint the exit reveal before `transition.ready`; old shell chrome would cover
+   Standard, while every other snapshot agrees with the later 1 → 1 WAAPI track. */
+html[data-mode-view-transition="exit"]::view-transition-new(*),
+html[data-mode-view-transition="exit"]::view-transition-old(*) {
+  opacity: 1;
+}
+html[data-mode-view-transition="exit"]::view-transition-old(mode-workspace),
+html[data-mode-view-transition="exit"]::view-transition-old(mode-navigation-bar),
+html[data-mode-view-transition="exit"]::view-transition-old(mode-navigation-drawer) {
   opacity: 0;
 }
 
