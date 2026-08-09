@@ -2421,6 +2421,43 @@ def _update_v2(client, auth, base, manifest, jsx):
     })
 
 
+def test_pending_update_receipt_upgrades_schema_one_on_policy_choice(tmp_path):
+  """A rolling restart preserves old pending conflicts until owner choice."""
+  from app import install
+
+  source = tmp_path / "legacy-pending"
+  pending = source / ".git" / "mobius-pending-update"
+  pending.mkdir(parents=True)
+  receipt_path = pending / "receipt.json"
+  receipt_path.write_text(json.dumps({
+    "schema": 1,
+    "app_id": 42,
+    "upstream_commit": "a" * 40,
+    "manifest": {"id": "legacy"},
+    "raw_base": "https://legacy.test/repo/",
+    "capability_digest": "capability",
+    "candidate_digest": "b" * 64,
+  }))
+
+  legacy = install.read_pending_conflict_update_receipt(
+    source,
+    app_id=42,
+    upstream_commit="a" * 40,
+  )
+  assert legacy is not None
+  assert legacy["resolution_policy"] is None
+  install.set_pending_conflict_update_policy(
+    source,
+    app_id=42,
+    upstream_commit="a" * 40,
+    policy="preserve_local",
+  )
+  upgraded = json.loads(receipt_path.read_text())
+  assert upgraded["schema"] == 2
+  assert upgraded["resolution_policy"] == "preserve_local"
+  assert upgraded["reviewed_tree_oid"] is None
+
+
 def test_flag_on_install_creates_repo_and_records_upstream(
   client, auth, bypass_url_validation,
 ):
@@ -2935,21 +2972,31 @@ def test_flag_on_conflicting_update_leaves_source_unchanged_until_resolve(
   )
   assert bypass.status_code == 422, bypass.text
 
-  # One Resolve click materializes a real merge. Saving marker-free text only
-  # prepares the draft; explicit resolution owns the complete installer replay.
+  # The explicit whole-tree policy is carried by the resolver-open request,
+  # persisted before the real merge, and therefore precedes the agent turn.
   resolver = client.post(
     f"/api/apps/{payload['id']}/conflict-resolver-chat", headers=auth,
+    json={"resolution_policy": "preserve_local"},
   )
   assert resolver.status_code == 200, resolver.text
   assert (app_dir / ".git" / "MERGE_HEAD").is_file()
   resolved = JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE")
   jsx_file.write_text(resolved)
 
+  reviewed = client.post(
+    "/api/apps/resolve-update/review",
+    headers=auth,
+    json={"source_dir": str(app_dir)},
+  )
+  assert reviewed.status_code == 200, reviewed.text
+  reviewed_tree = reviewed.json()["tree_oid"]
+  assert "RESOLVED TITLE" in reviewed.json()["diff"]
+  assert json.loads(pending.read_text())["reviewed_tree_oid"] == reviewed_tree
+
   # Resolution and promotion are separate crash-safe phases. Once the resolved
   # source is committed, the receipt remains so the canonical installer can
-  # replay bundle/static/DB promotion. This state must stay updateable but must
-  # NOT offer another resolver: upstream is already an ancestor and that route
-  # correctly rejects it as no longer conflicted.
+  # replay bundle/static/DB promotion. The existing resolver chat remains the
+  # resumable surface while upstream is already an ancestor of local source.
   from app import app_git
   resolved_commit = app_git.commit_local(app_dir, "resolve app update")
   assert resolved_commit
@@ -2963,8 +3010,10 @@ def test_flag_on_conflicting_update_leaves_source_unchanged_until_resolve(
   assert pending_update.json()["needs_resolution"] is False
   redundant_resolver = client.post(
     f"/api/apps/{payload['id']}/conflict-resolver-chat", headers=auth,
+    json={"resolution_policy": "preserve_local"},
   )
-  assert redundant_resolver.status_code == 409, redundant_resolver.text
+  assert redundant_resolver.status_code == 200, redundant_resolver.text
+  assert redundant_resolver.json()["created"] is False
 
   replay_responses = {
     base + "index.jsx": (200, jsx_v2.encode()),
@@ -2980,6 +3029,8 @@ def test_flag_on_conflicting_update_leaves_source_unchanged_until_resolve(
     replayed = client.post(
       "/api/apps/resolve-update",
       headers=auth,
+      # Simulate a retry after the review response was lost: the exact tree
+      # identity survives in the pending receipt.
       json={"source_dir": str(app_dir)},
     )
   assert replayed.status_code == 200, replayed.text
@@ -3053,10 +3104,17 @@ def test_resolved_conflict_changed_candidate_fails_closed_and_stays_retryable(
 
   resolver = client.post(
     f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth,
+    json={"resolution_policy": "preserve_local"},
   )
   assert resolver.status_code == 200, resolver.text
   resolved = JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE")
   jsx_file.write_text(resolved)
+  reviewed = client.post(
+    "/api/apps/resolve-update/review",
+    headers=auth,
+    json={"source_dir": str(app_dir)},
+  )
+  assert reviewed.status_code == 200, reviewed.text
   pending = app_dir / ".git" / "mobius-pending-update" / "receipt.json"
   bundle = Path(installed.json()["compiled_path"])
   old_bundle = bundle.read_bytes()
@@ -3077,7 +3135,10 @@ def test_resolved_conflict_changed_candidate_fails_closed_and_stays_retryable(
     replayed = client.post(
       "/api/apps/resolve-update",
       headers=auth,
-      json={"source_dir": str(app_dir)},
+      json={
+        "source_dir": str(app_dir),
+        "reviewed_tree_oid": reviewed.json()["tree_oid"],
+      },
     )
   assert replayed.status_code == 409, replayed.text
   assert replayed.json()["detail"]["code"] == "pending_update_changed"
@@ -3158,10 +3219,17 @@ def test_resolved_conflict_converges_static_metadata_and_bundle_once(
 
   resolver = client.post(
     f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth,
+    json={"resolution_policy": "preserve_local"},
   )
   assert resolver.status_code == 200, resolver.text
   resolved = JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE")
   jsx_file.write_text(resolved)
+  reviewed = client.post(
+    "/api/apps/resolve-update/review",
+    headers=auth,
+    json={"source_dir": str(app_dir)},
+  )
+  assert reviewed.status_code == 200, reviewed.text
 
   replay_responses = {
     base + "index.jsx": (200, jsx_v2.encode()),
@@ -3175,7 +3243,10 @@ def test_resolved_conflict_converges_static_metadata_and_bundle_once(
     replayed = client.post(
       "/api/apps/resolve-update",
       headers=auth,
-      json={"source_dir": str(app_dir)},
+      json={
+        "source_dir": str(app_dir),
+        "reviewed_tree_oid": reviewed.json()["tree_oid"],
+      },
     )
   assert replayed.status_code == 200, replayed.text
   assert replayed.json()["mode"] == "updated"
@@ -3305,11 +3376,10 @@ def test_conflicting_update_returns_conflict_without_auto_spawning(
     db.close()
 
 
-def test_conflict_resolver_click_materializes_merge_for_agent(
+def test_conflict_resolver_requires_policy_before_materializing_merge(
   client, auth, bypass_url_validation, monkeypatch,
 ):
-  """The update attempt is read-only on conflict; the owner's resolver click is
-  the moment a real git merge with markers is materialized for the agent."""
+  """Neither update nor chat open mutates source; the selected policy does."""
   base = "https://click-conflict.test/repo/"
   m = {**MANIFEST_NEWS, "id": "click-conflict", "name": "Click Conflict"}
   r1 = _install_v1(client, auth, base, m, JSX_MULTI)
@@ -3329,15 +3399,23 @@ def test_conflict_resolver_click_materializes_merge_for_agent(
   assert not (app_dir / ".git" / "MERGE_HEAD").exists()
 
   async def fake_start_turn(*args, **kwargs):
+    assert (app_dir / ".git" / "MERGE_HEAD").exists()
     return True
 
   monkeypatch.setattr(
     "app.routes.apps._start_conflict_resolver_turn",
     fake_start_turn,
   )
+  missing_policy = client.post(
+    f"/api/apps/{app_id}/conflict-resolver-chat",
+    headers=auth,
+  )
+  assert missing_policy.status_code == 422, missing_policy.text
+  assert not (app_dir / ".git" / "MERGE_HEAD").exists()
   r3 = client.post(
     f"/api/apps/{app_id}/conflict-resolver-chat",
     headers=auth,
+    json={"resolution_policy": "preserve_local"},
   )
   assert r3.status_code == 200, r3.text
   payload = r3.json()
@@ -3349,6 +3427,121 @@ def test_conflict_resolver_click_materializes_merge_for_agent(
   assert "<<<<<<<" in materialized and ">>>>>>>" in materialized
   assert "AGENT TITLE" in materialized and "UPSTREAM TITLE" in materialized
   assert (app_dir / ".git" / "MERGE_HEAD").exists()
+
+
+def test_preserve_resolution_reviews_whole_tree_and_rejects_drift(
+  client, auth, bypass_url_validation,
+):
+  """Review covers local-only files and finalize binds that exact tree."""
+  base = "https://whole-tree-review.test/repo/"
+  manifest = {**MANIFEST_NEWS, "id": "whole-tree-review"}
+  installed = _install_v1(client, auth, base, manifest, JSX_MULTI)
+  assert installed.status_code == 201, installed.text
+  app_id = installed.json()["id"]
+  app_dir = Path(get_settings().data_dir) / "apps" / "whole-tree-review"
+  entry = app_dir / "index.jsx"
+  entry.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "LOCAL TITLE"))
+  (app_dir / "local-only.js").write_text("export const localOnly = true\n")
+
+  upstream = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
+  conflicted = _update_v2(
+    client, auth, base, {**manifest, "version": "2.0.0"}, upstream,
+  )
+  assert conflicted.status_code == 201, conflicted.text
+  assert conflicted.json()["mode"] == "conflict"
+
+  selected = client.post(
+    "/api/apps/resolve-update/policy",
+    headers=auth,
+    json={"source_dir": str(app_dir), "policy": "preserve_local"},
+  )
+  assert selected.status_code == 200, selected.text
+  entry.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE"))
+
+  reviewed = client.post(
+    "/api/apps/resolve-update/review",
+    headers=auth,
+    json={"source_dir": str(app_dir)},
+  )
+  assert reviewed.status_code == 200, reviewed.text
+  payload = reviewed.json()
+  assert "local-only.js" in payload["diff"]
+  assert "RESOLVED TITLE" in payload["diff"]
+
+  (app_dir / "local-only.js").write_text("export const localOnly = false\n")
+  rejected = client.post(
+    "/api/apps/resolve-update",
+    headers=auth,
+    json={
+      "source_dir": str(app_dir),
+      "reviewed_tree_oid": payload["tree_oid"],
+    },
+  )
+  assert rejected.status_code == 409, rejected.text
+  assert rejected.json()["detail"]["code"] == "reviewed_tree_changed"
+  assert (app_dir / ".git" / "MERGE_HEAD").exists()
+
+
+def test_exact_upstream_policy_replaces_complete_tracked_source_tree(
+  client, auth, bypass_url_validation,
+):
+  """Explicit exact policy removes both conflicting and local-only source."""
+  base = "https://whole-tree-exact.test/repo/"
+  manifest = {**MANIFEST_NEWS, "id": "whole-tree-exact"}
+  installed = _install_v1(client, auth, base, manifest, JSX_MULTI)
+  assert installed.status_code == 201, installed.text
+  app_id = installed.json()["id"]
+  app_dir = Path(get_settings().data_dir) / "apps" / "whole-tree-exact"
+  entry = app_dir / "index.jsx"
+  entry.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "LOCAL TITLE"))
+  local_only = app_dir / "local-only.js"
+  local_only.write_text("export const localOnly = true\n")
+
+  upstream = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
+  manifest_v2 = {**manifest, "version": "2.0.0"}
+  conflicted = _update_v2(client, auth, base, manifest_v2, upstream)
+  assert conflicted.status_code == 201, conflicted.text
+  assert conflicted.json()["mode"] == "conflict"
+
+  selected = client.post(
+    f"/api/apps/{app_id}/conflict-resolver-chat",
+    headers=auth,
+    json={
+      "resolution_policy": "accept_reviewed_upstream_exact",
+    },
+  )
+  assert selected.status_code == 200, selected.text
+  assert entry.read_text() != upstream
+  assert local_only.exists()
+  assert not (app_dir / ".git" / "MERGE_HEAD").exists()
+
+  replay_responses = {
+    base + "index.jsx": (200, upstream.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, b"v2 prompt"),
+    base + "fetch.sh": (200, b""),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(replay_responses),
+  ):
+    finalized = client.post(
+      "/api/apps/resolve-update",
+      headers=auth,
+      json={"source_dir": str(app_dir)},
+    )
+  assert finalized.status_code == 200, finalized.text
+  assert finalized.json()["mode"] == "updated"
+  assert entry.read_text() == upstream
+  assert not local_only.exists()
+  diff = subprocess.run(
+    ["git", "-C", str(app_dir), "diff", "upstream..main"],
+    capture_output=True,
+    text=True,
+    check=True,
+  )
+  assert diff.stdout == ""
+  assert finalized.json()["app"]["id"] == app_id
 
 
 def test_flag_on_conflict_does_not_apply_upstream_capabilities(

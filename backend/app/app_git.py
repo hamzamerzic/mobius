@@ -606,6 +606,13 @@ def _canonical_diff(repo: Path, base_sha: str, head_sha: str) -> bytes | None:
   return proc.stdout if proc.returncode == 0 else None
 
 
+def canonical_diff(
+  source_dir: str | Path, base_ref: str, candidate_tree: str,
+) -> bytes | None:
+  """Return the stable full-tree diff used to bind accepted source reviews."""
+  return _canonical_diff(Path(source_dir), base_ref, candidate_tree)
+
+
 def merge_refs(
   source_dir: str | Path,
   left: str,

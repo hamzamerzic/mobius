@@ -194,6 +194,10 @@ _STATIC_ASSETS_COUNT_MAX = _CONTRACT_STATIC_ASSETS_COUNT_MAX
 _STATIC_ASSETS_TOTAL_MAX = _CONTRACT_STATIC_ASSETS_TOTAL_MAX
 _STATIC_ASSETS_MANIFEST = ".mobius-static-assets.json"
 _PENDING_UPDATE_DIR = "mobius-pending-update"
+UPDATE_RESOLUTION_POLICIES = frozenset({
+  "preserve_local",
+  "accept_reviewed_upstream_exact",
+})
 
 # Sibling source modules a multi-file mini-app declares alongside `entry`
 # (`cards.js`, `utils.js`, …) so Rolldown can bundle the import graph. The shared
@@ -873,13 +877,15 @@ def stage_pending_conflict_update(
     raise ValueError("pending update path must not be a symlink")
   target.mkdir(parents=True, exist_ok=True)
   atomic_write(target / "receipt.json", json.dumps({
-    "schema": 1,
+    "schema": 2,
     "app_id": app_id,
     "upstream_commit": upstream_commit,
     "manifest": manifest,
     "raw_base": raw_base,
     "capability_digest": capability_digest,
     "candidate_digest": candidate_digest,
+    "resolution_policy": None,
+    "reviewed_tree_oid": None,
   }, ensure_ascii=False, sort_keys=True) + "\n")
 
 
@@ -895,9 +901,16 @@ def read_pending_conflict_update_receipt(
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
   except (OSError, ValueError):
     return None
+  schema = receipt.get("schema") if isinstance(receipt, dict) else None
+  policy = (
+    receipt.get("resolution_policy") if schema == 2 else None
+  ) if isinstance(receipt, dict) else None
+  reviewed_tree_oid = (
+    receipt.get("reviewed_tree_oid") if schema == 2 else None
+  ) if isinstance(receipt, dict) else None
   if (
     not isinstance(receipt, dict)
-    or receipt.get("schema") != 1
+    or schema not in (1, 2)
     or receipt.get("app_id") != app_id
     or not upstream_commit
     or receipt.get("upstream_commit") != upstream_commit
@@ -905,8 +918,81 @@ def read_pending_conflict_update_receipt(
     or not isinstance(receipt.get("raw_base"), str)
     or not isinstance(receipt.get("capability_digest"), str)
     or not re.fullmatch(r"[0-9a-f]{64}", receipt.get("candidate_digest", ""))
+    or policy not in ({None} | UPDATE_RESOLUTION_POLICIES)
+    or (
+      reviewed_tree_oid is not None
+      and (
+        not isinstance(reviewed_tree_oid, str)
+        or not re.fullmatch(
+          r"(?:[0-9a-f]{40}|[0-9a-f]{64})", reviewed_tree_oid,
+        )
+      )
+    )
   ):
     return None
+  # Schema 1 receipts can survive a rolling restart. Normalize them in memory;
+  # the first explicit policy choice upgrades the durable receipt atomically.
+  receipt["resolution_policy"] = policy
+  receipt["reviewed_tree_oid"] = reviewed_tree_oid
+  return receipt
+
+
+def _write_pending_conflict_update_receipt(
+  source_dir: str | Path, receipt: dict,
+) -> None:
+  target = Path(source_dir) / ".git" / _PENDING_UPDATE_DIR / "receipt.json"
+  atomic_write(
+    target,
+    json.dumps(receipt, ensure_ascii=False, sort_keys=True) + "\n",
+  )
+
+
+def set_pending_conflict_update_policy(
+  source_dir: str | Path,
+  *,
+  app_id: int,
+  upstream_commit: str,
+  policy: str,
+) -> dict:
+  """Bind one owner-selected whole-tree policy to the pending candidate."""
+  if policy not in UPDATE_RESOLUTION_POLICIES:
+    raise ValueError("invalid update resolution policy")
+  receipt = read_pending_conflict_update_receipt(
+    source_dir,
+    app_id=app_id,
+    upstream_commit=upstream_commit,
+  )
+  if receipt is None:
+    raise ValueError("pending update receipt is missing or stale")
+  policy_changed = receipt["resolution_policy"] != policy
+  receipt["schema"] = 2
+  receipt["resolution_policy"] = policy
+  if policy_changed or policy != "preserve_local":
+    receipt["reviewed_tree_oid"] = None
+  _write_pending_conflict_update_receipt(source_dir, receipt)
+  return receipt
+
+
+def set_pending_conflict_update_review(
+  source_dir: str | Path,
+  *,
+  app_id: int,
+  upstream_commit: str,
+  tree_oid: str,
+) -> dict:
+  """Persist the exact complete source tree the agent reviewed."""
+  if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", tree_oid):
+    raise ValueError("invalid reviewed tree oid")
+  receipt = read_pending_conflict_update_receipt(
+    source_dir,
+    app_id=app_id,
+    upstream_commit=upstream_commit,
+  )
+  if receipt is None or receipt["resolution_policy"] != "preserve_local":
+    raise ValueError("preserve-local policy is not selected")
+  receipt["schema"] = 2
+  receipt["reviewed_tree_oid"] = tree_oid
+  _write_pending_conflict_update_receipt(source_dir, receipt)
   return receipt
 
 
@@ -2359,6 +2445,8 @@ async def install_from_manifest(
   expected_app_id: int | None = None,
   expected_upstream_commit: str | None = None,
   expected_candidate_digest: str | None = None,
+  resolution_policy: str | None = None,
+  reviewed_resolution_tree_oid: str | None = None,
 ) -> InstallResult:
   """Return a structured durable install/update/conflict outcome.
 
@@ -2398,6 +2486,15 @@ async def install_from_manifest(
       we never catch + swallow anything that would land the DB or
       filesystem in a half state.
   """
+  if resolution_policy not in ({None} | UPDATE_RESOLUTION_POLICIES):
+    raise ValueError("invalid update resolution policy")
+  if resolution_policy is not None and expected_upstream_commit is None:
+    raise ValueError("update resolution policy requires a pending replay")
+  if (
+    reviewed_resolution_tree_oid is not None
+    and resolution_policy != "preserve_local"
+  ):
+    raise ValueError("reviewed resolution tree requires preserve-local policy")
   # Phase 1: immutable, review-bound candidate. All network I/O ends here.
   candidate = await _fetch_install_candidate(
     manifest_url=manifest_url,
@@ -2598,6 +2695,21 @@ async def install_from_manifest(
           app_git.commit_local, git_source_dir,
           "local edits before update",
         )
+        if reviewed_resolution_tree_oid is not None:
+          replay_snapshot = await asyncio.to_thread(
+            app_git.snapshot_worktree, git_source_dir,
+          )
+          if replay_snapshot.tree_oid != reviewed_resolution_tree_oid:
+            raise HTTPException(
+              409,
+              detail={
+                "code": "reviewed_tree_changed",
+                "message": (
+                  "The resolved source changed after review. Review the "
+                  "complete tree again before finalizing."
+                ),
+              },
+            )
         # Decide divergence against the PREVIOUS upstream before advancing
         # it. When local `main` never diverged from what upstream last
         # shipped, the new upstream is the answer outright: no three-way
@@ -2621,6 +2733,16 @@ async def install_from_manifest(
             git_source_dir, prev_upstream_commit,
           )
         )
+        if resolution_policy == "accept_reviewed_upstream_exact":
+          if expected_upstream_commit is None:
+            raise RuntimeError(
+              "exact-upstream policy requires a pending update replay"
+            )
+          # The installer already owns the safe whole-tree upstream-wins path:
+          # journaled source replacement, compile, metadata/assets, and one
+          # replay commit. The explicit policy simply selects that path even
+          # though local main diverged; no reset or parallel rollback exists.
+          diverged = False
         if expected_upstream_commit is not None:
           current_upstream = await asyncio.to_thread(
             app_git.head_sha, git_source_dir, app_git.UPSTREAM_BRANCH,
@@ -2672,6 +2794,17 @@ async def install_from_manifest(
             app_git.UPSTREAM_BRANCH,
           )
         dropped_source_paths = previous_upstream_paths - new_upstream_paths
+        if resolution_policy == "accept_reviewed_upstream_exact":
+          local_tree = await asyncio.to_thread(
+            app_git.read_ref_tree, git_source_dir, app_git.LOCAL_BRANCH,
+          )
+          local_source_paths = {
+            rel for rel in local_tree if rel not in _MERGED_NON_SOURCE
+          }
+          # Exact means the complete tracked upstream source tree, including
+          # absence: local-only tracked files must not survive the journaled
+          # write and be recommitted by the replay.
+          dropped_source_paths |= local_source_paths - new_upstream_paths
         if not diverged:
           # No local edits → upstream wins outright for the whole tree; it is
           # `source_tree` as fetched for synthetic repos, or the full
