@@ -106,19 +106,18 @@ export function standardNewChatCandidate(chats, draft, {
     ...reuseOptions,
     activeChatId,
   })
-  const activeDraft = normalizedId(draft?.chatId) === normalizedId(active?.id)
+  if (!active) return null
+
+  const activeDraft = draft
+    && normalizedId(draft.chatId) === normalizedId(active.id)
     && (draft.input || draft.attachments?.length)
     ? draft
     : null
-  if (active) {
-    return {
-      chatId: active.id,
-      source: activeDraft ? 'draft' : 'active',
-      draft: activeDraft || null,
-    }
+  return {
+    chatId: active.id,
+    source: activeDraft ? 'draft' : 'active',
+    draft: activeDraft || null,
   }
-
-  return null
 }
 
 /** Decide whether candidate provenance is enough without a server round-trip. */

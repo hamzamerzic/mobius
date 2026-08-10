@@ -28,6 +28,14 @@ test('New chat never promotes an off-screen saved draft', () => {
   }), null)
 })
 
+test('a populated current chat with no draft has no reusable candidate', () => {
+  assert.equal(standardNewChatCandidate([
+    empty('current', { has_messages: true }),
+  ], null, {
+    activeChatId: 'current',
+  }), null)
+})
+
 test('the visible untouched blank outranks an older Standard draft', () => {
   const active = empty('active-blank')
   const olderDraft = empty('older-draft')
