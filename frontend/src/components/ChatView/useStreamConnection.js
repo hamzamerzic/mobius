@@ -133,6 +133,9 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  *                         { question_id, questions: [...] }. Renders a
  *                         card, absorbing the call's own tool_start
  *                         block in place (see streamReducers.js).
+ *   context_compacted     Provider condensed its native context window.
+ *                         Appends a quiet, standalone timeline marker; this
+ *                         is not tool activity or a handoff summary.
  *   queued_turn_starting  Backend about to promote a queued message
  *                         { ts }. Notifies caller via callback.
  *   steered_into_turn     THE CUT. The transcript split has committed: the
@@ -951,6 +954,17 @@ export default function useStreamConnection(chatId, {
                 event,
               ))
             }
+          } else if (event.type === 'context_compacted') {
+            // A first-class chronology boundary: flush prose so the marker
+            // lands exactly where the provider compacted, then append the same
+            // small block shape the backend persists. MsgContent deliberately
+            // renders it outside ActivityStretch and outside MarkerCard.
+            flushBuffer()
+            applyStreamItems(prev => [...prev, {
+              type: 'context_compaction',
+              ...(event.provider ? { provider: event.provider } : {}),
+              ...(event.trigger ? { trigger: event.trigger } : {}),
+            }])
           } else if (event.type === 'tool_start') {
             flushBuffer()
             // Codex identifies Memory here; Claude may add the same marker on

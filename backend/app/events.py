@@ -61,6 +61,7 @@ EventType = Literal[
   "text_final",
   "thinking",
   "text_boundary",
+  "context_compacted",
   "tool_start",
   "tool_input",
   "tool_output",
@@ -240,7 +241,7 @@ def _persisted_block(block: dict) -> dict:
 # Event types that begin (or belong to) a DIFFERENT visible content block and
 # therefore legitimately END a trailing thinking run. This is EXACTLY the set of
 # branches below that APPEND a new sibling block: text, text_final, text_boundary,
-# tool_start, error, question.
+# context_compacted, tool_start, error, question.
 #
 # Every OTHER event type must be TRANSPARENT to thinking coalescing:
 #  - Provider bookkeeping/heartbeats forwarded as "unknown_sdk_event" (a periodic
@@ -258,6 +259,7 @@ _THINKING_INTERRUPTING_TYPES: frozenset[str] = frozenset({
   "text",
   "text_final",
   "text_boundary",
+  "context_compacted",
   "tool_start",
   "question",
   "error",
@@ -914,6 +916,22 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
       assistant_blocks.append({"type": "text_boundary"})
       return True
     return False
+
+  if event_type == "context_compacted":
+    # Provider-native compaction is a chronological product event, not tool
+    # activity and not the readable cross-provider handoff summary stored as a
+    # top-level ``kind=compaction`` message. Keep a deliberately small block so
+    # it survives live snapshots, final persistence, and compact transcript
+    # reads without pretending the provider exposed its private summary.
+    block = {"type": "context_compaction"}
+    provider = event.get("provider")
+    if provider in ("claude", "codex"):
+      block["provider"] = provider
+    trigger = event.get("trigger")
+    if trigger in ("auto", "manual"):
+      block["trigger"] = trigger
+    assistant_blocks.append(block)
+    return True
 
   if event_type in _TOOL_EVENT_TYPES:
     return _process_tool_event(event, assistant_blocks)

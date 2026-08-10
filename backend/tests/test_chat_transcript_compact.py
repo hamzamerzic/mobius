@@ -188,6 +188,29 @@ def test_repeated_activity_metadata_is_bounded_by_variety():
   ] == ["Bash", "Bash", "Edit"]
 
 
+def test_context_compaction_stays_between_separate_activity_runs():
+  blocks = [
+    {"type": "thinking", "duration_ms": 100},
+    {"type": "tool", "tool": "Read", "status": "done"},
+    {"type": "context_compaction", "provider": "codex"},
+    {"type": "thinking", "duration_ms": 200},
+    {"type": "tool", "tool": "Bash", "status": "done"},
+  ]
+
+  compact = compact_messages_for_detail(
+    [{"role": "assistant", "blocks": blocks}],
+    message_offset=7,
+    binding=EMPTY_RECALL_BINDING,
+  )
+
+  assert [block["type"] for block in compact[0]["blocks"]] == [
+    "activity", "context_compaction", "activity",
+  ]
+  assert compact[0]["blocks"][1] == blocks[2]
+  assert compact[0]["blocks"][0]["end"] == 2
+  assert compact[0]["blocks"][2]["start"] == 3
+
+
 def test_long_activity_runs_are_split_into_fetchable_ranges():
   blocks = [
     {

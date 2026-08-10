@@ -717,6 +717,40 @@ def test_thinking_event_after_tool_starts_fresh_block():
   assert [b["duration_ms"] for b in thinking_blocks] == [0, 0]
 
 
+def test_context_compaction_is_a_persistent_thinking_boundary():
+  blocks = []
+  process_event({"type": "thinking", "content": "before", "ts": 1000}, blocks)
+  changed = process_event({
+    "type": "context_compacted",
+    "provider": "codex",
+    "trigger": "auto",
+  }, blocks)
+  process_event({"type": "thinking", "content": "after", "ts": 2000}, blocks)
+
+  assert changed is True
+  assert [block["type"] for block in blocks] == [
+    "thinking", "context_compaction", "thinking",
+  ]
+  assert blocks[1] == {
+    "type": "context_compaction",
+    "provider": "codex",
+    "trigger": "auto",
+  }
+  assert build_assistant_message(blocks)["blocks"][1] == blocks[1]
+
+
+def test_context_compaction_discards_untrusted_display_metadata():
+  blocks = []
+  process_event({
+    "type": "context_compacted",
+    "provider": "other",
+    "trigger": "surprise",
+    "summary": "provider-private text",
+  }, blocks)
+
+  assert blocks == [{"type": "context_compaction"}]
+
+
 def test_thinking_survives_interleaved_unknown_event():
   # A provider `ping` heartbeat is forwarded as an "unknown_sdk_event" and lands
   # BETWEEN two thinking_delta chunks (it can even split mid-word). It must NOT

@@ -16,6 +16,7 @@ import {
 } from './streamReducers.js'
 import { stripAugmentation } from './msgText.js'
 import ErrorCard from './ErrorCard.jsx'
+import ContextCompactionMarker from './ContextCompactionMarker.jsx'
 import { assistantBlockKey } from './streamPromotion.js'
 
 
@@ -151,7 +152,7 @@ function MsgContentInner({
 
     // Render a stretch-breaking block by type. Activity entries (tool/thinking)
     // are folded into an ActivityStretch below; this renders only the `single`
-    // nodes — text, question, error.
+    // nodes — text, question, error, and provider context compaction.
     const renderBlock = (block, i) => {
       if (block.type === 'activity' && Array.isArray(block.entries)) {
         return (
@@ -198,10 +199,18 @@ function MsgContentInner({
           </div>
         )
       }
+      if (block.type === 'context_compaction') {
+        return (
+          <ContextCompactionMarker
+            key={assistantBlockKey(block, i)}
+            block={block}
+          />
+        )
+      }
       // tool + thinking blocks never reach renderBlock: groupActivityRuns folds
       // every contiguous run of them (including a lone one) into a group node,
       // rendered by ActivityStretch below. renderBlock only sees the block types
-      // that BREAK a stretch — text (above), question, and error.
+      // that BREAK a stretch — text/compaction (above), question, and error.
       if (block.type === 'question') {
         // Suppress if this exact question is currently live in
         // streamItems — the streaming <li> is already rendering it.

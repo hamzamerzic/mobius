@@ -1143,6 +1143,61 @@ async def test_run_claude_sdk_turn_requests_summarized_thinking(monkeypatch):
   }
 
 
+@pytest.mark.asyncio
+async def test_precompact_hook_publishes_context_compaction_marker(monkeypatch):
+  captured: dict = {}
+
+  class _FakeClient:
+    def __init__(self, options):
+      captured["options"] = options
+
+    async def connect(self):
+      return None
+
+    async def query(self, message):
+      del message
+
+    async def disconnect(self):
+      return None
+
+    async def receive_response(self):
+      yield ResultMessage(
+        subtype="success",
+        duration_ms=10,
+        duration_api_ms=5,
+        is_error=False,
+        num_turns=1,
+        session_id="sess-compaction",
+        stop_reason="end_turn",
+        total_cost_usd=0.01,
+        usage={"input_tokens": 1, "output_tokens": 1},
+      )
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+  bus = _Bus()
+  await run_claude_sdk_turn(
+    "hello",
+    session_id=None,
+    base_env={},
+    cwd="/data",
+    chat_id="chat-compaction",
+    skill_text="system",
+    bc=bus,
+    pending_questions={},
+    db=None,
+  )
+
+  matcher = captured["options"].hooks["PreCompact"][0]
+  result = await matcher.hooks[0]({"trigger": "manual"}, None, {})
+
+  assert result == {"continue_": True}
+  assert {
+    "type": "context_compacted",
+    "provider": "claude",
+    "trigger": "manual",
+  } in bus.events
+
+
 def test_dispatch_input_json_delta_emits_unknown(monkeypatch):
   monkeypatch.setenv("MOBIUS_EMIT_UNKNOWN", "1")
   bus = _Bus()
