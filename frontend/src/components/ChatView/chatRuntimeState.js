@@ -4,7 +4,7 @@
  */
 
 import { groupActivityRuns } from './activityGrouping.js'
-import { pendingQuestionMessageIndex } from '../../lib/chatDetailCache.js'
+import { hasPendingQuestionMessage } from '../../lib/chatDetailCache.js'
 
 export function isContinuationMessage(message) {
   return message?.kind === 'continuation'
@@ -140,7 +140,7 @@ export function shouldRetireRestoredQuestionSnapshot({
   if (isStreaming || !Array.isArray(streamItems) || streamItems.length === 0) {
     return false
   }
-  if (pendingQuestionMessageIndex(messages, pendingQuestionId) < 0) return false
+  if (!hasPendingQuestionMessage(messages, pendingQuestionId)) return false
   return !streamItems.some(item => (
     item?.type === 'question'
     && item.question_id === pendingQuestionId

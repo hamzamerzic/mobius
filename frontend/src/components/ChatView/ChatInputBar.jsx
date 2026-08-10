@@ -149,7 +149,7 @@ function PrimaryAction({
   submissionBlocked, questionBlocked,
   onSubmit, onStop, onSteer, onToggleVoice,
 }) {
-  if (sending && !hasInput && showSteer) {
+  if (!questionBlocked && sending && !hasInput && showSteer) {
     return (
       <button
         key="primary"

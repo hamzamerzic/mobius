@@ -9,7 +9,7 @@ import {
   messageKey,
   messageMatchesKey,
   optimisticHandoffWindow,
-  pendingQuestionMessageIndex,
+  hasPendingQuestionMessage,
 } from '../../../lib/chatDetailCache.js'
 
 test('cache first paint requires the saved reading coordinate when one exists', () => {
@@ -209,7 +209,7 @@ test('a retained snapshot requires both the row version and pending card', () =>
   }), false)
 })
 
-test('pending question lookup returns the exact unanswered owner row', () => {
+test('pending question lookup requires the exact unanswered owner row', () => {
   const messages = [
     { role: 'user', content: 'choose' },
     {
@@ -217,13 +217,13 @@ test('pending question lookup returns the exact unanswered owner row', () => {
       blocks: [{ type: 'question', question_id: 'question-1', questions: [] }],
     },
   ]
-  assert.equal(pendingQuestionMessageIndex(messages, 'question-1'), 1)
-  assert.equal(pendingQuestionMessageIndex(messages, 'question-2'), -1)
-  assert.equal(pendingQuestionMessageIndex([], 'question-1'), -1)
-  assert.equal(pendingQuestionMessageIndex([{
+  assert.equal(hasPendingQuestionMessage(messages, 'question-1'), true)
+  assert.equal(hasPendingQuestionMessage(messages, 'question-2'), false)
+  assert.equal(hasPendingQuestionMessage([], 'question-1'), false)
+  assert.equal(hasPendingQuestionMessage([{
     ...messages[1],
     blocks: [{ ...messages[1].blocks[0], answers: { pick: 'yes' } }],
-  }], 'question-1'), -1)
+  }], 'question-1'), false)
 })
 
 test('a tail refresh retains every verified older row needed by a saved address', () => {

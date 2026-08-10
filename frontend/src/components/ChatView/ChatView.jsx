@@ -74,7 +74,7 @@ import {
   messageKey,
   messageMatchesKey,
   optimisticHandoffWindow,
-  pendingQuestionMessageIndex,
+  hasPendingQuestionMessage,
 } from '../../lib/chatDetailCache.js'
 import {
   chatSearchRevealFor,
@@ -1058,10 +1058,10 @@ export default function ChatView({
       const hydrationKey = pendingQuestionId ? `${chatId}:${pendingQuestionId}` : null
       if (
         hydrationKey
-        && pendingQuestionMessageIndex(
+        && !hasPendingQuestionMessage(
           messagesRef.current,
           pendingQuestionId,
-        ) < 0
+        )
         && parkedQuestionHydrationRef.current !== hydrationKey
       ) {
         parkedQuestionHydrationRef.current = hydrationKey
@@ -3842,21 +3842,21 @@ export default function ChatView({
   // marker instead of the card's block position is what lets a still-open card
   // trailed by parallel output or a terminal error keep blocking the composer.
   // The live-stream branch covers the window before the question_id persists.
-  const pendingQuestionInStream = activeAssistantIsStreaming
-    && streamItems.some(it => it.type === 'question' && !it.answers)
-  const hasPendingQuestion = pendingQuestionInStream || !!liveQuestionId
+  const pendingStreamQuestion = activeAssistantIsStreaming
+    ? streamItems.find(it => it.type === 'question' && !it.answers)
+    : null
+  const hasPendingQuestion = !!pendingStreamQuestion || !!liveQuestionId
 
   // Answerability id: prefer the durable pending_question_id marker; during the
   // streaming window BEFORE that marker persists (or reaches the client via a
   // runtime poll), fall back to the live streamed question's own id so its card
   // is answerable immediately. This mirrors the composer lock, which already
-  // trusts pendingQuestionInStream. Without it, a freshly-streamed question is
+  // trusts pendingStreamQuestion. Without it, a freshly-streamed question is
   // un-answerable until the marker lands — the regression that broke the
   // AskUserQuestion / Q&A e2e flows.
   const answerableQuestionId = liveQuestionId
-    || (pendingQuestionInStream
-      ? streamItems.find(it => it.type === 'question' && !it.answers)?.question_id ?? null
-      : null)
+    || pendingStreamQuestion?.question_id
+    || null
 
   // A live question parks Codex's JSON-RPC reader inside request_user_input.
   // turn/steer cannot be acknowledged until that question is released, so a

@@ -32,20 +32,17 @@ export function messageMatchesKey(message, index, key) {
   return `${role}-${index}` === target
 }
 
-/** Locate the durable assistant row that owns an unanswered question. */
-export function pendingQuestionMessageIndex(messages, pendingQuestionId) {
-  if (!pendingQuestionId || !Array.isArray(messages)) return -1
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]
-    if (message?.role !== 'assistant') continue
-    const ownsQuestion = (message.blocks || []).some(block => (
+/** True when the durable transcript contains the named unanswered question. */
+export function hasPendingQuestionMessage(messages, pendingQuestionId) {
+  if (!pendingQuestionId || !Array.isArray(messages)) return false
+  return messages.some(message => (
+    message?.role === 'assistant'
+    && (message.blocks || []).some(block => (
       block?.type === 'question'
       && block.question_id === pendingQuestionId
       && !block.answers
     ))
-    if (ownsQuestion) return index
-  }
-  return -1
+  ))
 }
 
 /** Classify the strongest safe entry a canonical detail cache can provide.
@@ -66,10 +63,10 @@ export function chatCacheEntryState(
   }
   if (
     cached.pending_question_id
-    && pendingQuestionMessageIndex(
+    && !hasPendingQuestionMessage(
       cached.messages,
       cached.pending_question_id,
-    ) < 0
+    )
   ) {
     return 'missing'
   }
@@ -125,10 +122,10 @@ export function chatSnapshotMatchesRuntime(cached, runtime) {
     && cached.updated_at === runtime.updated_at
   if (!sameVersion) return false
   return !runtime.pending_question_id
-    || pendingQuestionMessageIndex(
+    || hasPendingQuestionMessage(
       cached.messages,
       runtime.pending_question_id,
-    ) >= 0
+    )
 }
 
 export function chatDetailCacheValue(data = {}) {
