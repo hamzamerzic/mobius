@@ -38,7 +38,7 @@ test('Send, Steer, and Stop reuse one continuously visible primary action', () =
     /if \(sending && !hasInput && showSteer\)[\s\S]*?<button[\s\S]*?<\/button>/,
   )?.[0] || ''
   const stopBlock = inputBar.match(
-    /if \(sending && !hasInput\)[\s\S]*?<button[\s\S]*?<\/button>/,
+    /if \(questionBlocked \|\| \(sending && !hasInput\)\)[\s\S]*?<button[\s\S]*?<\/button>/,
   )?.[0] || ''
   const sendBlock = inputBar.match(
     /if \(hasInput && !listening\)[\s\S]*?<button[\s\S]*?<\/button>/,

@@ -74,6 +74,7 @@ import {
   messageKey,
   messageMatchesKey,
   optimisticHandoffWindow,
+  pendingQuestionMessageIndex,
 } from '../../lib/chatDetailCache.js'
 import {
   chatSearchRevealFor,
@@ -86,7 +87,10 @@ import {
   highlightSearchTerms,
 } from '../../lib/searchTermHighlight.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
-import { sendFailureMessage } from './sendFailure.js'
+import {
+  isPendingQuestionSendFailure,
+  sendFailureMessage,
+} from './sendFailure.js'
 import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, findTrailingAssistantPartialIndex, streamItemsHaveRenderableContent } from './streamPromotion.js'
 import {
   commitAssistantPromotion,
@@ -102,7 +106,7 @@ import {
   isOwnerUserMessage,
   jumpToLatestShown,
   openAppCtaViewModel,
-  pendingQuestionIsHydrated,
+  shouldRetireRestoredQuestionSnapshot,
   shouldShowOpenAppCta,
   shouldAttachRunningStream,
   shouldRetryStopAfterConfirm,
@@ -477,14 +481,9 @@ export default function ChatView({
   const [, setLimitResetClockTick] = useState(0)
   const armedEmbeddedResetRef = useRef(null)
   // The question_id of the AskUserQuestion the runner is currently parked
-  // on, set from the live SSE `question` event (onLiveQuestion). It is a
-  // FAST-PATH HINT only, never the sole gate: the backend does not persist
-  // a `pending_question_id`, so on a fresh load / navigate-back it is null
-  // (we never saw the live event), and answerability falls back to the
-  // durable "tail unanswered question of the last assistant message"
-  // invariant. See isQuestionAnswerable in the render. (The `cached`
-  // read is forward-compat: harmlessly null today, it would pick up a
-  // persisted pending_question_id if one is ever added.)
+  // on. The live SSE event supplies it immediately; the durable runtime marker
+  // restores it on reload and names the exact unanswered card that owns the
+  // composer barrier.
   const [liveQuestionId, setLiveQuestionId] = useState(() => cached?.pending_question_id ?? null)
   // Runtime polling stays small, but a parked question is a transcript-owned
   // control. Keep its necessary detail refresh single-flight per exact owner;
@@ -1059,7 +1058,10 @@ export default function ChatView({
       const hydrationKey = pendingQuestionId ? `${chatId}:${pendingQuestionId}` : null
       if (
         hydrationKey
-        && !pendingQuestionIsHydrated(messagesRef.current, pendingQuestionId)
+        && pendingQuestionMessageIndex(
+          messagesRef.current,
+          pendingQuestionId,
+        ) < 0
         && parkedQuestionHydrationRef.current !== hydrationKey
       ) {
         parkedQuestionHydrationRef.current = hydrationKey
@@ -1825,7 +1827,10 @@ export default function ChatView({
         const latestAnchorMatch = anchorMatchIn(latestCache)
         const latestCoversSavedAnchor = !activationAnchorKey || !!latestAnchorMatch
         remapAnchorMatch(latestAnchorMatch)
-        if (latestCoversSavedAnchor && chatSnapshotMatchesRuntime(latestCache, runtime)) {
+        if (
+          latestCoversSavedAnchor
+          && chatSnapshotMatchesRuntime(latestCache, runtime)
+        ) {
           detailCache = latestCache
           reused = true
         }
@@ -2267,6 +2272,13 @@ export default function ChatView({
       if (usesComposerFiles) restoreFiles(composerFileSnapshot)
     }
 
+    function revealPendingQuestion() {
+      // The 409 is authoritative proof that the durable question barrier owns
+      // this chat. Refresh that transcript surface after rollback so a stale
+      // client reveals the card instead of inviting another impossible send.
+      void fetchMessages({ force: true, authoritative: true })
+    }
+
     // Mint the message's stable identity ONCE, before the queue-vs-fresh
     // branch, so both paths carry the same `cid` from optimistic render
     // through the wire and into persistence. If a prior POST failed after the
@@ -2535,6 +2547,7 @@ export default function ChatView({
           pendingQueue.clearInFlight(queuedMsg.cid)
         }
       } catch (err) {
+        const pendingQuestionBlocked = isPendingQuestionSendFailure(err)
         // Roll back optimistic + restore input.
         if (!directSteer) pendingQueue.cancelByCid(queuedMsg.cid)
         forgetSendIntent({ cid: queuedMsg.cid })
@@ -2548,6 +2561,7 @@ export default function ChatView({
         }
         restoreComposerAfterFailedSend()
         setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
+        if (pendingQuestionBlocked) revealPendingQuestion()
       } finally {
         if (!directSteer
             && queuedSendRequestsRef.current.get(cid) === queueRequest) {
@@ -2714,9 +2728,12 @@ export default function ChatView({
         onFirstMessageRef.current?.()
       }
     } catch (err) {
-      setSending(false)
-      sendingRef.current = false
-      setServerRunningState(false)
+      const pendingQuestionBlocked = isPendingQuestionSendFailure(err)
+      if (!pendingQuestionBlocked) {
+        setSending(false)
+        sendingRef.current = false
+        setServerRunningState(false)
+      }
       if (!continuation) {
         rememberFailedAttempt({
           cid,
@@ -2737,7 +2754,11 @@ export default function ChatView({
         return next
       })
       setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
-      onStreamEndRef.current?.({ continues: false })
+      if (pendingQuestionBlocked) {
+        revealPendingQuestion()
+      } else {
+        onStreamEndRef.current?.({ continues: false })
+      }
     }
     // doSend doesn't need `sending` / `isStreaming` in deps anymore —
     // the guard reads sendingRef/isStreamingRef, and refs are stable.
@@ -2913,6 +2934,10 @@ export default function ChatView({
       // finish and emit its terminal refresh.
       onOwnerActivityRef.current?.()
       if (questionId) setLiveQuestionId(prev => prev === questionId ? null : prev)
+      // A composer send may have discovered this hidden question through the
+      // backend's 409 guard. Its recovery notice is stale once the answer
+      // commits; the preserved draft itself remains untouched.
+      setSendFailure(null)
       return true
     } catch (err) {
       // Restore the exact pre-submit turn state. In particular, reset the
@@ -3207,8 +3232,22 @@ export default function ChatView({
       disconnect({ clearStreaming: true })
       promoteStreamToMessages()
       setSending(false)
-      setServerRunningState(false)
-      setActiveGoalState('')
+      setServerRunningLocalState(false)
+      // Stop has now been confirmed idle by server truth. Retire the durable
+      // question barrier in both mounted state and the warm activation cache;
+      // failed/timed-out Stop paths return above and intentionally retain it.
+      setLiveQuestionId(null)
+      setActiveGoalObjective('')
+      updateChatRuntimeCache(
+        queryClient,
+        chatMessagesQueryKey(chatId),
+        {
+          running: false,
+          pending_question_id: null,
+          activeGoalObjective: '',
+        },
+      )
+      setSendFailure(null)
       // Sync sendingRef to the just-committed state so the synchronous
       // doSend(resendText) call below reads the post-stop value.
       // setSending(false) queues a render — the next render will write
@@ -3777,6 +3816,21 @@ export default function ChatView({
     streamItems,
     turnActive,
   ])
+
+  // A cold parked chat does not own a live socket. If its restored stream
+  // prefix lacks the durable question, retire that regenerable prefix before
+  // Stop or promotion can mutate history from data we already proved stale.
+  // Live sockets keep their buffer because same-turn answer continuation
+  // still promotes from it.
+  const retireRestoredQuestionSnapshot = shouldRetireRestoredQuestionSnapshot({
+    isStreaming,
+    messages,
+    streamItems,
+    pendingQuestionId: liveQuestionId,
+  })
+  useLayoutEffect(() => {
+    if (retireRestoredQuestionSnapshot) clearStreamItems()
+  }, [clearStreamItems, retireRestoredQuestionSnapshot])
 
   // ── Sticky "needs your answer" affordance ──────────────────────────
   // A pending AskUserQuestion freezes the turn until the user answers,
@@ -4434,6 +4488,7 @@ export default function ChatView({
           offline={!online}
           sendFailure={sendFailure}
           submissionBlocked={providerSwitching}
+          questionBlocked={hasPendingQuestion}
           pendingFiles={pendingFiles}
           onAddFiles={handleComposerAddFiles}
           onRemoveFile={handleComposerRemoveFile}

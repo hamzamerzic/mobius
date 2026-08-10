@@ -32,6 +32,22 @@ export function messageMatchesKey(message, index, key) {
   return `${role}-${index}` === target
 }
 
+/** Locate the durable assistant row that owns an unanswered question. */
+export function pendingQuestionMessageIndex(messages, pendingQuestionId) {
+  if (!pendingQuestionId || !Array.isArray(messages)) return -1
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message?.role !== 'assistant') continue
+    const ownsQuestion = (message.blocks || []).some(block => (
+      block?.type === 'question'
+      && block.question_id === pendingQuestionId
+      && !block.answers
+    ))
+    if (ownsQuestion) return index
+  }
+  return -1
+}
+
 /** Classify the strongest safe entry a canonical detail cache can provide.
  *
  * A saved row must be present in the cached window. Exact nested parts are a
@@ -46,6 +62,15 @@ export function chatCacheEntryState(
   savedAnchorHasNestedPart = false,
 ) {
   if (cached?.restorationWindowComplete !== true || !Array.isArray(cached.messages)) {
+    return 'missing'
+  }
+  if (
+    cached.pending_question_id
+    && pendingQuestionMessageIndex(
+      cached.messages,
+      cached.pending_question_id,
+    ) < 0
+  ) {
     return 'missing'
   }
   let containsAnchor = savedAnchorKey == null
@@ -90,13 +115,20 @@ function settledToolBlocks(message) {
 
 // A detail cache carries the Chat row version it was built from. Runtime reads
 // expose the same version without hydrating transcript JSON, so a retained
-// chat can prove that its already-painted messages are still current.
-// Missing versions fail closed during rolling updates and use the full detail
-// path once to seed the contract.
+// chat can prove that its already-painted messages are still current. A
+// pending-question marker additionally requires its actionable card: version
+// equality cannot bless a truncated/poisoned transcript. Missing evidence
+// fails closed and uses the full detail path once to seed the contract.
 export function chatSnapshotMatchesRuntime(cached, runtime) {
-  return typeof cached?.updated_at === 'string'
+  const sameVersion = typeof cached?.updated_at === 'string'
     && typeof runtime?.updated_at === 'string'
     && cached.updated_at === runtime.updated_at
+  if (!sameVersion) return false
+  return !runtime.pending_question_id
+    || pendingQuestionMessageIndex(
+      cached.messages,
+      runtime.pending_question_id,
+    ) >= 0
 }
 
 export function chatDetailCacheValue(data = {}) {

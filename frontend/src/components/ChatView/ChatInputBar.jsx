@@ -146,7 +146,7 @@ function PrimaryActionGlyphs({ action }) {
 
 function PrimaryAction({
   sending, listening, hasInput, hasUploading, offline, showSteer, steerReady,
-  submissionBlocked,
+  submissionBlocked, questionBlocked,
   onSubmit, onStop, onSteer, onToggleVoice,
 }) {
   if (sending && !hasInput && showSteer) {
@@ -169,7 +169,9 @@ function PrimaryAction({
       </button>
     )
   }
-  if (sending && !hasInput) {
+  // A pending question is a protocol barrier, not queueable work. Keep the
+  // draft editable, but let Stop outrank Send until the card is answered.
+  if (questionBlocked || (sending && !hasInput)) {
     return (
       <button
         key="primary"
@@ -463,6 +465,9 @@ function FileChips({ files, onRemove, chatId }) {
  *   submissionBlocked  — true while an atomic provider handoff owns the
  *                        chat; drafting stays available but send/mic-start do
  *                        not race the transition.
+ *   questionBlocked    — true while an unanswered owner question holds the
+ *                        turn; the draft stays editable and Stop owns the
+ *                        primary action until the card is answered.
  *   messageHistory     — visible owner-authored message text, oldest first.
  *   provider           — the chat's provider id ('claude' | 'codex'). Filters
  *                        the "/" menu to commands that actually dispatch on it;
@@ -494,6 +499,7 @@ export default function ChatInputBar({
   offline,
   sendFailure = null,
   submissionBlocked = false,
+  questionBlocked = false,
   pendingFiles,
   onAddFiles,
   onRemoveFile,
@@ -667,6 +673,8 @@ export default function ChatInputBar({
     inputRef?.current?.focus({ preventScroll: true })
   }
 
+  const canSubmit = !submissionBlocked && !questionBlocked
+
   function handleKeyDown(e) {
     // The menu claims Enter and the arrows while it is open — the same keys
     // that otherwise send and walk sent-message history — so it resolves
@@ -764,14 +772,14 @@ export default function ChatInputBar({
       return
     }
     if (action === 'submit-steer') {
-      if (!submissionBlocked) {
+      if (canSubmit) {
         resetMessageHistory()
         onSubmitSteer(e)
       }
       return
     }
     if (action === 'submit') {
-      if (!submissionBlocked) {
+      if (canSubmit) {
         resetMessageHistory()
         onSubmit(e)
       }
@@ -779,6 +787,10 @@ export default function ChatInputBar({
   }
 
   function handleSubmit(e) {
+    if (!canSubmit) {
+      e?.preventDefault?.()
+      return
+    }
     resetMessageHistory()
     onSubmit(e)
   }
@@ -860,6 +872,7 @@ export default function ChatInputBar({
               showSteer={showSteer}
               steerReady={steerReady}
               submissionBlocked={submissionBlocked}
+              questionBlocked={questionBlocked}
               onSubmit={handleSubmit}
               onStop={onStop}
               onSteer={onSteer}
