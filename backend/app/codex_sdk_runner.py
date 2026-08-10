@@ -2209,6 +2209,19 @@ async def run_codex_sdk_turn(
 
         if isinstance(payload, sdk["ContextCompactedNotification"]):
           log.info("Codex context compacted for chat %s", chat_id)
+          try:
+            bc.publish({
+              "type": "context_compacted",
+              "provider": "codex",
+            })
+          except Exception:
+            # Visibility must never interfere with the provider's own
+            # compaction or the rest of its turn.
+            log.warning(
+              "Codex context-compaction marker failed for chat %s",
+              chat_id,
+              exc_info=True,
+            )
           continue
 
         ratelimit_cls = sdk.get("AccountRateLimitsUpdatedNotification")

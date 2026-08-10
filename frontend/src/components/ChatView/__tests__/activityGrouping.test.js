@@ -26,3 +26,15 @@ test('activity grouping handles empty and non-activity-only input', () => {
   assert.deepEqual(groupActivityRuns([]), [])
   assert.deepEqual(groupActivityRuns([question]), [{ single: question }])
 })
+
+test('context compaction breaks activity stretches instead of joining tools', () => {
+  const before = entry('tool', { tool: 'Read' })
+  const compaction = entry('context_compaction', { provider: 'codex' })
+  const after = entry('thinking')
+
+  assert.deepEqual(groupActivityRuns([before, compaction, after]), [
+    { group: [before] },
+    { single: compaction },
+    { group: [after] },
+  ])
+})

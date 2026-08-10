@@ -932,11 +932,11 @@ async def run_claude_sdk_turn(
     del hook_input, tool_use_id, context
     return {"continue_": True}
 
-  # Observability parity with the Codex runner's ContextCompactedNotification
-  # log line. The Claude SDK fires PreCompact before it auto- or manually
-  # compacts the running session; Möbius takes NO action (compaction is the
-  # SDK's own memory management) but records it, so a long Claude chat that
-  # compacts leaves the same operator-facing signal Codex already does.
+  # The Claude SDK fires PreCompact before it auto- or manually compacts the
+  # running session. Möbius does not influence that memory-management action;
+  # it publishes a small product event so the moment is visible in the same
+  # timeline position as Codex's ContextCompactedNotification, then logs it for
+  # operators too.
   # Returns continue_=True — the established "observe and proceed" shape in this
   # file — so compaction is never blocked.
   async def precompact_hook(
@@ -945,10 +945,23 @@ async def run_claude_sdk_turn(
     context: dict[str, Any],
   ) -> dict[str, Any]:
     del tool_use_id, context
+    trigger = _precompact_log_trigger(hook_input)
     log.info(
       "Claude context compacted for chat %s (trigger=%s)",
-      chat_id, _precompact_log_trigger(hook_input),
+      chat_id, trigger,
     )
+    try:
+      event = {"type": "context_compacted", "provider": "claude"}
+      if trigger is not None:
+        event["trigger"] = trigger
+      bc.publish(event)
+    except Exception:
+      # Visibility must never interfere with the provider's own compaction.
+      log.warning(
+        "Claude context-compaction marker failed for chat %s",
+        chat_id,
+        exc_info=True,
+      )
     return {"continue_": True}
 
   # Per-chat model/effort overrides flow in via `agent_settings`

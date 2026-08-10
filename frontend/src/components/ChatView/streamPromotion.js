@@ -51,6 +51,13 @@ export function streamItemToBlock(item, { finalize = true } = {}) {
       ...(item.pause ? { pause: item.pause } : {}),
     }
   }
+  if (item.type === 'context_compaction') {
+    return {
+      type: 'context_compaction',
+      ...(item.provider ? { provider: item.provider } : {}),
+      ...(item.trigger ? { trigger: item.trigger } : {}),
+    }
+  }
   const status = finalize && item.status === 'running' ? 'done' : item.status
   return { type: 'tool', ...item, status }
 }
@@ -129,6 +136,9 @@ function streamBlocksCoverMessageBlocks(msgBlocks, streamBlocks) {
       if (!thinkingBlockCovers(streamBlock, msgBlock)) return false
     } else if (msgBlock.type === 'error') {
       if ((msgBlock.message || '') !== (streamBlock.message || '')) return false
+    } else if (msgBlock.type === 'context_compaction') {
+      if ((msgBlock.provider || '') !== (streamBlock.provider || '')) return false
+      if ((msgBlock.trigger || '') !== (streamBlock.trigger || '')) return false
     } else {
       return false
     }
@@ -157,6 +167,7 @@ function blockWeight(block) {
       + (block.answers ? 20 : 0)
   }
   if (block.type === 'error') return 40 + normalizeMirrorText(block.message).length
+  if (block.type === 'context_compaction') return 20
   return 0
 }
 
@@ -189,6 +200,10 @@ function blocksLookLikeSameTurn(a, b) {
   if (a.type === 'tool') return !!(a.tool && a.tool === b.tool)
   if (a.type === 'question') return questionKey(a) === questionKey(b)
   if (a.type === 'error') return (a.message || '') === (b.message || '')
+  if (a.type === 'context_compaction') {
+    return (a.provider || '') === (b.provider || '')
+      && (a.trigger || '') === (b.trigger || '')
+  }
   return false
 }
 
@@ -249,6 +264,10 @@ export function messageCoversAssistantStream(msg, items) {
     if (block.type === 'tool') return sameToolBlock(msgBlock, block)
     if (block.type === 'question') return questionKey(msgBlock) === questionKey(block)
     if (block.type === 'error') return (msgBlock.message || '') === (block.message || '')
+    if (block.type === 'context_compaction') {
+      return (msgBlock.provider || '') === (block.provider || '')
+        && (msgBlock.trigger || '') === (block.trigger || '')
+    }
     return false
   })
 }

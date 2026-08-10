@@ -54,6 +54,24 @@ test('streamItemsToAssistantPayload preserves text boundaries in legacy content'
   assert.equal(payload.blocks[1].status, 'done')
 })
 
+test('context compaction survives live promotion as its own block', () => {
+  const item = {
+    type: 'context_compaction', provider: 'codex', trigger: 'auto',
+  }
+  const payload = streamItemsToAssistantPayload([
+    { type: 'tool', tool: 'Read', status: 'done' },
+    item,
+    { type: 'text', content: 'continued' },
+  ])
+
+  assert.deepEqual(payload.blocks[1], item)
+  assert.equal(payload.content, 'continued')
+  assert.equal(assistantStreamCoversMessage({
+    role: 'assistant',
+    blocks: [item],
+  }, [item, { type: 'text', content: 'continued' }]), true)
+})
+
 test('source switch preserves the active answer block key namespace', () => {
   const dbBlocks = [
     { type: 'text', content: 'Inspecting' },

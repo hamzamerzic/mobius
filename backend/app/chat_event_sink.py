@@ -241,7 +241,10 @@ class ChatEventSink:
   # here: publish() rejects question events outright — they go through
   # publish_question()'s save-before-broadcast barrier instead.)
   _IMMEDIATE_SAVE_TYPES = frozenset(
-    {"tool_start", "tool_end", "task_start", "task_done", "error"}
+    {
+      "context_compacted", "tool_start", "tool_end", "task_start",
+      "task_done", "error",
+    }
   )
 
   def __init__(
