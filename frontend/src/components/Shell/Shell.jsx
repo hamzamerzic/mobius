@@ -104,7 +104,6 @@ import PaneChatView from './PaneChatView.jsx'
 import {
   BUILDER_CHAT_WORLD,
   FOCUSED_BUILDER_CHAT_SURFACE,
-  STANDARD_CONTENT_SURFACE,
   STANDARD_CHAT_WORLD,
   deriveAppToChatCover,
   deriveChatSurfaceLayers,
@@ -397,8 +396,7 @@ export default function Shell() {
     )
     lastStandardSurfaceRef.current = standardSurface
     const current = appToChatCoverRef.current
-    if (current?.surface === next?.surface
-        && String(current?.appId ?? '') === String(next?.appId ?? '')
+    if (String(current?.appId ?? '') === String(next?.appId ?? '')
         && String(current?.chatId ?? '') === String(next?.chatId ?? '')) return
     appToChatCoverRef.current = next
     setAppToChatCover(next)
@@ -1042,7 +1040,7 @@ export default function Shell() {
     finishDrawerNavigationPresentation()
     const appCover = appToChatCoverRef.current
     if (
-      appCover?.surface === STANDARD_CONTENT_SURFACE
+      appCover
       && String(paneId) === String(paneModel.SINGLE_SLOT_PANE)
       && String(appCover.chatId) === id
     ) {
@@ -3343,11 +3341,11 @@ export default function Shell() {
           const tabKey = `app:${id}`
           const paned = workspaceChromeActive ? visibleTabRects.get(tabKey) : null
           const heldForChat = !paned
-            && appToChatCover?.surface === STANDARD_CONTENT_SURFACE
-            && String(appToChatCover.appId) === String(id)
+            && String(appToChatCover?.appId ?? '') === String(id)
           const fullBleed = !paned && (tabKey === fullBleedKey || heldForChat)
           const surfaceVisible = !!(paned || fullBleed)
           const appSurfaceInert = !surfaceVisible || heldForChat
+          const appRuntimeVisible = visibleAppIds.has(String(id)) && !heldForChat
           const posStyle = paned ? {
             top: paned.y,
             left: paned.x,
@@ -3393,11 +3391,11 @@ export default function Shell() {
               // Settings/immersive-solo/hidden panes exclude it (visibleAppIds).
               // A held app still paints its last frame as a chat handoff cover,
               // but it is no longer an active app runtime.
-              visible={visibleAppIds.has(String(id)) && !heldForChat}
+              visible={appRuntimeVisible}
               // Every visible pane remains painted beneath the modal scrim, but
               // suspend its iframe interaction while the drawer is open OR during any
               // mode scene (cross-origin app interaction is inert throughout).
-              interactive={visibleAppIds.has(String(id)) && !heldForChat
+              interactive={appRuntimeVisible
                 && !navigationSurfaceOpen && !modeBeatActive}
               version={versionForApp(id)}
               appName={app?.name}

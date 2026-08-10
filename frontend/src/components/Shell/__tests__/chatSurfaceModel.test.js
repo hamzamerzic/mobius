@@ -4,7 +4,6 @@ import assert from 'node:assert/strict'
 import {
   BUILDER_CHAT_WORLD,
   FOCUSED_BUILDER_CHAT_SURFACE,
-  STANDARD_CONTENT_SURFACE,
   STANDARD_CHAT_WORLD,
   chatSurfaceKey,
   deriveAppToChatCover,
@@ -189,7 +188,6 @@ test('an app remains a Standard cover until the destination chat is display-read
   )
 
   assert.deepEqual(cover, {
-    surface: STANDARD_CONTENT_SURFACE,
     appId: '39',
     chatId: 'audit',
   })
@@ -200,14 +198,12 @@ test('an app-to-chat cover follows rapid chat navigation without a blank frame',
     standardContentSurface({ single: true, fullBleedKey: 'chat:first' }),
     standardContentSurface({ single: true, fullBleedKey: 'chat:second' }),
     {
-      surface: STANDARD_CONTENT_SURFACE,
       appId: '39',
       chatId: 'first',
     },
   )
 
   assert.deepEqual(cover, {
-    surface: STANDARD_CONTENT_SURFACE,
     appId: '39',
     chatId: 'second',
   })

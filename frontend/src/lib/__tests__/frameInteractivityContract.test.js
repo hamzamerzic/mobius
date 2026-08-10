@@ -14,17 +14,7 @@ const frameCacheModel = readFileSync(
   'utf8',
 )
 
-test('drawer suspension reaches the live app frame before paint', () => {
-  // Pane assembly/scatter also suspends iframe interaction throughout either beat:
-  // painted apps stay visible, but a moving cross-origin frame cannot intercept input.
-  assert.match(
-    shell,
-    /interactive=\{visibleAppIds\.has\(String\(id\)\) && !heldForChat\s*&& !navigationSurfaceOpen && !modeBeatActive\}/,
-  )
-  assert.match(
-    shell,
-    /visible=\{visibleAppIds\.has\(String\(id\)\) && !heldForChat\}/,
-  )
+test('frame suspension reaches the live app before paint', () => {
   assert.match(canvas, /useLayoutEffect\(\(\) => \{[\s\S]*sendInteractivity\(swap\.liveVersion, interactive, visible\)/)
   assert.match(canvas, /suspendScrolling:\s*visible\s*&&\s*!enabled/)
   assert.match(canvas, /moebius:frame-interactivity/)

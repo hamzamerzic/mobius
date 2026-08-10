@@ -8,12 +8,6 @@ export const STANDARD_CHAT_WORLD = 'standard'
 export const BUILDER_CHAT_WORLD = 'builder'
 export const FOCUSED_BUILDER_CHAT_SURFACE = '__builder-focused-chat__'
 
-// Standard's one full-bleed content slot can move directly from an app to a
-// chat. The app remains the visual cover until the destination chat has laid
-// out its restored transcript, so the cover needs a surface identity that is
-// independent from either item's tab key.
-export const STANDARD_CONTENT_SURFACE = 'standard-content'
-
 export function chatSurfaceKey(world, chatId) {
   return `${world}:chat:${chatId}`
 }
@@ -28,7 +22,6 @@ export function standardContentSurface({ single, fullBleedKey }) {
   const match = /^(app|chat):(.+)$/.exec(String(fullBleedKey || ''))
   if (!match) return null
   return {
-    surface: STANDARD_CONTENT_SURFACE,
     kind: match[1],
     id: match[2],
   }
@@ -43,25 +36,18 @@ export function standardContentSurface({ single, fullBleedKey }) {
  * live cover on rapid chat changes so an app never drops away between A -> B.
  */
 export function deriveAppToChatCover(previousSurface, currentSurface, cover) {
-  if (currentSurface?.kind !== 'chat'
-      || currentSurface.surface !== STANDARD_CONTENT_SURFACE) {
-    return null
-  }
+  if (currentSurface?.kind !== 'chat') return null
 
-  if (cover?.surface === currentSurface.surface) {
+  if (cover) {
     return {
       ...cover,
       chatId: currentSurface.id,
     }
   }
 
-  if (previousSurface?.kind !== 'app'
-      || previousSurface.surface !== currentSurface.surface) {
-    return null
-  }
+  if (previousSurface?.kind !== 'app') return null
 
   return {
-    surface: currentSurface.surface,
     appId: previousSurface.id,
     chatId: currentSurface.id,
   }
