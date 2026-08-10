@@ -62,11 +62,13 @@ import {
   createdChatDetailCache,
   currentReusableEmptyChat,
   mergeChatListWithCreatedGuards,
-  mostRecentConcreteChatId,
+  newChatCandidateResolution,
   newChatPresentationIsCurrent,
+  reconcileHydratedNewChatCandidate,
   reconcileCreatedChatGuard,
   rememberCreatedChat,
   reusableChatDetailVerdict,
+  standardNewChatCandidate,
 } from './newChatPolicy.js'
 import {
   forgetConfirmedDeletion,
@@ -82,10 +84,13 @@ import {
 import {
   clearComposerDraft,
   consumeComposerHandoff,
+  readComposerDraft,
+  readComposerDraftAsync,
   stageComposerHandoff,
 } from '../ChatView/composerDraft.js'
 import {
   beginTouchComposerFocusLease,
+  composerFocusLeaseHandoff,
   releaseComposerFocusLease,
 } from './composerFocusLease.js'
 import {
@@ -1028,14 +1033,12 @@ export default function Shell() {
       setNewChatPresentation(current => (
         current === presentation ? releasing : current
       ))
-      // The keyboard lease is deliberately NOT released here. Display-ready only
-      // unblocks the composerRequest (gated on surfaceVisible); the destination
-      // composer accepts focus one animation frame later. Releasing now blurs
-      // the lease a frame early, leaving nothing focused — Android drops and
-      // re-raises the soft keyboard (the New-chat "bounce"). On this success
-      // path the composer's own focus atomically takes the keyboard from the
-      // lease and the lease's onBlur clears it; only the abandon paths (failed
-      // or superseded allocation) release the lease explicitly.
+      // Display readiness owns the lease-to-composer transfer. Requesting focus
+      // when allocation resolves lets ChatView consume it before this boundary,
+      // so a later presentation change can leave the new composer unfocused.
+      // The composer's focus takes the keyboard from the lease atomically; its
+      // onBlur clears the lease, while abandon paths release it explicitly.
+      requestComposer(id, { focus: true })
     }
     finishDrawerNavigationPresentation()
     const appCover = appToChatCoverRef.current
@@ -1047,7 +1050,12 @@ export default function Shell() {
       appToChatCoverRef.current = null
       setAppToChatCover(null)
     }
-  }, [finishDrawerNavigationPresentation, focusedPaneViewIdRef, workspaceStateRef])
+  }, [
+    finishDrawerNavigationPresentation,
+    focusedPaneViewIdRef,
+    requestComposer,
+    workspaceStateRef,
+  ])
 
   const finishNewChatPresentationRelease = useCallback((presentation) => {
     if (!presentation?.releasing || newChatPresentationRef.current !== presentation) return
@@ -2452,14 +2460,13 @@ export default function Shell() {
   // { chatId, reason }: reason is 'offline' | 'inflight' | 'error' when chatId is null,
   // so each caller can react appropriately (a toast vs a retry surface).
   //
-  // `candidate`: an explicitly pre-captured reusable row (the materialize path, which
-  // captured it from the pre-transition active chat). When undefined, derive it fresh
-  // from the current active chat (the user newChat path). The list is only a candidate
-  // source — cross-client sends can make has_messages stale — so online reuse needs one
-  // fresh, bounded detail read; any error/unfamiliar response fails closed to creating.
+  // `candidate`: an explicitly pre-captured identity with its provenance and optional
+  // local draft snapshot. When undefined, derive the current active blank. A plain
+  // active candidate still needs a fresh bounded detail read online; a local draft is
+  // stronger owner intent and resumes directly without sacrificing its data.
   async function resolveNewChatId({ candidate, draft, forceNew, exclude } = {}) {
-    let empty = candidate !== undefined
-      ? candidate
+    const derivedActive = candidate !== undefined
+      ? null
       : currentReusableEmptyChat(chatsRef.current, {
         activeChatId: activeChatIdRef.current,
         draft: !!draft,
@@ -2468,11 +2475,23 @@ export default function Shell() {
         recoveredChatIds: recoveredChatIdsRef.current,
         streamingChatIds: streamingChatIdsRef.current,
       })
-    if (empty && online) {
+    let reusable = candidate !== undefined
+      ? candidate
+      : (derivedActive
+        ? { chatId: derivedActive.id, source: 'active', draft: null }
+        : null)
+    // A non-empty local draft is affirmative owner intent to resume that
+    // compose surface. It stays usable offline and if another device has since
+    // added context; candidates without current-surface provenance are rejected.
+    const candidateResolution = newChatCandidateResolution(reusable, { online })
+    if (candidateResolution === 'reject') {
+      reusable = null
+    }
+    if (reusable && candidateResolution === 'probe') {
       try {
-        const staleEmptyId = empty.id
+        const staleEmptyId = reusable.chatId
         const res = await apiFetch(
-          `/chats/${encodeURIComponent(empty.id)}?limit=1`,
+          `/chats/${encodeURIComponent(staleEmptyId)}?limit=1`,
           { timeoutMs: 5000 },
         )
         let detail = null
@@ -2483,7 +2502,7 @@ export default function Shell() {
           detail,
         })
         if (verdict !== 'empty') {
-          empty = null
+          reusable = null
           reconcileCreatedChatGuard(
             recentlyCreatedChatsRef.current,
             staleEmptyId,
@@ -2518,10 +2537,10 @@ export default function Shell() {
           }
         }
       } catch {
-        empty = null
+        reusable = null
       }
     }
-    if (empty) return { chatId: empty.id, reason: null }
+    if (reusable) return { chatId: reusable.chatId, reason: null }
     // Creating a fresh chat needs the server (POST allocates the row, and a chat is
     // only useful once the server-side agent can run). The reuse branch already handled
     // the offline-friendly case, so reaching here offline means we truly need network.
@@ -2576,8 +2595,11 @@ export default function Shell() {
       // Re-look-up the captured candidate by id (the list may have changed since the
       // request). Missing → no reuse, straight to create. Explicit candidate (may be
       // null) so resolveNewChatId does not re-derive from the now-different active chat.
-      const candidate = pending.candidateId != null
+      const candidateRow = pending.candidateId != null
         ? (chatsRef.current.find(c => String(c.id) === String(pending.candidateId)) || null)
+        : null
+      const candidate = candidateRow
+        ? { chatId: candidateRow.id, source: 'active', draft: null }
         : null
       const { chatId, reason } = pending.resolvedChatId != null
         ? { chatId: pending.resolvedChatId, reason: null }
@@ -2635,8 +2657,8 @@ export default function Shell() {
   async function newChat({ draft, forceNew, exclude, autoSend, focusComposer, recordHistory } = {}) {
     // Keep the active chat when it is still an untouched blank; only POST a
     // fresh row when this explicit New-chat action needs one. Never borrow an
-    // off-screen blank: another browser may have started it while this tab's
-    // chat-list cache still says has_messages=false.
+    // off-screen blank or draft; a local draft only strengthens ownership of
+    // the blank that is already open.
     //
     // `forceNew` bypasses reuse for callers that NEED a fresh row —
     // moebius:new-chat events (the ChatView wouldn't remount on the
@@ -2648,16 +2670,10 @@ export default function Shell() {
     //
     // Resolve chatId BEFORE switching views — setting activeView='chat'
     // with the old chatId causes a visible flash of the previous chat.
-    // Standard mode has one foreground surface. If the owner temporarily
-    // replaced an unfinished blank chat with an app, "New chat" means return to
-    // that in-progress compose surface rather than silently allocate another
-    // blank and strand its saved draft. Builder mode deliberately does NOT take
-    // this branch: opening another chat there is additive by design.
-    //
-    // The history route only supplies a candidate id. The existing list guards
-    // plus fresh detail probe still prove that it is untouched before reuse, so
-    // a send from another browser cannot turn this convenience into reopening a
-    // conversation that has already started.
+    // Standard mode has one foreground surface. New chat may keep the untouched
+    // blank already on that surface, but it must not borrow an off-screen draft
+    // or navigation-history row. Those drafts remain owned by their original
+    // chats and restore when that chat is revisited.
     //
     const ws = workspaceStateRef.current.ws
     // Standard is one destination surface, so acknowledge an explicit New-chat
@@ -2685,29 +2701,71 @@ export default function Shell() {
         current === presentation ? null : current
       ))
     }
+    const standardNewChat = ws.viewMode === 'single' && !draft && !forceNew
+    const reuseOptions = {
+      exclude,
+      recoveredChatIds: recoveredChatIdsRef.current,
+      streamingChatIds: streamingChatIdsRef.current,
+    }
+    // Candidate selection is intentionally scoped to the current surface.
+    // Persisted drafts never turn an explicit New chat action into navigation.
+    let composeCandidate = standardNewChat
+      ? standardNewChatCandidate(chatsRef.current, {
+          chatId: activeChatIdRef.current,
+          ...readComposerDraft(activeChatIdRef.current),
+        }, {
+          ...reuseOptions,
+          activeChatId: activeChatIdRef.current,
+        })
+      : null
+    let leaseCandidate = composeCandidate
+    let leaseInitialValue = composeCandidate?.draft?.input || ''
     // A phone keyboard can only be raised from the tap's live user-activation
-    // task. The modal drawer remains history-open but is no longer displayed,
-    // so no asynchronous traversal can blur this lease before the chat-bound
-    // composer accepts it. The lease also carries any early typing.
+    // task. Prime the lease with the complete resumed text so early typing
+    // extends that draft instead of replacing it.
     const touchFocusLeased = !!focusComposer && beginTouchComposerFocusLease(
       composerFocusLeaseRef.current,
+      { initialValue: leaseInitialValue },
     )
-    const resumeId = (
-      (ws.viewMode === 'single')
-      && activeChatIdRef.current == null
-      && !draft
-      && !forceNew
-    )
-      ? mostRecentConcreteChatId(navStackRef.current)
-      : null
-    const resumeCandidate = resumeId == null
+    if (standardNewChat) {
+      const activeDraft = composeCandidate
+        ? await readComposerDraftAsync(composeCandidate.chatId)
+        : null
+      const hydratedCandidate = standardNewChatCandidate(
+        chatsRef.current,
+        activeDraft && {
+          chatId: composeCandidate.chatId,
+          ...activeDraft,
+        },
+        { ...reuseOptions, activeChatId: activeChatIdRef.current },
+      )
+      const leaseWasEdited = touchFocusLeased
+        && composerFocusLeaseRef.current?.value !== leaseInitialValue
+      const hydration = reconcileHydratedNewChatCandidate(
+        composeCandidate,
+        hydratedCandidate,
+        { leaseWasEdited },
+      )
+      composeCandidate = hydration.candidate
+      if (hydration.primeLease) {
+        leaseCandidate = hydration.candidate
+        leaseInitialValue = hydration.candidate.draft?.input || ''
+        if (touchFocusLeased) {
+          const lease = composerFocusLeaseRef.current
+          lease.value = leaseInitialValue
+          const end = lease.value.length
+          try { lease.setSelectionRange(end, end) } catch {}
+        }
+      } else if (!hydration.candidate && hydratedCandidate?.source === 'draft') {
+        // The owner began a fresh thought before a durable older draft became
+        // discoverable. Keep those as two drafts rather than guessing a merge
+        // and overwriting either one.
+        leaseCandidate = null
+      }
+    }
+    const resumeCandidate = !standardNewChat
       ? undefined
-      : currentReusableEmptyChat(chatsRef.current, {
-        activeChatId: resumeId,
-        exclude,
-        recoveredChatIds: recoveredChatIdsRef.current,
-        streamingChatIds: streamingChatIdsRef.current,
-      })
+      : composeCandidate
     const { chatId, reason } = await resolveNewChatId(
       resumeCandidate === undefined
         ? { draft, forceNew, exclude }
@@ -2752,10 +2810,20 @@ export default function Shell() {
       && !!(draft || forceNew || drawerPushedRef.current || recordHistory)
     const suppliedDraft = draft ? String(draft) : ''
     const leasedDraft = touchFocusLeased ? composerFocusLeaseRef.current?.value || '' : ''
-    const draftText = suppliedDraft || leasedDraft
-    if (draftText) {
-      stageComposerHandoff(chatId, draftText, {
-        autoSend: suppliedDraft ? autoSend : false,
+    const handoff = composerFocusLeaseHandoff({
+      autoSend,
+      initialValue: leaseInitialValue,
+      leaseCandidate,
+      leaseValue: leasedDraft,
+      leased: touchFocusLeased,
+      resolvedChatId: chatId,
+      suppliedDraft,
+    })
+    if (handoff.shouldStage) {
+      stageComposerHandoff(chatId, handoff.text, {
+        allowEmpty: true,
+        attachments: handoff.attachments,
+        autoSend: handoff.autoSend,
       })
     }
     // Keep history writes inside useNavigation so the entry gets its route,
@@ -2790,9 +2858,12 @@ export default function Shell() {
         ))
       }
     }
-    if (focusComposer) {
+    // An immediate Standard presentation owns the keyboard lease until the
+    // destination reports a painted frame. Builder and an already-presented
+    // Standard blank have no pending presentation boundary, so focus now.
+    if (focusComposer && (!presentation || alreadyPresented)) {
       requestComposer(chatId, {
-        draft: draftText || undefined,
+        draft: handoff.shouldStage ? handoff.text : undefined,
         focus: true,
       })
     }
