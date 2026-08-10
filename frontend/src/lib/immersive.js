@@ -9,10 +9,11 @@
 // that VERIFIED event.source === its own iframe's contentWindow — never from
 // the message payload — so a frame can only toggle immersive for itself.
 //
-// The state is the id of the app that currently HOLDS an immersive request,
-// or null. Holding a request is not the same as immersive being APPLIED:
-// application additionally requires that app to be the active canvas (see
-// isImmersiveActive).
+// The state is the app's complete request ({ appId, mode }) or null. Keeping
+// ownership and presentation together prevents a mode from leaking from a
+// previous holder. Holding a request is not the same as immersive being
+// APPLIED: application additionally requires that app to be the active canvas
+// (see isImmersiveActive).
 //
 // Immersive intent is deliberately SESSIONAL, not sticky navigation state.
 // Leaving an app releases its request, and returning does not resurrect a
@@ -22,7 +23,7 @@
 // over merely because its cached iframe stayed mounted. A live frame promotion
 // is the one replay boundary; AppCanvas owns that distinction below.
 
-export function immersiveReducer(immersiveAppId, action) {
+export function immersiveReducer(request, action) {
   switch (action.type) {
     case 'request':
       // value:true grants the requesting app the immersive slot (last
@@ -32,15 +33,23 @@ export function immersiveReducer(immersiveAppId, action) {
       // cleanup-post and on iframe teardown (unmount / eviction / version
       // remount), so "app switch or unmount always restores" holds even
       // though tearing down an iframe never runs the app's own effects.
-      if (action.value) return action.appId
-      return sameApp(immersiveAppId, action.appId) ? null : immersiveAppId
+      if (action.value) {
+        const next = {
+          appId: action.appId,
+          mode: action.mode === 'bar' ? 'bar' : 'full',
+        }
+        return sameApp(request?.appId, next.appId) && request.mode === next.mode
+          ? request
+          : next
+      }
+      return sameApp(request?.appId, action.appId) ? null : request
     case 'exit':
       // The shell's floating exit button — the user always wins. The app
       // is NOT consulted; it only re-enters immersive by posting again
       // (which a mounted app won't do until it remounts).
       return null
     default:
-      return immersiveAppId
+      return request
   }
 }
 
@@ -48,10 +57,10 @@ export function immersiveReducer(immersiveAppId, action) {
 // actually looking at. Everything else — chat, settings, another app —
 // keeps normal chrome, which is what makes app-switch restoration
 // automatic: no event needs to fire, the condition just stops holding.
-export function isImmersiveActive(immersiveAppId, activeView, activeAppId) {
-  return immersiveAppId != null
+export function isImmersiveActive(request, activeView, activeAppId) {
+  return request?.appId != null
     && activeView === 'canvas'
-    && sameApp(immersiveAppId, activeAppId)
+    && sameApp(request.appId, activeAppId)
 }
 
 /**

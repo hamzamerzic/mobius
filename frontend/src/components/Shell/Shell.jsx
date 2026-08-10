@@ -318,8 +318,8 @@ export default function Shell() {
     '--desktop-sidebar-width': `${desktopSidebarWidth}px`,
     '--shell-tabstrip-height': `${paneModel.STRIP_H}px`,
   }), [desktopSidebarWidth])
-  // Immersive mode (moebius:immersive, .pm/128). The state is the id of the app
-  // holding an immersive request (or null); it's APPLIED — bar hidden, canvas
+  // Immersive mode (moebius:immersive, .pm/128). One state value owns the app
+  // id and requested mode; it's APPLIED — bar hidden, canvas
   // full-viewport — only while that app is the active canvas of the FOCUSED
   // pane, so switching to chat/settings/another app restores chrome
   // automatically and switching back re-enters without a re-post. The request
@@ -328,13 +328,9 @@ export default function Shell() {
   // lives there. Declared here (before the content-visibility derivation) so
   // immersive can solo its pane over the whole workspace (§4/§9). Full contract:
   // lib/immersive.js.
-  const [immersiveAppId, dispatchImmersive] = useReducer(immersiveReducer, null)
-  // Which flavor of hidden-bar the current holder asked for: 'full' (games —
-  // full-bleed under the notch) or 'bar' (general apps — hide the toolbar but
-  // keep the status-bar strip, so the app looks like a standalone PWA). Only a
-  // real-time request carries a mode; a lifecycle replay (in-place app update)
-  // omits it and leaves the last mode intact.
-  const [immersiveMode, setImmersiveMode] = useState('full')
+  const [immersiveRequest, dispatchImmersive] = useReducer(immersiveReducer, null)
+  const immersiveAppId = immersiveRequest?.appId ?? null
+  const immersiveMode = immersiveRequest?.mode ?? 'full'
   const [nowPlaying, setNowPlaying] = useState(null)
   const mediaSessionOwnerRef = useRef(null)
   if (!mediaSessionOwnerRef.current) {
@@ -348,8 +344,7 @@ export default function Shell() {
   }, [])
   // Stable identity — AppCanvas's message-listener effect depends on it.
   const handleImmersive = useCallback((appId, value, mode) => {
-    dispatchImmersive({ type: 'request', appId, value })
-    if (value && (mode === 'bar' || mode === 'full')) setImmersiveMode(mode)
+    dispatchImmersive({ type: 'request', appId, value, mode })
   }, [])
   // Immersive is a temporary overlay lease, independent of the durable builder /
   // single worlds. A verified request from the focused app may therefore solo
@@ -358,7 +353,7 @@ export default function Shell() {
   // Settings keeps its builder invariant because isImmersiveActive additionally
   // requires the active shell view to be the requesting canvas, and AppCanvas
   // forwards live requests only from its focused active frame.
-  const immersiveActive = isImmersiveActive(immersiveAppId, activeView, activeAppId)
+  const immersiveActive = isImmersiveActive(immersiveRequest, activeView, activeAppId)
   useLayoutEffect(() => {
     if (!immersiveActive) return
     const drawer = document.getElementById('navigation-drawer')
@@ -3365,8 +3360,9 @@ export default function Shell() {
               offlineCapable={!!app?.offline_capable}
               capabilityContract={app?.capability_contract || null}
               pendingIntent={appIntents[String(id)] || null}
-              immersive={immersiveActive && immersiveMode === 'full' && String(immersiveAppId) === String(id)}
-              barCollapsed={immersiveActive && immersiveMode === 'bar' && String(immersiveAppId) === String(id)}
+              immersiveMode={immersiveActive && String(immersiveAppId) === String(id)
+                ? immersiveMode
+                : null}
               onNavPush={appNavPush}
               onNavPop={appNavPop}
               onNavReset={appNavReset}
