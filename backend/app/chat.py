@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app import (
@@ -3974,15 +3975,18 @@ async def _run_chat_impl_with_db(
   startup_context = ""
   if not session_id and run_policy is None:
     # `build_memory_block` is pure; the activity emit + envelope live here.
-    eligible_chat_ids = {
+    ordered_chat_ids = [
       row[0]
       for row in db.query(models.Chat.id).filter(
         models.Chat.deleted_at.is_(None),
+      ).order_by(
+        func.coalesce(models.Chat.activity_at, models.Chat.updated_at).desc(),
+        models.Chat.id.desc(),
       ).all()
-    }
+    ]
     block = memory.build_memory_block(
       settings.data_dir,
-      eligible_chat_ids=eligible_chat_ids,
+      ordered_chat_ids=ordered_chat_ids,
     )
     ctx = block.text
     # Observability only. Chat-summary injection is core continuity, not graph
