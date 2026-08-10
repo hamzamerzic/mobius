@@ -225,12 +225,12 @@ test('only the painted workspace world can expose its handoff layers', () => {
   )
   assert.match(
     shell,
-    /const appRuntimeVisible = visibleAppIds\.has\(String\(id\)\)[\s\S]*?const appFrameVisible = appRuntimeVisible \|\| heldForChat/,
+    /const appRuntimeVisible = visibleAppIds\.has\(String\(id\)\) && !heldForChat[\s\S]*?const appFrameVisible = appRuntimeVisible \|\| heldForChat/,
     'the visual cover must not turn the outgoing app back into the active runtime',
   )
   assert.match(
     shell,
-    /visible=\{appRuntimeVisible\}[\s\S]*?frameVisible=\{appFrameVisible\}[\s\S]*?interactive=\{appRuntimeVisible && !heldForChat/,
+    /visible=\{appRuntimeVisible\}[\s\S]*?frameVisible=\{appFrameVisible\}[\s\S]*?interactive=\{appRuntimeVisible/,
     'the visually retained app keeps its frame foreground while navigation and interaction stay inactive',
   )
 })

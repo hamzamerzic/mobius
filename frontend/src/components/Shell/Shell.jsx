@@ -3345,7 +3345,7 @@ export default function Shell() {
           const fullBleed = !paned && (tabKey === fullBleedKey || heldForChat)
           const surfaceVisible = !!(paned || fullBleed)
           const appSurfaceInert = !surfaceVisible || heldForChat
-          const appRuntimeVisible = visibleAppIds.has(String(id))
+          const appRuntimeVisible = visibleAppIds.has(String(id)) && !heldForChat
           // The held app is the visual handoff cover. Keep its frame visibly
           // foreground until the chat has painted: apps may legitimately clear
           // their own UI after `frame-visibility:false`, which would otherwise
@@ -3405,7 +3405,7 @@ export default function Shell() {
               // Every visible pane remains painted beneath the modal scrim, but
               // suspend its iframe interaction while the drawer is open OR during any
               // mode scene (cross-origin app interaction is inert throughout).
-              interactive={appRuntimeVisible && !heldForChat
+              interactive={appRuntimeVisible
                 && !navigationSurfaceOpen && !modeBeatActive}
               version={versionForApp(id)}
               appName={app?.name}

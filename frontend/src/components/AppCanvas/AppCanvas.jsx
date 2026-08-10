@@ -243,18 +243,15 @@ const AppCanvas = forwardRef(function AppCanvas({
   // status-bar-preserving chrome collapse, or null. One value keeps safe-area
   // forwarding and the runtime echo from observing contradictory booleans.
   immersiveMode = null,
-  // Whether this app is the active tab of any painted workspace pane. This
-  // owns navigation and capability access; a frame kept briefly as a visual
-  // handoff cover remains inactive here.
-  //
-  // Immersive gating — Shell's immersive holder is GLOBAL
+  // Whether this app owns the focused pane. Shell's immersive holder is GLOBAL
   //     last-writer-wins, so immersive intent may only be forwarded/replayed
   //     while this canvas is active; otherwise a hidden cached app (or its
   //     freshly-promoted rebuild) steals chrome/insets from the app on screen.
   // Defaults true so any caller that omits it keeps apps un-paused (back-compat).
   active = true,
-  // An app visible in a background split still runs and can install nested-view
-  // sentinels. `visible` gates those concerns, while `active`
+  // Whether this app is the active tab of any painted pane. An app visible in a
+  // background split still runs and can install nested-view sentinels. `visible`
+  // gates navigation and capabilities, while `active`
   // (the FOCUSED pane's app) stays focused-pane-only and continues to gate
   // safe-area insets + the immersive holder (global last-writer-wins). Defaults
   // to `active` so a single-pane caller (where visible === focused) is unchanged.
