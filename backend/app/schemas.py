@@ -64,6 +64,9 @@ class InstallPassRedeemRequest(BaseModel):
 # 'none' on both; the agent opts an app in when the partner asks.
 ShareLevel = Literal["none", "read", "write"]
 ChatLogAccess = Literal["none", "summary", "summary_with_deleted"]
+UpdateResolutionPolicy = Literal[
+  "preserve_local", "accept_reviewed_upstream_exact",
+]
 
 
 class AppApply(BaseModel):
@@ -77,6 +80,33 @@ class AppResolveUpdate(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
   source_dir: str = Field(min_length=1, max_length=512)
+  reviewed_tree_oid: str | None = Field(
+    default=None, pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+  )
+
+
+class AppUpdateResolutionPolicy(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+
+  source_dir: str = Field(min_length=1, max_length=512)
+  policy: UpdateResolutionPolicy
+
+
+class AppUpdateResolutionPolicyOut(BaseModel):
+  policy: UpdateResolutionPolicy
+  conflict_paths: list[str] = Field(default_factory=list)
+
+
+class AppUpdateResolutionReview(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+
+  source_dir: str = Field(min_length=1, max_length=512)
+
+
+class AppUpdateResolutionReviewOut(BaseModel):
+  upstream_commit: str
+  tree_oid: str
+  diff: str
 
 
 class AppUpdate(BaseModel):
@@ -410,6 +440,12 @@ class AppConflictResolverChatOut(BaseModel):
   chat_id: str
   created: bool
   started: bool
+
+
+class AppConflictResolverChatRequest(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+
+  resolution_policy: UpdateResolutionPolicy
 
 
 class ProviderCodeRequest(BaseModel):
