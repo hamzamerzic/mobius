@@ -3517,6 +3517,14 @@ async def run_chat(
           "agent scratch release hint skipped chat_id=%s",
           chat_id, exc_info=True,
         )
+    # Parent progress must not wait on optional summary generation.
+    try:
+      if chat_id and disposition in _DELEGATION_WAKE_DISPOSITIONS:
+        from app.delegations import wake_parent_after_child_settled
+        await wake_parent_after_child_settled(chat_id)
+    except Exception:
+      _get_logger().debug("delegation parent-wake skipped", exc_info=True)
+
     # Turn-end chat-note guarantee: when the chat SETTLED (no pending
     # follow-up), the platform's sole publisher updates its three summary
     # granularities. Runs AFTER the reply is sent → no user-facing latency;
@@ -3539,18 +3547,6 @@ async def run_chat(
         )
     except Exception:
       _get_logger().debug("chat-note guarantee skipped", exc_info=True)
-
-    # Auto-wake a delegation's parent chat when the child subagent settles.
-    # Gated to durable, non-resuming terminals; runs after the reply is sent and
-    # is best-effort (like the chat-note guarantee above) so it can never affect
-    # this turn. A non-delegation chat is a single indexed miss and returns fast.
-    try:
-      if chat_id and disposition in _DELEGATION_WAKE_DISPOSITIONS:
-        from app.delegations import wake_parent_after_child_settled
-        await wake_parent_after_child_settled(chat_id)
-    except Exception:
-      _get_logger().debug("delegation parent-wake skipped", exc_info=True)
-
 
 # The durable, settled, non-resuming terminals where a delegation child's
 # result is final and its ChatRun terminal status has committed (FinishRun ran
