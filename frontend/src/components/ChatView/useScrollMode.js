@@ -89,8 +89,19 @@ const PENDING_GESTURE_CAP_MS = 2000
 
 // Physical-bottom transitions are exact reader intent, not the broader
 // "near real-content tail" send heuristic. Allow only subpixel/browser
-// rounding at the scroll extent.
+// rounding at the scroll extent. Used for the explicit "swipe/press at the very
+// clamp" follow claims, NOT for retaining follow once engaged.
 const PHYSICAL_BOTTOM_EPSILON_PX = 4
+
+// Follow-stick band. Adopted from use-stick-to-bottom's STICK_TO_BOTTOM_OFFSET_PX
+// (https://github.com/stackblitz-labs/use-stick-to-bottom): a reader counts as
+// "at the bottom" while within this many pixels of the tail. This replaces the
+// old pixel-exact test that made a fast stream shake the reader out of follow —
+// momentum/content-growth drift of a few dozen pixels is still "the bottom".
+// The reader leaves follow only by an explicit scroll UP (the escape latch),
+// never by drifting inside this band. The jump-to-latest control uses the same
+// band so there is no dead zone between "still following" and "button appears".
+export const FOLLOW_STICK_BAND_PX = 70
 
 // Bounded, content-free diagnostics. Recurring scroll bugs used to require
 // reconstructing races from screenshots and guesses; this keeps the last
@@ -888,14 +899,52 @@ export function modeAfterTerminalLayout(mode, spacerH, layoutStable) {
 }
 
 
-/** Resolve the quiet edge of a real reader gesture. The physical tail is an
- * explicit entrance to following, whether or not reservation remains. */
+/** Resolve the quiet edge of a real reader gesture, using use-stick-to-bottom's
+ * escape-latch semantics rather than a pixel-exact bottom test.
+ *
+ * Stickiness is a latch broken only by an explicit scroll UP (`escaped`).
+ *   - Already following: stay in FOLLOW_BOTTOM unless the reader escaped upward.
+ *     Content growth or downward momentum that drifted the viewport out of the
+ *     band never breaks follow (the layout owner re-glues the tail).
+ *   - Not following: enter FOLLOW_BOTTOM only when the gesture reached the
+ *     bottom band (`reachedNearBottom`) and did not end escaped — i.e. the
+ *     reader scrolled down to the tail.
+ * Anything else holds the exact reader position. */
 export function modeAfterReaderGesture({
-  reachedBottom,
+  escaped,
+  reachedNearBottom,
+  wasFollowing,
   holdMode,
 }) {
-  if (reachedBottom) return { kind: 'FOLLOW_BOTTOM' }
+  const stick = !escaped && (wasFollowing || reachedNearBottom)
+  if (stick) return { kind: 'FOLLOW_BOTTOM' }
   return holdMode || { kind: 'INITIAL' }
+}
+
+
+/** The escape/re-engage direction a raw reader input implies, mirroring
+ * use-stick-to-bottom's wheel + keyboard handling: scrolling UP escapes the
+ * bottom lock, scrolling DOWN re-engages it. Returns null for inputs with no
+ * vertical scroll intent (they neither escape nor re-engage the latch). Read
+ * from the input event itself so a single wheel tick or arrow press flips the
+ * latch immediately, with zero layout cost. */
+export function readerInputEscapeDirection(
+  type,
+  { deltaY = 0, key = '', shiftKey = false } = {},
+) {
+  if (type === 'wheel') {
+    if (deltaY < 0) return 'up'
+    if (deltaY > 0) return 'down'
+    return null
+  }
+  if (type === 'keydown') {
+    if (['ArrowUp', 'PageUp', 'Home'].includes(key)
+        || (shiftKey && [' ', 'Spacebar'].includes(key))) return 'up'
+    if (['ArrowDown', 'PageDown', 'End'].includes(key)
+        || (!shiftKey && [' ', 'Spacebar'].includes(key))) return 'down'
+    return null
+  }
+  return null
 }
 
 
@@ -1280,6 +1329,11 @@ export default function useScrollMode({
   // modeRef remains the synchronous source of truth; visibility still owns
   // spacer and this state is not a second mode machine.
   const [pinModeActive, setPinModeActive] = useState(false)
+  // Reactive mirror of FOLLOW_BOTTOM, used only to render the jump-to-latest
+  // control (contract R5a). modeRef stays the synchronous source of truth; this
+  // is deliberately NOT in the main layout effect's deps, so toggling follow
+  // never reinstalls the scroll controller mid-stream.
+  const [following, setFollowing] = useState(false)
   // Synchronous mirror of `revealed` for reapplyActiveMode, which is called
   // from a ChatView layout effect (a closure that may pre-date the reveal
   // flip). Set inline at every setRevealed(true) so the read is never stale.
@@ -1441,6 +1495,11 @@ export default function useScrollMode({
     const pinOwnedAfter = nextMode?.kind === 'PIN_USER_MSG'
     if (pinOwnedBefore !== pinOwnedAfter) {
       setPinModeActive(pinOwnedAfter)
+    }
+    const followBefore = previousMode?.kind === 'FOLLOW_BOTTOM'
+    const followAfter = nextMode?.kind === 'FOLLOW_BOTTOM'
+    if (followBefore !== followAfter) {
+      setFollowing(followAfter)
     }
     const scrollEl = scrollRef.current
     if (scrollEl) scrollEl.dataset.scrollMode = nextMode.kind
@@ -1739,6 +1798,26 @@ export default function useScrollMode({
       authorityVersion,
     )
     lastAppliedModeRef.current = nextMode
+    persistMode()
+  }, [persistMode, scrollRef, transitionMode, writeMode])
+
+  // The jump-to-latest control: unlike the question/resume nudges (which only
+  // reveal a card as a settled hold), tapping "jump to latest" is an explicit
+  // request to RESUME following, matching use-stick-to-bottom's scrollToBottom.
+  // It re-enters FOLLOW_BOTTOM so a live stream keeps glued afterward; on an
+  // idle chat it simply rests at the tail. Close any open gesture window so the
+  // resulting programmatic scroll is not mistaken for a fresh human gesture.
+  const followLatest = useCallback(() => {
+    const scrollEl = scrollRef.current
+    if (!scrollEl) return
+    discardPendingReaderSettleRef.current?.()
+    gestureWindowUntilRef.current = 0
+    readerIntentVersionRef.current += 1
+    const authorityVersion = readerIntentVersionRef.current
+    readerLocationExplicitRef.current = true
+    const mode = transitionMode({ kind: 'FOLLOW_BOTTOM' }, 'reader:scroll-bottom')
+    writeMode(scrollEl, mode, 'reader:jump-to-latest', authorityVersion)
+    lastAppliedModeRef.current = mode
     persistMode()
   }, [persistMode, scrollRef, transitionMode, writeMode])
 
@@ -2247,7 +2326,11 @@ export default function useScrollMode({
     // Anchor discovery, spacer measurement, mode transition, and persistence
     // run once at the trailing edge instead of on every compositor frame.
     let readerScrollDirty = false
+    // Latches once the gesture reaches the follow-stick band (70px of the tail).
     let readerGestureReachedBottom = false
+    // use-stick-to-bottom's escapedFromLock: set by an explicit scroll UP,
+    // cleared by a scroll DOWN. The sole signal that breaks an engaged follow.
+    let readerGestureEscaped = false
     let readerGestureSequence = null
     let readerSettleTimer = 0
     let disclosureInputOwnsGesture = false
@@ -2257,6 +2340,7 @@ export default function useScrollMode({
       readerSettleTimer = 0
       readerScrollDirty = false
       readerGestureReachedBottom = false
+      readerGestureEscaped = false
       disclosureInputOwnsGesture = false
     }
     discardPendingReaderSettleRef.current = discardPendingReaderSettle
@@ -2266,8 +2350,10 @@ export default function useScrollMode({
       readerSettleTimer = 0
       if (!readerScrollDirty) return
       readerScrollDirty = false
-      const settledAtBottom = readerGestureReachedBottom
+      const settledReachedNearBottom = readerGestureReachedBottom
+      const settledEscaped = readerGestureEscaped
       readerGestureReachedBottom = false
+      readerGestureEscaped = false
 
       // The quiet edge is the gesture/layout ownership handoff. Compute the
       // final semantic location before replaying any deferred layout observer;
@@ -2284,8 +2370,11 @@ export default function useScrollMode({
         // the physical tail instead enters FOLLOW_BOTTOM, including while
         // latest-turn reservation remains.
         const holdMode = anchorModeFromScroll(scrollEl)
+        const wasFollowing = modeRef.current.kind === 'FOLLOW_BOTTOM'
         const settledMode = modeAfterReaderGesture({
-          reachedBottom: settledAtBottom,
+          escaped: settledEscaped,
+          reachedNearBottom: settledReachedNearBottom,
+          wasFollowing,
           holdMode,
         })
         transitionMode(
@@ -2354,6 +2443,21 @@ export default function useScrollMode({
         gestureWindowUntilRef.current,
         performance.now(),
       )
+      // Escape latch (use-stick-to-bottom): a fresh gesture starts un-escaped,
+      // then this input's own vertical direction sets it (scroll up) or clears
+      // it (scroll down). Read straight from the event so a single wheel tick or
+      // arrow press flips follow immediately, at zero layout cost. Disclosure
+      // taps carry no scroll direction and must not disturb the latch.
+      if (!activatesDisclosure) {
+        if (!readerAlreadyOwns) readerGestureEscaped = false
+        const escapeDir = readerInputEscapeDirection(event?.type, {
+          deltaY: event?.deltaY,
+          key: event?.key,
+          shiftKey: event?.shiftKey,
+        })
+        if (escapeDir === 'up') readerGestureEscaped = true
+        else if (escapeDir === 'down') readerGestureEscaped = false
+      }
       if (!readerAlreadyOwns || activatesDisclosure) {
         recordTrace('events', `reader:input-${event?.type || 'unknown'}`, {
           captureGeometry: false,
@@ -2458,6 +2562,15 @@ export default function useScrollMode({
       // outlived the no-scroll dead-man before moving.
       if (gestureWindowUntilRef.current !== Number.POSITIVE_INFINITY
           && !readerScrollDirty) onUserInput(event)
+      // Touch escape latch: a finger moving UP drags content toward the tail —
+      // that is scrolling DOWN, which re-engages follow; a finger moving down is
+      // scrolling UP and escapes. Applied last so the stationary-touch re-arm
+      // above (a fresh onUserInput claim) cannot clobber the direction.
+      if (touchStartY != null) {
+        const fingerDelta = touchStartY - event.clientY
+        if (fingerDelta >= 12) readerGestureEscaped = false
+        else if (fingerDelta <= -12) readerGestureEscaped = true
+      }
     }
     const onPointerUpInput = () => {
       if (!readerScrollDirty) pendingGestureStart = 0
@@ -2608,7 +2721,10 @@ export default function useScrollMode({
         claimedSequence: readerGestureSequence,
         version: readerIntentVersionRef.current,
         reachedBottom: readerGestureReachedBottom,
-        atBottom: distanceToBottom < PHYSICAL_BOTTOM_EPSILON_PX,
+        // Follow-stick band, not the pixel-exact clamp: reaching within 70px of
+        // the tail during the gesture counts as "reached the bottom" so a fast
+        // stream can't shake the reader out of engaging follow.
+        atBottom: distanceToBottom <= FOLLOW_STICK_BAND_PX,
       })
       readerGestureSequence = intent.claimedSequence
       readerGestureReachedBottom = intent.reachedBottom
@@ -2836,6 +2952,8 @@ export default function useScrollMode({
   return {
     gestureWindowUntilRef,
     revealed,
+    following,
+    followLatest,
     anchorPagination,
     captureSendIntent,
     commitSendIntent,
