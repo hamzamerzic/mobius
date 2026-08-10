@@ -2,6 +2,7 @@ import {
   clear as clearIdbStore,
   createStore,
   del as delIdbValue,
+  entries as idbEntries,
   get as getIdbValue,
   set as setIdbValue,
 } from 'idb-keyval'
@@ -228,10 +229,80 @@ export function readComposerDraft(chatId, storage) {
   }
 }
 
-/** Whether this device owns unsent composer content for the chat. */
-export function composerDraftHasContent(chatId, storage) {
-  const draft = readComposerDraft(chatId, storage)
-  return draft.input.length > 0 || draft.attachments.length > 0
+/** Return every known non-empty draft, newest edit first. */
+export function composerDraftSnapshots() {
+  const snapshots = []
+  for (const [chatId, entry] of liveDrafts) {
+    const decoded = decodeDraft(entry.raw)
+    if (!decoded.input && decoded.attachments.length === 0) continue
+    snapshots.push({
+      chatId,
+      input: decoded.input,
+      attachments: decoded.attachments,
+      updatedAt: decoded.updatedAt,
+    })
+  }
+  return snapshots.sort((left, right) => (
+    (right.updatedAt ?? 0) - (left.updatedAt ?? 0)
+    || left.chatId.localeCompare(right.chatId)
+  ))
+}
+
+/**
+ * Hydrate the synchronous draft index from both browser stores.
+ *
+ * New Chat needs a complete device-local view before choosing which compose
+ * surface to resume. The live mirror remains authoritative over hydration, so
+ * an edit or clear racing this read cannot be replaced by an older disk value.
+ */
+export async function hydrateComposerDraftIndex(storage) {
+  const target = availableStorage(storage)
+  if (target) {
+    try {
+      for (let index = 0; index < target.length; index += 1) {
+        const key = target.key(index)
+        if (!key?.startsWith('draft:')) continue
+        const chatId = key.slice('draft:'.length)
+        if (!chatId || liveDrafts.has(chatId)) continue
+        const raw = target.getItem(key)
+        if (raw) {
+          rememberLiveDraft(chatId, raw, 'session')
+        }
+      }
+    } catch { /* unavailable browser storage */ }
+  }
+
+  const generation = durableGeneration
+  let durableEntries = []
+  try { durableEntries = await idbEntries(durableDraftStore) } catch {}
+  if (generation !== durableGeneration) return composerDraftSnapshots()
+
+  const durableByChatId = new Map(durableEntries.map(([key, raw]) => [draftId(key), raw]))
+  for (const [chatId, current] of liveDrafts) {
+    if (current.source !== 'session' || !current.raw) continue
+    const durableRaw = durableByChatId.get(chatId)
+    const currentDecoded = decodeDraft(current.raw)
+    const durableDecoded = decodeDraft(durableRaw)
+    const currentIsLegacy = currentDecoded.updatedAt == null
+    const durableIsNewer = durableRaw && !currentIsLegacy && (
+      (durableDecoded.updatedAt ?? -1) > (currentDecoded.updatedAt ?? -1)
+    )
+    if (durableIsNewer) {
+      rememberLiveDraft(chatId, durableRaw, 'durable')
+      try { target?.setItem(`draft:${chatId}`, durableRaw) } catch {}
+    } else if (durableRaw !== current.raw) {
+      queueDurableDraftWrite(chatId, current.raw)
+    }
+    durableByChatId.delete(chatId)
+  }
+
+  for (const [chatId, raw] of durableByChatId) {
+    if (!raw) continue
+    const current = liveDrafts.get(chatId)
+    if (current?.source === 'live') continue
+    rememberLiveDraft(chatId, raw, 'durable')
+  }
+  return composerDraftSnapshots()
 }
 
 /**
@@ -302,24 +373,17 @@ export function clearComposerDraft(chatId, storage) {
  * a chance to remove the composer.
  */
 export function persistComposerDraft(chatId, input, attachments = [], storage) {
-  // Backward compatibility for callers of the former
-  // persistComposerDraft(chatId, input, storage) signature.
-  const legacyStorage = !Array.isArray(attachments) && storage === undefined
-    ? attachments
-    : undefined
-  const draftAttachments = Array.isArray(attachments) ? attachments : []
-  const storageOverride = storage ?? legacyStorage
-  const useDurableStore = storageOverride === undefined
+  const useDurableStore = storage === undefined
   if (chatId == null) return false
   const key = `draft:${chatId}`
-  const value = encodeDraft(input, draftAttachments)
+  const value = encodeDraft(input, attachments)
 
   if (useDurableStore) {
     rememberLiveDraft(chatId, value, 'live', { advance: true })
     queueDurableDraftWrite(chatId, value)
   }
 
-  const target = availableStorage(storageOverride)
+  const target = availableStorage(storage)
   // Dedicated memory + IndexedDB ownership does not depend on Web Storage
   // being exposed (private/opaque contexts can deny it altogether).
   if (!target) return useDurableStore
@@ -361,10 +425,12 @@ export function persistComposerDraft(chatId, input, attachments = [], storage) {
 export function stageComposerHandoff(
   chatId,
   input,
-  { autoSend = false, storage } = {},
+  { allowEmpty = false, attachments = [], autoSend = false, storage } = {},
 ) {
-  if (chatId == null || typeof input !== 'string' || input.length === 0) return false
-  const persisted = persistComposerDraft(chatId, input, [], storage)
+  if (chatId == null || typeof input !== 'string') return false
+  const hasAttachments = Array.isArray(attachments) && attachments.length > 0
+  if (input.length === 0 && !hasAttachments && !allowEmpty) return false
+  const persisted = persistComposerDraft(chatId, input, attachments, storage)
   const target = availableStorage(storage)
   if (!target) return persisted
 
@@ -372,7 +438,8 @@ export function stageComposerHandoff(
     // A session has one navigation handoff at a time. Retire abandoned keyed
     // autosends before staging the replacement so visiting an older chat later
     // cannot unexpectedly submit a stale approval.
-    const keepAutoSendKey = autoSend
+    const shouldAutoSend = !!input && autoSend
+    const keepAutoSendKey = shouldAutoSend
       ? `${HANDOFF_AUTOSEND_PREFIX}${chatId}`
       : null
     const staleAutoSendKeys = []
@@ -384,8 +451,9 @@ export function stageComposerHandoff(
     }
     for (const key of staleAutoSendKeys) target.removeItem(key)
 
-    target.setItem(PENDING_HANDOFF_KEY, input)
-    if (autoSend) {
+    if (input) target.setItem(PENDING_HANDOFF_KEY, input)
+    else target.removeItem(PENDING_HANDOFF_KEY)
+    if (shouldAutoSend) {
       target.setItem(PENDING_HANDOFF_AUTOSEND_KEY, input)
       target.setItem(`${HANDOFF_AUTOSEND_PREFIX}${chatId}`, input)
     } else {

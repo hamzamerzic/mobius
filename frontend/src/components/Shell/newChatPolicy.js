@@ -88,16 +88,16 @@ export function currentReusableEmptyChat(chats, {
 
 /**
  * Choose the Standard compose surface without applying Builder's add-new rule.
- * Draft ownership is device-local; the caller still freshly verifies any
- * off-screen empty candidate before reuse.
+ * The structured result keeps draft provenance and its complete snapshot
+ * available to focus, offline, and handoff policy downstream.
  */
-export function standardNewChatCandidate(chats, routes, {
+export function standardNewChatCandidate(chats, drafts, {
   activeChatId,
-  hasDraft,
   exclude = null,
   recoveredChatIds = new Set(),
   streamingChatIds = new Set(),
 } = {}) {
+  const snapshots = Array.isArray(drafts) ? drafts : []
   const reuseOptions = {
     exclude,
     recoveredChatIds,
@@ -107,25 +107,54 @@ export function standardNewChatCandidate(chats, routes, {
     ...reuseOptions,
     activeChatId,
   })
-  if (active || typeof hasDraft !== 'function') return active
+  const activeDraft = snapshots.find(
+    draft => normalizedId(draft?.chatId) === normalizedId(active?.id),
+  )
+  if (active) {
+    return {
+      chatId: active.id,
+      source: activeDraft ? 'draft' : 'active',
+      draft: activeDraft || null,
+    }
+  }
 
-  const seen = new Set()
-  const rows = Array.isArray(routes) ? routes : []
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    const route = rows[index]
-    if (route?.view !== 'chat' || route.chatId == null) continue
-    const id = normalizedId(route.chatId)
-    if (!id || seen.has(id)) continue
-    seen.add(id)
-
-    if (!hasDraft(id)) continue
+  for (const draft of snapshots) {
+    const id = normalizedId(draft?.chatId)
+    if (!id) continue
     const candidate = currentReusableEmptyChat(chats, {
       ...reuseOptions,
       activeChatId: id,
     })
-    if (candidate) return candidate
+    if (candidate) {
+      return { chatId: candidate.id, source: 'draft', draft }
+    }
   }
   return null
+}
+
+/** Decide whether candidate provenance is enough without a server round-trip. */
+export function newChatCandidateResolution(candidate, { online } = {}) {
+  if (!candidate) return 'reject'
+  if (candidate.source === 'draft') return 'reuse'
+  if (!online) return candidate.source === 'active' ? 'reuse' : 'reject'
+  return 'probe'
+}
+
+/** Keep an early fresh edit separate when durable discovery arrives late. */
+export function reconcileHydratedNewChatCandidate(
+  currentCandidate,
+  hydratedCandidate,
+  { leaseWasEdited = false } = {},
+) {
+  if (!hydratedCandidate) return { candidate: currentCandidate, primeLease: false }
+  if (!leaseWasEdited) return { candidate: hydratedCandidate, primeLease: true }
+  const conflictsWithDiscoveredDraft = hydratedCandidate.source === 'draft'
+    && (!currentCandidate
+      || normalizedId(currentCandidate.chatId) === normalizedId(hydratedCandidate.chatId))
+  if (conflictsWithDiscoveredDraft && !currentCandidate?.draft) {
+    return { candidate: null, primeLease: false }
+  }
+  return { candidate: currentCandidate, primeLease: false }
 }
 
 /**

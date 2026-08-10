@@ -63,7 +63,9 @@ import {
   currentReusableEmptyChat,
   mergeChatListWithCreatedGuards,
   mostRecentConcreteChatId,
+  newChatCandidateResolution,
   newChatPresentationIsCurrent,
+  reconcileHydratedNewChatCandidate,
   reconcileCreatedChatGuard,
   rememberCreatedChat,
   reusableChatDetailVerdict,
@@ -82,12 +84,14 @@ import {
 } from './chatListProjection.js'
 import {
   clearComposerDraft,
-  composerDraftHasContent,
+  composerDraftSnapshots,
   consumeComposerHandoff,
+  hydrateComposerDraftIndex,
   stageComposerHandoff,
 } from '../ChatView/composerDraft.js'
 import {
   beginTouchComposerFocusLease,
+  composerFocusLeaseHandoff,
   releaseComposerFocusLease,
 } from './composerFocusLease.js'
 import {
@@ -622,6 +626,9 @@ export default function Shell() {
   // still disables sends while unavailable, but does not repeat this status
   // beside the composer.
   const online = useOnlineStatus()
+  useEffect(() => {
+    void hydrateComposerDraftIndex()
+  }, [])
   const chatsLoadedRef = useRef(false)
   const knownExistingOffListChatIdsRef = useRef(new Set())
   // Always-current chats, for reading inside callbacks that may hold a stale
@@ -2418,14 +2425,13 @@ export default function Shell() {
   // { chatId, reason }: reason is 'offline' | 'inflight' | 'error' when chatId is null,
   // so each caller can react appropriately (a toast vs a retry surface).
   //
-  // `candidate`: an explicitly pre-captured reusable row (the materialize path, which
-  // captured it from the pre-transition active chat). When undefined, derive it fresh
-  // from the current active chat (the user newChat path). The list is only a candidate
-  // source — cross-client sends can make has_messages stale — so online reuse needs one
-  // fresh, bounded detail read; any error/unfamiliar response fails closed to creating.
+  // `candidate`: an explicitly pre-captured identity with its provenance and optional
+  // local draft snapshot. When undefined, derive the current active blank. Arbitrary
+  // active/history candidates still need a fresh bounded detail read online; a local
+  // draft is stronger owner intent and resumes directly without sacrificing its data.
   async function resolveNewChatId({ candidate, draft, forceNew, exclude } = {}) {
-    let empty = candidate !== undefined
-      ? candidate
+    const derivedActive = candidate !== undefined
+      ? null
       : currentReusableEmptyChat(chatsRef.current, {
         activeChatId: activeChatIdRef.current,
         draft: !!draft,
@@ -2434,11 +2440,23 @@ export default function Shell() {
         recoveredChatIds: recoveredChatIdsRef.current,
         streamingChatIds: streamingChatIdsRef.current,
       })
-    if (empty && online) {
+    let reusable = candidate !== undefined
+      ? candidate
+      : (derivedActive
+        ? { chatId: derivedActive.id, source: 'active', draft: null }
+        : null)
+    // A non-empty local draft is affirmative owner intent to resume that
+    // compose surface. It stays usable offline and if another device has since
+    // added context; arbitrary history fallbacks still require fresh proof.
+    const candidateResolution = newChatCandidateResolution(reusable, { online })
+    if (candidateResolution === 'reject') {
+      reusable = null
+    }
+    if (reusable && candidateResolution === 'probe') {
       try {
-        const staleEmptyId = empty.id
+        const staleEmptyId = reusable.chatId
         const res = await apiFetch(
-          `/chats/${encodeURIComponent(empty.id)}?limit=1`,
+          `/chats/${encodeURIComponent(staleEmptyId)}?limit=1`,
           { timeoutMs: 5000 },
         )
         let detail = null
@@ -2449,7 +2467,7 @@ export default function Shell() {
           detail,
         })
         if (verdict !== 'empty') {
-          empty = null
+          reusable = null
           reconcileCreatedChatGuard(
             recentlyCreatedChatsRef.current,
             staleEmptyId,
@@ -2484,10 +2502,10 @@ export default function Shell() {
           }
         }
       } catch {
-        empty = null
+        reusable = null
       }
     }
-    if (empty) return { chatId: empty.id, reason: null }
+    if (reusable) return { chatId: reusable.chatId, reason: null }
     // Creating a fresh chat needs the server (POST allocates the row, and a chat is
     // only useful once the server-side agent can run). The reuse branch already handled
     // the offline-friendly case, so reaching here offline means we truly need network.
@@ -2542,8 +2560,11 @@ export default function Shell() {
       // Re-look-up the captured candidate by id (the list may have changed since the
       // request). Missing → no reuse, straight to create. Explicit candidate (may be
       // null) so resolveNewChatId does not re-derive from the now-different active chat.
-      const candidate = pending.candidateId != null
+      const candidateRow = pending.candidateId != null
         ? (chatsRef.current.find(c => String(c.id) === String(pending.candidateId)) || null)
+        : null
+      const candidate = candidateRow
+        ? { chatId: candidateRow.id, source: 'active', draft: null }
         : null
       const { chatId, reason } = pending.resolvedChatId != null
         ? { chatId: pending.resolvedChatId, reason: null }
@@ -2601,8 +2622,8 @@ export default function Shell() {
   async function newChat({ draft, forceNew, exclude, autoSend, focusComposer, recordHistory } = {}) {
     // Keep the active chat when it is still an untouched blank; only POST a
     // fresh row when this explicit New-chat action needs one. Never borrow an
-    // off-screen blank: another browser may have started it while this tab's
-    // chat-list cache still says has_messages=false.
+    // arbitrary off-screen blank: only a non-empty device-local draft is
+    // affirmative owner intent to resume that compose surface.
     //
     // `forceNew` bypasses reuse for callers that NEED a fresh row —
     // moebius:new-chat events (the ChatView wouldn't remount on the
@@ -2651,13 +2672,6 @@ export default function Shell() {
         current === presentation ? null : current
       ))
     }
-    // A phone keyboard can only be raised from the tap's live user-activation
-    // task. The modal drawer remains history-open but is no longer displayed,
-    // so no asynchronous traversal can blur this lease before the chat-bound
-    // composer accepts it. The lease also carries any early typing.
-    const touchFocusLeased = !!focusComposer && beginTouchComposerFocusLease(
-      composerFocusLeaseRef.current,
-    )
     const standardNewChat = ws.viewMode === 'single' && !draft && !forceNew
     const reuseOptions = {
       exclude,
@@ -2668,27 +2682,69 @@ export default function Shell() {
     // at the conversation they are reading. Standard's New chat action should
     // return to the most recently left unfinished composer, not manufacture a
     // second blank and make the saved draft look lost. Builder remains additive.
-    const composeCandidate = standardNewChat
-      ? standardNewChatCandidate(chatsRef.current, navStackRef.current, {
+    let composeCandidate = standardNewChat
+      ? standardNewChatCandidate(chatsRef.current, composerDraftSnapshots(), {
           ...reuseOptions,
           activeChatId: activeChatIdRef.current,
-          hasDraft: composerDraftHasContent,
         })
       : null
+    let leaseCandidate = composeCandidate
+    let leaseInitialValue = composeCandidate?.draft?.input || ''
+    // A phone keyboard can only be raised from the tap's live user-activation
+    // task. Prime the lease with the complete resumed text so early typing
+    // extends that draft instead of replacing it.
+    const touchFocusLeased = !!focusComposer && beginTouchComposerFocusLease(
+      composerFocusLeaseRef.current,
+      { initialValue: leaseInitialValue },
+    )
+    if (standardNewChat) {
+      await hydrateComposerDraftIndex()
+      const hydratedCandidate = standardNewChatCandidate(
+        chatsRef.current,
+        composerDraftSnapshots(),
+        { ...reuseOptions, activeChatId: activeChatIdRef.current },
+      )
+      const leaseWasEdited = touchFocusLeased
+        && composerFocusLeaseRef.current?.value !== leaseInitialValue
+      const hydration = reconcileHydratedNewChatCandidate(
+        composeCandidate,
+        hydratedCandidate,
+        { leaseWasEdited },
+      )
+      composeCandidate = hydration.candidate
+      if (hydration.primeLease) {
+        leaseCandidate = hydration.candidate
+        leaseInitialValue = hydration.candidate.draft?.input || ''
+        if (touchFocusLeased) {
+          const lease = composerFocusLeaseRef.current
+          lease.value = leaseInitialValue
+          const end = lease.value.length
+          try { lease.setSelectionRange(end, end) } catch {}
+        }
+      } else if (!hydration.candidate && hydratedCandidate?.source === 'draft') {
+        // The owner began a fresh thought before a durable older draft became
+        // discoverable. Keep those as two drafts rather than guessing a merge
+        // and overwriting either one.
+        leaseCandidate = null
+      }
+    }
     const resumeId = standardNewChat
       && !composeCandidate
       && activeChatIdRef.current == null
       ? mostRecentConcreteChatId(navStackRef.current)
       : null
+    const historyRow = resumeId == null
+      ? null
+      : currentReusableEmptyChat(chatsRef.current, {
+          ...reuseOptions,
+          activeChatId: resumeId,
+        })
     const resumeCandidate = !standardNewChat
       ? undefined
       : composeCandidate
-        || (resumeId == null
-          ? null
-          : currentReusableEmptyChat(chatsRef.current, {
-              ...reuseOptions,
-              activeChatId: resumeId,
-            }))
+        || (historyRow
+          ? { chatId: historyRow.id, source: 'history', draft: null }
+          : null)
     const { chatId, reason } = await resolveNewChatId(
       resumeCandidate === undefined
         ? { draft, forceNew, exclude }
@@ -2733,10 +2789,20 @@ export default function Shell() {
       && !!(draft || forceNew || drawerPushedRef.current || recordHistory)
     const suppliedDraft = draft ? String(draft) : ''
     const leasedDraft = touchFocusLeased ? composerFocusLeaseRef.current?.value || '' : ''
-    const draftText = suppliedDraft || leasedDraft
-    if (draftText) {
-      stageComposerHandoff(chatId, draftText, {
-        autoSend: suppliedDraft ? autoSend : false,
+    const handoff = composerFocusLeaseHandoff({
+      autoSend,
+      initialValue: leaseInitialValue,
+      leaseCandidate,
+      leaseValue: leasedDraft,
+      leased: touchFocusLeased,
+      resolvedChatId: chatId,
+      suppliedDraft,
+    })
+    if (handoff.shouldStage) {
+      stageComposerHandoff(chatId, handoff.text, {
+        allowEmpty: true,
+        attachments: handoff.attachments,
+        autoSend: handoff.autoSend,
       })
     }
     // Keep history writes inside useNavigation so the entry gets its route,
@@ -2773,7 +2839,7 @@ export default function Shell() {
     }
     if (focusComposer) {
       requestComposer(chatId, {
-        draft: draftText || undefined,
+        draft: handoff.shouldStage ? handoff.text : undefined,
         focus: true,
       })
     }

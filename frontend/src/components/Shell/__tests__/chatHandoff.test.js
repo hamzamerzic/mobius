@@ -260,7 +260,7 @@ test('direct chat actions hand focus to the destination composer', () => {
     /beginTouchComposerFocusLease\([\s\S]*?await resolveNewChatId/,
     'New chat must reserve phone keyboard focus before its first async boundary')
   assert.match(shell,
-    /composerFocusLeaseRef\.current\?\.value[\s\S]*?requestComposer\(chatId, \{[\s\S]*?draft: draftText \|\| undefined,[\s\S]*?focus: true/,
+    /composerFocusLeaseRef\.current\?\.value[\s\S]*?composerFocusLeaseHandoff\(\{[\s\S]*?requestComposer\(chatId, \{[\s\S]*?draft: handoff\.shouldStage \? handoff\.text : undefined,[\s\S]*?focus: true/,
     'New chat must carry early lease typing into the focused destination composer')
   assert.match(shell,
     /className="shell__composer-focus-lease"[\s\S]*?aria-label="New chat message"/,

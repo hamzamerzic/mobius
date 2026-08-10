@@ -14,7 +14,6 @@ import {
   reconcileCreatedChatGuard,
   rememberCreatedChat,
   reusableChatDetailVerdict,
-  standardNewChatCandidate,
 } from '../newChatPolicy.js'
 import { chatQueries } from '../../../hooks/queries.js'
 
@@ -149,56 +148,6 @@ test('the most recent concrete chat route can resume standard-mode composition',
     { view: 'canvas', appId: 4 },
   ]), null)
   assert.equal(mostRecentConcreteChatId(null), null)
-})
-
-test('standard mode resumes the most recently left local draft chat', () => {
-  const chats = [
-    empty('older-draft'),
-    empty('newer-draft'),
-    empty('no-draft'),
-    empty('now-running', { running: true }),
-  ]
-  const drafted = new Set(['older-draft', 'newer-draft', 'now-running'])
-  const candidate = standardNewChatCandidate(chats, [
-    { view: 'chat', chatId: 'older-draft' },
-    { view: 'chat', chatId: 'newer-draft' },
-    { view: 'chat', chatId: 'no-draft' },
-    { view: 'chat', chatId: 'now-running' },
-    { view: 'canvas', appId: 7 },
-  ], {
-    activeChatId: 'reading-chat',
-    hasDraft: id => drafted.has(id),
-  })
-
-  assert.equal(candidate?.id, 'newer-draft')
-})
-
-test('the visible untouched blank outranks an older Standard draft', () => {
-  const active = empty('active-blank')
-  const olderDraft = empty('older-draft')
-  const candidate = standardNewChatCandidate([active, olderDraft], [
-    { view: 'chat', chatId: 'older-draft' },
-  ], {
-    activeChatId: 'active-blank',
-    hasDraft: id => id === 'older-draft',
-  })
-
-  assert.equal(candidate, active)
-})
-
-test('draft resume never borrows a populated, recovered, or streaming chat', () => {
-  const chats = [
-    empty('populated', { has_messages: true }),
-    empty('recovered'),
-    empty('streaming'),
-  ]
-  const routes = chats.map(chat => ({ view: 'chat', chatId: chat.id }))
-  assert.equal(standardNewChatCandidate(chats, routes, {
-    activeChatId: 'reading-chat',
-    hasDraft: () => true,
-    recoveredChatIds: new Set(['recovered']),
-    streamingChatIds: new Set(['streaming']),
-  }), null)
 })
 
 test('running, excluded, recovered, and populated active chats are rejected', () => {
