@@ -67,6 +67,7 @@ import {
   reconcileCreatedChatGuard,
   rememberCreatedChat,
   reusableChatDetailVerdict,
+  standardNewChatCandidate,
 } from './newChatPolicy.js'
 import {
   forgetConfirmedDeletion,
@@ -81,6 +82,7 @@ import {
 } from './chatListProjection.js'
 import {
   clearComposerDraft,
+  composerDraftHasContent,
   consumeComposerHandoff,
   stageComposerHandoff,
 } from '../ChatView/composerDraft.js'
@@ -2656,22 +2658,37 @@ export default function Shell() {
     const touchFocusLeased = !!focusComposer && beginTouchComposerFocusLease(
       composerFocusLeaseRef.current,
     )
-    const resumeId = (
-      (ws.viewMode === 'single')
+    const standardNewChat = ws.viewMode === 'single' && !draft && !forceNew
+    const reuseOptions = {
+      exclude,
+      recoveredChatIds: recoveredChatIdsRef.current,
+      streamingChatIds: streamingChatIdsRef.current,
+    }
+    // Once the owner leaves a blank draft for another chat, activeChatId points
+    // at the conversation they are reading. Standard's New chat action should
+    // return to the most recently left unfinished composer, not manufacture a
+    // second blank and make the saved draft look lost. Builder remains additive.
+    const composeCandidate = standardNewChat
+      ? standardNewChatCandidate(chatsRef.current, navStackRef.current, {
+          ...reuseOptions,
+          activeChatId: activeChatIdRef.current,
+          hasDraft: composerDraftHasContent,
+        })
+      : null
+    const resumeId = standardNewChat
+      && !composeCandidate
       && activeChatIdRef.current == null
-      && !draft
-      && !forceNew
-    )
       ? mostRecentConcreteChatId(navStackRef.current)
       : null
-    const resumeCandidate = resumeId == null
+    const resumeCandidate = !standardNewChat
       ? undefined
-      : currentReusableEmptyChat(chatsRef.current, {
-        activeChatId: resumeId,
-        exclude,
-        recoveredChatIds: recoveredChatIdsRef.current,
-        streamingChatIds: streamingChatIdsRef.current,
-      })
+      : composeCandidate
+        || (resumeId == null
+          ? null
+          : currentReusableEmptyChat(chatsRef.current, {
+              ...reuseOptions,
+              activeChatId: resumeId,
+            }))
     const { chatId, reason } = await resolveNewChatId(
       resumeCandidate === undefined
         ? { draft, forceNew, exclude }

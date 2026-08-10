@@ -228,6 +228,12 @@ export function readComposerDraft(chatId, storage) {
   }
 }
 
+/** Whether this device owns unsent composer content for the chat. */
+export function composerDraftHasContent(chatId, storage) {
+  const draft = readComposerDraft(chatId, storage)
+  return draft.input.length > 0 || draft.attachments.length > 0
+}
+
 /**
  * Resolve the durable fallback after mount without overwriting a newer local
  * edit. Versioned session and IndexedDB values carry the same timestamp, so a

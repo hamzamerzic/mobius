@@ -7,6 +7,7 @@ import {
   _clearComposerDraftMemoryForTests,
   clearComposerDraft,
   clearDurableComposerDrafts,
+  composerDraftHasContent,
   consumeComposerHandoff,
   flushComposerDraftPersistence,
   persistComposerDraft,
@@ -43,6 +44,22 @@ test('persists and clears a chat draft synchronously', () => {
 
   assert.equal(persistComposerDraft('chat-a', '', storage), true)
   assert.equal(storage.getItem('draft:chat-a'), null)
+})
+
+test('reports text and completed attachments as resumable draft content', () => {
+  const storage = storageStub()
+  assert.equal(composerDraftHasContent('draft', storage), false)
+
+  persistComposerDraft('draft', 'unfinished thought', storage)
+  assert.equal(composerDraftHasContent('draft', storage), true)
+
+  persistComposerDraft('draft', '', [{
+    name: 'reference.png', size: 12, mime_type: 'image/png', status: 'done',
+  }], storage)
+  assert.equal(composerDraftHasContent('draft', storage), true)
+
+  persistComposerDraft('draft', '', [], storage)
+  assert.equal(composerDraftHasContent('draft', storage), false)
 })
 
 test('persists uploaded attachments with text and restores a sendable draft', () => {

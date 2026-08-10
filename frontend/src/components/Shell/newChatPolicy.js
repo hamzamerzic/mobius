@@ -87,6 +87,48 @@ export function currentReusableEmptyChat(chats, {
 }
 
 /**
+ * Choose the Standard compose surface without applying Builder's add-new rule.
+ * Draft ownership is device-local; the caller still freshly verifies any
+ * off-screen empty candidate before reuse.
+ */
+export function standardNewChatCandidate(chats, routes, {
+  activeChatId,
+  hasDraft,
+  exclude = null,
+  recoveredChatIds = new Set(),
+  streamingChatIds = new Set(),
+} = {}) {
+  const reuseOptions = {
+    exclude,
+    recoveredChatIds,
+    streamingChatIds,
+  }
+  const active = currentReusableEmptyChat(chats, {
+    ...reuseOptions,
+    activeChatId,
+  })
+  if (active || typeof hasDraft !== 'function') return active
+
+  const seen = new Set()
+  const rows = Array.isArray(routes) ? routes : []
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const route = rows[index]
+    if (route?.view !== 'chat' || route.chatId == null) continue
+    const id = normalizedId(route.chatId)
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+
+    if (!hasDraft(id)) continue
+    const candidate = currentReusableEmptyChat(chats, {
+      ...reuseOptions,
+      activeChatId: id,
+    })
+    if (candidate) return candidate
+  }
+  return null
+}
+
+/**
  * Find the concrete chat route the single-screen world most recently left.
  *
  * The navigation stack is newest-last. Home seed entries intentionally carry
