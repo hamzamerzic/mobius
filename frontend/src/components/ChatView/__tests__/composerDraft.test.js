@@ -6,10 +6,8 @@ import {
   _clearComposerDraftMemoryForTests,
   clearComposerDraft,
   clearDurableComposerDrafts,
-  composerDraftSnapshots,
   consumeComposerHandoff,
   flushComposerDraftPersistence,
-  hydrateComposerDraftIndex,
   persistComposerDraft,
   readComposerHandoff,
   readComposerDraft,
@@ -44,41 +42,6 @@ test('persists and clears a chat draft synchronously', () => {
 
   assert.equal(persistComposerDraft('chat-a', '', [], storage), true)
   assert.equal(storage.getItem('draft:chat-a'), null)
-})
-
-test('hydrates a durable newest-first draft index after document memory resets', async () => {
-  await clearDurableComposerDrafts()
-  persistComposerDraft('older', 'first thought')
-  persistComposerDraft('newer', '', [{
-    name: 'reference.png', size: 12, mime_type: 'image/png', status: 'done',
-  }])
-  await flushComposerDraftPersistence()
-  _clearComposerDraftMemoryForTests()
-
-  const snapshots = await hydrateComposerDraftIndex()
-  assert.deepEqual(snapshots.map(snapshot => snapshot.chatId), ['newer', 'older'])
-  assert.deepEqual(snapshots[0].attachments, [{
-    name: 'reference.png', size: 12, mime_type: 'image/png', status: 'done',
-  }])
-  assert.deepEqual(composerDraftSnapshots(), snapshots)
-  await clearDurableComposerDrafts()
-})
-
-test('draft-index hydration includes legacy session drafts without resurrecting clears', async () => {
-  await clearDurableComposerDrafts()
-  const storage = storageStub({ 'draft:legacy-index': 'keep this too' })
-  assert.deepEqual((await hydrateComposerDraftIndex(storage)).map(d => d.chatId), [
-    'legacy-index',
-  ])
-
-  persistComposerDraft('clear-race', 'remove me')
-  await flushComposerDraftPersistence()
-  _clearComposerDraftMemoryForTests()
-  const hydration = hydrateComposerDraftIndex(storage)
-  clearComposerDraft('clear-race')
-  await hydration
-  assert.equal(composerDraftSnapshots().some(d => d.chatId === 'clear-race'), false)
-  await clearDurableComposerDrafts()
 })
 
 test('persists uploaded attachments with text and restores a sendable draft', () => {
@@ -316,7 +279,7 @@ test('quota recovery sacrifices only transient cache and keeps every owner draft
     _clearComposerDraftMemoryForTests()
     assert.equal(readComposerDraft('chat-d').input, 'old session copy')
     assert.equal(
-      (await hydrateComposerDraftIndex()).find(draft => draft.chatId === 'chat-d')?.input,
+      (await readComposerDraftAsync('chat-d')).input,
       'newest durable copy',
     )
     assert.equal(readComposerDraft('chat-d').input, 'newest durable copy')

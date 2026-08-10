@@ -88,16 +88,15 @@ export function currentReusableEmptyChat(chats, {
 
 /**
  * Choose the Standard compose surface without applying Builder's add-new rule.
- * The structured result keeps draft provenance and its complete snapshot
- * available to focus, offline, and handoff policy downstream.
+ * Only the currently open untouched blank is eligible. Saved drafts belong to
+ * their original chats and must never turn New chat into history navigation.
  */
-export function standardNewChatCandidate(chats, drafts, {
+export function standardNewChatCandidate(chats, draft, {
   activeChatId,
   exclude = null,
   recoveredChatIds = new Set(),
   streamingChatIds = new Set(),
 } = {}) {
-  const snapshots = Array.isArray(drafts) ? drafts : []
   const reuseOptions = {
     exclude,
     recoveredChatIds,
@@ -107,9 +106,10 @@ export function standardNewChatCandidate(chats, drafts, {
     ...reuseOptions,
     activeChatId,
   })
-  const activeDraft = snapshots.find(
-    draft => normalizedId(draft?.chatId) === normalizedId(active?.id),
-  )
+  const activeDraft = normalizedId(draft?.chatId) === normalizedId(active?.id)
+    && (draft.input || draft.attachments?.length)
+    ? draft
+    : null
   if (active) {
     return {
       chatId: active.id,
@@ -118,17 +118,6 @@ export function standardNewChatCandidate(chats, drafts, {
     }
   }
 
-  for (const draft of snapshots) {
-    const id = normalizedId(draft?.chatId)
-    if (!id) continue
-    const candidate = currentReusableEmptyChat(chats, {
-      ...reuseOptions,
-      activeChatId: id,
-    })
-    if (candidate) {
-      return { chatId: candidate.id, source: 'draft', draft }
-    }
-  }
   return null
 }
 
@@ -136,8 +125,8 @@ export function standardNewChatCandidate(chats, drafts, {
 export function newChatCandidateResolution(candidate, { online } = {}) {
   if (!candidate) return 'reject'
   if (candidate.source === 'draft') return 'reuse'
-  if (!online) return candidate.source === 'active' ? 'reuse' : 'reject'
-  return 'probe'
+  if (candidate.source !== 'active') return 'reject'
+  return online ? 'probe' : 'reuse'
 }
 
 /** Keep an early fresh edit separate when durable discovery arrives late. */
@@ -148,32 +137,10 @@ export function reconcileHydratedNewChatCandidate(
 ) {
   if (!hydratedCandidate) return { candidate: currentCandidate, primeLease: false }
   if (!leaseWasEdited) return { candidate: hydratedCandidate, primeLease: true }
-  const conflictsWithDiscoveredDraft = hydratedCandidate.source === 'draft'
-    && (!currentCandidate
-      || normalizedId(currentCandidate.chatId) === normalizedId(hydratedCandidate.chatId))
-  if (conflictsWithDiscoveredDraft && !currentCandidate?.draft) {
+  if (hydratedCandidate.source === 'draft' && !currentCandidate?.draft) {
     return { candidate: null, primeLease: false }
   }
   return { candidate: currentCandidate, primeLease: false }
-}
-
-/**
- * Find the concrete chat route the single-screen world most recently left.
- *
- * The navigation stack is newest-last. Home seed entries intentionally carry
- * no concrete id, so they are skipped along with app/settings routes. This is
- * only a candidate source: callers must still run the normal empty-chat checks
- * and authoritative detail probe before reusing the row.
- */
-export function mostRecentConcreteChatId(routes) {
-  const rows = Array.isArray(routes) ? routes : []
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    const route = rows[index]
-    if (route?.view !== 'chat' || route.chatId == null) continue
-    const id = String(route.chatId).trim()
-    if (id) return id
-  }
-  return null
 }
 
 /**

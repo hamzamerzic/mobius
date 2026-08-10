@@ -14,34 +14,26 @@ const empty = (id, extra = {}) => ({
   ...extra,
 })
 
-test('standard mode resumes the most recently left local draft chat', () => {
+test('New chat never promotes an off-screen saved draft', () => {
   const chats = [
     empty('older-draft'),
     empty('newer-draft'),
     empty('no-draft'),
     empty('now-running', { running: true }),
   ]
-  const candidate = standardNewChatCandidate(chats, [
-    { chatId: 'now-running', input: 'newest but active elsewhere', attachments: [] },
-    { chatId: 'newer-draft', input: 'keep this', attachments: [] },
-    { chatId: 'older-draft', input: 'older', attachments: [] },
-  ], {
+  assert.equal(standardNewChatCandidate(chats, {
+    chatId: 'newer-draft', input: 'keep this', attachments: [],
+  }, {
     activeChatId: 'reading-chat',
-  })
-
-  assert.deepEqual(candidate, {
-    chatId: 'newer-draft',
-    source: 'draft',
-    draft: { chatId: 'newer-draft', input: 'keep this', attachments: [] },
-  })
+  }), null)
 })
 
 test('the visible untouched blank outranks an older Standard draft', () => {
   const active = empty('active-blank')
   const olderDraft = empty('older-draft')
-  const candidate = standardNewChatCandidate([active, olderDraft], [
-    { chatId: 'older-draft', input: 'keep this', attachments: [] },
-  ], {
+  const candidate = standardNewChatCandidate([active, olderDraft], {
+    chatId: 'older-draft', input: 'keep this', attachments: [],
+  }, {
     activeChatId: 'active-blank',
   })
 
@@ -58,10 +50,9 @@ test('draft resume never borrows a populated, recovered, or streaming chat', () 
     empty('recovered'),
     empty('streaming'),
   ]
-  const drafts = chats.map(chat => ({
-    chatId: chat.id, input: 'draft', attachments: [],
-  }))
-  assert.equal(standardNewChatCandidate(chats, drafts, {
+  assert.equal(standardNewChatCandidate(chats, {
+    chatId: 'recovered', input: 'draft', attachments: [],
+  }, {
     activeChatId: 'reading-chat',
     recoveredChatIds: new Set(['recovered']),
     streamingChatIds: new Set(['streaming']),
@@ -75,7 +66,7 @@ test('an active blank with a draft carries its complete resume snapshot', () => 
     input: 'unfinished',
     attachments: [{ name: 'reference.png', status: 'done' }],
   }
-  assert.deepEqual(standardNewChatCandidate([active], [draft], {
+  assert.deepEqual(standardNewChatCandidate([active], draft, {
     activeChatId: 'active',
   }), {
     chatId: 'active',
@@ -84,7 +75,7 @@ test('an active blank with a draft carries its complete resume snapshot', () => 
   })
 })
 
-test('candidate provenance owns offline reuse and authoritative probing', () => {
+test('only current-surface provenance can be reused or probed', () => {
   const active = { chatId: 'active', source: 'active', draft: null }
   const draft = { chatId: 'draft', source: 'draft', draft: { input: 'keep' } }
   const history = { chatId: 'history', source: 'history', draft: null }
@@ -94,30 +85,17 @@ test('candidate provenance owns offline reuse and authoritative probing', () => 
   assert.equal(newChatCandidateResolution(draft, { online: false }), 'reuse')
   assert.equal(newChatCandidateResolution(draft, { online: true }), 'reuse')
   assert.equal(newChatCandidateResolution(history, { online: false }), 'reject')
-  assert.equal(newChatCandidateResolution(history, { online: true }), 'probe')
+  assert.equal(newChatCandidateResolution(history, { online: true }), 'reject')
 })
 
 test('late durable discovery never guesses a merge over early fresh typing', () => {
   const active = { chatId: 'active', source: 'active', draft: null }
   const durable = {
-    chatId: 'durable',
+    chatId: 'active',
     source: 'draft',
     draft: { input: 'older thought', attachments: [] },
   }
   assert.deepEqual(reconcileHydratedNewChatCandidate(active, durable, {
-    leaseWasEdited: true,
-  }), {
-    candidate: active,
-    primeLease: false,
-  })
-  assert.deepEqual(reconcileHydratedNewChatCandidate(active, {
-    ...durable,
-    chatId: 'active',
-  }, { leaseWasEdited: true }), {
-    candidate: null,
-    primeLease: false,
-  })
-  assert.deepEqual(reconcileHydratedNewChatCandidate(null, durable, {
     leaseWasEdited: true,
   }), {
     candidate: null,
@@ -129,7 +107,7 @@ test('late durable discovery never guesses a merge over early fresh typing', () 
     candidate: active,
     primeLease: false,
   })
-  assert.deepEqual(reconcileHydratedNewChatCandidate(null, durable), {
+  assert.deepEqual(reconcileHydratedNewChatCandidate(active, durable), {
     candidate: durable,
     primeLease: true,
   })
