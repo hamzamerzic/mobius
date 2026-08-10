@@ -1006,17 +1006,20 @@ export default function Shell() {
       setNewChatPresentation(current => (
         current === presentation ? releasing : current
       ))
-      // The keyboard lease is deliberately NOT released here. Display-ready only
-      // unblocks the composerRequest (gated on surfaceVisible); the destination
-      // composer accepts focus one animation frame later. Releasing now blurs
-      // the lease a frame early, leaving nothing focused — Android drops and
-      // re-raises the soft keyboard (the New-chat "bounce"). On this success
-      // path the composer's own focus atomically takes the keyboard from the
-      // lease and the lease's onBlur clears it; only the abandon paths (failed
-      // or superseded allocation) release the lease explicitly.
+      // Display readiness owns the lease-to-composer transfer. Requesting focus
+      // when allocation resolves lets ChatView consume it before this boundary,
+      // so a later presentation change can leave the new composer unfocused.
+      // The composer's focus takes the keyboard from the lease atomically; its
+      // onBlur clears the lease, while abandon paths release it explicitly.
+      requestComposer(id, { focus: true })
     }
     finishDrawerNavigationPresentation()
-  }, [finishDrawerNavigationPresentation, focusedPaneViewIdRef, workspaceStateRef])
+  }, [
+    finishDrawerNavigationPresentation,
+    focusedPaneViewIdRef,
+    requestComposer,
+    workspaceStateRef,
+  ])
 
   const finishNewChatPresentationRelease = useCallback((presentation) => {
     if (!presentation?.releasing || newChatPresentationRef.current !== presentation) return
@@ -2819,7 +2822,10 @@ export default function Shell() {
         ))
       }
     }
-    if (focusComposer) {
+    // An immediate Standard presentation owns the keyboard lease until the
+    // destination reports a painted frame. Builder and an already-presented
+    // Standard blank have no pending presentation boundary, so focus now.
+    if (focusComposer && (!presentation || alreadyPresented)) {
       requestComposer(chatId, {
         draft: handoff.shouldStage ? handoff.text : undefined,
         focus: true,
