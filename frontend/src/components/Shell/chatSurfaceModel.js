@@ -8,8 +8,63 @@ export const STANDARD_CHAT_WORLD = 'standard'
 export const BUILDER_CHAT_WORLD = 'builder'
 export const FOCUSED_BUILDER_CHAT_SURFACE = '__builder-focused-chat__'
 
+// Standard's one full-bleed content slot can move directly from an app to a
+// chat. The app remains the visual cover until the destination chat has laid
+// out its restored transcript, so the cover needs a surface identity that is
+// independent from either item's tab key.
+export const STANDARD_CONTENT_SURFACE = 'standard-content'
+
 export function chatSurfaceKey(world, chatId) {
   return `${world}:chat:${chatId}`
+}
+
+/**
+ * Describe the item currently occupying Standard's full-bleed content
+ * surface. Settings and the New Chat landing intentionally return null: they
+ * are their own presentation surfaces and never retain an app as a cover.
+ */
+export function standardContentSurface({ single, fullBleedKey }) {
+  if (!single) return null
+  const match = /^(app|chat):(.+)$/.exec(String(fullBleedKey || ''))
+  if (!match) return null
+  return {
+    surface: STANDARD_CONTENT_SURFACE,
+    kind: match[1],
+    id: match[2],
+  }
+}
+
+/**
+ * Keep an app visible only while the next Standard chat reaches display-ready.
+ *
+ * Chat-to-chat transitions already have a retained ChatView cover. A direct
+ * app-to-chat transition has no outgoing ChatView to hold, which otherwise
+ * exposes ChatView's deliberate first-frame transcript settlement. Retarget a
+ * live cover on rapid chat changes so an app never drops away between A -> B.
+ */
+export function deriveAppToChatCover(previousSurface, currentSurface, cover) {
+  if (currentSurface?.kind !== 'chat'
+      || currentSurface.surface !== STANDARD_CONTENT_SURFACE) {
+    return null
+  }
+
+  if (cover?.surface === currentSurface.surface) {
+    return {
+      ...cover,
+      chatId: currentSurface.id,
+    }
+  }
+
+  if (previousSurface?.kind !== 'app'
+      || previousSurface.surface !== currentSurface.surface) {
+    return null
+  }
+
+  return {
+    surface: currentSurface.surface,
+    appId: previousSurface.id,
+    chatId: currentSurface.id,
+  }
 }
 
 function activeChatOwner(workspace, paneId) {
