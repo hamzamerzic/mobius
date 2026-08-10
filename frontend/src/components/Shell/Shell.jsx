@@ -105,8 +105,10 @@ import {
   BUILDER_CHAT_WORLD,
   FOCUSED_BUILDER_CHAT_SURFACE,
   STANDARD_CHAT_WORLD,
+  deriveAppToChatCover,
   deriveChatSurfaceLayers,
   deriveChatSurfaceOwners,
+  standardContentSurface,
 } from './chatSurfaceModel.js'
 import { deriveWorkspaceVisualState } from './visualReadiness.js'
 import {
@@ -374,6 +376,31 @@ export default function Shell() {
       effectiveViewMode, focusedPaneViewId],
   )
   const { multiPane, single, focusedActiveKey, fullBleedKey, visibleAppIds } = contentVisibility
+  // ChatView keeps its transcript hidden during the first scroll/stream
+  // settlement frame. Chat-to-chat transitions retain the old ChatView as an
+  // opaque cover, but an app has no ChatView to retain. Hold the outgoing app
+  // until the destination reports display-ready instead of exposing that
+  // intentional partial frame (particularly visible for long, running chats).
+  const standardSurface = useMemo(
+    () => standardContentSurface({ single, fullBleedKey }),
+    [fullBleedKey, single],
+  )
+  const lastStandardSurfaceRef = useRef(null)
+  const appToChatCoverRef = useRef(null)
+  const [appToChatCover, setAppToChatCover] = useState(null)
+  useLayoutEffect(() => {
+    const next = deriveAppToChatCover(
+      lastStandardSurfaceRef.current,
+      standardSurface,
+      appToChatCoverRef.current,
+    )
+    lastStandardSurfaceRef.current = standardSurface
+    const current = appToChatCoverRef.current
+    if (String(current?.appId ?? '') === String(next?.appId ?? '')
+        && String(current?.chatId ?? '') === String(next?.chatId ?? '')) return
+    appToChatCoverRef.current = next
+    setAppToChatCover(next)
+  }, [standardSurface])
   // The EFFECTIVE-mode-gated Settings takeover flag (finding F3): true only when the
   // takeover actually PAINTS — false in builder AND during a single-mode drag
   // preview (effectiveViewMode 'panes'). Every PAINT gate below reads
@@ -1011,6 +1038,15 @@ export default function Shell() {
       // or superseded allocation) release the lease explicitly.
     }
     finishDrawerNavigationPresentation()
+    const appCover = appToChatCoverRef.current
+    if (
+      appCover
+      && String(paneId) === String(paneModel.SINGLE_SLOT_PANE)
+      && String(appCover.chatId) === id
+    ) {
+      appToChatCoverRef.current = null
+      setAppToChatCover(null)
+    }
   }, [finishDrawerNavigationPresentation, focusedPaneViewIdRef, workspaceStateRef])
 
   const finishNewChatPresentationRelease = useCallback((presentation) => {
@@ -3304,9 +3340,12 @@ export default function Shell() {
         {renderedAppIds.map(id => {
           const tabKey = `app:${id}`
           const paned = workspaceChromeActive ? visibleTabRects.get(tabKey) : null
-          const fullBleed = !paned && tabKey === fullBleedKey
+          const heldForChat = !paned
+            && String(appToChatCover?.appId ?? '') === String(id)
+          const fullBleed = !paned && (tabKey === fullBleedKey || heldForChat)
           const surfaceVisible = !!(paned || fullBleed)
-          const appSurfaceInert = !surfaceVisible
+          const appSurfaceInert = !surfaceVisible || heldForChat
+          const appRuntimeVisible = visibleAppIds.has(String(id)) && !heldForChat
           const posStyle = paned ? {
             top: paned.y,
             left: paned.x,
@@ -3325,7 +3364,7 @@ export default function Shell() {
             data-mode-pane-vt={paned ? paned.paneId : undefined}
             className={paned
               ? 'shell__view shell__app-view shell__view--paned'
-              : `shell__view shell__app-view ${fullBleed ? 'shell__view--active' : ''}`}
+              : `shell__view shell__app-view ${fullBleed ? 'shell__view--active' : ''}${heldForChat ? ' shell__app-view--held' : ''}`}
             style={posStyle || undefined}
             inert={appSurfaceInert || undefined}
             aria-hidden={appSurfaceInert ? 'true' : undefined}
@@ -3350,11 +3389,14 @@ export default function Shell() {
               // Visible in ANY pane: gates frame-visibility + nav-push (§5). A
               // background split's app keeps running and can install sentinels;
               // Settings/immersive-solo/hidden panes exclude it (visibleAppIds).
-              visible={visibleAppIds.has(String(id))}
+              // A held app still paints its last frame as a chat handoff cover,
+              // but it is no longer an active app runtime.
+              visible={appRuntimeVisible}
               // Every visible pane remains painted beneath the modal scrim, but
               // suspend its iframe interaction while the drawer is open OR during any
               // mode scene (cross-origin app interaction is inert throughout).
-              interactive={visibleAppIds.has(String(id)) && !navigationSurfaceOpen && !modeBeatActive}
+              interactive={appRuntimeVisible
+                && !navigationSurfaceOpen && !modeBeatActive}
               version={versionForApp(id)}
               appName={app?.name}
               appSlug={app?.slug}
