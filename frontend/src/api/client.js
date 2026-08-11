@@ -419,6 +419,9 @@ export const api = {
         startLogin: () => apiFetch('/auth/provider/codex/login', { method: 'POST' }),
         status: () => apiFetch('/auth/provider/codex/status'),
       },
+      mobius: {
+        startLogin: () => apiFetch('/auth/provider/mobius/login', { method: 'POST' }),
+      },
     },
   },
   chats: {
@@ -500,6 +503,51 @@ export const api = {
     // transfers it to the opaque frame. Keep the stable base URL here; the
     // broker appends the scoped token + versioned service-worker cache key.
     moduleUrl: (appId) => `${BASE}/api/apps/${appId}/module`,
+  },
+  projects: {
+    list: () => apiFetch('/projects'),
+    templates: () => apiFetch('/projects/templates'),
+    legacy: () => apiFetch('/projects/legacy'),
+    detail: (projectId) => apiFetch(`/projects/${encodeURIComponent(projectId)}`),
+    create: (payload) => apiFetch('/projects', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+    importLegacy: (payload) => apiFetch('/projects/import-legacy', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+    update: (projectId, payload) => apiFetch(`/projects/${encodeURIComponent(projectId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+    remove: (projectId) => apiFetch(`/projects/${encodeURIComponent(projectId)}`, {
+      method: 'DELETE',
+    }),
+    recover: (projectId) => apiFetch(`/projects/${encodeURIComponent(projectId)}/recover`, {
+      method: 'POST',
+    }),
+    files: (projectId, path = '') => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/files?path=${encodeURIComponent(path)}`,
+    ),
+    readFile: (projectId, path, { download = false } = {}) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/file?path=${encodeURIComponent(path)}${download ? '&download=true' : ''}`,
+    ),
+    writeFile: (projectId, path, content) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/file?path=${encodeURIComponent(path)}`,
+      { method: 'PUT', body: JSON.stringify({ content }) },
+    ),
+    writeBytes: (projectId, path, bytes) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/file-bytes?path=${encodeURIComponent(path)}`,
+      { method: 'PUT', headers: { 'Content-Type': 'application/octet-stream' }, body: bytes },
+    ),
+    deleteFile: (projectId, path) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/file?path=${encodeURIComponent(path)}`,
+      { method: 'DELETE' },
+    ),
+    downloadUrl: (projectId, path) => (
+      `${BASE}/api/projects/${encodeURIComponent(projectId)}/file?path=${encodeURIComponent(path)}&download=true`
+    ),
   },
   services: {
     surface: async (slug) => jsonOrThrow(

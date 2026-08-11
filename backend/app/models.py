@@ -778,6 +778,44 @@ class App(Base):
   # Server-derived, versioned capability contract reviewed at install time.
   # Null is a legitimate legacy state for apps installed before contracts.
   capability_contract = Column(JSON, nullable=True, default=None)
+  # First-class project types contributed by this installed app. The installer
+  # stores the validated manifest declaration verbatim enough for project
+  # creation to snapshot it; existing projects never read this live value.
+  project_templates_json = Column(JSON, nullable=True, default=None)
+  created_at = Column(DateTime, default=lambda: datetime.now(UTC))
+  updated_at = Column(
+    DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+  )
+
+
+class Project(Base):
+  """A first-class owner workspace with one durable primary chat.
+
+  Project files live outside the database. ``root_path`` is nevertheless
+  explicit so a non-destructive legacy import can point at an existing
+  app-storage ``files/`` tree without moving it. All access goes through the
+  project router's resolved-path confinement.
+  """
+
+  __tablename__ = "projects"
+  __table_args__ = (
+    UniqueConstraint("chat_id", name="uq_projects_chat_id"),
+  )
+
+  id = Column(String(64), primary_key=True)
+  name = Column(String(256), nullable=False)
+  project_type = Column(String(128), nullable=False, default="blank")
+  root_path = Column(String(1024), nullable=False, unique=True)
+  chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=False, unique=True, index=True,
+  )
+  source_app_id = Column(
+    Integer, ForeignKey("apps.id", ondelete="SET NULL"),
+    nullable=True, default=None, index=True,
+  )
+  template_snapshot_json = Column(JSON, nullable=False, default=dict)
+  legacy_source_json = Column(JSON, nullable=True, default=None)
+  deleted_at = Column(DateTime, nullable=True, default=None)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)

@@ -56,10 +56,12 @@ const PLATFORM_APPLY_STATES = new Set([
   'restart_needed', 'activation_needed', 'up_to_date', 'conflict', 'rolled_back',
 ])
 const PROVIDER_CHOICES = [
+  { id: 'mobius', label: 'Möbius trial' },
   { id: 'claude', label: 'Claude Code' },
   { id: 'codex', label: 'OpenAI Codex' },
 ]
 const DEFAULT_BACKGROUND_MODELS = {
+  mobius: 'inkling',
   claude: 'claude-opus-4-8',
   codex: 'gpt-5.6-terra',
 }
@@ -362,6 +364,7 @@ export default function SettingsView({
   // persist would otherwise bounce the knob without telling the user
   // why.
   const [themeError, setThemeError] = useState('')
+  const [mobiusConnectError, setMobiusConnectError] = useState('')
   const [restartPhase, setRestartPhase] = useState('idle')
   const [restartError, setRestartError] = useState('')
   const [restartSlow, setRestartSlow] = useState(false)
@@ -413,6 +416,26 @@ export default function SettingsView({
   const providerAvailability = resolveProviderAvailability(providerStatusQuery)
   const configuredProviders = providerAvailability.configuredProviders
   const codexAuthenticated = configuredProviders.has('codex')
+  const mobiusAuthenticated = configuredProviders.has('mobius')
+  const mobiusTrial = providerStatusQuery.data?.mobius?.trial
+  const mobiusRemainingUnits = Number(mobiusTrial?.balance?.spendable_units)
+  const mobiusRemaining = Number.isFinite(mobiusRemainingUnits)
+    ? `$${(mobiusRemainingUnits / 1_000_000).toFixed(2)} remaining`
+    : 'Shared $2 agent trial'
+  const mobiusExpiryRaw = mobiusTrial?.trial_expires_at
+    || mobiusTrial?.account?.trial_expires_at
+    || mobiusTrial?.balance?.grants?.find(grant => grant?.kind === 'trial')?.expires_at
+  const mobiusExpiryTime = Date.parse(mobiusExpiryRaw || '')
+  const mobiusHasExpiry = Number.isFinite(mobiusExpiryTime)
+  const mobiusExpiryLabel = mobiusHasExpiry
+    ? new Intl.DateTimeFormat(undefined, {
+        year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC',
+      }).format(new Date(mobiusExpiryTime))
+    : ''
+  const mobiusExpired = mobiusHasExpiry && mobiusExpiryTime <= Date.now()
+  const mobiusTrialSubtitle = mobiusAuthenticated
+    ? `${mobiusRemaining}. ${mobiusExpired ? 'Expired' : 'Expires'} ${mobiusExpiryLabel || 'within 14 days'}. Inkling, DeepSeek V4 Flash, and GLM 5.2 included.`
+    : 'Sign in with mobius.you to claim $2, valid for 14 days. Inkling, DeepSeek V4 Flash, and GLM 5.2 included.'
   // Live-probed CLI versions (null when the CLI isn't installed or
   // didn't respond). Read-only — updates happen via the agent, not here.
   const claudeVersion = settingsQuery.data?.claude_version
@@ -807,6 +830,22 @@ export default function SettingsView({
     },
     [],
   )
+  const connectMobius = useCallback(async () => {
+    setMobiusConnectError('')
+    try {
+      const result = await api.auth.provider.mobius.startLogin()
+      if (result?.authorization_url) {
+        window.location.assign(result.authorization_url)
+        return
+      }
+      throw new Error('The sign-in service did not return an authorization link.')
+    } catch (err) {
+      setMobiusConnectError(
+        err?.message || 'Could not start mobius.you sign-in. Check your connection and try again.',
+      )
+      await providerStatusQuery.refetch()
+    }
+  }, [providerStatusQuery])
   const toggleClaudeUsage = useCallback(() => {
     setExpandedAuth(prev => prev === 'claude' ? null : prev)
     setExpandedUsage(prev => ({ ...prev, claude: !prev.claude }))
@@ -1445,6 +1484,24 @@ export default function SettingsView({
           {providerReady ? (
             <>
               <div className="settings__providers">
+                <ProviderRow
+                  name="Möbius trial"
+                  connected={mobiusAuthenticated}
+                  subtitle={mobiusTrialSubtitle}
+                  statusNode={(
+                    <StatusDot color={mobiusAuthenticated && !mobiusExpired ? '--green' : '--muted'}>
+                      {mobiusAuthenticated
+                        ? `${mobiusExpired ? 'Trial expired' : 'Trial active'} · Subscription coming soon`
+                        : 'Sign in to claim'}
+                    </StatusDot>
+                  )}
+                  detailNode={mobiusConnectError ? (
+                    <Alert color="danger" variant="soft" description={mobiusConnectError} />
+                  ) : null}
+                  expanded={false}
+                  actionLabel={mobiusAuthenticated ? 'Reconnect' : 'Claim trial'}
+                  onToggleExpand={connectMobius}
+                />
                 <ProviderRow
                   name="OpenAI Codex"
                   connected={codexAuthenticated}

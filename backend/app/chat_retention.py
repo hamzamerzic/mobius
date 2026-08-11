@@ -40,10 +40,20 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
   best-effort process/filesystem cleanup; a failed transaction therefore
   cannot erase recoverable data outside the database.
   """
+  # Release expired project/chat pairs first. The project sweep commits its row
+  # deletion before touching owned roots, so this chat query can only see a
+  # linked chat after the project's recovery contract has ended durably.
+  from app.project_retention import purge_expired_project_tombstones
+  purge_expired_project_tombstones(db)
+
   cutoff = now_naive_utc() - SOFT_DELETE_TTL
   expired_chat_ids = select(models.Chat.id).where(
     models.Chat.deleted_at.isnot(None),
     models.Chat.deleted_at < cutoff,
+    # A project tombstone keeps its root + primary chat recoverable together.
+    # Exclude every referenced chat (including projects themselves in recovery)
+    # so independent chat cleanup cannot sever that durable pair.
+    ~models.Chat.id.in_(select(models.Project.chat_id)),
   )
   chat_ids = [
     chat_id for chat_id in db.scalars(expired_chat_ids).all()

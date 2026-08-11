@@ -33,6 +33,12 @@ export const APPS_TAB_KEY = 'apps:apps'
 export function appsTab() { return { kind: 'apps', id: APPS_ID } }
 export function isAppsTab(tab) { return !!tab && tab.kind === 'apps' }
 
+export const PROJECTS_ID = 'projects'
+export const PROJECTS_TAB_KEY = 'projects:projects'
+export function projectsTab() { return { kind: 'projects', id: PROJECTS_ID } }
+export function isProjectsTab(tab) { return !!tab && tab.kind === 'projects' }
+export function projectTab(id) { return makeTab('project', id) }
+
 // Ids are stored as strings for stable React keys + browser persistence. App ids
 // are re-coerced to Number in tabNavTarget — the ONLY correct nav shape (the
 // iframe LRU dedups on strict !==, so a string id would double-mount).
@@ -59,6 +65,8 @@ export function tabKey(tab) {
 export function tabNavTarget(tab) {
   if (tab.kind === 'settings') return { view: 'settings' }
   if (tab.kind === 'apps') return { view: 'apps' }
+  if (tab.kind === 'projects') return { view: 'projects' }
+  if (tab.kind === 'project') return { view: 'project', opts: { projectId: tab.id } }
   return tab.kind === 'app'
     ? { view: 'canvas', opts: { appId: Number(tab.id) } }
     : { view: 'chat', opts: { chatId: tab.id } }

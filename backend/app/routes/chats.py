@@ -1143,7 +1143,7 @@ async def patch_chat(
           "handoff so the incoming provider can continue its context."
         ),
       )
-    if target_provider is not None and target_provider in ("claude", "codex"):
+    if target_provider is not None and target_provider in ("claude", "codex", "mobius"):
       # Reject a switch to a disconnected provider — the picker may
       # have raced ahead of /auth/providers/status, or the user may
       # be on stale state. Without this check the PATCH would succeed
@@ -1752,6 +1752,29 @@ async def delete_chat(
   db: Session = Depends(get_db),
 ):
   """Soft-deletes a chat and stops any running agent for it."""
+  linked_project = db.query(
+    models.Project.id, models.Project.name, models.Project.deleted_at,
+  ).filter(
+    models.Project.chat_id == chat_id,
+  ).first()
+  if linked_project is not None:
+    project_deleted = linked_project.deleted_at is not None
+    raise HTTPException(
+      status_code=409,
+      detail={
+        "code": "project_primary_chat",
+        "message": (
+          f"This is the primary chat for project “{linked_project.name}”. "
+          + (
+            "Recover it through the project."
+            if project_deleted
+            else "Delete the project or attach a different chat first."
+          )
+        ),
+        "project_id": linked_project.id,
+        "project_deleted": project_deleted,
+      },
+    )
   # Only attempt to stop if the chat is actually running. An idle chat
   # has no proc/SDK client/session to interrupt, so calling
   # stop_chat_for would be a no-op — but a transient error during the
@@ -1825,6 +1848,18 @@ def recover_chat(
   db: Session = Depends(get_db),
 ):
   """Restores a soft-deleted chat if the TTL window has not expired."""
+  linked_project = db.query(models.Project.id).filter(
+    models.Project.chat_id == chat_id,
+  ).first()
+  if linked_project is not None:
+    raise HTTPException(
+      status_code=409,
+      detail={
+        "code": "project_primary_chat",
+        "message": "Recover this chat through its project.",
+        "project_id": linked_project.id,
+      },
+    )
   chat = db.query(models.Chat).filter(
     models.Chat.id == chat_id,
     models.Chat.deleted_at.isnot(None),
@@ -2427,7 +2462,7 @@ def create_app_chat(
   provider = body.provider or providers.resolve_default_provider(
     data_dir, owner.provider if owner else None,
   )
-  if provider not in ("claude", "codex"):
+  if provider not in ("claude", "codex", "mobius"):
     raise HTTPException(status_code=422, detail=f"unknown provider: {provider}")
   if body.model and providers._model_belongs_to_other_provider(
     body.model, provider,
@@ -2515,7 +2550,7 @@ async def patch_app_chat(
         detail="The selected model does not belong to that provider.",
       )
     if body.provider is not None:
-      if body.provider not in ("claude", "codex"):
+      if body.provider not in ("claude", "codex", "mobius"):
         raise HTTPException(
           status_code=422, detail=f"unknown provider: {body.provider}"
         )

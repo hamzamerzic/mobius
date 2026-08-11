@@ -19,6 +19,8 @@ SOURCE_FILES_TOTAL_MAX = 8 * 1024 * 1024
 ICON_MAX_BYTES = 12 * 1024 * 1024
 SKILL_MAX_BYTES = 256 * 1024
 SYSTEM_PROMPT_MAX_BYTES = 256 * 1024
+PROJECT_TEMPLATES_COUNT_MAX = 12
+PROJECT_TEMPLATE_FILES_COUNT_MAX = 64
 
 _SLUG_OK = "abcdefghijklmnopqrstuvwxyz0123456789-_"
 _SOURCE_FILES_MANAGED_PREFIXES = (
@@ -224,6 +226,85 @@ def validate_manifest_contract(manifest) -> None:
   ):
     if field in permissions and not isinstance(permissions[field], bool):
       _fail(f"Manifest `permissions.{field}` must be a boolean.")
+
+  project_templates = manifest.get("project_templates")
+  if project_templates is not None:
+    if not isinstance(project_templates, list):
+      _fail("Manifest `project_templates` must be an array.")
+    if len(project_templates) > PROJECT_TEMPLATES_COUNT_MAX:
+      _fail(
+        "Manifest has too many project_templates "
+        f"(max {PROJECT_TEMPLATES_COUNT_MAX})."
+      )
+    seen_template_ids = set()
+    for index, template in enumerate(project_templates):
+      field = f"project_templates[{index}]"
+      if not isinstance(template, Mapping):
+        _fail(f"Manifest `{field}` must be an object.")
+      template_id = template.get("id")
+      validate_slug_field(template_id, f"{field}.id")
+      if template_id in seen_template_ids:
+        _fail(f"Manifest `{field}.id` duplicates {template_id!r}.")
+      seen_template_ids.add(template_id)
+      if not isinstance(template.get("name"), str) or not template["name"].strip():
+        _fail(f"Manifest `{field}.name` must be a non-empty string.")
+      for text_field in ("description", "guidance"):
+        value = template.get(text_field)
+        if value is not None and not isinstance(value, str):
+          _fail(f"Manifest `{field}.{text_field}` must be a string.")
+      for list_field in ("skills", "dependencies"):
+        values = template.get(list_field, [])
+        if not isinstance(values, list) or any(
+          not isinstance(value, str) or not value.strip() for value in values
+        ):
+          _fail(f"Manifest `{field}.{list_field}` must be an array of strings.")
+      previews = template.get("previews", [])
+      if not isinstance(previews, list) or len(previews) > 8:
+        _fail(f"Manifest `{field}.previews` must be an array with at most 8 entries.")
+      seen_preview_ids = set()
+      for preview_index, preview in enumerate(previews):
+        preview_field = f"{field}.previews[{preview_index}]"
+        if not isinstance(preview, Mapping):
+          _fail(f"Manifest `{preview_field}` must be an object.")
+        preview_id = preview.get("id")
+        validate_slug_field(preview_id, f"{preview_field}.id")
+        if preview_id in seen_preview_ids:
+          _fail(f"Manifest `{preview_field}.id` duplicates {preview_id!r}.")
+        seen_preview_ids.add(preview_id)
+        if preview.get("kind") not in {"html", "pdf", "image"}:
+          _fail(f"Manifest `{preview_field}.kind` must be html, pdf, or image.")
+        if not isinstance(preview.get("name"), str) or not preview["name"].strip():
+          _fail(f"Manifest `{preview_field}.name` must be a non-empty string.")
+        validate_repo_relative_path(preview.get("path"), f"{preview_field}.path")
+      actions = template.get("actions", [])
+      if not isinstance(actions, list) or len(actions) > 8:
+        _fail(f"Manifest `{field}.actions` must be an array with at most 8 entries.")
+      seen_action_ids = set()
+      for action_index, action in enumerate(actions):
+        action_field = f"{field}.actions[{action_index}]"
+        if not isinstance(action, Mapping):
+          _fail(f"Manifest `{action_field}` must be an object.")
+        action_id = action.get("id")
+        validate_slug_field(action_id, f"{action_field}.id")
+        if action_id in seen_action_ids:
+          _fail(f"Manifest `{action_field}.id` duplicates {action_id!r}.")
+        seen_action_ids.add(action_id)
+        if not isinstance(action.get("name"), str) or not action["name"].strip():
+          _fail(f"Manifest `{action_field}.name` must be a non-empty string.")
+        prompt = action.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 4000:
+          _fail(f"Manifest `{action_field}.prompt` must be 1-4000 characters.")
+      files = template.get("files", {})
+      if not isinstance(files, Mapping):
+        _fail(f"Manifest `{field}.files` must be an object.")
+      if len(files) > PROJECT_TEMPLATE_FILES_COUNT_MAX:
+        _fail(
+          f"Manifest `{field}.files` has too many entries "
+          f"(max {PROJECT_TEMPLATE_FILES_COUNT_MAX})."
+        )
+      for destination, source in files.items():
+        validate_repo_relative_path(destination, f"{field}.files.{destination}")
+        validate_repo_relative_path(source, f"{field}.files.{destination}")
 
   # Runtime capabilities are normalized by the same canonical registry used
   # to build the owner-reviewable install contract. Keep a single definition

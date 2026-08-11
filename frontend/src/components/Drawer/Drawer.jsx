@@ -9,6 +9,7 @@ import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import {
   AppsNavIcon,
   NewChatNavIcon,
+  ProjectsNavIcon,
   SettingsNavIcon,
 } from '../navigationIcons.js'
 import AppIcon from '../AppIcon.jsx'
@@ -65,6 +66,7 @@ import './Drawer.css'
 // A fresh `new Set()` per call would break identity-based memoization
 // downstream.
 const EMPTY_SET = new Set()
+const EMPTY_LIST = []
 const TOUCH_CONTEXT_MENU_PROVENANCE_MS = 1500
 const APP_ICON_PRIORITY_COUNT = 24
 const APP_ICON_WARM_LIMIT = 96
@@ -81,6 +83,11 @@ export default function Drawer({
   onRetryApps,
   activeView,
   activeAppId,
+  projects = EMPTY_LIST,
+  projectsStatus = 'success',
+  activeProjectId,
+  onProject,
+  onProjectsOpen,
   chats,
   chatsStatus = 'success',
   onRetryChats,
@@ -1060,6 +1067,52 @@ export default function Drawer({
                 </span>
                 <span className="drawer__item-text">Apps</span>
               </button>
+
+              <div className="drawer__projects-nav">
+                <button
+                  type="button"
+                  className={`drawer__item drawer__item--projects${activeView === 'projects' ? ' drawer__item--active' : ''}`}
+                  aria-current={activeView === 'projects' ? 'page' : undefined}
+                  onClick={onProjectsOpen}
+                >
+                  <span className="drawer__item-icon" aria-hidden="true">
+                    <ProjectsNavIcon />
+                  </span>
+                  <span className="drawer__item-text">Projects</span>
+                </button>
+                <button
+                  type="button"
+                  className="drawer__projects-add"
+                  aria-label="Create project"
+                  title="Create project"
+                  onClick={onProjectsOpen}
+                >
+                  +
+                </button>
+              </div>
+              {projectsStatus === 'loading' ? (
+                <p className="drawer__projects-status" role="status">Loading projects…</p>
+              ) : projectsStatus === 'success' && projects.length > 0 ? (
+                <div className="drawer__projects-list" aria-label="Recent projects">
+                  {projects.slice(0, 6).map(project => (
+                    <button
+                      key={project.id}
+                      type="button"
+                      className={`drawer__project-row${activeView === 'project' && String(activeProjectId) === String(project.id) ? ' drawer__project-row--active' : ''}`}
+                      aria-current={activeView === 'project' && String(activeProjectId) === String(project.id) ? 'page' : undefined}
+                      onClick={() => onProject?.(project)}
+                    >
+                      <span aria-hidden="true">{project.name.slice(0, 1).toUpperCase()}</span>
+                      <span>{project.name}</span>
+                    </button>
+                  ))}
+                  {projects.length > 6 && (
+                    <button type="button" className="drawer__projects-more" onClick={onProjectsOpen}>
+                      View all {projects.length} projects
+                    </button>
+                  )}
+                </div>
+              ) : null}
 
               {nowPlaying && (
                 <NowPlaying

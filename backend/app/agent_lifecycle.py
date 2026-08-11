@@ -88,7 +88,7 @@ def stable_agent_id(
   thread ids are already globally unique and can appear with different
   session-tree identifiers on different notification variants.
   """
-  if provider == "codex":
+  if provider in ("codex", "mobius"):
     material = f"{provider}\0{provider_agent_id}"
   else:
     material = f"{provider}\0{provider_session_id or ''}\0{provider_agent_id}"

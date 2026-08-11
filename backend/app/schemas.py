@@ -551,7 +551,7 @@ class ChatPatch(BaseModel):
 class ChatProviderSwitch(BaseModel):
   """Atomic cross-provider switch prepared by the incoming provider."""
 
-  provider: Literal["claude", "codex"]
+  provider: Literal["claude", "codex", "mobius"]
   agent_settings_json: AgentSettingsOverride
   # Stable across a network retry so the writer can return the already-stored
   # switch instead of appending a duplicate compaction marker.
@@ -576,6 +576,7 @@ class ChatProviderSwitch(BaseModel):
         "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
       },
       "claude": {"low", "medium", "high", "xhigh", "max", "ultracode"},
+      "mobius": {"medium", "high"},
     }
     if effort not in allowed_efforts[self.provider]:
       raise ValueError("target effort does not belong to target provider")

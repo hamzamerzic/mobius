@@ -306,7 +306,6 @@ async def complete_managed_sso(
         settings.mobius_sso_issuer + "/sso/token",
         json={
           "instance_id": settings.mobius_sso_instance_id,
-          "client_secret": settings.mobius_sso_client_secret,
           "code": code,
           "code_verifier": code_verifier,
           "redirect_uri": redirect_uri,
@@ -874,6 +873,11 @@ async def providers_status(
       "authenticated": error is None,
       "error": error,
     }
+    if pid == "mobius" and error is None:
+      try:
+        out[pid]["trial"] = provider.trial_status()
+      except Exception:
+        out[pid]["trial"] = None
   return out
 
 
@@ -955,6 +959,102 @@ from app.codex_login_parse import banner_has_code, parse_login_banner
 
 _codex_login_procs: dict[str, asyncio.subprocess.Process] = {}
 _codex_login_status: dict[str, str] = {}  # "complete" | "failed"
+
+
+async def _mobius_broker_request(method: str, route: str, payload=None):
+  socket_path = os.environ.get(
+    "MOBIUS_IDENTITY_BROKER_SOCKET",
+    "/data/run/mobius-identity-broker.sock",
+  )
+  transport = httpx.AsyncHTTPTransport(uds=socket_path)
+  async with httpx.AsyncClient(transport=transport, timeout=10.0) as client:
+    response = await client.request(
+      method, "http://broker" + route, json=payload
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+@router.post(
+  "/provider/mobius/login", dependencies=[Depends(reject_cross_site)],
+)
+async def mobius_login_start(
+  request: Request,
+  owner: models.Owner = Depends(get_current_owner),
+):
+  """Start public-client PKCE linking; no central secret enters the runtime."""
+  identity = await _mobius_broker_request("GET", "/identity")
+  if identity.get("linked") is True:
+    return {"linked": True}
+  state = secrets.token_urlsafe(32)
+  verifier = secrets.token_urlsafe(48)
+  challenge = urlsafe_b64encode(
+    hashlib.sha256(verifier.encode("ascii")).digest()
+  ).decode("ascii").rstrip("=")
+  redirect_uri = str(request.url_for("mobius_login_callback"))
+  pending = {
+    "state": state,
+    "owner": owner.username,
+    "verifier": verifier,
+    "instance_id": identity["instance_id"],
+    "public_key_jwk": identity["public_key_jwk"],
+    "redirect_uri": redirect_uri,
+    "expires_at": time.time() + 600,
+  }
+  await _mobius_broker_request("POST", "/identity/oauth/start", pending)
+  issuer = os.environ.get(
+    "MOBIUS_IDENTITY_ISSUER", "https://www.mobius.you"
+  ).rstrip("/")
+  return {
+    "linked": False,
+    "authorization_url": issuer + "/identity/authorize?" + urlencode({
+      "instance_id": identity["instance_id"],
+      "state": state,
+      "redirect_uri": redirect_uri,
+      "code_challenge": challenge,
+      "key_thumbprint": identity["key_thumbprint"],
+    }),
+  }
+
+
+@router.get("/provider/mobius/callback", name="mobius_login_callback")
+async def mobius_login_callback(
+  code: str,
+  state: str,
+):
+  # Browser navigation does not carry the SPA's Authorization header. The
+  # random, one-use state is therefore the callback credential; its verifier
+  # and owner binding are atomically consumed from the root broker so this also
+  # works with multiple backend workers.
+  consumed = await _mobius_broker_request(
+    "POST", "/identity/oauth/consume", {"state": state}
+  )
+  pending = consumed.get("pending") if isinstance(consumed, dict) else None
+  if (
+    not pending
+    or pending["expires_at"] <= time.time()
+  ):
+    raise HTTPException(status_code=400, detail="Möbius sign-in expired")
+  issuer = os.environ.get(
+    "MOBIUS_IDENTITY_ISSUER", "https://www.mobius.you"
+  ).rstrip("/")
+  async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
+    exchange = await client.post(
+      issuer + "/identity/token",
+      json={
+        "instance_id": pending["instance_id"],
+        "code": code,
+        "code_verifier": pending["verifier"],
+        "redirect_uri": pending["redirect_uri"],
+        "public_key_jwk": pending["public_key_jwk"],
+      },
+    )
+    exchange.raise_for_status()
+  receipt = exchange.json().get("enrollment_receipt")
+  if not isinstance(receipt, str):
+    raise HTTPException(status_code=502, detail="Möbius sign-in failed")
+  await _mobius_broker_request("POST", "/identity/enroll", {"receipt": receipt})
+  return RedirectResponse(url="/settings?section=ai-providers", status_code=303)
 
 
 async def _watch_codex_login(proc):

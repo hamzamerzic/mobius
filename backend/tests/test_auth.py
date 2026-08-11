@@ -14,7 +14,6 @@ def configure_managed_sso(monkeypatch):
   settings = get_settings()
   monkeypatch.setattr(settings, "mobius_sso_issuer", "http://launcher.test")
   monkeypatch.setattr(settings, "mobius_sso_instance_id", "mob_testinstance")
-  monkeypatch.setattr(settings, "mobius_sso_client_secret", "s" * 48)
   monkeypatch.setattr(settings, "frontend_origin", "http://testserver")
   return settings
 
@@ -128,7 +127,7 @@ def test_managed_sso_first_login_creates_bound_owner_and_one_time_handoff(
   assert FakeSsoExchange.calls
   exchange_url, exchange_args = FakeSsoExchange.calls[-1]
   assert exchange_url == "http://launcher.test/sso/token"
-  assert exchange_args["json"]["client_secret"] == "s" * 48
+  assert "client_secret" not in exchange_args["json"]
   assert exchange_args["json"]["code"] == "opaque-code"
   owner = db.query(models.Owner).one()
   assert owner.username == "Managed Owner"
@@ -532,7 +531,7 @@ def test_providers_models_returns_known_models_on_missing_creds(
   r = client.get("/api/auth/providers/models", headers=auth)
   assert r.status_code == 200
   body = r.json()
-  assert set(body) == {"claude", "codex"}
+  assert set(body) == {"claude", "codex", "mobius"}
   claude_ids = [m["id"] for m in body["claude"]]
   assert claude_ids == [
     "claude-fable-5", "claude-sonnet-5",
@@ -544,6 +543,9 @@ def test_providers_models_returns_known_models_on_missing_creds(
   ]
   assert set(claude_ids) == DEFAULT_VISIBLE_MODELS["claude"]
   assert set(codex_ids) == DEFAULT_VISIBLE_MODELS["codex"]
+  assert [m["id"] for m in body["mobius"]] == [
+    "inkling", "deepseek-flash", "glm",
+  ]
   # Claude rows carry a tier derived from the id.
   by_id = {m["id"]: m for m in body["claude"]}
   assert by_id["claude-opus-4-8"]["name"] == "claude-opus-4-8"
@@ -558,6 +560,81 @@ def test_providers_models_returns_known_models_on_missing_creds(
   for rows in body.values():
     for row in rows:
       assert set(row).issubset({"id", "name", "tier"})
+
+
+def test_self_host_mobius_callback_uses_single_use_broker_state_without_auth_header(
+  client, auth, monkeypatch,
+):
+  from app.routes import auth as auth_routes
+
+  saved = {}
+  broker_calls = []
+
+  async def broker_request(method, route, payload=None):
+    broker_calls.append((method, route, payload))
+    if route == "/identity":
+      return {
+        "linked": False,
+        "instance_id": "mob_self_testinstance",
+        "public_key_jwk": {"kty": "OKP", "crv": "Ed25519", "x": "x" * 43},
+        "key_thumbprint": "a" * 64,
+      }
+    if route == "/identity/oauth/start":
+      saved.update(payload)
+      return {"saved": True}
+    if route == "/identity/oauth/consume":
+      if payload["state"] != saved.get("state"):
+        return {"pending": None}
+      value = dict(saved)
+      saved.clear()
+      return {"pending": value}
+    if route == "/identity/enroll":
+      return {"linked": True}
+    raise AssertionError(route)
+
+  class ExchangeResponse:
+    def raise_for_status(self):
+      return None
+
+    def json(self):
+      return {"enrollment_receipt": "signed.receipt.value"}
+
+  class ExchangeClient:
+    def __init__(self, *args, **kwargs):
+      pass
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def post(self, *_args, **_kwargs):
+      return ExchangeResponse()
+
+  monkeypatch.setattr(auth_routes, "_mobius_broker_request", broker_request)
+  start = client.post("/api/auth/provider/mobius/login", headers=auth)
+  assert start.status_code == 200
+  authorization_url = urllib.parse.urlparse(start.json()["authorization_url"])
+  state = urllib.parse.parse_qs(authorization_url.query)["state"][0]
+  monkeypatch.setattr(auth_routes.httpx, "AsyncClient", ExchangeClient)
+
+  # A top-level browser redirect has no localStorage bearer header. State is
+  # the one-use callback credential and is consumed by the root broker.
+  callback = client.get(
+    "/api/auth/provider/mobius/callback",
+    params={"code": "central-code", "state": state},
+    follow_redirects=False,
+  )
+  assert callback.status_code == 303
+  assert callback.headers["location"] == "/settings?section=ai-providers"
+  replay = client.get(
+    "/api/auth/provider/mobius/callback",
+    params={"code": "central-code", "state": state},
+    follow_redirects=False,
+  )
+  assert replay.status_code == 400
+  assert any(route == "/identity/enroll" for _, route, _ in broker_calls)
 
 
 def test_providers_models_respects_hidden_model_prefs(client, auth):

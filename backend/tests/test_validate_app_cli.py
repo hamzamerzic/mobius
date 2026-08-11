@@ -141,6 +141,40 @@ def test_system_prompt_requires_explicit_system_app_identity(tmp_path):
     _validate_manifest(manifest)
 
 
+def test_project_templates_validate_ids_lists_and_confined_file_paths(tmp_path):
+  _write_app(tmp_path, "export default function App(){ return <div /> }")
+  manifest = json.loads((tmp_path / "mobius.json").read_text())
+  manifest["project_templates"] = [{
+    "id": "web-app",
+    "name": "Web app",
+    "description": "A site",
+    "guidance": "Use the project root.",
+    "skills": ["web"],
+    "dependencies": ["node"],
+    "previews": [{
+      "id": "site", "name": "Site", "kind": "html", "path": "index.html",
+    }],
+    "actions": [{
+      "id": "review", "name": "Review", "prompt": "Review the rendered site.",
+    }],
+    "files": {"index.html": "templates/index.html"},
+  }]
+  validate_manifest_contract(manifest)
+
+  manifest["project_templates"][0]["files"] = {
+    "../outside": "templates/index.html",
+  }
+  with pytest.raises(ManifestContractError, match="must not contain"):
+    validate_manifest_contract(manifest)
+
+  manifest["project_templates"][0]["files"] = {
+    "index.html": "templates/index.html",
+  }
+  manifest["project_templates"][0]["previews"][0]["kind"] = "browser"
+  with pytest.raises(ManifestContractError, match="must be html, pdf, or image"):
+    validate_manifest_contract(manifest)
+
+
 @pytest.mark.parametrize(("removed_permission", "value"), [
   ("background_agent", True),
   ("job_authority", "scoped"),

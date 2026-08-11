@@ -106,6 +106,7 @@ from app.providers import (
   effective_agent_settings,
   get_provider,
   get_skill_path,
+  provider_runtime_kind,
 )
 from app.runner_registry import registry
 
@@ -4342,7 +4343,7 @@ async def _run_chat_impl_with_db(
     _build_resumed_context(chat_row)
     if (
       session_id
-      and provider.name in ("Claude Code", "Codex")
+      and provider_runtime_kind(provider) in ("claude_sdk", "codex_sdk")
       and (run_policy is None or run_policy.allow_session_reseed)
     )
     else None
@@ -4426,8 +4427,9 @@ async def _run_chat_impl_with_db(
 
   # SDK dispatch: route both Claude and Codex through their official
   # Agent SDK runners.
-  is_claude = provider.name == "Claude Code"
-  is_codex = provider.name == "Codex"
+  runtime_kind = provider_runtime_kind(provider)
+  is_claude = runtime_kind == "claude_sdk"
+  is_codex = runtime_kind == "codex_sdk"
   if is_codex:
     log.info(
       "chat start chat_id=%s provider=%s session=%s msg_len=%d sdk=codex",
@@ -4483,6 +4485,7 @@ async def _run_chat_impl_with_db(
         goal_continue=goal_continue,
         fallback_goal_objective=fallback_goal_objective,
         run_policy=run_policy,
+        provider_id=provider_id,
         connector_plan=connector_turn_plan,
       )
       new_session_id = runner_result.get("session_id")

@@ -139,12 +139,15 @@ function sanitizeTab(raw) {
   if (raw.kind === 'apps') {
     return String(raw.id) === tabModel.APPS_ID ? tabModel.appsTab() : null
   }
+  if (raw.kind === 'projects') {
+    return String(raw.id) === tabModel.PROJECTS_ID ? tabModel.projectsTab() : null
+  }
   if (raw.kind === 'settings') {
     return String(raw.id) === tabModel.SETTINGS_ID
       ? tabModel.settingsTab()
       : null
   }
-  if (raw.kind !== 'chat' && raw.kind !== 'app') return null
+  if (raw.kind !== 'chat' && raw.kind !== 'app' && raw.kind !== 'project') return null
   if (raw.kind === 'app' && !Number.isFinite(Number(raw.id))) return null
   return tabModel.makeTab(raw.kind, raw.id)
 }
@@ -174,11 +177,17 @@ function sanitizeSingleScreen(raw) {
   if (raw.kind === 'apps' && String(raw.id) === tabModel.APPS_ID) {
     return tabModel.appsTab()
   }
+  if (raw.kind === 'projects' && String(raw.id) === tabModel.PROJECTS_ID) {
+    return tabModel.projectsTab()
+  }
   if (raw.kind === 'chat' && raw.id != null && String(raw.id).trim() !== '') {
     return { kind: 'chat', id: String(raw.id) }
   }
   if (raw.kind === 'app' && Number.isFinite(Number(raw.id))) {
     return { kind: 'app', id: String(raw.id) }
+  }
+  if (raw.kind === 'project' && raw.id != null && String(raw.id).trim() !== '') {
+    return { kind: 'project', id: String(raw.id) }
   }
   return null
 }
@@ -445,6 +454,7 @@ function singleScreenTab(ws) {
   const item = sanitizeSingleScreen(ws.singleScreen)
   if (!item) return null
   if (item.kind === 'apps') return tabModel.appsTab()
+  if (item.kind === 'projects') return tabModel.projectsTab()
   return tabModel.makeTab(item.kind, item.id)
 }
 
@@ -491,6 +501,8 @@ export function singleScreenKey(ws) {
   if (slot.kind === 'app') return `app:${slot.id}`
   if (slot.kind === 'chat') return `chat:${slot.id}`
   if (slot.kind === 'apps') return tabModel.APPS_TAB_KEY
+  if (slot.kind === 'projects') return tabModel.PROJECTS_TAB_KEY
+  if (slot.kind === 'project') return `project:${slot.id}`
   return null
 }
 
@@ -537,6 +549,8 @@ function focusedSlotSeed(ws) {
   if (tab.kind === 'app') return { kind: 'app', id: String(tab.id) }
   if (tab.kind === 'chat') return { kind: 'chat', id: String(tab.id) }
   if (tab.kind === 'apps') return tabModel.appsTab()
+  if (tab.kind === 'projects') return tabModel.projectsTab()
+  if (tab.kind === 'project') return { kind: 'project', id: String(tab.id) }
   return null
 }
 
@@ -605,6 +619,8 @@ export function focusedContentRoute(ws) {
       // (design: the overlay must not be conflated with focused-content-is-Settings).
       if (tab.kind === 'settings') return { view: 'settings', chatId: null, appId: null, paneId }
       if (tab.kind === 'apps') return { view: 'apps', chatId: null, appId: null, paneId }
+      if (tab.kind === 'projects') return { view: 'projects', chatId: null, appId: null, projectId: null, paneId }
+      if (tab.kind === 'project') return { view: 'project', chatId: null, appId: null, projectId: String(tab.id), paneId }
       const { view, opts } = tabModel.tabNavTarget(tab)
       if (view === 'canvas') return { view: 'canvas', chatId: null, appId: opts.appId, paneId }
       return { view: 'chat', chatId: opts.chatId, appId: null, paneId }
@@ -624,6 +640,12 @@ export function singleScreenRoute(ws) {
   const paneId = ws.focusedPaneId
   if (slot && slot.kind === 'apps') {
     return { view: 'apps', chatId: null, appId: null, paneId }
+  }
+  if (slot && slot.kind === 'projects') {
+    return { view: 'projects', chatId: null, appId: null, projectId: null, paneId }
+  }
+  if (slot && slot.kind === 'project') {
+    return { view: 'project', chatId: null, appId: null, projectId: String(slot.id), paneId }
   }
   if (slot && slot.kind === 'app') {
     const appId = Number(slot.id)
@@ -670,6 +692,8 @@ export function visibleAppIds(ws, visibleLeaves) {
 function routeItemKey(route) {
   if (!route || typeof route !== 'object') return null
   if (route.view === 'apps') return tabModel.APPS_TAB_KEY
+  if (route.view === 'projects') return tabModel.PROJECTS_TAB_KEY
+  if (route.view === 'project' && route.projectId != null) return `project:${route.projectId}`
   if (route.view === 'canvas' && route.appId != null) return `app:${route.appId}`
   if (route.view === 'chat' && !route.homeSeed && route.chatId != null) return `chat:${route.chatId}`
   return null
@@ -1105,11 +1129,13 @@ function toIdSet(ids) {
 
 // Whether the single-screen slot's backing chat/app is still live. A null/home
 // slot is always "live" (nothing to prune). A null live set means "unknown, keep".
-function slotIsLive(slot, chats, apps) {
+function slotIsLive(slot, chats, apps, projects) {
   if (!slot || typeof slot !== 'object') return true
   if (slot.kind === 'chat') return chats == null || chats.has(String(slot.id))
   if (slot.kind === 'app') return apps == null || apps.has(String(slot.id))
+  if (slot.kind === 'project') return projects == null || projects.has(String(slot.id))
   if (slot.kind === 'apps') return true
+  if (slot.kind === 'projects') return true
   return true
 }
 
@@ -1120,12 +1146,14 @@ function slotIsLive(slot, chats, apps) {
 // same op, so a phantom slot can never point at a dead item. A deleted slot
 // degrades to the explicit-empty screen (null), NEVER to builder focus (design:
 // no auto-fallback from a deleted slot).
-export function prune(ws, { liveChatIds, liveAppIds } = {}) {
+export function prune(ws, { liveChatIds, liveAppIds, liveProjectIds } = {}) {
   const chats = toIdSet(liveChatIds)
   const apps = toIdSet(liveAppIds)
+  const projects = toIdSet(liveProjectIds)
   const keep = (tab) => {
     if (tab.kind === 'chat') return chats == null || chats.has(tab.id)
     if (tab.kind === 'app') return apps == null || apps.has(tab.id)
+    if (tab.kind === 'project') return projects == null || projects.has(tab.id)
     return true
   }
   const panes = {}
@@ -1142,7 +1170,7 @@ export function prune(ws, { liveChatIds, liveAppIds } = {}) {
   // via CLOSE_TAB reason:'deleted'. This slot check exists so PRUNE remains
   // CORRECT if a bulk-reconcile caller is ever wired; it is not the delete path.
   const slotDead = ('singleScreen' in ws) && !!ws.singleScreen
-    && !slotIsLive(ws.singleScreen, chats, apps)
+    && !slotIsLive(ws.singleScreen, chats, apps, projects)
   if (!changed && !slotDead) return ws
   const candidate = { ...ws, panes }
   if (slotDead) candidate.singleScreen = null
@@ -1749,6 +1777,7 @@ export function workspaceReducer(state, action) {
       const next = prune(ws, {
         liveChatIds: action.liveChatIds,
         liveAppIds: action.liveAppIds,
+        liveProjectIds: action.liveProjectIds,
       })
       if (next === ws && undo == null) return state
       return { ws: next, undo: null }
@@ -1765,7 +1794,11 @@ export function workspaceReducer(state, action) {
       // overwriting a live drag's toast slot.
       return {
         ws: next,
-        undo: { ws, label: 'Workspace placement', toast: action.toast || 'Agent arranged your workspace' },
+        undo: {
+          ws,
+          label: 'Workspace placement',
+          toast: action.toast === undefined ? 'Agent arranged your workspace' : action.toast,
+        },
       }
     }
     case 'SET_VIEW_MODE': {

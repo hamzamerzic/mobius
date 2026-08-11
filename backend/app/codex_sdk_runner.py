@@ -1448,6 +1448,7 @@ async def run_codex_sdk_turn(
   fallback_goal_objective: str | None = None,
   run_policy=None,
   connector_plan=None,
+  provider_id: str = "codex",
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -1492,13 +1493,17 @@ async def run_codex_sdk_turn(
   # not supported". Quietly normalize to the Codex default so
   # existing chats keep working; the user can re-pick in the
   # picker if they want a specific Codex model.
-  from app.providers import _model_belongs_to_other_provider, DEFAULT_MODELS
-  if model and _model_belongs_to_other_provider(model, "codex"):
+  from app.providers import (
+    _model_belongs_to_other_provider,
+    DEFAULT_MODELS,
+    get_provider,
+  )
+  if model and _model_belongs_to_other_provider(model, provider_id):
     log.warning(
       "codex turn started with non-codex model %r — normalizing to %r",
-      model, DEFAULT_MODELS["codex"],
+      model, DEFAULT_MODELS[provider_id],
     )
-    model = DEFAULT_MODELS["codex"]
+    model = DEFAULT_MODELS[provider_id]
 
   # Reasoning effort comes from Codex's live per-model catalog. The generated
   # enum implements `_missing_`, so newer wire values such as max/ultra survive
@@ -1515,7 +1520,9 @@ async def run_codex_sdk_turn(
         effort_str,
       )
 
-  reasoning_summary = _reasoning_summary_setting(sdk)
+  reasoning_summary = (
+    None if provider_id == "mobius" else _reasoning_summary_setting(sdk)
+  )
 
   # Compute the constitution snapshot for BOTH thread_start and thread_resume.
   # chat.py passes the SAME immutable per-chat system_prompt snapshot on every
@@ -1564,6 +1571,7 @@ async def run_codex_sdk_turn(
     allow_multi_agent=not delegated,
     allow_goals=not delegated,
   )
+  config_overrides.extend(get_provider(provider_id).codex_config_overrides())
   launch_args = _codex_app_server_launch_args(codex_bin, config_overrides)
   config_kwargs: dict[str, Any] = dict(
     codex_bin=codex_bin,

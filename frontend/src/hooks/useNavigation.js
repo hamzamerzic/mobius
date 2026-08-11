@@ -62,13 +62,14 @@ function navRoute(view, chatId, appId, paneId, extra = null) {
 }
 
 function isRestorableRoute(route) {
-  return route && ['chat', 'canvas', 'apps', 'settings'].includes(route.view)
+  return route && ['chat', 'canvas', 'apps', 'projects', 'project', 'settings'].includes(route.view)
 }
 
 function sameRoute(a, b) {
   return a?.view === b?.view
     && String(a?.chatId ?? '') === String(b?.chatId ?? '')
     && String(a?.appId ?? '') === String(b?.appId ?? '')
+    && String(a?.projectId ?? '') === String(b?.projectId ?? '')
     && String(a?.paneId ?? '') === String(b?.paneId ?? '')
 }
 
@@ -200,6 +201,7 @@ export default function useNavigation({
   const activeView = overlayShowing ? 'settings' : contentRoute.view
   const activeChatId = contentRoute.chatId
   const activeAppId = contentRoute.appId
+  const activeProjectId = contentRoute.projectId ?? null
 
   // Guards the one-shot HOME seed against a StrictMode double-mount / any
   // remount (pushNavEntry is not idempotent). See the mount effect below.
@@ -210,18 +212,19 @@ export default function useNavigation({
   // Monotonic shell-route generation. Delayed cold-boot slug resolution uses
   // this to avoid reopening an app after the user navigated elsewhere.
   const navigationEpochRef = useRef(0)
-  const projectedRouteRef = useRef({ activeView, activeChatId, activeAppId })
+  const projectedRouteRef = useRef({ activeView, activeChatId, activeAppId, activeProjectId })
   const projectedRoute = projectedRouteRef.current
   if (
     projectedRoute.activeView !== activeView
     || projectedRoute.activeChatId !== activeChatId
     || projectedRoute.activeAppId !== activeAppId
+    || projectedRoute.activeProjectId !== activeProjectId
   ) {
     // Catch workspace-only route changes (for example, closing the active tab)
     // that do not pass through navTo/restoreRoute. The explicit increments in
     // those functions remain synchronous guards before React's next render.
     navigationEpochRef.current += 1
-    projectedRouteRef.current = { activeView, activeChatId, activeAppId }
+    projectedRouteRef.current = { activeView, activeChatId, activeAppId, activeProjectId }
   }
   // The refs mirror the render-time projection so Shell's asynchronous callbacks
   // (system events, shell-reload snapshot, restore probes) read the current
@@ -233,6 +236,8 @@ export default function useNavigation({
   activeViewRef.current = activeView
   const activeAppIdRef = useRef(activeAppId)
   activeAppIdRef.current = activeAppId
+  const activeProjectIdRef = useRef(activeProjectId)
+  activeProjectIdRef.current = activeProjectId
   const settingsOpenRef = useRef(settingsOpen)
   settingsOpenRef.current = settingsOpen
   // Logical/history ownership — never mirror drawerVisible during render.
@@ -485,7 +490,13 @@ export default function useNavigation({
     // record/restore Settings instead of the builder surface the user saw (M1). It
     // still retains the focused content ids + pane hint (contract §2.2.1).
     const view = overlayShowingForWs(ws) ? 'settings' : content.view
-    return navRoute(view, content.chatId, content.appId, content.paneId)
+    return navRoute(
+      view,
+      content.chatId,
+      content.appId,
+      content.paneId,
+      content.projectId ? { projectId: content.projectId } : null,
+    )
   }, [workspaceStateRef, overlayShowingForWs])
 
   const pushShellEntry = useCallback((kind, route, appNav = null) => {
@@ -938,9 +949,13 @@ export default function useNavigation({
     if (mode === 'single') {
       const item = route.view === 'apps'
         ? tabModel.appsTab()
-        : (route.view === 'canvas'
-          ? (route.appId != null ? { kind: 'app', id: route.appId } : null)
-          : (route.chatId != null ? { kind: 'chat', id: route.chatId } : null))
+        : (route.view === 'projects'
+          ? tabModel.projectsTab()
+          : (route.view === 'project'
+            ? (route.projectId != null ? { kind: 'project', id: route.projectId } : null)
+            : (route.view === 'canvas'
+              ? (route.appId != null ? { kind: 'app', id: route.appId } : null)
+              : (route.chatId != null ? { kind: 'chat', id: route.chatId } : null))))
       dispatchWorkspace({ type: 'SET_SINGLE_SCREEN', item })
       return
     }
@@ -949,9 +964,13 @@ export default function useNavigation({
       : ws.focusedPaneId
     const tab = route.view === 'apps'
       ? tabModel.appsTab()
-      : (route.view === 'canvas'
-        ? tabModel.makeTab('app', route.appId)
-        : tabModel.makeTab('chat', route.chatId))
+      : (route.view === 'projects'
+        ? tabModel.projectsTab()
+        : (route.view === 'project'
+          ? tabModel.projectTab(route.projectId)
+          : (route.view === 'canvas'
+            ? tabModel.makeTab('app', route.appId)
+            : tabModel.makeTab('chat', route.chatId))))
     dispatchWorkspace({ type: 'OPEN_TAB', paneId: targetPaneId, tab, activate: true })
   }, [applySettingsDestination, dispatchWorkspace, workspaceStateRef])
 
@@ -998,6 +1017,14 @@ export default function useNavigation({
     } else if (view === 'apps') {
       nextRoute = navRoute('apps', null, null, targetPaneId)
       openTab = tabModel.appsTab()
+    } else if (view === 'projects') {
+      nextRoute = navRoute('projects', null, null, targetPaneId)
+      openTab = tabModel.projectsTab()
+    } else if (view === 'project') {
+      const projectId = 'projectId' in opts ? opts.projectId : activeProjectIdRef.current
+      if (projectId == null || String(projectId).trim() === '') return
+      nextRoute = navRoute('project', null, null, targetPaneId, { projectId: String(projectId) })
+      openTab = tabModel.projectTab(projectId)
     } else if (view === 'canvas') {
       const appId = 'appId' in opts ? opts.appId : activeAppIdRef.current
       const tab = tabModel.makeTab('app', appId)
@@ -1085,7 +1112,9 @@ export default function useNavigation({
     // empty/home screen; in builder just refocus.
     const tombstoneKey = route.view === 'canvas'
       ? (route.appId != null ? `app:${route.appId}` : null)
-      : (!route.homeSeed && route.chatId != null ? `chat:${route.chatId}` : null)
+      : (route.view === 'project'
+        ? (route.projectId != null ? `project:${route.projectId}` : null)
+        : (!route.homeSeed && route.chatId != null ? `chat:${route.chatId}` : null))
     if (tombstoneKey && tombstonedRouteRef.current.has(tombstoneKey)) {
       if (single) dispatchWorkspace({ type: 'SET_SINGLE_SCREEN', item: null })
       else dispatchWorkspace({ type: 'FOCUS', paneId })
@@ -1100,6 +1129,12 @@ export default function useNavigation({
     let itemRoute = null
     if (route.view === 'apps') {
       itemRoute = { view: 'apps', appId: null, chatId: null, paneId: route.paneId }
+    } else if (route.view === 'projects') {
+      itemRoute = { view: 'projects', appId: null, chatId: null, paneId: route.paneId }
+    } else if (route.view === 'project') {
+      if (route.projectId != null) itemRoute = {
+        view: 'project', projectId: route.projectId, appId: null, chatId: null, paneId: route.paneId,
+      }
     } else if (route.view === 'canvas') {
       if (route.appId != null) itemRoute = { view: 'canvas', appId: route.appId, chatId: null, paneId: route.paneId }
     } else {
@@ -1814,7 +1849,7 @@ export default function useNavigation({
       ? 'nav'
       : history.state.kind
     currentNavStateRef.current = updateCurrentNavEntry(snapshotRoute(), { kind })
-  }, [activeView, activeChatId, activeAppId, contentRoute.paneId, snapshotRoute])
+  }, [activeView, activeChatId, activeAppId, activeProjectId, contentRoute.paneId, snapshotRoute])
 
   // A queued close from a hidden cached app becomes safe once shell Back restores
   // that app and its sentinel to the current tagged entry — or once a split/focus
@@ -1841,6 +1876,7 @@ export default function useNavigation({
     activeView,
     activeAppId,
     activeChatId,
+    activeProjectId,
     drawerOpen: drawerVisible,
     drawerNavigationCover: drawerVisible && !drawerOpenRef.current,
     // Strictly "the full-workspace takeover overlay is up" — NOT "focused content
@@ -1870,6 +1906,7 @@ export default function useNavigation({
     activeViewRef,
     activeChatIdRef,
     activeAppIdRef,
+    activeProjectIdRef,
     appNavPush,
     appNavPop,
     appNavReset,

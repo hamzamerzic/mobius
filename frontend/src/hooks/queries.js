@@ -19,6 +19,9 @@ const settingsKey = ['settings']
 const providerUsageRootKey = ['settings', 'provider-usage']
 const providerUsageKey = (provider) => [...providerUsageRootKey, provider]
 const appsKey = ['apps']
+const projectsKey = ['projects']
+const projectTemplatesKey = ['projects', 'templates']
+const legacyProjectsKey = ['projects', 'legacy']
 const chatsKey = ['chats']
 const providersStatusKey = ['auth', 'providers', 'status']
 const modelRegistryKey = ['models', 'registry']
@@ -117,6 +120,36 @@ function useAppsQuery({ reconcile } = {}) {
       return reconcile ? reconcile(rows) : rows
     },
   })
+}
+
+async function fetchProjects() {
+  const res = await api.projects.list()
+  const data = await jsonOrThrow(res, 'projects fetch failed:')
+  return Array.isArray(data) ? data : []
+}
+
+function useProjectsQuery() {
+  return useQuery({ queryKey: projectsKey, queryFn: fetchProjects })
+}
+
+async function fetchProjectTemplates() {
+  const res = await api.projects.templates()
+  const data = await jsonOrThrow(res, 'project templates fetch failed:')
+  return Array.isArray(data) ? data : []
+}
+
+function useProjectTemplatesQuery() {
+  return useQuery({ queryKey: projectTemplatesKey, queryFn: fetchProjectTemplates })
+}
+
+async function fetchLegacyProjects() {
+  const res = await api.projects.legacy()
+  const data = await jsonOrThrow(res, 'legacy projects fetch failed:')
+  return Array.isArray(data) ? data : []
+}
+
+function useLegacyProjectsQuery({ enabled = true } = {}) {
+  return useQuery({ queryKey: legacyProjectsKey, queryFn: fetchLegacyProjects, enabled })
 }
 
 async function fetchChats({ signal } = {}) {
@@ -367,6 +400,34 @@ export const appQueries = {
     fetch: fetchAppToken,
     useQuery: useAppTokenQuery,
     invalidate: (queryClient, appId) => queryClient.invalidateQueries({ queryKey: ['app-token', appId] }),
+  },
+}
+
+export const projectQueries = {
+  keys: {
+    all: projectsKey,
+    templates: projectTemplatesKey,
+    legacy: legacyProjectsKey,
+    detail: (projectId) => ['projects', 'detail', projectId],
+    files: (projectId, path = '') => ['projects', 'files', projectId, path],
+  },
+  list: {
+    key: projectsKey,
+    fetch: fetchProjects,
+    useQuery: useProjectsQuery,
+    invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: projectsKey }),
+  },
+  templates: {
+    key: projectTemplatesKey,
+    fetch: fetchProjectTemplates,
+    useQuery: useProjectTemplatesQuery,
+    invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: projectTemplatesKey }),
+  },
+  legacy: {
+    key: legacyProjectsKey,
+    fetch: fetchLegacyProjects,
+    useQuery: useLegacyProjectsQuery,
+    invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: legacyProjectsKey }),
   },
 }
 

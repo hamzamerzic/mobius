@@ -14,6 +14,9 @@ configure_agent_sudo "${MOBIUS_AGENT_SUDO:-1}" || exit $?
 # hands pid 1 to the application server.
 cleanup() {
   kill "$(cat /var/run/crond.pid 2>/dev/null)" 2>/dev/null
+  if [ -n "${_identity_broker_pid:-}" ]; then
+    kill "$_identity_broker_pid" 2>/dev/null || true
+  fi
 }
 trap cleanup TERM INT
 
@@ -1080,6 +1083,36 @@ fi
 # the mobius user at runtime, causing subprocess "permission denied"
 # failures that look like generic CLI crashes.
 umask 022
+
+# Start the narrow identity/capability broker while this entrypoint is still
+# root. Its private key and linked account state live in a root-only directory;
+# the application receives only the explicitly allow-listed Unix-socket API,
+# and Codex receives only the loopback Responses proxy. The one-use Railway
+# bootstrap is inherited by this process and then removed before uvicorn starts.
+mkdir -p /data/identity-broker /data/run
+chown root:root /data/identity-broker
+chmod 700 /data/identity-broker
+DATA_DIR=/data python3 -P /app/runtime/identity_broker.py &
+_identity_broker_pid=$!
+unset MOBIUS_IDENTITY_BOOTSTRAP
+# Scrub credentials used by pre-capability prototypes/managed SSO revisions.
+# They are no longer accepted anywhere and must not reach the unprivileged app.
+unset MOBIUS_SSO_CLIENT_SECRET MOBIUS_COMPUTE_INSTANCE_TOKEN
+_identity_broker_ready=0
+for _broker_wait in $(seq 1 50); do
+  if [ -S /data/run/mobius-identity-broker.sock ]; then
+    _identity_broker_ready=1
+    break
+  fi
+  if ! kill -0 "$_identity_broker_pid" 2>/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
+if [ "$_identity_broker_ready" -ne 1 ]; then
+  echo "FATAL: identity broker did not become ready" >&2
+  exit 1
+fi
 
 # Root-owned half of the ordinary Settings restart handshake. The app publishes
 # a nonce-bound request; this poller accepts it and terminates pid 1 so Docker or

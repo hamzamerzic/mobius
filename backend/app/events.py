@@ -925,7 +925,7 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     # reads without pretending the provider exposed its private summary.
     block = {"type": "context_compaction"}
     provider = event.get("provider")
-    if provider in ("claude", "codex"):
+    if provider in ("claude", "codex", "mobius"):
       block["provider"] = provider
     trigger = event.get("trigger")
     if trigger in ("auto", "manual"):

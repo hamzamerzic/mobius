@@ -196,6 +196,18 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   deleted_app_id = app.id
   settings = get_settings()
 
+  # Imported Projects still point into this app's id-keyed storage. They must
+  # keep that tree for their own recovery/live lifecycle, so an app tombstone
+  # cannot become a destructive back door around Project retention.
+  legacy_project = db.query(models.Project.id).filter(
+    models.Project.source_app_id == deleted_app_id,
+    models.Project.legacy_source_json.isnot(None),
+  ).first()
+  if legacy_project is not None:
+    raise RuntimeError(
+      f"app {deleted_app_id} still owns imported project {legacy_project.id}"
+    )
+
   # Registry state is the revocation boundary; physical cleanup may fail.
   await _revoke_app_publish_tokens(
     settings, deleted_app_id, app.token_nonce,
@@ -233,6 +245,11 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   db.query(models.AppPreviewState).filter(
     models.AppPreviewState.app_id == deleted_app_id,
   ).delete(synchronize_session=False)
+  # Native Projects snapshot their provider metadata and own a separate root;
+  # uninstalling the provider must not delete or invalidate those projects.
+  db.query(models.Project).filter(
+    models.Project.source_app_id == deleted_app_id,
+  ).update({models.Project.source_app_id: None}, synchronize_session=False)
   db.delete(app)
   db.commit()
   get_system_broadcast().publish(
@@ -324,6 +341,7 @@ async def list_apps(
       defer(models.App.jsx_source),
       defer(models.App.icon_png),
       defer(models.App.icon_override_png),
+      defer(models.App.project_templates_json),
     )
     .filter(models.App.deleted_at.is_(None))
     .order_by(
@@ -2332,6 +2350,24 @@ async def delete_app(
     )
     if not app:
       raise HTTPException(status_code=404, detail="App not found.")
+
+    imported_project = db.query(models.Project.id, models.Project.name).filter(
+      models.Project.source_app_id == app_id,
+      models.Project.legacy_source_json.isnot(None),
+      models.Project.deleted_at.is_(None),
+    ).first()
+    if imported_project is not None:
+      raise HTTPException(
+        status_code=409,
+        detail={
+          "code": "app_has_imported_project",
+          "message": (
+            f"Project “{imported_project.name}” still uses this app's legacy "
+            "files. Delete that project before uninstalling the app."
+          ),
+          "project_id": imported_project.id,
+        },
+      )
 
     await _revoke_app_publish_tokens(
       settings=get_settings(), app_id=app_id, app_gen=app.token_nonce,

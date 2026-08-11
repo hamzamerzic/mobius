@@ -64,12 +64,15 @@ from app.routes import (
   admin_router, apps_router, auth_router,
   chat_embed_router, chat_logs_router, chat_router, chats_router, chats_stream_router,
   connectors_router, connectors_public_router,
+  community_router,
+  contribution_relay_router,
   debug_router, delegations_router, fs_router, github_router, media_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
   secrets_router, self_reminders_router, settings_router, skills_router,
   client_error_router, client_signal_router, standalone_router, storage_router,
   theme_router, uploads_router, platform_router,
   published_router,
+  projects_router,
 )
 
 _BOOT_ID = os.environ.get("MOBIUS_BOOT_ID") or f"{os.getpid()}-{time.time_ns()}"
@@ -606,6 +609,7 @@ app.include_router(auth_router)
 app.include_router(apps_router)
 app.include_router(storage_router)
 app.include_router(fs_router)
+app.include_router(projects_router)
 app.include_router(chat_router)
 app.include_router(chat_embed_router)
 app.include_router(chats_router)
@@ -631,6 +635,8 @@ app.include_router(proxy_router)
 app.include_router(local_services_router)
 app.include_router(client_error_router)
 app.include_router(client_signal_router)
+app.include_router(community_router)
+app.include_router(contribution_relay_router)
 app.include_router(settings_router)
 app.include_router(platform_router)
 app.include_router(uploads_router)

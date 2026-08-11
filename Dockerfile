@@ -322,6 +322,48 @@ RUN set -eux; \
     chown -R root:root /app/platform-baked; \
     chmod -R a+rX,go-w /app/platform-baked
 
+# `railway up` uploads a working tree rather than a Git source deployment, so
+# Railway cannot provide RAILWAY_GIT_COMMIT_SHA. Review deployments may still
+# need the exact unpushed checkout to seed /data/platform. Keep that exception
+# explicit and provenance-bound: normal builds never copy this overlay, while
+# the opt-in path requires the caller to name the exact local commit and records
+# a synthetic Git commit whose tree is the uploaded source.
+ARG MOBIUS_USE_LOCAL_PLATFORM_SOURCE=0
+ARG MOBIUS_LOCAL_PLATFORM_SHA=unknown
+ARG MOBIUS_LOCAL_PLATFORM_DATE=unknown
+COPY . /tmp/mobius-local-platform-source/
+RUN set -eux; \
+    case "${MOBIUS_USE_LOCAL_PLATFORM_SOURCE:-0}" in 0|1) ;; *) \
+      echo "FATAL: MOBIUS_USE_LOCAL_PLATFORM_SOURCE must be 0 or 1" >&2; exit 1;; \
+    esac; \
+    if [ "${MOBIUS_USE_LOCAL_PLATFORM_SOURCE:-0}" = "1" ]; then \
+      printf '%s' "${MOBIUS_LOCAL_PLATFORM_SHA:-unknown}" \
+        | grep -Eq '^[0-9a-fA-F]{40}$' \
+        || { echo "FATAL: local platform source requires its exact Git SHA" >&2; exit 1; }; \
+      cp -a /tmp/mobius-local-platform-source/. /app/platform-baked/; \
+      git -C /app/platform-baked add -A; \
+      git -C /app/platform-baked commit --allow-empty \
+        -m "Seed local review source ${MOBIUS_LOCAL_PLATFORM_SHA}"; \
+      git -C /app/platform-baked checkout -B main HEAD; \
+      git -C /app/platform-baked branch -f upstream HEAD; \
+      git -C /app/platform-baked update-ref refs/remotes/origin/main HEAD; \
+      if [ -d /app/platform-baked/frontend ]; then \
+        cd /app/platform-baked/frontend; \
+        [ -e node_modules ] || [ -L node_modules ] \
+          || ln -s /app/shell-src/node_modules node_modules; \
+        mkdir -p dist; \
+        cp -a /app/static/. dist/; \
+      fi; \
+      git -C /app/platform-baked rev-parse HEAD > /app/platform-baked/.baked-sha; \
+      printf '{"sha":"%s","build_date":"%s","railway_deployment_id":"%s","source":"local-overlay"}\n' \
+        "${MOBIUS_LOCAL_PLATFORM_SHA}" \
+        "${MOBIUS_LOCAL_PLATFORM_DATE:-unknown}" \
+        "${RAILWAY_DEPLOYMENT_ID:-unknown}" > /app/build-info.json; \
+      chown -R root:root /app/platform-baked; \
+      chmod -R a+rX,go-w /app/platform-baked; \
+    fi; \
+    rm -rf /tmp/mobius-local-platform-source
+
 # Initialize the runtime volume paths for the non-root agent user.
 RUN mkdir -p /data/db /data/apps /data/compiled /data/shared \
     && chown -R mobius:mobius /data

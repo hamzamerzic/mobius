@@ -128,6 +128,27 @@ function OpenAILogo() {
 }
 
 
+/** Möbius-owned neutral infinity mark for the account trial. */
+function MobiusLogo() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.25"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M8.2 7.2c-2.9 0-5.2 2.1-5.2 4.8s2.3 4.8 5.2 4.8c3.8 0 5.5-3.6 7.6-7.1 1-1.6 2.1-2.5 3.4-2.5 1 0 1.8.4 2.8 1.4" />
+      <path d="M15.8 16.8c2.9 0 5.2-2.1 5.2-4.8s-2.3-4.8-5.2-4.8c-3.8 0-5.5 3.6-7.6 7.1-1 1.6-2.1 2.5-3.4 2.5-1 0-1.8-.4-2.8-1.4" />
+    </svg>
+  )
+}
+
+
 /** Provider metadata used by the row renderer. Effort levels are
  *  scoped to each provider since the two SDKs publish different
  *  enumerations:
@@ -154,6 +175,15 @@ function OpenAILogo() {
  *  ChatSettingsPanel: a single track with N stops, the selected
  *  one filled, the long-form label rendered next to the track. */
 export const PROVIDER_INFO = {
+  mobius: {
+    id: 'mobius',
+    label: 'Möbius trial',
+    Logo: MobiusLogo,
+    efforts: [
+      { value: 'medium', label: 'Medium' },
+      { value: 'high', label: 'High' },
+    ],
+  },
   codex: {
     id: 'codex',
     label: 'OpenAI Codex',
@@ -184,7 +214,7 @@ export const PROVIDER_INFO = {
     ],
   },
 }
-export const PROVIDER_ORDER = ['codex', 'claude']
+export const PROVIDER_ORDER = ['mobius', 'codex', 'claude']
 
 
 /** Resolves the displayed model list for `providerId` from the live

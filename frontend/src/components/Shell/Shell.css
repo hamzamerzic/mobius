@@ -519,6 +519,12 @@
   container: apps-directory / inline-size;
 }
 
+.shell__projects-view,
+.shell__project-view {
+  background: var(--bg);
+  container: projects / inline-size;
+}
+
 .shell__apps-host {
   width: 100%;
   height: 100%;

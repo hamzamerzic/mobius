@@ -4,6 +4,7 @@ import { CollapseSm } from '@openai/apps-sdk-ui/components/Icon'
 import {
   AppsNavIcon,
   NewChatNavIcon,
+  ProjectsNavIcon,
   SettingsNavIcon,
 } from '../navigationIcons.js'
 import Drawer from '../Drawer/Drawer.jsx'
@@ -31,7 +32,10 @@ import {
   chatQueries,
   modelQueries,
   ownerQueries,
+  projectQueries,
 } from '../../hooks/queries.js'
+import ProjectsDirectory from '../Projects/ProjectsDirectory.jsx'
+import ProjectWorkspace from '../Projects/ProjectWorkspace.jsx'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
 import { bumpChatRunSignal, chatRunSignal } from '../../lib/chatRunSignal.js'
 import { clearAppFrameStorage, clearCachedAppToken } from '../../lib/appFrameStorage.js'
@@ -196,6 +200,7 @@ export default function Shell() {
     activeView,
     activeAppId,
     activeChatId,
+    activeProjectId,
     drawerOpen, settingsOverlayOpen, settingsOpenRaw, openDrawer, closeDrawer,
     drawerNavigationCover, finishDrawerNavigationPresentation,
     navTo, tabRevealRevision, applyModeDestination, dismissSettings,
@@ -500,6 +505,9 @@ export default function Shell() {
     [],
   )
   const appsQuery = appQueries.list.useQuery({ reconcile: reconcileApps })
+  const projectsQuery = projectQueries.list.useQuery()
+  const projectTemplatesQuery = projectQueries.templates.useQuery()
+  const legacyProjectsQuery = projectQueries.legacy.useQuery()
   // Create responses are authoritative even when the next NetworkFirst list
   // request has to fall back to a just-stale service-worker copy. Reconcile at
   // the query function boundary so the protected row never disappears from
@@ -518,6 +526,9 @@ export default function Shell() {
     reconcile: reconcileCreatedChats,
   })
   const apps = appsQuery.data ?? EMPTY_LIST
+  const projects = projectsQuery.data ?? EMPTY_LIST
+  const projectTemplates = projectTemplatesQuery.data ?? EMPTY_LIST
+  const legacyProjects = legacyProjectsQuery.data ?? EMPTY_LIST
   const chats = chatsQuery.data ?? EMPTY_LIST
   const appsStatus = apps.length > 0 || appsQuery.isSuccess
     ? 'success'
@@ -525,6 +536,9 @@ export default function Shell() {
   const chatsStatus = chats.length > 0 || chatsQuery.isSuccess
     ? 'success'
     : (chatsQuery.isError ? 'error' : 'loading')
+  const projectsStatus = projects.length > 0 || projectsQuery.isSuccess
+    ? 'success'
+    : (projectsQuery.isError ? 'error' : 'loading')
   const appPreviewAckRef = useRef(new Set())
   const handleAppPreviewSeen = useCallback((app, final) => {
     acknowledgeAppPreview({
@@ -931,6 +945,14 @@ export default function Shell() {
     || projection.visibleLeaves.some(id => workspace.panes[id]?.activeTabKey === APPS_KEY)
   const appsPaned = workspaceChromeActive ? visibleTabRects.get(APPS_KEY) : null
   const appsFullBleed = !appsPaned && fullBleedKey === APPS_KEY
+  // Projects launcher and each project are ordinary canonical workspace items.
+  // The project tab owns files/editor state; its primary chat remains a distinct
+  // chat tab, so opening both never mounts a second ChatView inside Projects.
+  const PROJECTS_KEY = tabModel.PROJECTS_TAB_KEY
+  const projectsVisibleAsTab = fullBleedKey === PROJECTS_KEY
+    || projection.visibleLeaves.some(id => workspace.panes[id]?.activeTabKey === PROJECTS_KEY)
+  const projectsPaned = workspaceChromeActive ? visibleTabRects.get(PROJECTS_KEY) : null
+  const projectsFullBleed = !projectsPaned && fullBleedKey === PROJECTS_KEY
   // focusedActiveKey / fullBleedKey / visibleAppIds are derived once by
   // deriveContentVisibility above: focusedActiveKey drives the AppCanvas
   // focused-pane-only `active` prop (insets + immersive holder); fullBleedKey is
@@ -1128,12 +1150,80 @@ export default function Shell() {
     for (const a of apps) m.set(String(a.id), a)
     return m
   }, [apps])
+  const projectById = useMemo(() => {
+    const m = new Map()
+    for (const project of projects) m.set(String(project.id), project)
+    return m
+  }, [projects])
   const labelForTab = useCallback((tab) => {
     if (tab.kind === 'apps') return 'Apps'
+    if (tab.kind === 'projects') return 'Projects'
     if (tab.kind === 'settings') return 'Settings'
     if (tab.kind === 'chat') return chatById.get(tab.id)?.title || 'Chat'
+    if (tab.kind === 'project') return projectById.get(tab.id)?.name || 'Project'
     return appById.get(tab.id)?.name || 'App'
-  }, [chatById, appById])
+  }, [chatById, appById, projectById])
+
+  const renderedProjectIds = useMemo(() => {
+    const ids = new Set(
+      openTabs.filter(tab => tab.kind === 'project').map(tab => String(tab.id)),
+    )
+    const slot = workspace.singleScreen
+    if (slot?.kind === 'project') ids.add(String(slot.id))
+    return [...ids].sort()
+  }, [openTabs, workspace.singleScreen])
+
+  function openProject(project) {
+    if (!project?.id || !project?.chat_id) return
+    navTo('project', { projectId: project.id })
+    dispatchWorkspace({
+      type: 'APPLY_PLACEMENT',
+      toast: null,
+      resolve: (current) => {
+        let next = paneModel.setViewMode(current, 'panes')
+        const projectKey = tabModel.tabKey(tabModel.projectTab(project.id))
+        if (!paneModel.paneOf(next, projectKey)) {
+          next = paneModel.openTab(next, tabModel.projectTab(project.id))
+        }
+        let projectPane = paneModel.paneOf(next, projectKey)
+        if (!projectPane) return next
+
+        const chatTab = tabModel.makeTab('chat', project.chat_id)
+        const chatKey = tabModel.tabKey(chatTab)
+        const chatPane = paneModel.paneOf(next, chatKey)
+        const rect = contentRectRef.current
+        const edge = paneModel.modeForRect(rect) === 'phone' ? 'bottom' : 'right'
+        if (chatPane?.id === projectPane.id) {
+          next = paneModel.moveTab(next, chatKey, { paneId: projectPane.id, edge })
+        } else if (chatPane) {
+          next = paneModel.setActiveTab(next, chatPane.id, chatKey)
+        } else {
+          const split = paneModel.splitPaneWithTab(next, chatTab, {
+            paneId: projectPane.id,
+            edge,
+            focus: false,
+          })
+          next = split === next
+            ? paneModel.openTab(next, chatTab, {
+              paneId: projectPane.id, activate: false, focus: false,
+            })
+            : split
+        }
+        projectPane = paneModel.paneOf(next, projectKey)
+        if (!projectPane) return next
+        next = paneModel.setActiveTab(next, projectPane.id, projectKey)
+        return paneModel.focusPane(next, projectPane.id)
+      },
+    })
+  }
+
+  function runProjectAction(project, action) {
+    if (!project?.chat_id || !action?.prompt) return
+    const chatId = String(project.chat_id)
+    stageComposerHandoff(chatId, action.prompt)
+    navTo('chat', { chatId })
+    requestComposer(chatId, { draft: action.prompt, focus: true })
+  }
 
   // Per-chat repair callback for a mounted chat pane (design §2 M13). A pane
   // whose chat reports a real 404 drops its tab; the derived triple follows the
@@ -2184,6 +2274,27 @@ export default function Shell() {
       // Recovery is the sole operation allowed to clear the session tombstone.
       if (ev.chatId) confirmChatRecovered(ev.chatId)
       void invalidateShellListCache('chats').then(refreshChats)
+    } else if (ev.type === 'project_deleted') {
+      if (ev.projectId) {
+        const projectId = String(ev.projectId)
+        queryClient.setQueryData(projectQueries.keys.all, current => (
+          Array.isArray(current)
+            ? current.filter(project => String(project.id) !== projectId)
+            : current
+        ))
+        navStackRef.current = navStackRef.current.filter(
+          entry => String(entry.projectId ?? '') !== projectId,
+        )
+        tombstoneRoute('project', projectId)
+        dispatchWorkspace({
+          type: 'CLOSE_TAB',
+          tabKey: tabModel.tabKey(tabModel.projectTab(projectId)),
+          reason: 'deleted',
+        })
+      }
+      void projectQueries.list.invalidate(queryClient)
+    } else if (ev.type === 'project_recovered') {
+      void projectQueries.list.invalidate(queryClient)
     } else if (ev.type === 'chat_renamed') {
       // The committed event carries the exact changed row fields. Apply those
       // in place so renaming one chat cannot parse and reconcile all hundreds
@@ -2394,7 +2505,7 @@ export default function Shell() {
     loadTheme, markChatRunActivity, markChatRunFinished,
     markChatRunState, markStreamingEnd, markStreamingStart,
     onNotificationCreated, placeInWorkspace, queryClient,
-    refreshApps, refreshChats, warmAppCode,
+    refreshApps, refreshChats, tombstoneRoute, warmAppCode,
   ])
 
   // Shell-level SSE subscription for system events. Stays open for
@@ -3020,6 +3131,77 @@ export default function Shell() {
     })
   }
 
+  async function deleteProject(project) {
+    const projectId = String(project.id)
+    const chatId = String(project.chat_id)
+    let res
+    try {
+      res = await api.projects.remove(projectId)
+    } catch {
+      showToast("Couldn't delete — check your connection.", { variant: 'error' })
+      return false
+    }
+    if (!res.ok && res.status !== 404) {
+      if (res.status === 409) {
+        showToast('The project agent is still working — stop it and retry.', { duration: 6000 })
+      } else {
+        showToast("Couldn't delete this project — please try again.", { variant: 'error' })
+      }
+      return false
+    }
+
+    confirmChatDeleted(chatId)
+    clearComposerDraft(chatId)
+    chatQueries.messages.remove(queryClient, chatId)
+    queryClient.setQueryData(projectQueries.keys.all, current => (
+      Array.isArray(current)
+        ? current.filter(candidate => String(candidate.id) !== projectId)
+        : current
+    ))
+    navStackRef.current = navStackRef.current.filter(entry => (
+      String(entry.projectId ?? '') !== projectId
+      && String(entry.chatId ?? '') !== chatId
+    ))
+    tombstoneRoute('project', projectId)
+    tombstoneRoute('chat', chatId)
+    navTo('projects')
+    dispatchWorkspace({
+      type: 'CLOSE_TAB',
+      tabKey: tabModel.tabKey(tabModel.projectTab(projectId)),
+      reason: 'deleted',
+    })
+    dispatchWorkspace({
+      type: 'CLOSE_TAB',
+      tabKey: tabModel.tabKey(tabModel.makeTab('chat', chatId)),
+      reason: 'deleted',
+    })
+    await Promise.all([
+      projectsQuery.refetch(),
+      refreshChats(),
+    ])
+    showToast('Project deleted', {
+      duration: 5000,
+      action: {
+        label: 'Undo',
+        onAction: async () => {
+          try {
+            const recoverRes = await api.projects.recover(projectId)
+            const recovered = await jsonOrThrow(recoverRes, 'Project recovery failed')
+            confirmChatRecovered(chatId)
+            queryClient.setQueryData(projectQueries.keys.all, current => {
+              const rows = Array.isArray(current) ? current : []
+              return [recovered, ...rows.filter(row => String(row.id) !== projectId)]
+            })
+            await refreshChats()
+          } catch {
+            showToast("Couldn't undo — project may be gone.", { variant: 'error' })
+          }
+        },
+      },
+    })
+    return true
+  }
+
   // App delete lives here (not in Drawer) so we have access to showToast.
   // The Drawer's local deleteApp swallowed all errors silently — 409 means
   // the agent is still working and the app cannot be safely removed yet;
@@ -3034,7 +3216,14 @@ export default function Shell() {
     }
     if (!res.ok) {
       if (res.status === 409) {
-        showToast('Agent is still working in this app — stop it first.', { duration: 6000 })
+        let detail = null
+        try { detail = (await res.json())?.detail } catch { /* use fallback */ }
+        showToast(
+          detail?.code === 'app_has_imported_project'
+            ? detail.message
+            : 'Agent is still working in this app — stop it first.',
+          { duration: 6000 },
+        )
         return
       }
       if (res.status !== 404) {
@@ -3243,6 +3432,16 @@ export default function Shell() {
           </button>
           <button
             type="button"
+            className={`shell__rail-action${activeView === 'projects' || activeView === 'project' ? ' shell__rail-action--active' : ''}`}
+            aria-label="Projects shortcut"
+            title="Projects"
+            aria-current={activeView === 'projects' ? 'page' : undefined}
+            onClick={() => navTo('projects')}
+          >
+            <ProjectsNavIcon aria-hidden="true" />
+          </button>
+          <button
+            type="button"
             className={`shell__rail-action shell__rail-action--bottom${activeView === 'settings' ? ' shell__rail-action--active' : ''}`}
             aria-label="Settings shortcut"
             title="Settings"
@@ -3282,6 +3481,11 @@ export default function Shell() {
         onRetryApps={() => appsQuery.refetch()}
         activeView={activeView}
         activeAppId={activeAppId}
+        projects={projects}
+        projectsStatus={projectsStatus}
+        activeProjectId={activeProjectId}
+        onProject={openProject}
+        onProjectsOpen={() => navTo('projects')}
         chats={chats}
         chatsStatus={chatsStatus}
         onRetryChats={() => chatsQuery.refetch()}
@@ -3661,6 +3865,98 @@ export default function Shell() {
             </div>
           )
         })()}
+        {/* Projects launcher — a canonical workspace destination below Apps. */}
+        {(() => {
+          const projectListPos = projectsPaned
+            ? {
+              top: projectsPaned.y,
+              left: projectsPaned.x,
+              width: projectsPaned.w,
+              height: projectsPaned.h,
+              ...modeViewTransitionStyle('pane', projectsPaned.paneId, PROJECTS_KEY),
+            }
+            : null
+          const surfaceVisible = projectsVisibleAsTab
+            && !!(projectsPaned || projectsFullBleed)
+          return (
+            <div
+              key="projects"
+              id={projectsPaned ? panePanelDomId(projectsPaned.paneId, PROJECTS_KEY) : undefined}
+              role={projectsPaned ? 'tabpanel' : undefined}
+              aria-labelledby={projectsPaned ? paneTabDomId(projectsPaned.paneId, PROJECTS_KEY) : undefined}
+              data-tab-key={projectsPaned ? PROJECTS_KEY : undefined}
+              data-mode-pane-vt={projectsPaned ? projectsPaned.paneId : undefined}
+              className={projectsPaned
+                ? 'shell__view shell__view--paned shell__projects-view'
+                : `shell__view shell__projects-view ${projectsFullBleed ? 'shell__view--active' : ''}`}
+              style={projectListPos || undefined}
+              inert={!surfaceVisible || undefined}
+              aria-hidden={!surfaceVisible ? 'true' : undefined}
+              onPointerDownCapture={projectsPaned && !modeBeatActive
+                ? () => dispatchWorkspace({ type: 'FOCUS', paneId: projectsPaned.paneId })
+                : undefined}
+            >
+              <ProjectsDirectory
+                projects={projects}
+                templates={projectTemplates}
+                legacy={legacyProjects}
+                status={projectsStatus}
+                onRetry={() => Promise.all([
+                  projectsQuery.refetch(),
+                  projectTemplatesQuery.refetch(),
+                  legacyProjectsQuery.refetch(),
+                ])}
+                onOpen={openProject}
+              />
+            </div>
+          )
+        })()}
+        {/* One stable file/editor surface per open project. The companion chat is
+            always its ordinary chat tab and therefore reuses the shell's sole
+            PaneChatView mount for that chat id. */}
+        {renderedProjectIds.map((projectId) => {
+          const project = projectById.get(projectId)
+          if (!project) return null
+          const key = tabModel.tabKey(tabModel.projectTab(projectId))
+          const paned = workspaceChromeActive ? visibleTabRects.get(key) : null
+          const fullBleed = !paned && fullBleedKey === key
+          const pos = paned
+            ? {
+              top: paned.y,
+              left: paned.x,
+              width: paned.w,
+              height: paned.h,
+              ...modeViewTransitionStyle('pane', paned.paneId, key),
+            }
+            : null
+          const visible = !!(paned || fullBleed)
+          return (
+            <div
+              key={key}
+              id={paned ? panePanelDomId(paned.paneId, key) : undefined}
+              role={paned ? 'tabpanel' : undefined}
+              aria-labelledby={paned ? paneTabDomId(paned.paneId, key) : undefined}
+              data-tab-key={paned ? key : undefined}
+              data-mode-pane-vt={paned ? paned.paneId : undefined}
+              className={paned
+                ? 'shell__view shell__view--paned shell__project-view'
+                : `shell__view shell__project-view ${fullBleed ? 'shell__view--active' : ''}`}
+              style={pos || undefined}
+              inert={!visible || undefined}
+              aria-hidden={!visible ? 'true' : undefined}
+              onPointerDownCapture={paned && !modeBeatActive
+                ? () => dispatchWorkspace({ type: 'FOCUS', paneId: paned.paneId })
+                : undefined}
+            >
+              <ProjectWorkspace
+                project={project}
+                onOpenChat={chatId => navTo('chat', { chatId })}
+                onDelete={deleteProject}
+                onRunAction={runProjectAction}
+              />
+            </div>
+          )
+        })}
         {/* Settings surface — ONE wrapper, positioned like a chat/app content
             wrapper (paned) when it is a visible builder tab, full-bleed when the
             takeover overlay is up. Keyed 'settings' so React reconciles it by key
