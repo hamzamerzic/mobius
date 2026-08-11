@@ -541,6 +541,10 @@ export const api = {
       `/projects/${encodeURIComponent(projectId)}/file-bytes?path=${encodeURIComponent(path)}`,
       { method: 'PUT', headers: { 'Content-Type': 'application/octet-stream' }, body: bytes },
     ),
+    createFolder: (projectId, path) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/folder`,
+      { method: 'POST', body: JSON.stringify({ path }) },
+    ),
     deleteFile: (projectId, path) => apiFetch(
       `/projects/${encodeURIComponent(projectId)}/file?path=${encodeURIComponent(path)}`,
       { method: 'DELETE' },

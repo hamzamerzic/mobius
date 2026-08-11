@@ -191,7 +191,44 @@ export default function StandaloneApp({ initialApp }) {
   }, [])
 
   const onHostRequest = useCallback((_appId, request) => {
-    void (async () => {
+    const run = async () => {
+      if (request.type === 'moebius:projects') {
+        const [projectsResponse, templatesResponse] = await Promise.all([
+          api.projects.list(),
+          api.projects.templates(),
+        ])
+        if (!projectsResponse.ok || !templatesResponse.ok) {
+          throw new Error('Projects are unavailable.')
+        }
+        const projects = (await projectsResponse.json()).filter(
+          project => String(project.source_app_id) === String(initialApp.id),
+        )
+        if (request.action === 'list') return projects
+        if (request.action === 'browse') {
+          window.location.href = shellUrl({ projects: 1 })
+          return { opened: true }
+        }
+        if (request.action === 'open') {
+          const project = projects.find(row => String(row.id) === request.projectId)
+          if (!project) throw new Error('That project is unavailable to this app.')
+          window.location.href = shellUrl({ project: project.id })
+          return project
+        }
+        const templates = (await templatesResponse.json()).filter(
+          template => String(template.source_app_id) === String(initialApp.id),
+        )
+        const template = templates.find(row => row.key === request.templateId) || templates[0]
+        if (!template) throw new Error(`${initialApp.name} does not provide a project type.`)
+        const response = await api.projects.create({
+          name: request.name || `Untitled ${template.name.toLowerCase()}`,
+          template_id: template.key,
+          recovery_request_id: crypto.randomUUID(),
+        })
+        if (!response.ok) throw new Error(`project create ${response.status}`)
+        const project = await response.json()
+        window.location.href = shellUrl({ project: project.id })
+        return project
+      }
       if (request.type === 'moebius:open-app') {
         window.location.href = shellUrl({ app: request.appId, intent: request.intent })
         return
@@ -214,12 +251,17 @@ export default function StandaloneApp({ initialApp }) {
         stageComposerHandoff(chat.id, request.draft, { autoSend: request.autoSend })
         window.location.href = shellUrl({ chat: chat.id })
       }
-    })().catch(error => captureCrash(
+      return null
+    }
+    const outcome = run()
+    if (request.requestId) return outcome
+    void outcome.catch(error => captureCrash(
       initialApp.id,
       `Möbius couldn't complete that request. ${readableAppDiagnostic(error)}`,
       null,
     ))
-  }, [captureCrash, initialApp.id])
+    return undefined
+  }, [captureCrash, initialApp.id, initialApp.name])
 
   const refreshCrash = useCallback(() => {
     if (!crash || repairControllerRef.current) return

@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  assembleProjectHtmlPreview,
   projectPreviewSandbox,
   safeProjectHtmlDocument,
 } from '../projectPreview.js'
@@ -12,7 +13,7 @@ test('project HTML preview injects a deny-by-default CSP into the document head'
   assert.match(result, /default-src 'none'/)
   assert.match(result, /form-action 'none'/)
   assert.match(result, /base-uri 'none'/)
-  assert.doesNotMatch(result, /script-src/)
+  assert.match(result, /script-src 'unsafe-inline'/)
 })
 
 test('project preview policy precedes resources placed before a malformed head', () => {
@@ -23,6 +24,35 @@ test('project preview policy precedes resources placed before a malformed head',
   assert.match(result, /^<meta http-equiv="Content-Security-Policy"/)
 })
 
-test('project HTML preview grants no iframe sandbox capabilities', () => {
-  assert.equal(projectPreviewSandbox(), '')
+test('project HTML preview runs scripts without granting origin or navigation access', () => {
+  assert.equal(projectPreviewSandbox(), 'allow-scripts')
+})
+
+test('project HTML preview inlines local CSS and JavaScript into its isolated document', async () => {
+  const files = new Map([
+    ['site/style.css', 'body { color: rebeccapurple; }'],
+    ['site/app.js', 'document.body.dataset.ready = "yes"'],
+  ])
+  const result = await assembleProjectHtmlPreview(
+    '<link rel="stylesheet" href="./style.css"><script src="./app.js"></script>',
+    'site/index.html',
+    async path => {
+      if (!files.has(path)) throw new Error('missing')
+      return files.get(path)
+    },
+  )
+  assert.match(result, /data-project-file="site\/style.css"/)
+  assert.match(result, /color: rebeccapurple/)
+  assert.match(result, /data-project-file="site\/app.js"/)
+  assert.match(result, /dataset.ready/)
+})
+
+test('project HTML preview leaves remote dependencies blocked by CSP', async () => {
+  const result = await assembleProjectHtmlPreview(
+    '<script src="https://tracker.invalid/x.js"></script>',
+    'index.html',
+    async () => { throw new Error('must not fetch') },
+  )
+  assert.match(result, /https:\/\/tracker.invalid\/x.js/)
+  assert.match(result, /default-src 'none'/)
 })

@@ -567,7 +567,18 @@ def list_chats(
     # shell tell a parked turn from a live stream without decoding the messages
     # JSON. Consumed by _owner_chat_summary below.
     models.Chat.pending_question_id,
-  ).filter(models.Chat.deleted_at.is_(None))
+  ).filter(
+    models.Chat.deleted_at.is_(None),
+    # A project chat is reached through its project, not duplicated in the
+    # global Recents list. It remains a normal Chat row so the existing chat
+    # runtime, direct routes, search, recovery, and agent lifecycle stay the
+    # single implementation for every conversation surface.
+    ~models.Chat.id.in_(
+      db.query(models.Project.chat_id).filter(
+        models.Project.deleted_at.is_(None),
+      )
+    ),
+  )
   chats = (
     q.order_by(
       models.Chat.pinned_at.is_(None),

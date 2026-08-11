@@ -339,8 +339,12 @@
   border-radius: 6px;
   color: var(--accent);
   background: var(--accent-dim);
-  font-size: 10px;
-  font-weight: 700;
+}
+
+.drawer__project-row > span:first-child svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.8;
 }
 
 .drawer__project-row > span:last-child {

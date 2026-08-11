@@ -99,6 +99,12 @@ class FileWrite(BaseModel):
   content: str = Field(max_length=_WRITE_MAX)
 
 
+class FolderCreate(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+
+  path: str = Field(min_length=1, max_length=2048)
+
+
 def _project_response(project: models.Project) -> dict[str, Any]:
   return {
     "id": project.id,
@@ -498,6 +504,28 @@ def get_project(
   db: Session = Depends(get_db),
 ):
   return _project_response(_live_project(db, project_id))
+
+
+@router.post(
+  "/{project_id}/folder", dependencies=[Depends(reject_cross_site)],
+)
+def create_project_folder(
+  project_id: str,
+  body: FolderCreate,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  project = _live_project(db, project_id)
+  root, target = _resolve_project_path(project, body.path)
+  if target == root:
+    raise HTTPException(400, "The project root already exists.")
+  try:
+    target.mkdir(parents=True, exist_ok=False)
+  except FileExistsError as exc:
+    raise HTTPException(409, "A file or folder already uses that path.") from exc
+  project.updated_at = now_naive_utc()
+  db.commit()
+  return {"ok": True, "path": target.relative_to(root).as_posix()}
 
 
 @router.patch("/{project_id}", dependencies=[Depends(reject_cross_site)])

@@ -796,7 +796,35 @@ const AppCanvas = forwardRef(function AppCanvas({
       // request, so no host needs to rediscover iframe identity.
       const hostRequest = appHostRequest(msg)
       if (hostRequest && onHostRequest) {
-        onHostRequest(appId, hostRequest)
+        const responseTarget = e.source
+        try {
+          const outcome = onHostRequest(appId, hostRequest)
+          if (hostRequest.requestId) {
+            Promise.resolve(outcome).then(
+              result => responseTarget?.postMessage({
+                type: 'moebius:projects-result',
+                requestId: hostRequest.requestId,
+                ok: true,
+                result: result ?? null,
+              }, '*'),
+              error => responseTarget?.postMessage({
+                type: 'moebius:projects-result',
+                requestId: hostRequest.requestId,
+                ok: false,
+                error: error?.message || 'Projects request failed.',
+              }, '*'),
+            )
+          }
+        } catch (error) {
+          if (hostRequest.requestId) {
+            responseTarget?.postMessage({
+              type: 'moebius:projects-result',
+              requestId: hostRequest.requestId,
+              ok: false,
+              error: error?.message || 'Projects request failed.',
+            }, '*')
+          }
+        }
         return
       }
 

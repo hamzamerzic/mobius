@@ -5,15 +5,18 @@ import File from 'lucide-react/dist/esm/icons/file.mjs'
 import FileCode from 'lucide-react/dist/esm/icons/file-code.mjs'
 import FileText from 'lucide-react/dist/esm/icons/file-text.mjs'
 import Folder from 'lucide-react/dist/esm/icons/folder.mjs'
+import FolderPlus from 'lucide-react/dist/esm/icons/folder-plus.mjs'
 import Grid2X2 from 'lucide-react/dist/esm/icons/grid-2x2.mjs'
 import Image from 'lucide-react/dist/esm/icons/image.mjs'
 import List from 'lucide-react/dist/esm/icons/list.mjs'
 import MessageSquare from 'lucide-react/dist/esm/icons/message-square.mjs'
+import Ellipsis from 'lucide-react/dist/esm/icons/ellipsis.mjs'
 import Plus from 'lucide-react/dist/esm/icons/plus.mjs'
 import Upload from 'lucide-react/dist/esm/icons/upload.mjs'
+import Trash2 from 'lucide-react/dist/esm/icons/trash-2.mjs'
 import { api, jsonOrThrow } from '../../api/client.js'
 import { projectQueries } from '../../hooks/queries.js'
-import { projectPreviewSandbox, safeProjectHtmlDocument } from '../../lib/projectPreview.js'
+import { assembleProjectHtmlPreview, projectPreviewSandbox } from '../../lib/projectPreview.js'
 import './Projects.css'
 
 const VIEW_KEY = 'mobius.projects.files-view'
@@ -37,7 +40,9 @@ function fileIcon(entry, size) {
   return <File size={size} />
 }
 
-export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunAction }) {
+export default function ProjectWorkspace({
+  project, onOpenChat, onLocationChange, onDelete, onRunAction,
+}) {
   const [path, setPath] = useState('')
   const [view, setView] = useState(initialView)
   const [selectedPath, setSelectedPath] = useState(null)
@@ -45,9 +50,14 @@ export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunA
   const [baseline, setBaseline] = useState('')
   const [fileKind, setFileKind] = useState('none')
   const [objectUrl, setObjectUrl] = useState(null)
+  const [creation, setCreation] = useState(null)
+  const [creationPath, setCreationPath] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const uploadRef = useRef(null)
+  const creationInputRef = useRef(null)
+  const createMenuRef = useRef(null)
+  const moreMenuRef = useRef(null)
 
   const filesQuery = useQuery({
     queryKey: projectQueries.keys.files(project.id, path),
@@ -66,12 +76,22 @@ export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunA
     setContent('')
     setBaseline('')
     setObjectUrl(null)
+    setCreation(null)
+    setCreationPath('')
     setError('')
   }, [project.id])
 
   useEffect(() => () => {
     if (objectUrl) URL.revokeObjectURL(objectUrl)
   }, [objectUrl])
+
+  useEffect(() => {
+    onLocationChange?.(selectedPath || path || '')
+  }, [onLocationChange, path, selectedPath])
+
+  useEffect(() => {
+    if (creation) creationInputRef.current?.focus()
+  }, [creation])
 
   function chooseView(next) {
     setView(next)
@@ -141,7 +161,16 @@ export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunA
       const res = await api.projects.readFile(project.id, preview.path)
       if (preview.kind === 'html') {
         const data = await jsonOrThrow(res, 'Preview failed:')
-        setContent(safeProjectHtmlDocument(data.content))
+        const assembled = await assembleProjectHtmlPreview(
+          data.content,
+          preview.path,
+          async dependencyPath => {
+            const dependency = await api.projects.readFile(project.id, dependencyPath)
+            const value = await jsonOrThrow(dependency, 'Preview dependency failed:')
+            return value.content
+          },
+        )
+        setContent(assembled)
         setBaseline('')
         setFileKind('html')
       } else {
@@ -175,34 +204,83 @@ export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunA
     }
   }
 
-  async function createFile() {
-    const requested = window.prompt('New file path', path ? `${path}/` : '')
-    if (!requested) return
+  function beginCreate(kind) {
+    setCreation(kind)
+    setCreationPath(path ? `${path}/` : '')
+    setError('')
+  }
+
+  async function submitCreate(event) {
+    event.preventDefault()
+    const requested = creationPath.trim()
+    if (!requested || !creation || busy) return
     setBusy(true)
     setError('')
     try {
-      await jsonOrThrow(await api.projects.writeFile(project.id, requested, ''), 'File creation failed:')
+      if (creation === 'file') {
+        await jsonOrThrow(
+          await api.projects.writeFile(project.id, requested, ''),
+          'File creation failed:',
+        )
+      } else {
+        await jsonOrThrow(
+          await api.projects.createFolder(project.id, requested),
+          'Folder creation failed:',
+        )
+      }
       await filesQuery.refetch()
-      await openFile({ path: requested, name: requested.split('/').pop(), type: 'file' })
+      const completedKind = creation
+      setCreation(null)
+      setCreationPath('')
+      if (completedKind === 'file') {
+        await openFile({ path: requested, name: requested.split('/').pop(), type: 'file' })
+      }
     } catch (cause) {
-      setError(cause?.message || 'Could not create that file.')
+      setError(cause?.message || `Could not create that ${creation}.`)
     } finally {
       setBusy(false)
     }
   }
 
   async function uploadFile(event) {
-    const file = event.target.files?.[0]
+    const files = [...(event.target.files || [])]
     event.target.value = ''
-    if (!file) return
-    const target = [path, file.name].filter(Boolean).join('/')
+    if (files.length === 0) return
     setBusy(true)
     setError('')
     try {
-      await jsonOrThrow(await api.projects.writeBytes(project.id, target, await file.arrayBuffer()), 'Upload failed:')
+      for (const file of files) {
+        const target = [path, file.name].filter(Boolean).join('/')
+        await jsonOrThrow(
+          await api.projects.writeBytes(project.id, target, await file.arrayBuffer()),
+          `Upload of ${file.name} failed:`,
+        )
+      }
       await filesQuery.refetch()
     } catch (cause) {
       setError(cause?.message || 'Could not upload that file.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function deleteCurrentFile() {
+    if (!selectedPath || busy || !window.confirm(`Delete “${selectedPath}”?`)) return
+    setBusy(true)
+    setError('')
+    try {
+      await jsonOrThrow(
+        await api.projects.deleteFile(project.id, selectedPath),
+        'File deletion failed:',
+      )
+      setSelectedPath(null)
+      setFileKind('none')
+      setContent('')
+      setBaseline('')
+      replaceObjectUrl(null)
+      await filesQuery.refetch()
+    } catch (cause) {
+      setError(cause?.message || 'Could not delete that file.')
     } finally {
       setBusy(false)
     }
@@ -245,6 +323,7 @@ export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunA
           <div className="project-document__actions">
             {['binary', 'image', 'pdf'].includes(fileKind) && <button type="button" onClick={downloadFile}>Download</button>}
             {fileKind === 'text' && <button type="button" disabled={!dirty || busy} onClick={saveFile}>{busy ? 'Saving…' : 'Save'}</button>}
+            <button type="button" className="project-document__delete" aria-label={`Delete ${selectedPath}`} title="Delete file" disabled={busy} onClick={deleteCurrentFile}><Trash2 size={17} /></button>
           </div>
         </header>
         {error && <p className="projects-error" role="alert">{error}</p>}
@@ -263,7 +342,7 @@ export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunA
               }}
             />
           ) : fileKind === 'html' ? (
-            <div className="project-preview"><p>Safe preview · scripts, network requests, forms, and parent access are disabled.</p><iframe title={`${selectedPath} preview`} sandbox={projectPreviewSandbox()} srcDoc={content} /></div>
+            <div className="project-preview"><p>Isolated preview · local scripts and styles can run; network, forms, downloads, and parent access are blocked.</p><iframe title={`${selectedPath} preview`} sandbox={projectPreviewSandbox()} srcDoc={content} /></div>
           ) : fileKind === 'image' ? (
             <div className="project-preview project-preview--asset"><img src={objectUrl || ''} alt={`Preview of ${selectedPath}`} /></div>
           ) : fileKind === 'pdf' ? (
@@ -286,14 +365,26 @@ export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunA
           <div><h1>{project.name}</h1><p>{project.template?.name || project.project_type}</p></div>
         </div>
         <div className="project-workspace__header-actions">
+          <button type="button" className="project-icon-button" aria-label="Open project chat" title="Project chat" onClick={() => onOpenChat(project.chat_id)}><MessageSquare size={18} /></button>
           <div className="projects-view-toggle" role="group" aria-label="File view">
             <button type="button" aria-label="Icon view" aria-pressed={view === 'icons'} onClick={() => chooseView('icons')}><Grid2X2 size={17} /></button>
             <button type="button" aria-label="List view" aria-pressed={view === 'list'} onClick={() => chooseView('list')}><List size={18} /></button>
           </div>
-          <button type="button" className="project-icon-button" aria-label="New file" title="New file" disabled={busy} onClick={createFile}><Plus size={19} /></button>
-          <button type="button" className="project-icon-button" aria-label="Upload file" title="Upload file" disabled={busy} onClick={() => uploadRef.current?.click()}><Upload size={18} /></button>
-          <input ref={uploadRef} type="file" hidden onChange={uploadFile} />
-          <button type="button" className="project-workspace__delete" disabled={busy} onClick={deleteProject}>Delete</button>
+          <details ref={createMenuRef} className="project-menu">
+            <summary className="project-icon-button" aria-label="Add to project" title="Add to project"><Plus size={19} /></summary>
+            <div className="project-menu__popover" role="menu">
+              <button type="button" role="menuitem" disabled={busy} onClick={() => { createMenuRef.current?.removeAttribute('open'); beginCreate('file') }}><FileText size={16} /> New file</button>
+              <button type="button" role="menuitem" disabled={busy} onClick={() => { createMenuRef.current?.removeAttribute('open'); beginCreate('folder') }}><FolderPlus size={16} /> New folder</button>
+              <button type="button" role="menuitem" disabled={busy} onClick={() => { createMenuRef.current?.removeAttribute('open'); uploadRef.current?.click() }}><Upload size={16} /> Upload files</button>
+            </div>
+          </details>
+          <input ref={uploadRef} type="file" multiple hidden onChange={uploadFile} />
+          <details ref={moreMenuRef} className="project-menu">
+            <summary className="project-icon-button" aria-label="More project actions" title="More"><Ellipsis size={19} /></summary>
+            <div className="project-menu__popover project-menu__popover--end" role="menu">
+              <button type="button" className="project-menu__danger" role="menuitem" disabled={busy} onClick={() => { moreMenuRef.current?.removeAttribute('open'); void deleteProject() }}><Trash2 size={16} /> Delete project</button>
+            </div>
+          </details>
         </div>
       </header>
 
@@ -303,6 +394,26 @@ export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunA
           <button key={`${part}:${index}`} type="button" onClick={() => setPath(breadcrumb.slice(0, index + 1).join('/'))}>/ {part}</button>
         ))}
       </nav>
+
+      {creation && (
+        <form className="project-inline-create" onSubmit={submitCreate} onKeyDown={event => {
+          if (event.key === 'Escape' && !busy) setCreation(null)
+        }}>
+          <label htmlFor={`project-create-${project.id}`}>
+            {creation === 'file' ? 'New file' : 'New folder'}
+          </label>
+          <input
+            id={`project-create-${project.id}`}
+            ref={creationInputRef}
+            value={creationPath}
+            maxLength={2048}
+            placeholder={path ? `${path}/name` : 'name'}
+            onChange={event => setCreationPath(event.target.value)}
+          />
+          <button type="submit" disabled={busy || !creationPath.trim()}>{busy ? 'Creating…' : 'Create'}</button>
+          <button type="button" disabled={busy} onClick={() => setCreation(null)}>Cancel</button>
+        </form>
+      )}
 
       {error && <p className="projects-error" role="alert">{error}</p>}
       <div className="project-browser">
@@ -315,18 +426,6 @@ export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunA
           <div className="projects-empty" role="alert"><p>Files are unavailable.</p><button type="button" onClick={() => filesQuery.refetch()}>Try again</button></div>
         ) : (
           <div className={`project-items project-items--${view}`}>
-            {!path && (
-              <button type="button" className="project-items__chat" onClick={() => onOpenChat(project.chat_id)}>
-                <span className="project-items__icon" aria-hidden="true"><MessageSquare size={view === 'icons' ? 38 : 22} /></span>
-                <span><strong>Project chat</strong><small>Context for this project</small></span>
-              </button>
-            )}
-            {!path && previews.map(preview => (
-              <button key={preview.id} type="button" onClick={() => openPreview(preview)}>
-                <span className="project-items__icon" aria-hidden="true"><FileCode size={view === 'icons' ? 38 : 22} /></span>
-                <span><strong>{preview.name}</strong><small>Build artifact</small></span>
-              </button>
-            ))}
             {entries.map(entry => (
               <button key={entry.path} type="button" onClick={() => openFile(entry)}>
                 <span className="project-items__icon" aria-hidden="true">{fileIcon(entry, view === 'icons' ? 38 : 22)}</span>
@@ -335,10 +434,22 @@ export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunA
             ))}
           </div>
         )}
+        {!filesQuery.isLoading && !filesQuery.isError && entries.length === 0 && !path && (
+          <div className="projects-empty">
+            <Folder size={42} strokeWidth={1.4} aria-hidden="true" />
+            <p>This project is empty.</p>
+            <button type="button" onClick={() => beginCreate('file')}>Add the first file</button>
+          </div>
+        )}
         {!filesQuery.isLoading && !filesQuery.isError && entries.length === 0 && path && <p className="projects-empty">This folder is empty.</p>}
       </div>
-      {actions.length > 0 && (
+      {(previews.length > 0 || actions.length > 0) && (
         <footer className="project-actions" role="group" aria-label="Project actions">
+          {previews.map(preview => (
+            <button key={preview.id} type="button" disabled={busy} onClick={() => openPreview(preview)}>
+              Preview {preview.name.toLowerCase()}
+            </button>
+          ))}
           {actions.map(action => <button key={action.id} type="button" onClick={() => onRunAction(project, action)}>{action.name}</button>)}
         </footer>
       )}

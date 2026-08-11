@@ -31,6 +31,11 @@ def test_blank_project_creates_unique_primary_chat_and_confined_files(
     models.Chat.id == project["chat_id"],
     models.Chat.deleted_at.is_(None),
   ).one()
+  # Project chats remain directly addressable, but their project is the one
+  # drawer location. They must not also appear as unrelated global Recents.
+  chat_list = client.get("/api/chats", headers=auth)
+  assert chat_list.status_code == 200
+  assert project["chat_id"] not in {row["id"] for row in chat_list.json()}
 
   saved = client.put(
     f"/api/projects/{project['id']}/file?path=notes/idea.md",
@@ -52,6 +57,19 @@ def test_blank_project_creates_unique_primary_chat_and_confined_files(
     f"/api/projects/{project['id']}/file?path=../../etc/passwd", headers=auth,
   )
   assert traversal.status_code in (400, 404)
+
+  folder = client.post(
+    f"/api/projects/{project['id']}/folder",
+    headers=auth,
+    json={"path": "assets/images"},
+  )
+  assert folder.status_code == 200, folder.text
+  assert folder.json()["path"] == "assets/images"
+  root_listing = client.get(
+    f"/api/projects/{project['id']}/files", headers=auth,
+  ).json()
+  assert any(row["path"] == "assets" and row["type"] == "directory"
+             for row in root_listing["entries"])
 
 
 def test_nested_symlink_parent_cannot_escape_project_root(client, auth, db):
@@ -173,6 +191,7 @@ def test_manifest_template_scaffolds_files_and_snapshots_metadata(
   opened = client.get(
     f"/api/projects/{project['id']}/file?path=main.tex", headers=auth,
   )
+  assert opened.status_code == 200, opened.text
   assert opened.json()["content"] == "\\documentclass{article}"
 
   binary = client.put(

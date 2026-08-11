@@ -1210,6 +1210,16 @@ export default function useNavigation({
           { view: 'chat', chatId: deepLink.chatId, appId: null, paneId: bootPaneId },
           tabModel.makeTab('chat', deepLink.chatId),
         )
+      } else if (deepLink?.view === 'projects') {
+        bootDeepLink(
+          { view: 'projects', chatId: null, appId: null, paneId: bootPaneId },
+          tabModel.projectsTab(),
+        )
+      } else if (deepLink?.view === 'project' && deepLink.projectId) {
+        bootDeepLink(
+          { view: 'project', projectId: deepLink.projectId, chatId: null, appId: null, paneId: bootPaneId },
+          tabModel.projectTab(deepLink.projectId),
+        )
       } else if (!blobValid && initialNav.view === 'canvas' && initialNav.appId != null) {
         // No valid blob: the retained active-destination keys name the item to
         // restore. openBootTab replaces the lone implicit-home fallback and

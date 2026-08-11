@@ -18,7 +18,15 @@ function initialView() {
   }
 }
 
-export default function ProjectsDirectory({ projects, templates, legacy, status, onRetry, onOpen }) {
+export default function ProjectsDirectory({
+  projects,
+  templates,
+  legacy,
+  status,
+  onRetry,
+  onOpen,
+  createRequest = 0,
+}) {
   const queryClient = useQueryClient()
   const [creating, setCreating] = useState(false)
   const [view, setView] = useState(initialView)
@@ -35,6 +43,12 @@ export default function ProjectsDirectory({ projects, templates, legacy, status,
   useEffect(() => {
     if (creating) nameRef.current?.focus()
   }, [creating])
+
+  useEffect(() => {
+    if (!createRequest) return
+    setCreating(true)
+    setError('')
+  }, [createRequest])
 
   function chooseView(next) {
     setView(next)

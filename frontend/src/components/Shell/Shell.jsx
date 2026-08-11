@@ -683,6 +683,10 @@ export default function Shell() {
   // re-registering every mounted AppCanvas message listener.
   const appsRef = useRef(apps)
   useEffect(() => { appsRef.current = apps }, [apps])
+  const projectsRef = useRef(projects)
+  const projectTemplatesRef = useRef(projectTemplates)
+  useEffect(() => { projectsRef.current = projects }, [projects])
+  useEffect(() => { projectTemplatesRef.current = projectTemplates }, [projectTemplates])
   // Latest-`newChat` ref so the stable handleAppError can start a fresh chat
   // for a crash report without depending on newChat's identity (newChat is a
   // per-render function declaration with volatile inputs — chats, streaming,
@@ -1155,14 +1159,28 @@ export default function Shell() {
     for (const project of projects) m.set(String(project.id), project)
     return m
   }, [projects])
+  const projectByChatId = useMemo(() => {
+    const m = new Map()
+    for (const project of projects) m.set(String(project.chat_id), project)
+    return m
+  }, [projects])
+  const [projectLocations, setProjectLocations] = useState({})
+  const [projectCreateRequest, setProjectCreateRequest] = useState(0)
   const labelForTab = useCallback((tab) => {
     if (tab.kind === 'apps') return 'Apps'
     if (tab.kind === 'projects') return 'Projects'
     if (tab.kind === 'settings') return 'Settings'
-    if (tab.kind === 'chat') return chatById.get(tab.id)?.title || 'Chat'
-    if (tab.kind === 'project') return projectById.get(tab.id)?.name || 'Project'
+    if (tab.kind === 'chat') {
+      const project = projectByChatId.get(tab.id)
+      return project ? `${project.name} · Chat` : chatById.get(tab.id)?.title || 'Chat'
+    }
+    if (tab.kind === 'project') {
+      const name = projectById.get(tab.id)?.name || 'Project'
+      const location = projectLocations[tab.id]
+      return location ? `${name} · ${location.split('/').pop()}` : name
+    }
     return appById.get(tab.id)?.name || 'App'
-  }, [chatById, appById, projectById])
+  }, [chatById, appById, projectByChatId, projectById, projectLocations])
 
   const renderedProjectIds = useMemo(() => {
     const ids = new Set(
@@ -1175,6 +1193,10 @@ export default function Shell() {
 
   function openProject(project) {
     if (!project?.id || !project?.chat_id) return
+    // The project list is authoritative evidence that its primary chat exists;
+    // avoid treating its intentional absence from global Recents as a possible
+    // deletion and issuing a redundant direct-chat probe on every open.
+    knownExistingOffListChatIdsRef.current.add(String(project.chat_id))
     navTo('project', { projectId: project.id })
     dispatchWorkspace({
       type: 'APPLY_PLACEMENT',
@@ -1216,6 +1238,13 @@ export default function Shell() {
       },
     })
   }
+
+  function startProjectCreation() {
+    navTo('projects')
+    setProjectCreateRequest(current => current + 1)
+  }
+  const openProjectRef = useRef(openProject)
+  openProjectRef.current = openProject
 
   function runProjectAction(project, action) {
     if (!project?.chat_id || !action?.prompt) return
@@ -1912,6 +1941,18 @@ export default function Shell() {
     )
   }, [navigationEpochRef, openAppWithIntent])
 
+  const coldProjectDeepLinkHandledRef = useRef(false)
+  useEffect(() => {
+    if (coldProjectDeepLinkHandledRef.current) return
+    if (deepLink?.view !== 'project' || !deepLink.projectId || !projectsQuery.isSuccess) return
+    coldProjectDeepLinkHandledRef.current = true
+    const project = projectsRef.current.find(
+      row => String(row.id) === String(deepLink.projectId),
+    )
+    if (project) openProjectRef.current(project)
+    else navToRef.current('projects')
+  }, [projectsQuery.isSuccess])
+
   // Route a mini-app crash report to the chat that built the app (its
   // `chat_id`), falling back to a new chat when that chat was deleted. The
   // report is set as a DRAFT (not auto-sent) so the owner reviews before
@@ -1948,8 +1989,44 @@ export default function Shell() {
   // AppCanvas owns exact-window attribution and wire-format narrowing for
   // every frame request. This callback owns the workspace outcome only, so the
   // standalone host and workspace cannot drift into separate message routers.
-  const handleAppHostRequest = useCallback((_appId, request) => {
-    void (async () => {
+  const handleAppHostRequest = useCallback((appId, request) => {
+    return (async () => {
+      if (request.type === 'moebius:projects') {
+        const app = appsRef.current.find(row => String(row.id) === String(appId))
+        if (!app) throw new Error('This app is no longer installed.')
+        const ownProjects = projectsRef.current.filter(
+          project => String(project.source_app_id) === String(app.id),
+        )
+        if (request.action === 'list') return ownProjects
+        if (request.action === 'browse') {
+          navToRef.current('projects')
+          return { opened: true }
+        }
+        if (request.action === 'open') {
+          const project = ownProjects.find(row => String(row.id) === request.projectId)
+          if (!project) throw new Error('That project is unavailable to this app.')
+          openProjectRef.current(project)
+          return project
+        }
+        const templates = projectTemplatesRef.current.filter(
+          template => String(template.source_app_id) === String(app.id),
+        )
+        const template = templates.find(row => row.key === request.templateId) || templates[0]
+        if (!template) throw new Error(`${app.name} does not provide a project type.`)
+        const response = await api.projects.create({
+          name: request.name || `Untitled ${template.name.toLowerCase()}`,
+          template_id: template.key,
+          recovery_request_id: crypto.randomUUID(),
+        })
+        const project = await jsonOrThrow(response, 'Project creation failed:')
+        projectsRef.current = [
+          project,
+          ...projectsRef.current.filter(row => String(row.id) !== String(project.id)),
+        ]
+        queryClient.setQueryData(projectQueries.keys.all, projectsRef.current)
+        openProjectRef.current(project)
+        return project
+      }
       if (request.type === 'moebius:new-chat') {
         await newChatRef.current?.({
           draft: request.draft || undefined,
@@ -1996,7 +2073,7 @@ export default function Shell() {
       setSettingsFocusTarget({ section, nonce: Date.now() })
       if (activeViewRef.current !== 'settings') navToRef.current('settings')
     })()
-  }, [openAppWithIntent, refreshChats, requestComposer])
+  }, [openAppWithIntent, queryClient, refreshChats, requestComposer])
 
   // Restore the active chat after Shell mount. Two cache layers can
   // satisfy this effect: (1) the persisted TanStack cache hydrated
@@ -3486,6 +3563,7 @@ export default function Shell() {
         activeProjectId={activeProjectId}
         onProject={openProject}
         onProjectsOpen={() => navTo('projects')}
+        onProjectCreate={startProjectCreation}
         chats={chats}
         chatsStatus={chatsStatus}
         onRetryChats={() => chatsQuery.refetch()}
@@ -3907,6 +3985,7 @@ export default function Shell() {
                   legacyProjectsQuery.refetch(),
                 ])}
                 onOpen={openProject}
+                createRequest={projectCreateRequest}
               />
             </div>
           )
@@ -3951,6 +4030,11 @@ export default function Shell() {
               <ProjectWorkspace
                 project={project}
                 onOpenChat={chatId => navTo('chat', { chatId })}
+                onLocationChange={location => setProjectLocations(current => (
+                  current[project.id] === location
+                    ? current
+                    : { ...current, [project.id]: location }
+                ))}
                 onDelete={deleteProject}
                 onRunAction={runProjectAction}
               />

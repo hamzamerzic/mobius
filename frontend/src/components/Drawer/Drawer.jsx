@@ -12,6 +12,7 @@ import {
   ProjectsNavIcon,
   SettingsNavIcon,
 } from '../navigationIcons.js'
+import Folder from 'lucide-react/dist/esm/icons/folder.mjs'
 import AppIcon from '../AppIcon.jsx'
 import { preloadAppIcons } from '../appIcon.js'
 import {
@@ -88,6 +89,7 @@ export default function Drawer({
   activeProjectId,
   onProject,
   onProjectsOpen,
+  onProjectCreate,
   chats,
   chatsStatus = 'success',
   onRetryChats,
@@ -134,6 +136,10 @@ export default function Drawer({
   const streamingSet = streamingChatIds || EMPTY_SET
   const attentionSet = attentionChatIds || EMPTY_SET
   const newAppSet = newAppIds || EMPTY_SET
+  const activeProject = projects.find(project => (
+    (activeView === 'project' && String(activeProjectId) === String(project.id))
+    || (activeView === 'chat' && String(activeChatId) === String(project.chat_id))
+  ))
   // One source of truth for which row the focused pane is showing, so a chat
   // and an app are selected by the same rule wherever the row is rendered.
   const isRowActive = ({ kind, item }) => (
@@ -1071,7 +1077,7 @@ export default function Drawer({
               <div className="drawer__projects-nav">
                 <button
                   type="button"
-                  className={`drawer__item drawer__item--projects${activeView === 'projects' ? ' drawer__item--active' : ''}`}
+                  className={`drawer__item drawer__item--projects${activeView === 'projects' || activeView === 'project' || activeProject ? ' drawer__item--active' : ''}`}
                   aria-current={activeView === 'projects' ? 'page' : undefined}
                   onClick={onProjectsOpen}
                 >
@@ -1085,7 +1091,7 @@ export default function Drawer({
                   className="drawer__projects-add"
                   aria-label="Create project"
                   title="Create project"
-                  onClick={onProjectsOpen}
+                  onClick={onProjectCreate || onProjectsOpen}
                 >
                   +
                 </button>
@@ -1094,18 +1100,21 @@ export default function Drawer({
                 <p className="drawer__projects-status" role="status">Loading projects…</p>
               ) : projectsStatus === 'success' && projects.length > 0 ? (
                 <div className="drawer__projects-list" aria-label="Recent projects">
-                  {projects.slice(0, 6).map(project => (
-                    <button
-                      key={project.id}
-                      type="button"
-                      className={`drawer__project-row${activeView === 'project' && String(activeProjectId) === String(project.id) ? ' drawer__project-row--active' : ''}`}
-                      aria-current={activeView === 'project' && String(activeProjectId) === String(project.id) ? 'page' : undefined}
-                      onClick={() => onProject?.(project)}
-                    >
-                      <span aria-hidden="true">{project.name.slice(0, 1).toUpperCase()}</span>
-                      <span>{project.name}</span>
-                    </button>
-                  ))}
+                  {projects.slice(0, 6).map(project => {
+                    const active = String(activeProject?.id) === String(project.id)
+                    return (
+                      <button
+                        key={project.id}
+                        type="button"
+                        className={`drawer__project-row${active ? ' drawer__project-row--active' : ''}`}
+                        aria-current={active ? 'page' : undefined}
+                        onClick={() => onProject?.(project)}
+                      >
+                        <span aria-hidden="true"><Folder size={14} /></span>
+                        <span>{project.name}</span>
+                      </button>
+                    )
+                  })}
                   {projects.length > 6 && (
                     <button type="button" className="drawer__projects-more" onClick={onProjectsOpen}>
                       View all {projects.length} projects
