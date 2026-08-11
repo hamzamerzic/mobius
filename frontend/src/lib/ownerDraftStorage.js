@@ -1,5 +1,15 @@
-const OWNER_DRAFT_PREFIXES = ['qa-draft:', 'draft:', 'draft-autosend:']
-const OWNER_DRAFT_KEYS = new Set(['pending-draft', 'pending-draft-autosend'])
+const OWNER_DRAFT_PREFIXES = [
+  'qa-draft:',
+  'draft:',
+  // Retire handoffs left by a tab that was open during the storage migration.
+  'draft-autosend:',
+]
+const OWNER_DRAFT_KEYS = new Set([
+  'composer-handoff',
+  'new-chat-intent',
+  'pending-draft',
+  'pending-draft-autosend',
+])
 
 
 function browserStorages() {

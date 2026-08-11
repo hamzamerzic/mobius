@@ -9,6 +9,17 @@ export function shouldApplyComposerFocusRequest({
   return String(focusRequest.chatId) === String(chatId)
 }
 
+export function placeCaretAtTextEnd(el) {
+  if (!el || typeof el.setSelectionRange !== 'function') return false
+  const end = String(el.value ?? '').length
+  try {
+    el.setSelectionRange(end, end)
+  } catch {
+    return false
+  }
+  return true
+}
+
 export function focusComposerElement(el) {
   if (!el || typeof el.focus !== 'function') return false
   try {

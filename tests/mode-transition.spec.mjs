@@ -26,10 +26,28 @@ import * as tabModel from '../frontend/src/components/Shell/tabModel.js'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
+async function mockIdleChatRuntime(page) {
+  await page.route(/\/api\/chats\/[^/?]+\/runtime(?:\?.*)?$/, route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        running: false,
+        active_goal_objective: null,
+        pending_messages: [],
+        pending_question_id: null,
+        updated_at: null,
+      }),
+    })
+  })
+}
+
 async function bootShell(page, viewport) {
   await page.setViewportSize(viewport)
   await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, r => r.fulfill({ status: 202, body: '{}' }))
   await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, r => r.fulfill({ status: 204, body: '' }))
+  await mockIdleChatRuntime(page)
   await page.route('**/api/chat/stop', r => r.fulfill({ status: 200, body: '{}' }))
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('.shell', { timeout: 10000 })
@@ -44,6 +62,7 @@ async function bootSeededWorkspace(page, viewport, ws) {
   await page.setViewportSize(viewport)
   await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, r => r.fulfill({ status: 202, body: '{}' }))
   await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, r => r.fulfill({ status: 204, body: '' }))
+  await mockIdleChatRuntime(page)
   await page.route('**/api/chat/stop', r => r.fulfill({ status: 200, body: '{}' }))
   await page.route(/\/api\/chats\/[^/?]+(\?.*)?$/, (r) => {
     if (r.request().method() !== 'GET') return r.fallback()
@@ -190,6 +209,39 @@ async function transientClassCount(page) {
   return page.evaluate(() => {
     return document.documentElement.dataset.modeViewTransition ? 1 : 0
   })
+}
+
+function createdEmptyChat(id, timestamp = '2026-01-01T00:02:00Z') {
+  const detail = {
+    messages: [],
+    total: 0,
+    offset: 0,
+    running: false,
+    pending_messages: [],
+    pending_question_id: null,
+    session_id: null,
+    provider: 'codex',
+    created_by_app_id: null,
+    agent_settings_json: null,
+    effective_agent_settings: { model: 'gpt-current', effort: 'medium' },
+    has_assistant_turns: false,
+    auto_resume_on_limit: false,
+    auto_resume_on_restart: true,
+    updated_at: timestamp,
+  }
+  return {
+    id,
+    title: 'New chat',
+    created_at: timestamp,
+    updated_at: timestamp,
+    activity_at: timestamp,
+    pinned_at: null,
+    created_by_app_id: null,
+    has_messages: false,
+    running: false,
+    messages: [],
+    detail,
+  }
 }
 
 for (const [name, viewport] of [
@@ -479,6 +531,215 @@ test('round4-3: a persisted NULL single slot stays New Chat even with historical
   ), { timeout: 3000 }).toBe('freshboot')
   expect(createCount, 'boot materializes one new row instead of selecting chats[0]').toBe(1)
   await expect(page.locator('.shell__view--active .chat__empty-title')).toBeVisible()
+})
+
+test('an explicit New Chat keeps its draft when an older NULL-slot allocation settles', async ({ page }) => {
+  let createCount = 0
+  let explicitId = null
+  let releaseDeferred
+  let releaseExplicit
+  const deferredGate = new Promise(resolve => { releaseDeferred = resolve })
+  const explicitGate = new Promise(resolve => { releaseExplicit = resolve })
+
+  await page.route(/\/api\/chats(?:\?.*)?$/, async (route) => {
+    const method = route.request().method()
+    if (method === 'GET') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          { id: 'aaa', title: 'Left', has_messages: true },
+          { id: 'bbb', title: 'Right', has_messages: true },
+        ]),
+      })
+    }
+    if (method !== 'POST') return route.fallback()
+
+    createCount += 1
+    const body = route.request().postDataJSON()
+    if (createCount === 1) {
+      expect(body.id).toBeUndefined()
+      await deferredGate
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 'deferred-empty',
+          title: 'New chat',
+          has_messages: false,
+        }),
+      })
+    }
+
+    expect(createCount).toBe(2)
+    explicitId = body.id
+    expect(explicitId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    )
+    await explicitGate
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(createdEmptyChat(explicitId)),
+    })
+  })
+
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder(null))
+  await toggleMode(page)
+  await expect.poll(() => builderActive(page)).toBe(false)
+  await expect.poll(() => createCount, { timeout: 3000 }).toBe(1)
+
+  await openNavigation(page)
+  const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+  await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
+
+  const presentation = page.locator('[data-new-chat-presentation]')
+  const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
+  await expect.poll(() => createCount).toBe(2)
+  await expect(composer).toBeFocused()
+  await composer.fill('Explicit draft wins')
+  await expect.poll(() => page.evaluate(({ id, key }) => ({
+    slot: JSON.parse(localStorage.getItem(key))?.singleScreen ?? null,
+    intent: JSON.parse(sessionStorage.getItem('new-chat-intent')),
+    draft: JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input,
+  }), { id: explicitId, key: paneModel.STORAGE_KEY })).toEqual({
+    slot: null,
+    intent: { chatId: explicitId, status: 'allocating' },
+    draft: 'Explicit draft wins',
+  })
+
+  const staleResponse = page.waitForResponse(response => (
+    /\/api\/chats(?:\?.*)?$/.test(response.url())
+      && response.request().method() === 'POST'
+      && response.request().postDataJSON()?.id == null
+  ))
+  releaseDeferred()
+  await staleResponse
+  await page.evaluate(() => new Promise(resolve => (
+    requestAnimationFrame(() => requestAnimationFrame(resolve))
+  )))
+
+  // The old automatic materializer may have committed its own empty row, but
+  // its late result must not own any client-visible state after the explicit tap.
+  await expect.poll(() => page.evaluate(({ id, key }) => ({
+    slot: JSON.parse(localStorage.getItem(key))?.singleScreen ?? null,
+    intent: JSON.parse(sessionStorage.getItem('new-chat-intent')),
+    draft: JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input,
+    focused: document.activeElement === document.querySelector(
+      '[data-new-chat-presentation] textarea',
+    ),
+  }), { id: explicitId, key: paneModel.STORAGE_KEY })).toEqual({
+    slot: null,
+    intent: { chatId: explicitId, status: 'allocating' },
+    draft: 'Explicit draft wins',
+    focused: true,
+  })
+  await expect(presentation).toBeVisible()
+  await expect(composer).toHaveValue('Explicit draft wins')
+
+  releaseExplicit()
+  const painted = page.locator(`[data-chat-surface="painted"][data-chat-id="${explicitId}"]`)
+  await expect(painted.getByRole('textbox', { name: 'Message Möbius…' })).toBeFocused()
+  await expect(painted.getByRole('textbox', { name: 'Message Möbius…' }))
+    .toHaveValue('Explicit draft wins')
+  await expect(presentation).toHaveCount(0)
+  await expect.poll(() => page.evaluate(key => (
+    JSON.parse(localStorage.getItem(key))?.singleScreen
+  ), paneModel.STORAGE_KEY)).toEqual({ kind: 'chat', id: explicitId })
+})
+
+test('retiring an explicit Builder cover repairs the newly empty Standard slot', async ({ page }) => {
+  let explicitId = null
+  let explicitCreates = 0
+  let automaticCreates = 0
+  let releaseExplicit
+  const explicitGate = new Promise(resolve => { releaseExplicit = resolve })
+
+  await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
+    const method = route.request().method()
+    if (method === 'GET') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          { id: 'aaa', title: 'Left', has_messages: true },
+          { id: 'bbb', title: 'Right', has_messages: true },
+        ]),
+      })
+    }
+    if (method !== 'POST') return route.fallback()
+
+    const body = route.request().postDataJSON()
+    if (body.id != null) {
+      explicitCreates += 1
+      explicitId = body.id
+      await explicitGate
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(createdEmptyChat(explicitId)),
+      })
+    }
+
+    automaticCreates += 1
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(createdEmptyChat('retired-home')),
+    })
+  })
+
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder(null))
+  await openNavigation(page)
+  const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+  await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
+
+  const presentation = page.locator('[data-new-chat-presentation]')
+  const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
+  await expect.poll(() => explicitCreates).toBe(1)
+  await expect(composer).toBeFocused()
+  await composer.fill('Keep this parked Builder draft')
+
+  await toggleMode(page)
+  await expect.poll(() => builderActive(page)).toBe(false)
+  await expect(presentation).toHaveCount(0)
+  await expect.poll(() => automaticCreates, { timeout: 4000 }).toBe(1)
+  await expect.poll(() => page.evaluate(key => (
+    JSON.parse(localStorage.getItem(key))?.singleScreen
+  ), paneModel.STORAGE_KEY), { timeout: 4000 }).toEqual({
+    kind: 'chat',
+    id: 'retired-home',
+  })
+  await expect.poll(() => page.evaluate(id => ({
+    intent: JSON.parse(sessionStorage.getItem('new-chat-intent')),
+    draft: JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input,
+  }), explicitId)).toEqual({
+    intent: { chatId: explicitId, status: 'allocating' },
+    draft: 'Keep this parked Builder draft',
+  })
+
+  const explicitResponse = page.waitForResponse(response => (
+    /\/api\/chats(?:\?.*)?$/.test(response.url())
+      && response.request().method() === 'POST'
+      && response.request().postDataJSON()?.id === explicitId
+  ))
+  releaseExplicit()
+  await explicitResponse
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => (
+    requestAnimationFrame(resolve)
+  ))))
+
+  expect(automaticCreates, 'retirement repairs the slot exactly once').toBe(1)
+  await expect.poll(() => page.evaluate(key => (
+    JSON.parse(localStorage.getItem(key))?.singleScreen
+  ), paneModel.STORAGE_KEY)).toEqual({ kind: 'chat', id: 'retired-home' })
+  await expect.poll(() => page.evaluate(id => ({
+    intent: JSON.parse(sessionStorage.getItem('new-chat-intent')),
+    draft: JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input,
+  }), explicitId)).toEqual({
+    intent: { chatId: explicitId, status: 'materialized' },
+    draft: 'Keep this parked Builder draft',
+  })
 })
 
 test('round4-3: a superseding NULL-slot request drains after the older POST without duplicating it', async ({ page }) => {

@@ -200,11 +200,11 @@ class ChatCreate(ChatUpdate):
   # It is owner-scoped by the route and derives an opaque UUID rather than being
   # stored as user-visible chat metadata.
   recovery_request_id: str | None = Field(default=None, min_length=1, max_length=128)
-  # A client-minted chat id. A brand-new chat runs live on the client the instant
-  # it is opened and is only persisted on its first send, so the client owns the
-  # id from birth: the surface (keyed by chat id) never has to be renamed or
-  # remounted when the row lands. Create is idempotent on it — a retried first
-  # send returns the same row instead of duplicating it — exactly like
+  # A client-minted chat id. A brand-new chat's draft surface mounts before its
+  # allocation request settles, so the client owns the id from birth: the
+  # surface (keyed by chat id) never has to be renamed or remounted when the row
+  # lands. Create is idempotent on it — a retried allocation returns the same row
+  # instead of duplicating it — exactly like
   # recovery_request_id. Validated as a real UUID below so it matches the shape
   # the server otherwise mints and cannot be an arbitrary primary key.
   id: str | None = Field(default=None, min_length=1, max_length=64)

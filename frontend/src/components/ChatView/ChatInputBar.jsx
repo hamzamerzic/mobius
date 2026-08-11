@@ -107,7 +107,10 @@ import {
   textareaUsesNativeSizing,
   syncComposerTallClass,
 } from './composerTextareaSizing.js'
-import { focusComposerElement } from './composerFocusPolicy.js'
+import {
+  focusComposerElement,
+  placeCaretAtTextEnd,
+} from './composerFocusPolicy.js'
 
 
 // Detect touch-primary once (same heuristic ChatView uses).
@@ -460,6 +463,8 @@ function FileChips({ files, onRemove, chatId }) {
  *                        effect, so the parent (e.g. ComposerPopover)
  *                        can trigger the hidden <input type="file">
  *                        without the bar shipping a paperclip button.
+ *   attachmentsDisabled — suppresses file picker and pasted-file handling
+ *                        while a draft-only surface has no server row yet.
  *   submissionBlocked  — true while an atomic provider handoff owns the
  *                        chat; drafting stays available but send/mic-start do
  *                        not race the transition.
@@ -500,6 +505,7 @@ export default function ChatInputBar({
   leftButtons,
   rightButtons,
   attachTriggerRef,
+  attachmentsDisabled = false,
   messageHistory = [],
   provider,
 }) {
@@ -551,7 +557,7 @@ export default function ChatInputBar({
   // live click-handler across re-renders without needing a stable
   // callback identity from the caller.
   useLayoutEffect(() => {
-    if (!attachTriggerRef) return
+    if (!attachTriggerRef || attachmentsDisabled) return
     attachTriggerRef.current = () => {
       // Read focus state synchronously BEFORE the picker steals it.
       // ComposerPopover already restored focus to the textarea by
@@ -566,7 +572,7 @@ export default function ChatInputBar({
     return () => {
       if (attachTriggerRef.current) attachTriggerRef.current = null
     }
-  }, [attachTriggerRef, inputRef])
+  }, [attachTriggerRef, attachmentsDisabled, inputRef])
 
   function resetMessageHistory() {
     historyProbeVersionRef.current += 1
@@ -635,7 +641,7 @@ export default function ChatInputBar({
   function handleFileSelect(e) {
     const fileList = Array.from(e.target.files || [])
     e.target.value = ''
-    if (fileList.length) onAddFiles(fileList)
+    if (fileList.length) onAddFiles?.(fileList)
     restoreFocusAfterFilePicker()
   }
 
@@ -648,12 +654,13 @@ export default function ChatInputBar({
   }
 
   function handlePaste(e) {
+    if (attachmentsDisabled) return
     const files = pastedFiles(e.clipboardData)
     if (files.length === 0) return
     if (filePasteNeedsDefaultPrevented(e.clipboardData, files)) {
       e.preventDefault()
     }
-    onAddFiles(files)
+    onAddFiles?.(files)
   }
 
   function acceptSlashCommand(command) {
@@ -664,7 +671,8 @@ export default function ChatInputBar({
     onInputChange(value)
     // The textarea never lost focus (rows suppress pointerdown), but a click
     // accept still needs the caret put back after the controlled update.
-    inputRef?.current?.focus({ preventScroll: true })
+    focusComposerElement(inputRef?.current)
+    requestAnimationFrame(() => placeCaretAtTextEnd(inputRef?.current))
   }
 
   function handleKeyDown(e) {
@@ -787,14 +795,16 @@ export default function ChatInputBar({
 
   return (
     <form className="chat__form" onSubmit={handleSubmit}>
-      <input
-        type="file"
-        multiple
-        ref={fileInputRef}
-        onChange={handleFileSelect}
-        onCancel={restoreFocusAfterFilePicker}
-        style={{ display: 'none' }}
-      />
+      {!attachmentsDisabled && (
+        <input
+          type="file"
+          multiple
+          ref={fileInputRef}
+          onChange={handleFileSelect}
+          onCancel={restoreFocusAfterFilePicker}
+          style={{ display: 'none' }}
+        />
+      )}
       {sendFailure && (
         <div
           className="chat__offline-note chat__offline-note--error"
@@ -832,7 +842,10 @@ export default function ChatInputBar({
               onChange={handleTextareaChange}
               onPaste={handlePaste}
               onKeyDown={handleKeyDown}
-              onFocus={() => setSlashInputFocused(true)}
+              onFocus={(event) => {
+                placeCaretAtTextEnd(event.currentTarget)
+                setSlashInputFocused(true)
+              }}
               onBlur={() => setSlashInputFocused(false)}
               placeholder="Message Möbius…"
               aria-label="Message Möbius…"

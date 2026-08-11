@@ -257,6 +257,88 @@ def test_create_chat_returns_canonical_owner_drawer_summary(client, auth):
   assert body["detail"] == detail_body
 
 
+def test_create_chat_honors_client_uuid_and_retries_idempotently(
+  client, auth, db,
+):
+  chat_id = str(uuid4())
+  payload = {"id": chat_id, "title": "Client-owned chat"}
+
+  first = client.post("/api/chats", json=payload, headers=auth)
+  retry = client.post("/api/chats", json=payload, headers=auth)
+
+  assert first.status_code == 200, first.text
+  assert retry.status_code == 200, retry.text
+  assert first.json()["id"] == chat_id
+  assert retry.json() == first.json()
+  assert db.query(models.Chat).filter(models.Chat.id == chat_id).count() == 1
+
+  detail = client.get(f"/api/chats/{chat_id}", headers=auth)
+  assert detail.status_code == 200, detail.text
+  assert retry.json()["detail"] == detail.json()
+
+
+def test_create_chat_rejects_invalid_client_uuid(client, auth):
+  created = client.post(
+    "/api/chats",
+    json={"id": "not-a-uuid", "title": "Invalid client id"},
+    headers=auth,
+  )
+
+  assert created.status_code == 422
+  assert created.json()["detail"] == "invalid chat id"
+
+
+def test_create_chat_rejects_tombstoned_client_uuid(client, auth):
+  chat_id = str(uuid4())
+  created = client.post(
+    "/api/chats",
+    json={"id": chat_id, "title": "Delete this chat"},
+    headers=auth,
+  )
+  assert created.status_code == 200, created.text
+  deleted = client.delete(f"/api/chats/{chat_id}", headers=auth)
+  assert deleted.status_code == 204, deleted.text
+
+  retry = client.post(
+    "/api/chats",
+    json={"id": chat_id, "title": "Do not resurrect"},
+    headers=auth,
+  )
+
+  assert retry.status_code == 409
+  assert retry.json()["detail"] == "chat id was deleted"
+
+
+def test_create_chat_returns_occupied_client_uuid_unchanged(client, auth):
+  chat_id = str(uuid4())
+  original_messages = [{"role": "user", "content": "Existing history"}]
+  original = client.post(
+    "/api/chats",
+    json={
+      "id": chat_id,
+      "title": "Existing chat",
+      "messages": original_messages,
+    },
+    headers=auth,
+  )
+  assert original.status_code == 200, original.text
+
+  occupied = client.post(
+    "/api/chats",
+    json={
+      "id": chat_id,
+      "title": "Replacement title",
+      "messages": [{"role": "user", "content": "Replacement history"}],
+    },
+    headers=auth,
+  )
+
+  assert occupied.status_code == 200, occupied.text
+  assert occupied.json() == original.json()
+  assert occupied.json()["title"] == "Existing chat"
+  assert occupied.json()["messages"] == original_messages
+
+
 def test_create_repair_chat_is_idempotent_across_ambiguous_retries(client, auth):
   payload = {
     "title": "Fix a Möbius error",
