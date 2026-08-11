@@ -7,6 +7,8 @@ const css = readFileSync(
   'utf8',
 )
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
+const app = readFileSync(new URL('../../../App.jsx', import.meta.url), 'utf8')
+const index = readFileSync(new URL('../../../../index.html', import.meta.url), 'utf8')
 const appFrameCache = readFileSync(
   new URL('../useAppFrameCache.js', import.meta.url),
   'utf8',
@@ -1343,4 +1345,30 @@ test('mode transitions have one browser scene owner and no legacy CSS controller
   assert.match(shell, /const requestEmptySingleNewChat = useCallback\(\(\) =>/)
   // The stale "Settings conversion" comment near the toggle handler is corrected.
   assert.doesNotMatch(shell, /Settings overlay<->tab conversion/)
+})
+
+test('authenticated launch cover waits for the shell first frame', () => {
+  const staticBoot = index.slice(
+    index.indexOf('var isChatEmbed'),
+    index.indexOf("// Prevent browser from scrolling to top on refresh."),
+  )
+  assert.match(staticBoot, /if \(isChatEmbed\) \{[\s\S]*?s\.remove\(\)/,
+    'only the inert embed may remove the cover before React starts')
+  assert.doesNotMatch(staticBoot, /isChatEmbed \|\| hasOwnerToken/,
+    'an owner token alone is not visual readiness')
+
+  assert.match(app,
+    /const \[shellVisualReady, setShellVisualReady\] = useState\(false\)[\s\S]*?const markShellVisualReady = useCallback/,
+    'App must wait for a shell-owned visual readiness signal')
+  assert.match(app,
+    /if \(!hasToken \|\| status !== 'shell' \|\| isRestoring\) return[\s\S]*?STANDALONE_APP \|\| shellVisualReady \|\| showingDegradedNotice[\s\S]*?removeSplash\(\)/,
+    'restored authenticated shells keep the cover until a safe visible surface exists')
+  assert.match(app, /<Shell onInitialVisualReady=\{markShellVisualReady\} \/>/)
+
+  assert.match(shell,
+    /PaneChatView calls this after the destination's display-ready frame has[\s\S]*?markInitialVisualReady\(\)/,
+    'a real chat releases the cover only after its own stable frame')
+  assert.match(shell,
+    /if \(activeView === 'chat' && activeChatId\) return undefined/,
+    'the generic fallback must not pre-empt a concrete chat restoration')
 })
