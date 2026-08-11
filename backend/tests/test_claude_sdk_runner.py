@@ -1239,6 +1239,25 @@ def test_dispatch_assistant_tool_use_emits_tool_start():
   assert "tool_start" in types
 
 
+def test_dispatch_claude_edit_carries_shared_diff_preview(tmp_path):
+  path = tmp_path / "app.py"
+  bus = _Bus()
+  msg = AssistantMessage(
+    content=[ToolUseBlock(id="edit-1", name="Edit", input={
+      "file_path": str(path),
+      "old_string": "before",
+      "new_string": "after",
+    })],
+    model="claude-opus",
+  )
+
+  dispatch_sdk_message(msg, bus, None)
+
+  assert [event["type"] for event in bus.events] == ["tool_start", "tool_input"]
+  assert bus.events[1]["input"] == str(path)
+  assert "-before\n+after" in bus.events[1]["edit_preview"]["diff"]
+
+
 def test_dispatch_skill_tool_emits_skill_loaded_and_logs(monkeypatch):
   """A Skill tool_use emits a skill_loaded event AFTER its tool_start
   and appends one skill_loaded record to the activity log."""

@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 const toolBlock = readFileSync(new URL('../ToolBlock.jsx', import.meta.url), 'utf8')
 const toolImageResult = readFileSync(new URL('../ToolImageResult.jsx', import.meta.url), 'utf8')
 const toolImagePreview = readFileSync(new URL('../useToolImagePreview.js', import.meta.url), 'utf8')
+const toolEditPreviewCss = readFileSync(new URL('../ToolEditPreview.css', import.meta.url), 'utf8')
 const activityHeader = readFileSync(new URL('../ActivityLineHeader.jsx', import.meta.url), 'utf8')
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 const indexCss = readFileSync(new URL('../../../index.css', import.meta.url), 'utf8')
@@ -57,6 +58,19 @@ test('tool detail is a third nested level with labeled command and output', () =
     'only a settled empty command reports No output')
   assert.match(chatCss, /\.chat__activity-timeline \.chat__tool-detail\s*\{[^}]*margin-inline-start:\s*20px/s,
     'output aligns beneath the child label')
+})
+
+test('edit detail hands vertical scrolling to the transcript', () => {
+  assert.match(toolBlock,
+    /editPreview \? ' chat__tool-detail--edit' : ''/,
+    'only a successfully parsed edit preview escapes the generic output cap')
+  const editRule = toolEditPreviewCss.match(
+    /\.chat__tool-detail\.chat__tool-detail--edit\s*\{[^}]*\}/s,
+  )?.[0] || ''
+  assert.match(editRule, /max-height:\s*none/)
+  assert.match(editRule, /overflow-y:\s*visible/,
+    'an edit card must not retain a second vertical scroll owner')
+  assert.doesNotMatch(editRule, /overflow-y:\s*(?:auto|scroll)/)
 })
 
 test('technical command failures stay behind the top-level disclosure', () => {
