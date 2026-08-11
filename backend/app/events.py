@@ -704,20 +704,56 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
     return True
 
   if event_type == "skill_loaded":
-    # Skill observability: the runner emits this alongside the Skill
-    # tool's tool_start. Stamp the skill name onto the most recent
-    # Skill tool block so the persisted transcript carries the chip
-    # data (the frontend reads `block.skill`); the same event drives
-    # the activity-log append on the runner side. No skill name is a
-    # no-op — an empty chip carries no signal.
-    skill = event.get("skill") or ""
+    # Skill observability belongs to the tool that performed the read. Both
+    # providers usually load skill files through Read/Bash rather than a
+    # first-class Skill tool, so keep a small deduped receipt on the owning
+    # running tool (matched by tool_use_id when available). The frontend
+    # presents that same tool as one distinctive,
+    # provider-neutral skill-read block; expanding it still reveals the raw
+    # command/read details. A native Skill tool keeps its singular `skill`
+    # field too, so its own row can name the skill directly.
+    skill = str(event.get("skill") or "").strip()
     if not skill:
       return False
-    for blk in reversed(assistant_blocks):
-      if blk.get("type") == "tool" and blk.get("tool") == "Skill":
-        blk["skill"] = skill
-        return True
-    return False
+
+    target = _tool_block_for_event(
+      assistant_blocks, event.get("tool_use_id"),
+    )
+    if target is None:
+      # A repeated/replayed observation after the tool settled is idempotent
+      # when the last tool already owns this receipt.
+      latest_tool = next((
+        blk for blk in reversed(assistant_blocks)
+        if blk.get("type") == "tool"
+      ), None)
+      latest_skills = (
+        latest_tool.get("skills") if isinstance(latest_tool, dict) else None
+      )
+      if isinstance(latest_skills, list) and skill in latest_skills:
+        return False
+
+    if target is not None:
+      skills = target.get("skills")
+      if not isinstance(skills, list):
+        skills = []
+      if skill not in skills:
+        target["skills"] = [*skills, skill]
+      if target.get("tool") == "Skill":
+        target["skill"] = skill
+      return True
+
+    # Defensive fallback for provider/event-order drift: the observation must
+    # stay visible even if no owning tool_start reached the reducer.
+    assistant_blocks.append({
+      "type": "tool",
+      "tool": "Skill",
+      "skill": skill,
+      "skills": [skill],
+      "input": "",
+      "output": "",
+      "status": "done",
+    })
+    return True
 
   return False
 

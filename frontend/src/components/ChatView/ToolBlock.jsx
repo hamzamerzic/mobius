@@ -118,7 +118,10 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
   const copyControllerRef = useRef(null)
   const pointerSelectionRef = useRef(null)
   const effectiveName = effectiveToolName(t)
-  const isShell = effectiveName === 'Bash' || effectiveName === 'shell'
+  // Skill reads keep the raw owning tool beneath their plain-language header.
+  // Use that raw identity for command/result formatting even though
+  // effectiveToolName intentionally classifies the collapsed row as Skill.
+  const isShell = t?.tool === 'Bash' || t?.tool === 'shell'
   const label = toolCallLabel(t)
   const iconKind = toolActivityIcon(effectiveName)
   const isImageTool = effectiveName === 'ViewImage'
@@ -129,7 +132,12 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
   // end of the message (MessageSources), where they belong to the answer
   // rather than to the one search that found them. They deliberately do not
   // make a tool row expandable on their own.
-  const hasDetail = !!(t.input || t.output || t.output_truncated)
+  const skillNames = effectiveName === 'Skill' && Array.isArray(t.skills)
+    ? t.skills.filter(skill => typeof skill === 'string' && skill.trim())
+    : []
+  const hasDetail = !!(
+    t.input || t.output || t.output_truncated || skillNames.length > 1
+  )
 
   useEffect(() => {
     // `loadingPreview` is intentionally not a dependency or start guard. Setting
@@ -387,10 +395,6 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
       >
         <ActivityTypeIcon kind={iconKind} />
       </span>
-      {/* Skill observability: when the Skill tool loaded a named
-          skill, show its name as a chip so the user can see which
-          skill the agent reached for this turn. */}
-      {t.skill && <span className="chat__tool-chip">skill: {t.skill}</span>}
       {/* The group header names the category ("Ran commands"); each child row
           names the concrete operation ("Ran git status -sb"). */}
       <span className="chat__tool-name" title={label}>
@@ -480,6 +484,14 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
           tabIndex={open ? 0 : undefined}
           hidden={!open}
         >
+          {open && skillNames.length > 1 && (
+            <div className="chat__tool-section">
+              <span className="chat__tool-section-label">Skills</span>
+              <ul className="chat__skill-list">
+                {skillNames.map(skill => <li key={skill}>{skill}</li>)}
+              </ul>
+            </div>
+          )}
           {open && t.input && !isImageTool && (
             <div className="chat__tool-section">
               <span className="chat__tool-section-label">

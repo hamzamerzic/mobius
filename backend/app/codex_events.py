@@ -890,31 +890,53 @@ def _skill_names_in_command(command: str, data_dir: str) -> list[str]:
 
   Codex has no Read tool and no `can_use_tool` hook — its closest
   interception point is the command-execution item stream, where a
-  skill load looks like `cat /data/shared/skills/<name>.md` (flat) or
-  `cat /data/shared/skills/<id>/SKILL.md` (the directory shape installed
-  skills use), possibly via sed/head/grep over the same path. Any
-  reference to a skill file in a command counts as a load; that
-  over-counts an edit-in-place, which is acceptable for an aggregate
-  most-used signal. A directory skill is keyed by its DIRECTORY name —
-  the on-disk id — matching the Claude Read observer and the usage
-  aggregation; a deeper resource read inside the directory is not a
-  load. Returns deduped names in first-mention order.
+  skill load can target either Möbius's authoritative shared tree or
+  Codex's project-local `.codex/skills` tree. A directory skill's scripts,
+  references, and other resources still belong to that skill, so any path
+  below its top-level directory counts. Any reference to a matching path in
+  a command counts as a load; that over-counts an edit-in-place, which is
+  acceptable for an aggregate most-used signal. Returns deduped names in
+  first-mention order.
   """
   if not command:
     return []
   from app.skills import GENERATED_INDEX_STEMS
 
-  prefix = re.escape(
-    os.path.normpath(os.path.join(data_dir, "shared", "skills"))
+  shared_root = re.escape(os.path.normpath(
+    os.path.join(data_dir, "shared", "skills")
+  ))
+  codex_root = re.escape(os.path.normpath(
+    os.path.join(data_dir, ".codex", "skills")
+  ))
+  # The boundary keeps relative forms from matching the tail of an unrelated
+  # absolute path. Shell punctuation terminates a resource path; the detector
+  # is lexical on purpose and never reads the referenced file.
+  boundary = r"(?<![A-Za-z0-9._/-])"
+  name_part = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+  resource_tail = r"/[^\s'\"`;&|()<>]+"
+  shared_pattern = re.compile(
+    boundary
+    + rf"(?:{shared_root}|shared/skills)/"
+    + rf"(?P<shared_name>{name_part})"
+    + rf"(?:\.md\b|{resource_tail})"
   )
+  codex_pattern = re.compile(
+    boundary
+    + rf"(?:{codex_root}|\.codex/skills)/"
+    + rf"(?:\.system/)?(?P<codex_name>{name_part}){resource_tail}"
+  )
+
+  matches = [
+    (match.start(), match.group("shared_name"))
+    for match in shared_pattern.finditer(command)
+  ]
+  matches.extend(
+    (match.start(), match.group("codex_name"))
+    for match in codex_pattern.finditer(command)
+  )
+
   names: list[str] = []
-  # Either `<id>/SKILL.md` (directory skill, id = the dir name, SKILL.md
-  # case-insensitive) or a flat `<name>.md` directly under skills/. The two
-  # alternatives are disjoint (a flat match can't span a `/`), so one pass in
-  # command order preserves first-mention order without double counting.
-  pattern = prefix + r"/([A-Za-z0-9._-]+)(?:/(?i:SKILL\.md)|\.md)\b"
-  for match in re.finditer(pattern, command):
-    name = match.group(1)
+  for _, name in sorted(matches):
     # Reading a generated index is consulting a listing, not loading a skill.
     if name not in names and name not in GENERATED_INDEX_STEMS:
       names.append(name)
@@ -926,8 +948,8 @@ def _observe_skill_reads(
 ) -> None:
   """Fire-and-forget `skill_loaded` events for skill-file shell reads.
 
-  Mirrors `observe_skill_file_read` in claude_sdk_runner: same wire
-  event (chip), same activity record (most-used-skills aggregation).
+  Mirrors `observe_skill_file_read` in claude_sdk_runner: same targeted wire
+  receipt, same activity record (most-used-skills aggregation).
   Never raises — observability must not break the notification loop.
   """
   try:
@@ -937,8 +959,13 @@ def _observe_skill_reads(
     from app.config import get_settings
     command = _extract_bash_command(item.command or "")
     skills = _skill_names_in_command(command, get_settings().data_dir)
+    tool_use_id = getattr(item, "id", None)
     for skill in skills:
-      bc.publish({"type": "skill_loaded", "skill": skill})
+      bc.publish({
+        "type": "skill_loaded",
+        "skill": skill,
+        **({"tool_use_id": tool_use_id} if tool_use_id else {}),
+      })
       activity.log_skill_load(chat_id, skill)
   except Exception:
     log.debug("codex skill_loaded observability failed", exc_info=True)
