@@ -92,6 +92,18 @@ const PENDING_GESTURE_CAP_MS = 2000
 // rounding at the scroll extent.
 const PHYSICAL_BOTTOM_EPSILON_PX = 4
 
+// Start the next bounded history read before the loaded-page boundary can
+// enter the viewport. A non-scrollable page also needs one immediately because
+// the browser cannot emit the scroll event that normally drives pagination.
+export const HISTORY_PREFETCH_PX = 240
+
+
+export function olderHistoryShouldLoad(scrollEl, { userDriven = false } = {}) {
+  if (!scrollEl) return false
+  return scrollEl.scrollHeight <= scrollEl.clientHeight + 1
+    || (userDriven && scrollEl.scrollTop <= HISTORY_PREFETCH_PX)
+}
+
 // Bounded, content-free diagnostics. Recurring scroll bugs used to require
 // reconstructing races from screenshots and guesses; this keeps the last
 // controller transitions and actual automatic writes without recording any

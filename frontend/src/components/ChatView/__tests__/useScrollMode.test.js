@@ -27,6 +27,7 @@ import {
   modeAfterReaderGesture,
   modeAfterSpacerResize,
   modeAfterTerminalLayout,
+  olderHistoryShouldLoad,
   physicalBottomAnchorModeFromScroll,
   readerInputActivatesDisclosure,
   readerInputMayScroll,
@@ -193,6 +194,29 @@ test('deferred layout waits for the first scroll instead of timing Infinity', ()
   assert.equal(gestureLayoutRetryDelay(Number.POSITIVE_INFINITY, 1000), null)
   assert.equal(gestureLayoutRetryDelay(1250, 1000), 251)
   assert.equal(gestureLayoutRetryDelay(999, 1000), 1)
+})
+
+test('older history loads before its boundary appears and fills a short page', () => {
+  assert.equal(olderHistoryShouldLoad(makeScrollEl({
+    scrollHeight: 2000,
+    scrollTop: 240,
+    clientHeight: 800,
+  }), { userDriven: true }), true)
+  assert.equal(olderHistoryShouldLoad(makeScrollEl({
+    scrollHeight: 2000,
+    scrollTop: 600,
+    clientHeight: 800,
+  }), { userDriven: true }), false)
+  assert.equal(olderHistoryShouldLoad(makeScrollEl({
+    scrollHeight: 800,
+    scrollTop: 0,
+    clientHeight: 800,
+  })), true)
+  assert.equal(olderHistoryShouldLoad(makeScrollEl({
+    scrollHeight: 2000,
+    scrollTop: 0,
+    clientHeight: 800,
+  })), false, 'layout-owned top landings must not fetch history')
 })
 
 test('only scrolling keys claim reader ownership', () => {
