@@ -1203,6 +1203,21 @@ export default function Shell() {
       toast: null,
       resolve: (current) => {
         let next = paneModel.setViewMode(current, 'panes')
+        // Opening a project establishes one clear files + companion-chat pair.
+        // Retire companion chats from other projects so repeated project opens
+        // do not grow an accidental pane wall; their files tabs remain open and
+        // selecting either project restores its chat immediately.
+        for (const other of projectsRef.current) {
+          if (
+            String(other.id) !== String(project.id)
+            && other.chat_id
+          ) {
+            next = paneModel.closeTab(
+              next,
+              tabModel.tabKey(tabModel.makeTab('chat', other.chat_id)),
+            )
+          }
+        }
         const projectKey = tabModel.tabKey(tabModel.projectTab(project.id))
         if (!paneModel.paneOf(next, projectKey)) {
           next = paneModel.openTab(next, tabModel.projectTab(project.id))
