@@ -177,13 +177,13 @@
     <script>
       // The embedded document must remain blank while its one-use capability
       // is exchanged; never cover that inert state with the full-shell logo.
-      // Only top-level shell loads consult the owner's browser token.
       var isChatEmbed = window.location.pathname === '/shell/embed/chat'
-      var hasOwnerToken = false
-      if (!isChatEmbed) {
-        try { hasOwnerToken = !!localStorage.getItem('token') } catch (_) {}
-      }
-      if (isChatEmbed || hasOwnerToken) {
+      // An authenticated top-level shell keeps this cover through React's
+      // restored-cache and first-frame handshake. Removing it just because a
+      // token exists exposes the empty chat viewport while a long transcript
+      // (especially question cards) is still restoring its reading position.
+      // The opaque embed has no such shell handoff and must stay blank.
+      if (isChatEmbed) {
         var s = document.getElementById('splash')
         if (s) s.remove()
       }
@@ -195,6 +195,11 @@
       // and keep the operator repair path as the last resort.
       setTimeout(function() {
         if (!document.getElementById('root').hasChildNodes()) {
+          // The normal authenticated handoff intentionally retains the cover.
+          // A failed JavaScript boot has no Shell callback to release it, so
+          // remove it before exposing the recovery action.
+          var splash = document.getElementById('splash')
+          if (splash) splash.remove()
           var d = document.createElement('div')
           var retry = document.createElement('a')
           d.setAttribute('role', 'alert')
