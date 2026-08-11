@@ -338,7 +338,7 @@ export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunA
         {!filesQuery.isLoading && !filesQuery.isError && entries.length === 0 && path && <p className="projects-empty">This folder is empty.</p>}
       </div>
       {actions.length > 0 && (
-        <footer className="project-actions" aria-label="Project actions">
+        <footer className="project-actions" role="group" aria-label="Project actions">
           {actions.map(action => <button key={action.id} type="button" onClick={() => onRunAction(project, action)}>{action.name}</button>)}
         </footer>
       )}
