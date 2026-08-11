@@ -45,3 +45,40 @@ test('settings takeover changes only the reload surface, not workspace content i
     drawerOpen: false,
   })
 })
+
+test('a claimed Settings destination is serialized before the outgoing view paints', () => {
+  const workspace = {
+    ...paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'kept' }]),
+    singleScreen: { kind: 'chat', id: 'kept' },
+  }
+
+  assert.deepEqual(deriveShellReloadState({
+    workspace,
+    activeView: 'chat',
+    drawerOpen: true,
+    destination: { view: 'settings', chatId: 'kept', appId: null },
+  }), {
+    activeView: 'settings',
+    activeAppId: null,
+    activeChatId: 'kept',
+    drawerOpen: false,
+  })
+})
+
+test('a claimed content destination becomes the reload route', () => {
+  const workspace = paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'old' }])
+
+  assert.deepEqual(deriveShellReloadState({
+    workspace,
+    activeView: 'chat',
+    drawerOpen: true,
+    destination: {
+      view: 'chat', chatId: 'new', appId: null,
+    },
+  }), {
+    activeView: 'chat',
+    activeAppId: null,
+    activeChatId: 'new',
+    drawerOpen: false,
+  })
+})
