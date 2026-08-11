@@ -79,14 +79,8 @@
   flex: 0 0 auto;
 }
 
-.project-menu > summary {
-  list-style: none;
-}
-
-.project-menu > summary::-webkit-details-marker { display: none; }
-
-.project-menu[open] > summary,
-.project-menu > summary:hover { background: var(--surface); }
+.project-menu > .project-icon-button:hover,
+.project-menu > .project-icon-button[aria-expanded="true"] { background: var(--surface-hover, var(--surface)); }
 
 .project-menu__popover {
   position: absolute;

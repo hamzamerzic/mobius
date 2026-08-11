@@ -52,6 +52,7 @@ export default function ProjectWorkspace({
   const [objectUrl, setObjectUrl] = useState(null)
   const [creation, setCreation] = useState(null)
   const [creationPath, setCreationPath] = useState('')
+  const [activeMenu, setActiveMenu] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const uploadRef = useRef(null)
@@ -78,6 +79,7 @@ export default function ProjectWorkspace({
     setObjectUrl(null)
     setCreation(null)
     setCreationPath('')
+    setActiveMenu(null)
     setError('')
   }, [project.id])
 
@@ -92,6 +94,23 @@ export default function ProjectWorkspace({
   useEffect(() => {
     if (creation) creationInputRef.current?.focus()
   }, [creation])
+
+  useEffect(() => {
+    if (!activeMenu) return undefined
+    function closeOnPointer(event) {
+      const menu = activeMenu === 'create' ? createMenuRef.current : moreMenuRef.current
+      if (!menu?.contains(event.target)) setActiveMenu(null)
+    }
+    function closeOnEscape(event) {
+      if (event.key === 'Escape') setActiveMenu(null)
+    }
+    document.addEventListener('pointerdown', closeOnPointer)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnPointer)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [activeMenu])
 
   function chooseView(next) {
     setView(next)
@@ -370,21 +389,25 @@ export default function ProjectWorkspace({
             <button type="button" aria-label="Icon view" aria-pressed={view === 'icons'} onClick={() => chooseView('icons')}><Grid2X2 size={17} /></button>
             <button type="button" aria-label="List view" aria-pressed={view === 'list'} onClick={() => chooseView('list')}><List size={18} /></button>
           </div>
-          <details ref={createMenuRef} className="project-menu">
-            <summary className="project-icon-button" aria-label="Add to project" title="Add to project"><Plus size={19} /></summary>
-            <div className="project-menu__popover" role="menu">
-              <button type="button" role="menuitem" disabled={busy} onClick={() => { createMenuRef.current?.removeAttribute('open'); beginCreate('file') }}><FileText size={16} /> New file</button>
-              <button type="button" role="menuitem" disabled={busy} onClick={() => { createMenuRef.current?.removeAttribute('open'); beginCreate('folder') }}><FolderPlus size={16} /> New folder</button>
-              <button type="button" role="menuitem" disabled={busy} onClick={() => { createMenuRef.current?.removeAttribute('open'); uploadRef.current?.click() }}><Upload size={16} /> Upload files</button>
-            </div>
-          </details>
+          <div ref={createMenuRef} className="project-menu">
+            <button type="button" className="project-icon-button" aria-label="Add to project" title="Add to project" aria-haspopup="menu" aria-expanded={activeMenu === 'create'} onClick={() => setActiveMenu(current => current === 'create' ? null : 'create')}><Plus size={19} /></button>
+            {activeMenu === 'create' && (
+              <div className="project-menu__popover" role="menu">
+                <button type="button" role="menuitem" disabled={busy} onClick={() => { setActiveMenu(null); beginCreate('file') }}><FileText size={16} /> New file</button>
+                <button type="button" role="menuitem" disabled={busy} onClick={() => { setActiveMenu(null); beginCreate('folder') }}><FolderPlus size={16} /> New folder</button>
+                <button type="button" role="menuitem" disabled={busy} onClick={() => { setActiveMenu(null); uploadRef.current?.click() }}><Upload size={16} /> Upload files</button>
+              </div>
+            )}
+          </div>
           <input ref={uploadRef} type="file" multiple hidden onChange={uploadFile} />
-          <details ref={moreMenuRef} className="project-menu">
-            <summary className="project-icon-button" aria-label="More project actions" title="More"><Ellipsis size={19} /></summary>
-            <div className="project-menu__popover project-menu__popover--end" role="menu">
-              <button type="button" className="project-menu__danger" role="menuitem" disabled={busy} onClick={() => { moreMenuRef.current?.removeAttribute('open'); void deleteProject() }}><Trash2 size={16} /> Delete project</button>
-            </div>
-          </details>
+          <div ref={moreMenuRef} className="project-menu">
+            <button type="button" className="project-icon-button" aria-label="More project actions" title="More" aria-haspopup="menu" aria-expanded={activeMenu === 'more'} onClick={() => setActiveMenu(current => current === 'more' ? null : 'more')}><Ellipsis size={19} /></button>
+            {activeMenu === 'more' && (
+              <div className="project-menu__popover project-menu__popover--end" role="menu">
+                <button type="button" className="project-menu__danger" role="menuitem" disabled={busy} onClick={() => { setActiveMenu(null); void deleteProject() }}><Trash2 size={16} /> Delete project</button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
