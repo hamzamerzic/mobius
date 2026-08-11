@@ -991,7 +991,10 @@ async def mobius_login_start(
   challenge = urlsafe_b64encode(
     hashlib.sha256(verifier.encode("ascii")).digest()
   ).decode("ascii").rstrip("=")
-  redirect_uri = str(request.url_for("mobius_login_callback"))
+  callback_path = request.url_for("mobius_login_callback").path
+  redirect_uri = (
+    get_settings().frontend_origin.rstrip("/") + callback_path
+  )
   pending = {
     "state": state,
     "owner": owner.username,

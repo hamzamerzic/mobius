@@ -212,6 +212,84 @@ def _validate_local_identity(source_dir: Path, manifest: dict) -> None:
     )
 
 
+def _apply_local_manifest_runtime(
+  app: models.App, manifest: dict, *, package_icon: bytes | None,
+) -> None:
+  """Persist every live manifest field owned by explicit local apply.
+
+  Store installs and local-source apply are two entry points into the same App
+  row. Keeping the full projection here prevents a locally uploaded app from
+  compiling successfully while silently losing project templates, permissions,
+  offline metadata, or other runtime declarations.
+  """
+  from app import install
+
+  runtime_fields = local_manifest_runtime_fields(manifest)
+  permissions = manifest.get("permissions") or {}
+  app.name = manifest["name"]
+  app.description = manifest["description"]
+  app.version = str(manifest.get("version", "")).strip() or None
+  app.theme_color = install._manifest_color(manifest.get("theme_color"))
+  app.background_color = (
+    install._manifest_color(manifest.get("background_color"))
+    or app.theme_color
+  )
+  app.display = install._manifest_display(manifest.get("display"))
+  app.icon_png = package_icon
+  app.cross_app_access = permissions.get("cross_app_access", "none")
+  app.share_with_apps = permissions.get("share_with_apps", "none")
+  app.chat_log_access = permissions.get("chat_log_access", "none")
+  app.manage_apps = bool(permissions.get("manage_apps", False))
+  app.manage_skills = bool(permissions.get("manage_skills", False))
+  app.github_access = bool(permissions.get("github_access", False))
+  app.github_connect = bool(permissions.get("github_connect", False))
+  app.filesystem_access = bool(permissions.get("filesystem_access", False))
+  app.connections_manage = bool(permissions.get("connections_manage", False))
+  app.offline_capable = bool(runtime_fields.get("offline_capable", False))
+  app.embeds_agent = bool(manifest.get("embeds_agent", False))
+  app.offline_contract = manifest.get("offline") or None
+  app.system_prompt_file = manifest.get("system_prompt") or None
+  app.system_app = bool(manifest.get("system_app", False))
+  app.project_templates_json = manifest.get("project_templates") or None
+  app.capability_contract = contract_from_app_state(
+    app, capabilities=runtime_fields["capabilities"],
+  )
+
+
+def _live_runtime_state(app: models.App) -> tuple:
+  """Fields whose manifest-driven changes make an apply non-empty."""
+  return (
+    app.name,
+    app.description,
+    app.version,
+    app.theme_color,
+    app.background_color,
+    app.display,
+    app.cross_app_access,
+    app.share_with_apps,
+    app.chat_log_access,
+    app.manage_apps,
+    app.manage_skills,
+    app.github_access,
+    app.github_connect,
+    app.filesystem_access,
+    app.connections_manage,
+    app.offline_capable,
+    app.embeds_agent,
+    app.offline_contract,
+    app.system_prompt_file,
+    app.system_app,
+    app.project_templates_json,
+    app.capability_contract,
+    app.chat_id,
+    app.jsx_source,
+    app.compiled_path,
+    app.source_commit,
+    app.icon_png,
+    app.icon_override_png,
+  )
+
+
 async def apply_source_revision(
   db: Session,
   *,
@@ -292,18 +370,7 @@ async def apply_source_revision(
         db.add(app)
         db.flush()
       assert app is not None
-      previous_state = (
-        app.name,
-        app.description,
-        app.offline_capable,
-        app.capability_contract,
-        app.chat_id,
-        app.jsx_source,
-        app.compiled_path,
-        app.source_commit,
-        app.icon_png,
-        app.icon_override_png,
-      )
+      previous_state = _live_runtime_state(app)
 
       staged = _compiled_dir() / f"app-{app.id}.js.staging"
       await compile_jsx(
@@ -325,14 +392,8 @@ async def apply_source_revision(
         )
 
       if app.manifest_url is None:
-        runtime_fields = local_manifest_runtime_fields(manifest)
-        app.name = manifest["name"]
-        app.description = manifest["description"]
-        app.icon_png = package_icon
-        if "offline_capable" in runtime_fields:
-          app.offline_capable = runtime_fields["offline_capable"]
-        app.capability_contract = contract_from_app_state(
-          app, capabilities=runtime_fields["capabilities"],
+        _apply_local_manifest_runtime(
+          app, manifest, package_icon=package_icon,
         )
       if chat_id is not None:
         app.chat_id = chat_id
@@ -355,18 +416,7 @@ async def apply_source_revision(
       changed = (
         created
         or committed is not None
-        or previous_state != (
-          app.name,
-          app.description,
-          app.offline_capable,
-          app.capability_contract,
-          app.chat_id,
-          source,
-          str(published),
-          app.source_commit,
-          app.icon_png,
-          app.icon_override_png,
-        )
+        or previous_state != _live_runtime_state(app)
       )
       if not changed:
         db.rollback()
