@@ -1,9 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import ArrowLeft from 'lucide-react/dist/esm/icons/arrow-left.mjs'
+import File from 'lucide-react/dist/esm/icons/file.mjs'
+import FileCode from 'lucide-react/dist/esm/icons/file-code.mjs'
+import FileText from 'lucide-react/dist/esm/icons/file-text.mjs'
+import Folder from 'lucide-react/dist/esm/icons/folder.mjs'
+import Grid2X2 from 'lucide-react/dist/esm/icons/grid-2x2.mjs'
+import Image from 'lucide-react/dist/esm/icons/image.mjs'
+import List from 'lucide-react/dist/esm/icons/list.mjs'
+import MessageSquare from 'lucide-react/dist/esm/icons/message-square.mjs'
+import Plus from 'lucide-react/dist/esm/icons/plus.mjs'
+import Upload from 'lucide-react/dist/esm/icons/upload.mjs'
 import { api, jsonOrThrow } from '../../api/client.js'
 import { projectQueries } from '../../hooks/queries.js'
 import { projectPreviewSandbox, safeProjectHtmlDocument } from '../../lib/projectPreview.js'
 import './Projects.css'
+
+const VIEW_KEY = 'mobius.projects.files-view'
+
+function initialView() {
+  try { return localStorage.getItem(VIEW_KEY) === 'list' ? 'list' : 'icons' } catch { return 'icons' }
+}
 
 function parentPath(path) {
   const parts = path.split('/').filter(Boolean)
@@ -11,18 +28,22 @@ function parentPath(path) {
   return parts.join('/')
 }
 
-function fileLabel(path) {
-  return path.split('/').pop() || path
+function fileIcon(entry, size) {
+  if (entry.type === 'directory') return <Folder size={size} />
+  const extension = entry.name.split('.').pop()?.toLowerCase()
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(extension)) return <Image size={size} />
+  if (['html', 'css', 'js', 'jsx', 'ts', 'tsx', 'json', 'py'].includes(extension)) return <FileCode size={size} />
+  if (['md', 'txt', 'tex', 'csv', 'pdf'].includes(extension)) return <FileText size={size} />
+  return <File size={size} />
 }
 
 export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunAction }) {
   const [path, setPath] = useState('')
+  const [view, setView] = useState(initialView)
   const [selectedPath, setSelectedPath] = useState(null)
   const [content, setContent] = useState('')
   const [baseline, setBaseline] = useState('')
   const [fileKind, setFileKind] = useState('none')
-  const [openItems, setOpenItems] = useState([])
-  const [activeItemKey, setActiveItemKey] = useState(null)
   const [objectUrl, setObjectUrl] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -44,8 +65,6 @@ export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunA
     setFileKind('none')
     setContent('')
     setBaseline('')
-    setOpenItems([])
-    setActiveItemKey(null)
     setObjectUrl(null)
     setError('')
   }, [project.id])
@@ -54,6 +73,11 @@ export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunA
     if (objectUrl) URL.revokeObjectURL(objectUrl)
   }, [objectUrl])
 
+  function chooseView(next) {
+    setView(next)
+    try { localStorage.setItem(VIEW_KEY, next) } catch { /* private browsing */ }
+  }
+
   function replaceObjectUrl(next) {
     setObjectUrl(current => {
       if (current) URL.revokeObjectURL(current)
@@ -61,25 +85,25 @@ export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunA
     })
   }
 
-  function rememberItem(item) {
-    setOpenItems(current => current.some(row => row.key === item.key)
-      ? current
-      : [...current, item])
-    setActiveItemKey(item.key)
+  function closeFile() {
+    if (dirty && !window.confirm('Discard your unsaved changes?')) return
+    setSelectedPath(null)
+    setFileKind('none')
+    setContent('')
+    setBaseline('')
+    replaceObjectUrl(null)
+    setError('')
   }
 
   async function openFile(entry) {
+    if (entry.type === 'directory') {
+      setPath(entry.path)
+      return
+    }
     if (dirty && !window.confirm('Discard your unsaved changes?')) return
     setSelectedPath(entry.path)
     setError('')
-    if (entry.type === 'directory') {
-      setPath(entry.path)
-      setSelectedPath(null)
-      setActiveItemKey(null)
-      setFileKind('none')
-      return
-    }
-    rememberItem({ key: `file:${entry.path}`, path: entry.path, name: fileLabel(entry.path), type: 'file' })
+    setFileKind('loading')
     try {
       const res = await api.projects.readFile(project.id, entry.path)
       const type = res.headers.get('content-type') || ''
@@ -112,13 +136,7 @@ export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunA
     setBusy(true)
     setError('')
     setSelectedPath(preview.path)
-    rememberItem({
-      key: `preview:${preview.id}`,
-      path: preview.path,
-      name: preview.name,
-      type: 'preview',
-      preview,
-    })
+    setFileKind('loading')
     try {
       const res = await api.projects.readFile(project.id, preview.path)
       if (preview.kind === 'html') {
@@ -142,38 +160,12 @@ export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunA
     }
   }
 
-  function activateItem(item) {
-    if (item.type === 'preview') void openPreview(item.preview)
-    else void openFile({ path: item.path, type: 'file' })
-  }
-
-  function closeItem(event, item) {
-    event.stopPropagation()
-    if (item.key === activeItemKey && dirty && !window.confirm('Discard your unsaved changes?')) return
-    const next = openItems.filter(row => row.key !== item.key)
-    setOpenItems(next)
-    if (item.key !== activeItemKey) return
-    const fallback = next.at(-1)
-    if (fallback) activateItem(fallback)
-    else {
-      setActiveItemKey(null)
-      setSelectedPath(null)
-      setFileKind('none')
-      setContent('')
-      setBaseline('')
-      replaceObjectUrl(null)
-    }
-  }
-
   async function saveFile() {
     if (!selectedPath || fileKind !== 'text' || busy) return
     setBusy(true)
     setError('')
     try {
-      await jsonOrThrow(
-        await api.projects.writeFile(project.id, selectedPath, content),
-        'File save failed:',
-      )
+      await jsonOrThrow(await api.projects.writeFile(project.id, selectedPath, content), 'File save failed:')
       setBaseline(content)
       await filesQuery.refetch()
     } catch (cause) {
@@ -191,7 +183,7 @@ export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunA
     try {
       await jsonOrThrow(await api.projects.writeFile(project.id, requested, ''), 'File creation failed:')
       await filesQuery.refetch()
-      await openFile({ path: requested, type: 'file' })
+      await openFile({ path: requested, name: requested.split('/').pop(), type: 'file' })
     } catch (cause) {
       setError(cause?.message || 'Could not create that file.')
     } finally {
@@ -207,10 +199,7 @@ export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunA
     setBusy(true)
     setError('')
     try {
-      await jsonOrThrow(
-        await api.projects.writeBytes(project.id, target, await file.arrayBuffer()),
-        'Upload failed:',
-      )
+      await jsonOrThrow(await api.projects.writeBytes(project.id, target, await file.arrayBuffer()), 'Upload failed:')
       await filesQuery.refetch()
     } catch (cause) {
       setError(cause?.message || 'Could not upload that file.')
@@ -236,8 +225,7 @@ export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunA
   }
 
   async function deleteProject() {
-    if (busy) return
-    if (!window.confirm(`Delete “${project.name}” and its project chat?`)) return
+    if (busy || !window.confirm(`Delete “${project.name}” and its project chat?`)) return
     setBusy(true)
     setError('')
     const deleted = await onDelete(project)
@@ -245,158 +233,115 @@ export default function ProjectWorkspace({ project, onOpenChat, onDelete, onRunA
   }
 
   const breadcrumb = useMemo(() => path.split('/').filter(Boolean), [path])
+  const previews = project.template?.previews || []
+  const actions = project.template?.actions || []
+
+  if (selectedPath) {
+    return (
+      <section className="project-workspace project-document" aria-label={`${selectedPath} in ${project.name}`}>
+        <header className="project-document__header">
+          <button type="button" className="project-icon-button" aria-label="Back to project files" onClick={closeFile}><ArrowLeft size={19} /></button>
+          <div><strong>{selectedPath.split('/').pop()}</strong><small>{project.name} / {selectedPath}</small></div>
+          <div className="project-document__actions">
+            {['binary', 'image', 'pdf'].includes(fileKind) && <button type="button" onClick={downloadFile}>Download</button>}
+            {fileKind === 'text' && <button type="button" disabled={!dirty || busy} onClick={saveFile}>{busy ? 'Saving…' : 'Save'}</button>}
+          </div>
+        </header>
+        {error && <p className="projects-error" role="alert">{error}</p>}
+        <div className="project-document__surface">
+          {fileKind === 'text' ? (
+            <textarea
+              aria-label={`Edit ${selectedPath}`}
+              value={content}
+              spellCheck="false"
+              onChange={event => setContent(event.target.value)}
+              onKeyDown={event => {
+                if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+                  event.preventDefault()
+                  void saveFile()
+                }
+              }}
+            />
+          ) : fileKind === 'html' ? (
+            <div className="project-preview"><p>Safe preview · scripts, network requests, forms, and parent access are disabled.</p><iframe title={`${selectedPath} preview`} sandbox={projectPreviewSandbox()} srcDoc={content} /></div>
+          ) : fileKind === 'image' ? (
+            <div className="project-preview project-preview--asset"><img src={objectUrl || ''} alt={`Preview of ${selectedPath}`} /></div>
+          ) : fileKind === 'pdf' ? (
+            <div className="project-preview project-preview--asset"><iframe title={`${selectedPath} PDF`} src={objectUrl || ''} /></div>
+          ) : fileKind === 'binary' ? (
+            <div className="project-document__empty"><File size={42} strokeWidth={1.4} /><h2>Preview unavailable</h2><p>This file is preserved as-is and can be downloaded.</p><button type="button" onClick={downloadFile}>Download</button></div>
+          ) : (
+            <div className="project-document__empty" role="status"><p>Opening file…</p></div>
+          )}
+        </div>
+      </section>
+    )
+  }
 
   return (
     <section className="project-workspace" aria-label={`${project.name} project`}>
       <header className="project-workspace__header">
         <div className="project-workspace__identity">
-          <span className="project-workspace__mark" aria-hidden="true">{project.name.slice(0, 1).toUpperCase()}</span>
-          <div>
-            <h1>{project.name}</h1>
-            <p>{project.template?.name || project.project_type}</p>
-          </div>
+          <span className="project-workspace__mark" aria-hidden="true"><Folder size={25} /></span>
+          <div><h1>{project.name}</h1><p>{project.template?.name || project.project_type}</p></div>
         </div>
         <div className="project-workspace__header-actions">
-          <button type="button" className="project-workspace__delete" disabled={busy} onClick={deleteProject}>
-            Delete
-          </button>
-          <button
-            type="button"
-            className="project-workspace__chat"
-            aria-label="Open project chat"
-            title="Open project chat"
-            onClick={() => onOpenChat(project.chat_id)}
-          >
-            Chat
-          </button>
+          <div className="projects-view-toggle" role="group" aria-label="File view">
+            <button type="button" aria-label="Icon view" aria-pressed={view === 'icons'} onClick={() => chooseView('icons')}><Grid2X2 size={17} /></button>
+            <button type="button" aria-label="List view" aria-pressed={view === 'list'} onClick={() => chooseView('list')}><List size={18} /></button>
+          </div>
+          <button type="button" className="project-icon-button" aria-label="New file" title="New file" disabled={busy} onClick={createFile}><Plus size={19} /></button>
+          <button type="button" className="project-icon-button" aria-label="Upload file" title="Upload file" disabled={busy} onClick={() => uploadRef.current?.click()}><Upload size={18} /></button>
+          <input ref={uploadRef} type="file" hidden onChange={uploadFile} />
+          <button type="button" className="project-workspace__delete" disabled={busy} onClick={deleteProject}>Delete</button>
         </div>
       </header>
-      {((project.template?.previews || []).length > 0 || (project.template?.actions || []).length > 0) && (
-        <div className="project-workspace__tools" aria-label="Project tools">
-          <span>Project tools</span>
-          {(project.template?.previews || []).map(preview => (
-            <button key={preview.id} type="button" className="project-workspace__secondary" disabled={busy} onClick={() => openPreview(preview)}>
-              {preview.name}
-            </button>
-          ))}
-          {(project.template?.actions || []).map(action => (
-            <button key={action.id} type="button" className="project-workspace__secondary" onClick={() => onRunAction(project, action)}>
-              {action.name}
-            </button>
-          ))}
-        </div>
-      )}
-      <div className="project-workspace__body">
-        <aside className="project-files" aria-label="Project files">
-          <div className="project-files__toolbar">
-            <div className="project-files__breadcrumb" title={path || 'Project root'}>
-              <button type="button" onClick={() => setPath('')} disabled={!path}>Project</button>
-              {breadcrumb.map((part, index) => (
-                <span key={`${part}:${index}`}>/ {part}</span>
-              ))}
-            </div>
-            <div className="project-files__actions">
-              <button type="button" onClick={createFile} disabled={busy}>New file</button>
-              <button type="button" onClick={() => uploadRef.current?.click()} disabled={busy}>Upload</button>
-              <input ref={uploadRef} type="file" hidden onChange={uploadFile} />
-            </div>
+
+      <nav className="project-breadcrumb" aria-label="Project location">
+        <button type="button" onClick={() => setPath('')} disabled={!path}>{project.name}</button>
+        {breadcrumb.map((part, index) => (
+          <button key={`${part}:${index}`} type="button" onClick={() => setPath(breadcrumb.slice(0, index + 1).join('/'))}>/ {part}</button>
+        ))}
+      </nav>
+
+      {error && <p className="projects-error" role="alert">{error}</p>}
+      <div className="project-browser">
+        {path && (
+          <button type="button" className="project-browser__back" onClick={() => setPath(parentPath(path))}><ArrowLeft size={17} /> Parent folder</button>
+        )}
+        {filesQuery.isLoading ? (
+          <p className="projects-empty" role="status">Loading files…</p>
+        ) : filesQuery.isError ? (
+          <div className="projects-empty" role="alert"><p>Files are unavailable.</p><button type="button" onClick={() => filesQuery.refetch()}>Try again</button></div>
+        ) : (
+          <div className={`project-items project-items--${view}`}>
+            {!path && (
+              <button type="button" className="project-items__chat" onClick={() => onOpenChat(project.chat_id)}>
+                <span className="project-items__icon" aria-hidden="true"><MessageSquare size={view === 'icons' ? 38 : 22} /></span>
+                <span><strong>Project chat</strong><small>Context for this project</small></span>
+              </button>
+            )}
+            {!path && previews.map(preview => (
+              <button key={preview.id} type="button" onClick={() => openPreview(preview)}>
+                <span className="project-items__icon" aria-hidden="true"><FileCode size={view === 'icons' ? 38 : 22} /></span>
+                <span><strong>{preview.name}</strong><small>Build artifact</small></span>
+              </button>
+            ))}
+            {entries.map(entry => (
+              <button key={entry.path} type="button" onClick={() => openFile(entry)}>
+                <span className="project-items__icon" aria-hidden="true">{fileIcon(entry, view === 'icons' ? 38 : 22)}</span>
+                <span><strong>{entry.name}</strong><small>{entry.type === 'directory' ? 'Folder' : entry.size < 1024 ? `${entry.size} B` : `${Math.ceil(entry.size / 1024)} KB`}</small></span>
+              </button>
+            ))}
           </div>
-          {path && (
-            <button type="button" className="project-files__row project-files__row--back" onClick={() => setPath(parentPath(path))}>
-              <span aria-hidden="true">←</span><span>Parent folder</span>
-            </button>
-          )}
-          {filesQuery.isLoading ? (
-            <p className="project-files__status">Loading files…</p>
-          ) : filesQuery.isError ? (
-            <button type="button" className="project-files__status" onClick={() => filesQuery.refetch()}>Retry file list</button>
-          ) : entries.length === 0 ? (
-            <p className="project-files__status">This folder is empty.</p>
-          ) : entries.map(entry => (
-            <button
-              key={entry.path}
-              type="button"
-              className={`project-files__row${selectedPath === entry.path ? ' project-files__row--active' : ''}`}
-              onClick={() => openFile(entry)}
-            >
-              <span className="project-files__kind" aria-hidden="true">{entry.type === 'directory' ? '▸' : '·'}</span>
-              <span>{entry.name}</span>
-              {entry.type === 'file' && <small>{entry.size < 1024 ? `${entry.size} B` : `${Math.ceil(entry.size / 1024)} KB`}</small>}
-            </button>
-          ))}
-        </aside>
-        <article className="project-editor">
-          {openItems.length > 0 && (
-            <div className="project-editor__tabs" role="tablist" aria-label="Open project files and previews">
-              {openItems.map(item => (
-                <div
-                  key={item.key}
-                  role="tab"
-                  aria-selected={item.key === activeItemKey}
-                  className={`project-editor__tab${item.key === activeItemKey ? ' project-editor__tab--active' : ''}`}
-                >
-                  <button type="button" onClick={() => activateItem(item)}>{item.name}</button>
-                  <button type="button" aria-label={`Close ${item.name}`} onClick={event => closeItem(event, item)}>×</button>
-                </div>
-              ))}
-            </div>
-          )}
-          {selectedPath ? (
-            <>
-              <div className="project-editor__toolbar">
-                <strong title={selectedPath}>{selectedPath}</strong>
-                <div>
-                  {['binary', 'image', 'pdf'].includes(fileKind) && <button type="button" onClick={downloadFile}>Download</button>}
-                  {fileKind === 'text' && <button type="button" disabled={!dirty || busy} onClick={saveFile}>{busy ? 'Saving…' : 'Save'}</button>}
-                </div>
-              </div>
-              {error && <p className="projects-error" role="alert">{error}</p>}
-              {fileKind === 'text' ? (
-                <textarea
-                  aria-label={`Edit ${selectedPath}`}
-                  value={content}
-                  spellCheck="false"
-                  onChange={event => setContent(event.target.value)}
-                  onKeyDown={event => {
-                    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
-                      event.preventDefault()
-                      void saveFile()
-                    }
-                  }}
-                />
-              ) : fileKind === 'html' ? (
-                <div className="project-preview">
-                  <p>Safe preview · scripts, network requests, forms, and parent access are disabled.</p>
-                  <iframe title={`${selectedPath} preview`} sandbox={projectPreviewSandbox()} srcDoc={content} />
-                </div>
-              ) : fileKind === 'image' ? (
-                <div className="project-preview project-preview--asset">
-                  <img src={objectUrl || ''} alt={`Preview of ${selectedPath}`} />
-                </div>
-              ) : fileKind === 'pdf' ? (
-                <div className="project-preview project-preview--asset">
-                  <iframe title={`${selectedPath} PDF`} src={objectUrl || ''} />
-                </div>
-              ) : fileKind === 'binary' ? (
-                <div className="project-editor__empty">
-                  <h2>Binary file</h2>
-                  <p>This asset is preserved as-is. Download it to inspect or edit it locally.</p>
-                  <button type="button" onClick={downloadFile}>Download {selectedPath.split('/').pop()}</button>
-                </div>
-              ) : (
-                <div className="project-editor__empty"><p>Opening file…</p></div>
-              )}
-            </>
-          ) : (
-            <div className="project-editor__empty">
-              <span aria-hidden="true">{project.name.slice(0, 1).toUpperCase()}</span>
-              <h2>{project.name}</h2>
-              <p>Select a file, or open the project chat beside this pane to start building.</p>
-              <button type="button" onClick={() => onOpenChat(project.chat_id)}>Open project chat</button>
-            </div>
-          )}
-        </article>
+        )}
+        {!filesQuery.isLoading && !filesQuery.isError && entries.length === 0 && path && <p className="projects-empty">This folder is empty.</p>}
       </div>
+      {actions.length > 0 && (
+        <footer className="project-actions" aria-label="Project actions">
+          {actions.map(action => <button key={action.id} type="button" onClick={() => onRunAction(project, action)}>{action.name}</button>)}
+        </footer>
+      )}
     </section>
   )
 }

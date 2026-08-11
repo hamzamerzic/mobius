@@ -1,19 +1,45 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import Folder from 'lucide-react/dist/esm/icons/folder.mjs'
+import Grid2X2 from 'lucide-react/dist/esm/icons/grid-2x2.mjs'
+import List from 'lucide-react/dist/esm/icons/list.mjs'
+import Plus from 'lucide-react/dist/esm/icons/plus.mjs'
 import { api, jsonOrThrow } from '../../api/client.js'
 import { projectQueries } from '../../hooks/queries.js'
 import './Projects.css'
 
+const VIEW_KEY = 'mobius.projects.directory-view'
+
+function initialView() {
+  try {
+    return localStorage.getItem(VIEW_KEY) === 'list' ? 'list' : 'icons'
+  } catch {
+    return 'icons'
+  }
+}
+
 export default function ProjectsDirectory({ projects, templates, legacy, status, onRetry, onOpen }) {
   const queryClient = useQueryClient()
+  const [creating, setCreating] = useState(false)
+  const [view, setView] = useState(initialView)
   const [name, setName] = useState('')
   const [templateId, setTemplateId] = useState('blank')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const requestIdRef = useRef(null)
+  const nameRef = useRef(null)
   const availableTemplates = useMemo(() => (
     templates.length ? templates : [{ key: 'blank', name: 'Blank project', description: '' }]
   ), [templates])
+
+  useEffect(() => {
+    if (creating) nameRef.current?.focus()
+  }, [creating])
+
+  function chooseView(next) {
+    setView(next)
+    try { localStorage.setItem(VIEW_KEY, next) } catch { /* private browsing */ }
+  }
 
   async function createProject(event) {
     event.preventDefault()
@@ -31,6 +57,7 @@ export default function ProjectsDirectory({ projects, templates, legacy, status,
       const project = await jsonOrThrow(res, 'Project creation failed:')
       requestIdRef.current = null
       setName('')
+      setCreating(false)
       await Promise.all([
         projectQueries.list.invalidate(queryClient),
         projectQueries.legacy.invalidate(queryClient),
@@ -66,27 +93,40 @@ export default function ProjectsDirectory({ projects, templates, legacy, status,
     }
   }
 
+  const selectedTemplate = availableTemplates.find(template => template.key === templateId)
+
   return (
     <section className="projects-directory" aria-label="Projects">
       <header className="projects-directory__header">
         <div>
           <h1>Projects</h1>
-          <p>Files and a project-aware chat, kept together in your workspace.</p>
+          <p>Your files, artifacts, and project chats.</p>
+        </div>
+        <div className="projects-directory__actions">
+          <div className="projects-view-toggle" role="group" aria-label="Project view">
+            <button type="button" aria-label="Icon view" aria-pressed={view === 'icons'} onClick={() => chooseView('icons')}><Grid2X2 size={17} /></button>
+            <button type="button" aria-label="List view" aria-pressed={view === 'list'} onClick={() => chooseView('list')}><List size={18} /></button>
+          </div>
+          <button
+            type="button"
+            className="projects-add"
+            aria-label={creating ? 'Close new project form' : 'Create project'}
+            aria-expanded={creating}
+            onClick={() => { setCreating(current => !current); setError('') }}
+          >
+            <Plus size={20} />
+          </button>
         </div>
       </header>
       <div className="projects-directory__scroll">
-        <form className="projects-create" onSubmit={createProject}>
-          <div className="projects-create__heading">
-            <div>
-              <h2>New project</h2>
-              <p>Installed apps add project types, skills, and starter files.</p>
-            </div>
-            <button type="submit" disabled={busy}>{busy ? 'Working…' : 'Create'}</button>
-          </div>
-          <div className="projects-create__fields">
+        {creating && (
+          <form className="projects-create" onSubmit={createProject} onKeyDown={event => {
+            if (event.key === 'Escape' && !busy) setCreating(false)
+          }}>
             <label>
               <span>Name</span>
               <input
+                ref={nameRef}
                 value={name}
                 placeholder="Untitled project"
                 maxLength={256}
@@ -101,55 +141,49 @@ export default function ProjectsDirectory({ projects, templates, legacy, status,
                 ))}
               </select>
             </label>
-          </div>
-          {availableTemplates.find(template => template.key === templateId)?.description && (
-            <p className="projects-create__description">
-              {availableTemplates.find(template => template.key === templateId).description}
-            </p>
-          )}
-        </form>
+            <button type="submit" disabled={busy}>{busy ? 'Creating…' : 'Create'}</button>
+            {selectedTemplate?.description && <p>{selectedTemplate.description}</p>}
+          </form>
+        )}
 
         {error && <p className="projects-error" role="alert">{error}</p>}
 
-        <section className="projects-list" aria-labelledby="projects-list-heading">
-          <div className="projects-section-heading">
-            <h2 id="projects-list-heading">Your projects</h2>
-            <span>{projects.length}</span>
+        {status === 'loading' ? (
+          <p className="projects-empty" role="status">Loading projects…</p>
+        ) : status === 'error' ? (
+          <div className="projects-empty" role="alert">
+            <p>Projects are unavailable.</p>
+            <button type="button" onClick={onRetry}>Try again</button>
           </div>
-          {status === 'loading' ? (
-            <p className="projects-empty" role="status">Loading projects…</p>
-          ) : status === 'error' ? (
-            <div className="projects-empty" role="alert">
-              <p>Projects are unavailable.</p>
-              <button type="button" onClick={onRetry}>Try again</button>
-            </div>
-          ) : projects.length === 0 ? (
-            <p className="projects-empty">Create a project to keep its files and chats in one place.</p>
-          ) : (
-            <div className="projects-list__rows">
-              {projects.map(project => (
-                <button key={project.id} type="button" onClick={() => onOpen(project)}>
-                  <span className="projects-list__icon" aria-hidden="true">{project.name.slice(0, 1).toUpperCase()}</span>
-                  <span className="projects-list__copy">
-                    <strong>{project.name}</strong>
-                    <small>{project.template?.name || project.project_type}</small>
-                  </span>
-                  <span className="projects-list__open" aria-hidden="true">Open</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </section>
+        ) : projects.length === 0 ? (
+          <div className="projects-empty">
+            <Folder size={42} strokeWidth={1.4} aria-hidden="true" />
+            <p>No projects yet.</p>
+            <button type="button" onClick={() => setCreating(true)}>Create a project</button>
+          </div>
+        ) : (
+          <div className={`projects-collection projects-collection--${view}`}>
+            {projects.map(project => (
+              <button key={project.id} type="button" onClick={() => onOpen(project)}>
+                <span className="projects-collection__icon" aria-hidden="true"><Folder size={view === 'icons' ? 42 : 24} /></span>
+                <span className="projects-collection__copy">
+                  <strong>{project.name}</strong>
+                  <small>{project.template?.name || project.project_type}</small>
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
 
         {legacy.some(row => !row.imported) && (
           <section className="projects-legacy" aria-labelledby="projects-legacy-heading">
             <div className="projects-section-heading">
               <div>
                 <h2 id="projects-legacy-heading">Existing app projects</h2>
-                <p>Link these without moving or changing their files.</p>
+                <p>Bring these into Projects without moving their files.</p>
               </div>
             </div>
-            <div className="projects-list__rows">
+            <div className="projects-collection projects-collection--list">
               {legacy.filter(row => !row.imported).map(row => (
                 <button
                   key={`${row.app_id}:${row.legacy_project_id}`}
@@ -157,12 +191,12 @@ export default function ProjectsDirectory({ projects, templates, legacy, status,
                   disabled={busy}
                   onClick={() => importLegacy(row)}
                 >
-                  <span className="projects-list__icon projects-list__icon--legacy" aria-hidden="true">↗</span>
-                  <span className="projects-list__copy">
+                  <span className="projects-collection__icon" aria-hidden="true"><Folder size={24} /></span>
+                  <span className="projects-collection__copy">
                     <strong>{row.name}</strong>
                     <small>{row.app_name}</small>
                   </span>
-                  <span className="projects-list__open">Import</span>
+                  <span className="projects-collection__verb">Import</span>
                 </button>
               ))}
             </div>
