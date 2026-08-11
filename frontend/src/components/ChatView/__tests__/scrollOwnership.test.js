@@ -92,6 +92,8 @@ test('gesture scroll frames defer anchor, spacer, and persistence work until set
   )
   assert.match(hotPath, /atBottom:\s*distanceToBottom\s*<=\s*FOLLOW_STICK_BAND_PX/,
     'the intent reducer must latch the follow-stick band, not a pixel-exact tail')
+  assert.match(hotPath, /readerScrollEscapeDirection\(/,
+    'directionless native scrollbar movement must update the escape latch')
 
   const settleStart = ownerSource.indexOf('const settleReaderScroll = () => {')
   const settleEnd = ownerSource.indexOf(

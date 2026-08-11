@@ -948,6 +948,25 @@ export function readerInputEscapeDirection(
 }
 
 
+/** Infer the same escape/re-engage direction from an actual scroll position.
+ * Wheel, keyboard, and touch inputs expose direction before scrolling, but a
+ * mouse scrollbar drag does not. Comparing consecutive owned positions keeps
+ * that native path inside the same latch instead of snapping an upward drag
+ * back to FOLLOW_BOTTOM at settlement. */
+export function readerScrollEscapeDirection(
+  previousScrollTop,
+  nextScrollTop,
+  epsilon = 0.5,
+) {
+  if (!Number.isFinite(previousScrollTop) || !Number.isFinite(nextScrollTop)) {
+    return null
+  }
+  if (nextScrollTop < previousScrollTop - epsilon) return 'up'
+  if (nextScrollTop > previousScrollTop + epsilon) return 'down'
+  return null
+}
+
+
 /** A primary composer press or direct edit at the physical tail is an explicit
  * request to keep the latest content visible while the keyboard or composer
  * changes the viewport. The edit case covers paste/typing while the textarea
@@ -2331,6 +2350,10 @@ export default function useScrollMode({
     // use-stick-to-bottom's escapedFromLock: set by an explicit scroll UP,
     // cleared by a scroll DOWN. The sole signal that breaks an engaged follow.
     let readerGestureEscaped = false
+    // Baseline for directionless native scrolling, chiefly a mouse scrollbar
+    // drag. Input captures the pre-scroll position; each owned scroll frame
+    // advances it without doing any DOM traversal or layout measurement.
+    let readerGestureLastScrollTop = null
     let readerGestureSequence = null
     let readerSettleTimer = 0
     let disclosureInputOwnsGesture = false
@@ -2341,6 +2364,7 @@ export default function useScrollMode({
       readerScrollDirty = false
       readerGestureReachedBottom = false
       readerGestureEscaped = false
+      readerGestureLastScrollTop = null
       disclosureInputOwnsGesture = false
     }
     discardPendingReaderSettleRef.current = discardPendingReaderSettle
@@ -2354,6 +2378,7 @@ export default function useScrollMode({
       const settledEscaped = readerGestureEscaped
       readerGestureReachedBottom = false
       readerGestureEscaped = false
+      readerGestureLastScrollTop = null
 
       // The quiet edge is the gesture/layout ownership handoff. Compute the
       // final semantic location before replaying any deferred layout observer;
@@ -2403,6 +2428,7 @@ export default function useScrollMode({
       if (gestureSequenceRef.current !== sequence
           || gestureWindowUntilRef.current !== Number.POSITIVE_INFINITY) return
       disclosureInputOwnsGesture = false
+      readerGestureLastScrollTop = null
       gestureWindowUntilRef.current = 0
       clearTimeout(pendingGestureTimerRef.current)
       pendingGestureTimerRef.current = 0
@@ -2450,6 +2476,11 @@ export default function useScrollMode({
       // taps carry no scroll direction and must not disturb the latch.
       if (!activatesDisclosure) {
         if (!readerAlreadyOwns) readerGestureEscaped = false
+        // Every input is a fresh pre-scroll sample. This is redundant for
+        // wheel/keys (their event carries direction) but load-bearing for a
+        // scrollbar pointerdown, whose later scroll event is the first place
+        // the browser reveals which way the reader moved.
+        readerGestureLastScrollTop = scrollEl.scrollTop
         const escapeDir = readerInputEscapeDirection(event?.type, {
           deltaY: event?.deltaY,
           key: event?.key,
@@ -2704,6 +2735,7 @@ export default function useScrollMode({
         pendingGestureTimerRef.current = 0
         cancelAnimationFrame(pendingGestureReleaseRafRef.current)
         pendingGestureReleaseRafRef.current = 0
+        readerGestureLastScrollTop = null
         resumeLayoutAfterGestureRef.current?.()
         return
       }
@@ -2716,6 +2748,13 @@ export default function useScrollMode({
         pendingGestureReleaseRafRef.current = 0
       }
       readerScrollDirty = true
+      const scrollEscapeDir = readerScrollEscapeDirection(
+        readerGestureLastScrollTop,
+        scrollEl.scrollTop,
+      )
+      readerGestureLastScrollTop = scrollEl.scrollTop
+      if (scrollEscapeDir === 'up') readerGestureEscaped = true
+      else if (scrollEscapeDir === 'down') readerGestureEscaped = false
       const intent = readerIntentAfterScroll({
         gestureSequence: gestureSequenceRef.current,
         claimedSequence: readerGestureSequence,

@@ -32,6 +32,7 @@ import {
   readerInputActivatesDisclosure,
   readerInputMayScroll,
   readerInputNeedsFrameRelease,
+  readerScrollEscapeDirection,
   releaseQuestionSubmissionForViewport,
   settledPinMode,
   shouldPinSend,
@@ -823,6 +824,15 @@ test('reader input escape direction follows use-stick-to-bottom wheel/key rules'
   // A non-directional key and pointer input never move the latch.
   assert.equal(readerInputEscapeDirection('keydown', { key: 'Tab' }), null)
   assert.equal(readerInputEscapeDirection('pointerdown', {}), null)
+})
+
+test('actual scroll direction covers native scrollbar drags', () => {
+  assert.equal(readerScrollEscapeDirection(1400, 1200), 'up')
+  assert.equal(readerScrollEscapeDirection(1200, 1400), 'down')
+  assert.equal(readerScrollEscapeDirection(1200, 1200.4), null,
+    'subpixel jitter must not flip the escape latch')
+  assert.equal(readerScrollEscapeDirection(null, 1200), null,
+    'a scroll without a pre-input position carries no invented direction')
 })
 
 test('a short settled pin retires automatic follow but keeps its identity', () => {
