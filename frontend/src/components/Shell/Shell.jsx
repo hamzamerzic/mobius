@@ -1279,26 +1279,38 @@ export default function Shell({ onInitialVisualReady }) {
         let next = paneModel.setViewMode(current, 'panes')
         const chatTab = tabModel.makeTab('chat', chatId)
         const chatKey = tabModel.tabKey(chatTab)
-        const chatPane = paneModel.paneOf(next, chatKey)
-        if (chatPane) {
-          next = paneModel.setActiveTab(next, chatPane.id, chatKey)
-          return paneModel.focusPane(next, chatPane.id)
-        }
-
         const projectKey = tabModel.tabKey(tabModel.projectTab(project.id))
         const projectPane = paneModel.paneOf(next, projectKey)
         if (!projectPane) return paneModel.openTab(next, chatTab)
         const phone = paneModel.modeForRect(contentRectRef.current) === 'phone'
+        const companionPane = Object.entries(projectChatLookup)
+          .filter(([existingChatId, meta]) => (
+            existingChatId !== chatId
+            && meta.projectId === String(project.id)
+          ))
+          .map(([existingChatId]) => paneModel.paneOf(
+            next,
+            tabModel.tabKey(tabModel.makeTab('chat', existingChatId)),
+          ))
+          .find(pane => pane && pane.id !== projectPane.id)
+        const chatPane = paneModel.paneOf(next, chatKey)
+        if (chatPane) {
+          if (!phone && chatPane.id === projectPane.id) {
+            next = companionPane
+              ? paneModel.moveTab(next, chatKey, { paneId: companionPane.id })
+              : paneModel.moveTab(next, chatKey, {
+                paneId: projectPane.id,
+                edge: 'right',
+              })
+          }
+          const owner = paneModel.paneOf(next, chatKey)
+          if (!owner) return next
+          next = paneModel.setActiveTab(next, owner.id, chatKey)
+          return paneModel.focusPane(next, owner.id)
+        }
         if (phone) {
           next = paneModel.openTab(next, chatTab, { paneId: projectPane.id })
         } else {
-          const companionPane = Object.entries(projectChatLookup)
-            .filter(([, meta]) => meta.projectId === String(project.id))
-            .map(([existingChatId]) => paneModel.paneOf(
-              next,
-              tabModel.tabKey(tabModel.makeTab('chat', existingChatId)),
-            ))
-            .find(pane => pane && pane.id !== projectPane.id)
           if (companionPane) {
             next = paneModel.openTab(next, chatTab, { paneId: companionPane.id })
           } else {
