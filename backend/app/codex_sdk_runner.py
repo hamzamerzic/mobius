@@ -104,6 +104,7 @@ from app.codex_events import (
   _skill_names_in_command,
   _observe_skill_reads,
   _file_change_patch_summary,
+  _file_change_edit_preview,
 )
 from app.process_groups import lower_process_group_priority
 from app.providers import get_skill_path
@@ -2149,6 +2150,16 @@ async def run_codex_sdk_turn(
           continue
 
         if isinstance(payload, sdk["FileChangePatchUpdatedNotification"]):
+          edit_preview = _file_change_edit_preview(payload.changes)
+          if edit_preview:
+            first = _model_dump(payload.changes[0]) if payload.changes else {}
+            event = {
+              "type": "tool_input",
+              "input": first.get("path", "") if isinstance(first, dict) else "",
+              "edit_preview": edit_preview,
+            }
+            _stamp_notification_item_id(event, payload)
+            bc.publish(event)
           summary = _file_change_patch_summary(payload.changes)
           if summary:
             event = {"type": "tool_output", "content": summary}

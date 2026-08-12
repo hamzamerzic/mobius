@@ -16,6 +16,7 @@ from typing import Any
 
 from app.codex_appserver import _extract_bash_command
 from app.json_safety import json_safe
+from app.tool_edit_preview import codex_edit_preview
 from app.tool_sources import normalize_tool_sources
 
 log = logging.getLogger("moebius.chat")
@@ -595,10 +596,12 @@ def _tool_start_event(item: Any, sdk: dict[str, Any]) -> dict[str, Any] | None:
   if isinstance(item, sdk["FileChangeThreadItem"]):
     first = item.changes[0] if item.changes else None
     path = _model_dump(first).get("path", "") if first is not None else ""
+    edit_preview = _file_change_edit_preview(item.changes)
     return {
       "type": "tool_start",
       "tool": "Edit",
       "input": path,
+      **({"edit_preview": edit_preview} if edit_preview else {}),
     }
   if isinstance(item, sdk["McpToolCallThreadItem"]):
     tool_name = f"{item.server}:{item.tool}" if item.server else item.tool
@@ -979,3 +982,8 @@ def _file_change_patch_summary(changes: list[Any]) -> str:
     if line:
       lines.append(line)
   return "\n".join(lines)
+
+
+def _file_change_edit_preview(changes: list[Any]) -> dict | None:
+  """Normalize SDK file changes into the shared bounded diff preview."""
+  return codex_edit_preview([_model_dump(change) for change in changes])

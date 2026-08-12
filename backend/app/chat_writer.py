@@ -2230,6 +2230,15 @@ class ChatWriterActor:
     else:
       pending.append(new_msg)
     chat.pending_messages = pending
+    if applied:
+      # The recovered-answer path (an answer submitted after a restart, when no
+      # in-memory pending question survives) reaches AppendPending instead of
+      # AnswerQuestion, so clear the durable marker here too — mirroring
+      # _answer_question. Otherwise it stays set for the whole recovered turn and
+      # every read surface, the composer's queue/steer lock included, keeps
+      # treating the chat as awaiting an answer. Gated on `applied` so an
+      # ordinary queue-behind send never disturbs a genuinely open question.
+      chat.pending_question_id = None
     chat.updated_at = datetime.now(UTC)
     chat.activity_at = datetime.now(UTC)
     if not _commit_or_rollback(db):

@@ -3807,6 +3807,23 @@ def _build_available_skills_block(data_dir: str | Path) -> str:
   return "\n".join(lines)
 
 
+def _build_provider_skills_block(
+  data_dir: str | Path,
+  provider_name: str,
+  *,
+  codex_native_ready: bool = False,
+) -> str:
+  """Use one skill inventory: Codex native discovery, or Möbius's block.
+
+  Suppress Möbius's block only after the Codex cache proved it represents every
+  shared skill. A partial or failed sync retains the bounded fallback instead
+  of silently making the skipped entries undiscoverable.
+  """
+  if provider_name == "Codex" and codex_native_ready:
+    return ""
+  return _build_available_skills_block(data_dir)
+
+
 async def _run_chat_impl(
   messages: list[schemas.ChatMessage],
   chat_id: str = "",
@@ -3915,6 +3932,18 @@ async def _run_chat_impl_with_db(
       )
   from app.delegations import policy_for_chat
   run_policy = policy_for_chat(db, chat_id) if chat_row is not None else None
+  provider = get_provider(provider_id)
+  codex_native_skills_ready = False
+  if run_policy is None and provider.name == "Codex":
+    try:
+      from app.codex_skills import sync_codex_skills_for_prompt
+      from app.providers import skills_enabled as _skills_enabled
+      codex_native_skills_ready = sync_codex_skills_for_prompt(
+        settings.data_dir,
+        _skills_enabled(settings.data_dir),
+      )
+    except Exception:
+      log.exception("codex skills sync failed chat_id=%s", chat_id)
   if run_policy is None:
     app_context_block, app_context_env = _build_app_context(
       db, chat_id, settings.data_dir,
@@ -3995,13 +4024,16 @@ async def _run_chat_impl_with_db(
     # dict access on viewport so a malformed payload (missing keys,
     # wrong types) doesn't crash the agent spawn — skip the line
     # instead.
-    provider_obj = get_provider(provider_id)
-    provider_line = f"\nProvider: {provider_obj.name}"
+    provider_line = f"\nProvider: {provider.name}"
     tz_line = f"\nTimezone: {timezone}" if timezone else ""
     vp_w = (viewport or {}).get("width")
     vp_h = (viewport or {}).get("height")
     vp_line = f"\nViewport: {vp_w}x{vp_h}" if vp_w and vp_h else ""
-    skills_block = _build_available_skills_block(settings.data_dir)
+    skills_block = _build_provider_skills_block(
+      settings.data_dir,
+      provider.name,
+      codex_native_ready=codex_native_skills_ready,
+    )
     if ctx or provider_line or tz_line or vp_line or skills_block:
       # The <agent_experience> block is private runtime context, injected once per
       # session. Three load-bearing sentences:
@@ -4187,9 +4219,6 @@ async def _run_chat_impl_with_db(
   base_env["AGENT_BROWSER_ARGS"] = bounded_agent_browser_args(
     os.environ.get("AGENT_BROWSER_ARGS"),
   )
-
-  # Get the provider first — needed for auth check.
-  provider = get_provider(provider_id)
 
   # Resolve effective agent settings (model, effort, ...) for this turn.
   # Per-chat overrides from `Chat.agent_settings_json` win over the
@@ -4433,19 +4462,6 @@ async def _run_chat_impl_with_db(
       "chat start chat_id=%s provider=%s session=%s msg_len=%d sdk=codex",
       chat_id, provider.name, session_id or "new", len(user_message),
     )
-    # Mirror the shared skills into Codex's project-local skills dir
-    # (<cwd>/.codex/skills) so Codex auto-discovers them — name + description in
-    # the prompt, body loaded on demand — the parity match for Claude's
-    # skills="all". Gated on the same skills_enabled flag; when off it prunes its
-    # own shims. Best-effort: skill discovery is advisory, so a sync failure must
-    # never block the turn from starting.
-    if run_policy is None:
-      try:
-        from app.codex_skills import sync_codex_skills
-        from app.providers import skills_enabled as _skills_enabled
-        sync_codex_skills(settings.data_dir, _skills_enabled(settings.data_dir))
-      except Exception:
-        log.exception("codex skills sync failed chat_id=%s", chat_id)
     sdk_env = provider.build_env(
       base_env=base_env,
       data_dir=settings.data_dir,

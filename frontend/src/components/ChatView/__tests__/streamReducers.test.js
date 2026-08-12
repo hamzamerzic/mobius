@@ -32,6 +32,7 @@ import {
   replaceTextItem,
   startToolLifecycle,
   applySkillLoaded,
+  attachToolInput,
 } from '../streamReducers.js'
 import { questionKey } from '../questionKey.js'
 
@@ -89,6 +90,35 @@ test('skill loads remain visible when no owning tool start arrived', () => {
   }])
   assert.equal(applySkillLoaded(items, { skill: 'humanizer' }), items,
     'a replayed settled receipt is idempotent')
+})
+
+test('tool start preserves the shared edit preview for either provider', () => {
+  const editPreview = {
+    diff: 'diff --git a/a b/a\n@@ -1 +1 @@\n-a\n+b',
+    truncated: false,
+  }
+  const items = startToolLifecycle([], {
+    tool: 'Edit', input: 'a', tool_use_id: 'edit-1', edit_preview: editPreview,
+  })
+
+  assert.equal(items[0].edit_preview, editPreview)
+})
+
+test('a later Codex patch update replaces the live edit preview by identity', () => {
+  const first = { diff: 'diff --git a/a b/a', truncated: false }
+  const final = {
+    diff: 'diff --git a/a b/a\n@@ -1 +1 @@\n-a\n+b',
+    truncated: false,
+  }
+  const started = startToolLifecycle([], {
+    tool: 'Edit', input: 'a', tool_use_id: 'edit-1', edit_preview: first,
+  })
+  const updated = attachToolInput(started, {
+    type: 'tool_input', input: 'a', tool_use_id: 'edit-1', edit_preview: final,
+  })
+
+  assert.equal(updated[0].edit_preview, final)
+  assert.equal(started[0].edit_preview, first, 'the live snapshot stays immutable')
 })
 
 test('text item identity keeps late deltas before an interleaved question', () => {

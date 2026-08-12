@@ -362,7 +362,9 @@ export default function useWorkspaceDrag({
 
       // iOS callout/selection suppression begins NOW (pointerdown), scoped to the
       // source, for the WHOLE hold window — not at arm, when the magnifier has
-      // already won. `contextmenu` is prevented for a touch source too.
+      // already won. Swallow touch `contextmenu` in capture phase so it cannot
+      // bypass the shared hold timer through a tab or row's own handler. Mouse
+      // right-click is untouched because this listener exists only for touch.
       let ctxListener = null
       if (isTouch) {
         prevBodySelect = document.body.style.userSelect
@@ -370,7 +372,10 @@ export default function useWorkspaceDrag({
         document.body.style.webkitUserSelect = 'none'
         srcEl.style.webkitTouchCallout = 'none'
         srcEl.style.userSelect = 'none'
-        ctxListener = (ev) => ev.preventDefault()
+        ctxListener = (ev) => {
+          ev.preventDefault()
+          ev.stopImmediatePropagation()
+        }
         window.addEventListener('contextmenu', ctxListener, true)
       }
 
