@@ -4091,8 +4091,8 @@ export default function Shell({ onInitialVisualReady }) {
               data-new-chat-presentation={presentingNewChat
                 ? newChatPresentation.chatId || 'allocating'
                 : undefined}
-              inert={(presentingNewChat && newChatPresentation.materialized) || undefined}
-              aria-hidden={(presentingNewChat && newChatPresentation.materialized)
+              inert={(presentingNewChat && newChatPresentation.releasing) || undefined}
+              aria-hidden={(presentingNewChat && newChatPresentation.releasing)
                 ? 'true'
                 : undefined}
               onAnimationEnd={releasingNewChat
