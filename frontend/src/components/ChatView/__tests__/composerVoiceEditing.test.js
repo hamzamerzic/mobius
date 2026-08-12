@@ -53,4 +53,7 @@ test('accepting a slash command rebases live dictation before changing the draft
       < slashCommandHandler.indexOf('onInputChange(value)'),
     'the voice baseline must update before the controlled composer value',
   )
+  assert.match(slashCommandHandler,
+    /requestAnimationFrame\(\(\) => placeCaretAtTextEnd\(inputRef\?\.current\)\)/,
+    'command acceptance must place the caret after the controlled value commits')
 })

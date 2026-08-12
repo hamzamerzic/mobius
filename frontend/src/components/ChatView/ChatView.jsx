@@ -65,7 +65,11 @@ import { questionKey } from './questionKey.js'
 import { clearChatQuestionDrafts } from './questionDraft.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 import { resolveStopResend } from './resolveStopResend.js'
-import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
+import {
+  focusComposerElement,
+  placeCaretAtTextEnd,
+  shouldApplyComposerFocusRequest,
+} from './composerFocusPolicy.js'
 import { shouldDismissComposerKeyboardOnSubmit } from './composerKeyboardPolicy.js'
 import { updateChatRuntimeCache } from './chatRuntimeCache.js'
 import {
@@ -658,16 +662,42 @@ export default function ChatView({
     }
 
     let cancelled = false
-    const raf = requestAnimationFrame(() => {
+    let raf = 0
+    const transfer = (attempt = 0) => {
       if (cancelled) return
       focusComposerElement(inputRef.current)
+      if (composerRequest.restoreExistingDraft) {
+        const focused = typeof document === 'undefined'
+          || document.activeElement === inputRef.current
+        // The live landing remains the owner until the destination really has
+        // focus. One extra painted-frame attempt covers a just-committed pane
+        // becoming interactive without ever clearing or migrating its draft.
+        if (!focused && attempt < 1) {
+          raf = requestAnimationFrame(() => transfer(attempt + 1))
+          return
+        }
+        if (!focused) return
+        // Focus first, then re-read. A key dispatched to the landing in the
+        // preceding frame is already in draft:<id> and joins this commit.
+        flushSync(() => restoreDurableDraft())
+        placeCaretAtTextEnd(inputRef.current)
+      }
       onComposerRequestHandled?.(token)
-    })
+    }
+    raf = requestAnimationFrame(() => transfer())
     return () => {
       cancelled = true
       cancelAnimationFrame(raf)
     }
-  }, [chatId, composerRequest, embedded, onComposerRequestHandled])
+  }, [
+    chatId,
+    composerRequest,
+    embedded,
+    handleComposerInputChange,
+    inputValueRef,
+    onComposerRequestHandled,
+    restoreDurableDraft,
+  ])
 
   // Lifecycle guards. `hadMessagesRef` reflects the cached length so
   // doSend's "first message" branch doesn't fire spuriously.
@@ -727,6 +757,12 @@ export default function ChatView({
   onOwnerActivityRef.current = onOwnerActivity
   const onFirstMessageRef = useRef(onFirstMessage)
   onFirstMessageRef.current = onFirstMessage
+  const acknowledgeFirstMessageAccepted = useCallback(() => {
+    if (hadMessagesRef.current) return false
+    hadMessagesRef.current = true
+    onFirstMessageRef.current?.()
+    return true
+  }, [])
   const onStreamEndRef = useRef(onStreamEnd)
   onStreamEndRef.current = onStreamEnd
   const onExternalRunEventRef = useRef(onExternalRunEvent)
@@ -2373,6 +2409,11 @@ export default function ChatView({
         const result = await queueRequest
         clearFailedAttempt()
         releaseComposerFilesAfterAccepted()
+        // The active-turn decision can be stale while the first POST is still
+        // settling. Any successfully accepted queue result still proves this
+        // formerly empty chat now owns a message; share the idempotent first-
+        // message boundary before duplicate/queued early returns.
+        acknowledgeFirstMessageAccepted()
         if (result?.status === 'duplicate') {
           // A stale local queue decision can race an already-durable retry.
           // Remove only this send's optimistic tray row; an unrelated live
@@ -2673,6 +2714,11 @@ export default function ChatView({
       )
       clearFailedAttempt()
       releaseComposerFilesAfterAccepted()
+      // A resolved fresh-send transport is authoritative acceptance even when
+      // it reports an idempotent duplicate or a queued row. Claim the first
+      // message before either status can return so Shell retires this New Chat
+      // intent exactly once; rejected/failed sends still take the catch path.
+      acknowledgeFirstMessageAccepted()
       if (result?.status === 'duplicate') {
         const durableRows = startedMessagesFromResponse(result)
         if (durableRows) {
@@ -2747,10 +2793,6 @@ export default function ChatView({
           return replaceOptimisticWithBatch(prev, cid, startedMessages)
         })
       }
-      if (!hadMessagesRef.current) {
-        hadMessagesRef.current = true
-        onFirstMessageRef.current?.()
-      }
     } catch (err) {
       const pendingQuestionBlocked = isPendingQuestionSendFailure(err)
       if (!pendingQuestionBlocked) {
@@ -2804,6 +2846,7 @@ export default function ChatView({
     releaseFiles,
     online,
     setActiveGoalState,
+    acknowledgeFirstMessageAccepted,
   ])
 
   useEffect(() => {

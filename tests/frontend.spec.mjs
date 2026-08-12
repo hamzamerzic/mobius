@@ -63,6 +63,7 @@ async function newChat(page) {
     })
   }
   await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 8000 })
+  return chat
 }
 
 async function sendMessage(page, text) {
@@ -995,6 +996,17 @@ test.describe('Scroll position', () => {
     const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
     expect(chatId).toBeTruthy()
 
+    // This test overlays a populated transcript through a route mock. Persist a
+    // small occupancy marker too so the New Chat action owns a genuinely new
+    // draft instead of correctly reusing the otherwise untouched server row.
+    const token = await page.evaluate(() => localStorage.getItem('token'))
+    expect(token).toBeTruthy()
+    const occupyResponse = await page.request.put(`${BASE}/api/chats/${chatId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { messages: [{ role: 'user', content: 'Entry restoration fixture' }] },
+    })
+    expect(occupyResponse.ok()).toBe(true)
+
     let returning = false
     let streamCount = 0
     let catchUpServed = false
@@ -1104,7 +1116,8 @@ test.describe('Scroll position', () => {
     await page.getByLabel('Primary navigation')
       .getByRole('button', { name: 'New chat', exact: true })
       .click()
-    await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap'))
+      .toBeVisible({ timeout: 5000 })
     const decoyChatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
     expect(decoyChatId).toBeTruthy()
     expect(decoyChatId).not.toBe(chatId)

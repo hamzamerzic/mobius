@@ -38,7 +38,7 @@ test('draft-only and embedded requests do not focus the composer', () => {
   }), false)
 })
 
-test('focusComposerElement preserves scroll when the browser supports it', () => {
+test('focusComposerElement preserves scroll and the current selection', () => {
   const calls = []
   const selections = []
   const el = {

@@ -99,10 +99,15 @@ async function newChat(page) {
   await page.waitForFunction(() => !!document.querySelector('.drawer--open'), { timeout: 3000 })
   await page.evaluate(() => document.querySelector('.drawer__item--new')?.click())
   await page.waitForFunction(() => !document.querySelector('.drawer--open'), { timeout: 3000 })
+  await page.waitForFunction(
+    () => !document.querySelector('[data-new-chat-presentation]'),
+    { timeout: 10000 },
+  )
 }
 
 async function sendMessage(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
+  const input = page.locator('[data-chat-surface="painted"]')
+    .getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
   await page.keyboard.press('Enter')
   await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toBeVisible({ timeout: 3000 })

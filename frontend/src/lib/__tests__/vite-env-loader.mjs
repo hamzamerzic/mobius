@@ -27,6 +27,7 @@ const REACT_SHIMMED_MODULES = [
   '/components/Shell/useAppIntentNavigation.js',
   '/components/Shell/useShellReloadController.js',
   '/components/ChatView/useFileUpload.js',
+  '/components/ChatView/hooks/useComposerDraftState.js',
   '/components/ChatView/useScrollMode.js',
   '/hooks/useNavigation.js',
 ]

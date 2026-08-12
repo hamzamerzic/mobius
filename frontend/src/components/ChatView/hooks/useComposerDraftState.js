@@ -103,7 +103,10 @@ export default function useComposerDraftState({ chatId, hidden, inputRef }) {
         && (initial.input || initial.attachments.length > 0)) {
       persistComposerDraft(chatId, initial.input, initial.attachments)
     }
-    consumeComposerHandoff(chatId, initial.input)
+    // An autosend handoff remains one-shot intent until the send begins below.
+    // Consuming it during restoration would turn a reload while loading into a
+    // silently downgraded draft.
+    if (!initial.autoSend) consumeComposerHandoff(chatId, initial.input)
   }, [chatId, hidden, initial])
 
   useEffect(() => {

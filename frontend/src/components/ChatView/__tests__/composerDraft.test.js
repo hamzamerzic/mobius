@@ -96,76 +96,49 @@ test('keeps legacy plain-text drafts readable', () => {
   })
 })
 
-test('chat handoffs keep exact draft and autosend text under one owner', () => {
-  const storage = storageStub({
-    'pending-draft-autosend': 'stale',
-    'draft-autosend:chat-a': 'stale',
-    'draft-autosend:abandoned-chat': 'abandoned approval',
-  })
-
+test('chat handoffs are exact, chat-bound, and replace stale intent', () => {
+  const storage = storageStub()
   assert.equal(stageComposerHandoff('chat-a', 'Review this exactly', {
-    attachments: [{
-      name: 'review.txt', size: 9, mime_type: 'text/plain', status: 'done',
-    }],
     autoSend: true,
     storage,
   }), true)
   assert.deepEqual(readComposerDraft('chat-a', storage), {
     input: 'Review this exactly',
-    attachments: [{
-      name: 'review.txt', size: 9, mime_type: 'text/plain', status: 'done',
-    }],
+    attachments: [],
   })
-  assert.equal(storage.getItem('pending-draft'), 'Review this exactly')
-  assert.equal(storage.getItem('pending-draft-autosend'), 'Review this exactly')
-  assert.equal(storage.getItem('draft-autosend:chat-a'), 'Review this exactly')
-  assert.equal(storage.getItem('draft-autosend:abandoned-chat'), null)
   assert.deepEqual(readComposerHandoff('chat-a', storage), {
     draft: 'Review this exactly',
     autoSendDraft: 'Review this exactly',
   })
-
-  consumeComposerHandoff('chat-a', 'Review this exactly', { storage })
-  assert.equal(storage.getItem('pending-draft'), null)
-  assert.equal(storage.getItem('pending-draft-autosend'), null)
-  assert.equal(storage.getItem('draft-autosend:chat-a'), 'Review this exactly',
-    'the retry marker survives until the send attempt actually starts')
-  assert.deepEqual(readComposerHandoff('chat-a', storage), {
+  assert.deepEqual(readComposerHandoff('chat-b', storage), {
     draft: null,
-    autoSendDraft: 'Review this exactly',
+    autoSendDraft: null,
   })
-  consumeComposerHandoff('chat-a', 'Review this exactly', { autoSend: true, storage })
-  assert.equal(storage.getItem('draft-autosend:chat-a'), null)
 
-  assert.equal(stageComposerHandoff('chat-a', 'Leave this for review', { storage }), true)
-  consumeComposerHandoff('chat-a', 'Review this exactly', { autoSend: true, storage })
-  assert.equal(storage.getItem('pending-draft'), 'Leave this for review')
-  assert.equal(storage.getItem('pending-draft-autosend'), null)
-  assert.equal(storage.getItem('draft-autosend:chat-a'), null)
+  assert.equal(stageComposerHandoff('chat-b', 'A newer destination', { storage }), true)
+  consumeComposerHandoff('chat-a', 'Review this exactly', { storage })
+  assert.deepEqual(readComposerHandoff('chat-b', storage), {
+    draft: 'A newer destination',
+    autoSendDraft: null,
+  })
 
-  assert.equal(stageComposerHandoff('attachment-only', '', {
-    attachments: [{
-      name: 'reference.png', size: 12, mime_type: 'image/png', status: 'done',
-    }],
+  // A late consumer of an older, non-sending intent cannot erase a newer
+  // same-text autosend for the same chat.
+  assert.equal(stageComposerHandoff('chat-b', 'A newer destination', {
+    autoSend: true,
     storage,
   }), true)
-  assert.deepEqual(readComposerDraft('attachment-only', storage), {
-    input: '',
-    attachments: [{
-      name: 'reference.png', size: 12, mime_type: 'image/png', status: 'done',
-    }],
+  consumeComposerHandoff('chat-b', 'A newer destination', { storage })
+  assert.deepEqual(readComposerHandoff('chat-b', storage), {
+    draft: 'A newer destination',
+    autoSendDraft: 'A newer destination',
   })
-
-  persistComposerDraft('cleared-handoff', 'remove me', [], storage)
-  assert.equal(stageComposerHandoff('cleared-handoff', '', {
-    allowEmpty: true,
+  consumeComposerHandoff('chat-b', 'A newer destination', {
+    autoSend: true,
     storage,
-  }), true)
-  assert.equal(storage.getItem('pending-draft'), null)
-  assert.equal(storage.getItem('draft-autosend:chat-a'), null)
-  assert.deepEqual(readComposerDraft('cleared-handoff', storage), {
-    input: '', attachments: [],
   })
+  assert.equal(storage.getItem('composer-handoff'), null)
+  assert.equal(stageComposerHandoff('chat-c', '', { storage }), false)
 })
 
 test('does not restore attachments that never finished uploading', () => {
