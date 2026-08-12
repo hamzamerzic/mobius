@@ -193,7 +193,7 @@
 
 .projects-collection--icons {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
   gap: 12px 8px;
 }
 .projects-collection--icons > button {
@@ -235,8 +235,8 @@
 .projects-legacy { max-width: 760px; margin-top: 34px; padding-top: 20px; border-top: 1px solid var(--border-light); }
 .projects-section-heading h2 { font-size: 16px; font-weight: 620; letter-spacing: -0.02em; }
 
-.project-workspace__identity { min-width: 0; display: flex; align-items: center; gap: 10px; }
-.project-workspace__identity > div { min-width: 0; display: grid; align-content: center; }
+.project-workspace__identity { min-width: 0; flex: 1; display: flex; align-items: center; gap: 10px; }
+.project-workspace__identity > div { min-width: 0; flex: 1; display: grid; align-content: center; }
 .project-workspace__identity h1,
 .project-workspace__identity p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-workspace__mark {
@@ -263,9 +263,9 @@
 .project-workspace__title svg { flex: 0 0 auto; color: var(--muted); opacity: 0; }
 .project-workspace__title:hover svg,
 .project-workspace__title:focus-visible svg { opacity: 1; }
-.project-workspace__rename { min-width: 0; }
+.project-workspace__rename { min-width: 0; max-width: 260px; }
 .project-workspace__rename input {
-  width: min(330px, 36vw);
+  width: 100%;
   height: 34px;
   padding: 0 8px;
   border: 1px solid var(--accent);
@@ -289,6 +289,7 @@
   color: var(--accent);
   background: var(--accent-dim);
   font-weight: 650;
+  white-space: nowrap;
   cursor: pointer;
 }
 .project-build-button:hover { filter: brightness(1.08); }
@@ -491,7 +492,7 @@
   .project-document__header small { display: none; }
   .project-inline-create { flex-wrap: wrap; }
   .project-inline-create label { width: 100%; }
-  .project-workspace__rename input { width: min(190px, 48vw); }
+  .project-workspace__rename { max-width: min(190px, 48vw); }
   .project-build-button span { display: none; }
   .project-build-button { width: 38px; padding: 0; justify-content: center; }
 }

@@ -513,10 +513,6 @@ export default function ProjectWorkspace({
             </button>
           )}
           <button type="button" className="project-icon-button" aria-label="Open project chat" title="Project chat" onClick={() => onOpenChat(project.chat_id)}><MessageSquare size={18} /></button>
-          <div className="projects-view-toggle" role="group" aria-label="File view">
-            <button type="button" aria-label="Icon view" aria-pressed={view === 'icons'} onClick={() => chooseView('icons')}><Grid2X2 size={17} /></button>
-            <button type="button" aria-label="List view" aria-pressed={view === 'list'} onClick={() => chooseView('list')}><List size={18} /></button>
-          </div>
           <div ref={createMenuRef} className="project-menu">
             <button type="button" className="project-icon-button" aria-label="Add to project" title="Add to project" aria-haspopup="menu" aria-expanded={activeMenu === 'create'} onClick={() => setActiveMenu(current => current === 'create' ? null : 'create')}><Plus size={19} /></button>
             {activeMenu === 'create' && (
@@ -532,6 +528,8 @@ export default function ProjectWorkspace({
             <button type="button" className="project-icon-button" aria-label="More project actions" title="More" aria-haspopup="menu" aria-expanded={activeMenu === 'more'} onClick={() => setActiveMenu(current => current === 'more' ? null : 'more')}><Ellipsis size={19} /></button>
             {activeMenu === 'more' && (
               <div className="project-menu__popover project-menu__popover--end" role="menu">
+                <button type="button" role="menuitemradio" aria-checked={view === 'icons'} onClick={() => { chooseView('icons'); setActiveMenu(null) }}><Grid2X2 size={16} /> Icon view</button>
+                <button type="button" role="menuitemradio" aria-checked={view === 'list'} onClick={() => { chooseView('list'); setActiveMenu(null) }}><List size={16} /> List view</button>
                 <button type="button" className="project-menu__danger" role="menuitem" disabled={busy} onClick={() => { setActiveMenu(null); void deleteProject() }}><Trash2 size={16} /> Delete project</button>
               </div>
             )}
@@ -539,12 +537,14 @@ export default function ProjectWorkspace({
         </div>
       </header>
 
-      <nav className="project-breadcrumb" aria-label="Project location">
-        <button type="button" onClick={() => setPath('')} disabled={!path}>{project.name}</button>
-        {breadcrumb.map((part, index) => (
-          <button key={`${part}:${index}`} type="button" onClick={() => setPath(breadcrumb.slice(0, index + 1).join('/'))}>/ {part}</button>
-        ))}
-      </nav>
+      {path && (
+        <nav className="project-breadcrumb" aria-label="Project location">
+          <button type="button" onClick={() => setPath('')}>{project.name}</button>
+          {breadcrumb.map((part, index) => (
+            <button key={`${part}:${index}`} type="button" onClick={() => setPath(breadcrumb.slice(0, index + 1).join('/'))}>/ {part}</button>
+          ))}
+        </nav>
+      )}
 
       {creation && (
         <form className="project-inline-create" onSubmit={submitCreate} onKeyDown={event => {
