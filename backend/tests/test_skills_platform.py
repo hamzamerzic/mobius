@@ -1562,9 +1562,8 @@ def test_corrupt_sidecar_fails_install_closed_and_preserves_ownership(
   assert d.is_dir()
 
 
-def test_codex_usage_counts_directory_skill_by_id(skills_dir):
-  """F-5: a `cat <skills>/pdf/SKILL.md` read counts pdf as loaded (keyed by the
-  directory id), matching the Claude Read observer."""
+def test_codex_usage_counts_directory_entry_by_id(skills_dir):
+  """A directory entry counts by id; its resources are not another load."""
   from app.codex_sdk_runner import _skill_names_in_command
   from app.config import get_settings
 
@@ -1572,6 +1571,9 @@ def test_codex_usage_counts_directory_skill_by_id(skills_dir):
   cmd = (
     f"cat {data_dir}/shared/skills/pdf/SKILL.md; "
     f"head {data_dir}/shared/skills/cron.md; "
-    f"cat {data_dir}/shared/skills/pdf/reference.md"  # resource: NOT a load
+    f"cat {data_dir}/shared/skills/pdf/reference.md"
   )
   assert _skill_names_in_command(cmd, data_dir) == ["pdf", "cron"]
+  assert _skill_names_in_command(
+    f"cat {data_dir}/shared/skills/pdf/reference.md", data_dir,
+  ) == []

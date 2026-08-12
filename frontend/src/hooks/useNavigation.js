@@ -129,6 +129,9 @@ export const coldRestoredCanvasAppId =
  *   replaceImplicitBootTab
  *                       true when the only boot tab is the unpinned home
  *                       surface, which an explicit deep link replaces.
+ *   beforeNavigateRef   optional synchronous destination claimant, run after
+ *                       validation/no-op detection but before history or
+ *                       workspace mutation.
  *
  * Three load-bearing pieces remain: `openDrawer` pushes one mobile sentinel;
  * `navTo` retags that sentinel or pushes one ordinary destination; every modal
@@ -144,6 +147,7 @@ export default function useNavigation({
   blobValid,
   replaceImplicitBootTab,
   dragActiveRef,
+  beforeNavigateRef,
 }) {
   // Monotonic presentation signal for re-revealing an already-active tab. The
   // semantic route remains a no-op (no history or workspace write), but a drawer
@@ -1026,6 +1030,11 @@ export default function useNavigation({
       if (drawerOpenRef.current) closeDrawer()
       return
     }
+
+    // Give the shell-generation controller one synchronous boundary before
+    // this destination mutates history or paints. A pending update can claim
+    // the semantic route and reveal it only in the new document.
+    if (beforeNavigateRef?.current?.(nextRoute) === true) return
 
     navigationEpochRef.current += 1
     const keepDrawerPresented = opts.preserveDrawerPresentation === true

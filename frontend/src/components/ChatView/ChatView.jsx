@@ -571,7 +571,6 @@ export default function ChatView({
   const queuedContinuationRef = useRef(null)
   const sendIntentByCidRef = useRef(new Map())
   const runtimeReconnectInFlightRef = useRef(false)
-  const swReloadHoldTimerRef = useRef(null)
 
   // DOM refs
   const scrollRef = useRef(null)
@@ -3618,22 +3617,6 @@ export default function ChatView({
   // the visible fast-forward affordance and its keyboard shortcut inert while
   // the stream is unavailable; otherwise the tray disappears but the composer
   // can still offer an action whose request cannot reach the running turn.
-  useEffect(() => {
-    try {
-      if (swReloadHoldTimerRef.current) {
-        clearTimeout(swReloadHoldTimerRef.current)
-        swReloadHoldTimerRef.current = null
-      }
-      sessionStorage.setItem('sw-auto-reloaded', '1')
-      if (!turnActive) {
-        swReloadHoldTimerRef.current = setTimeout(() => {
-          try { sessionStorage.removeItem('sw-auto-reloaded') } catch {}
-          swReloadHoldTimerRef.current = null
-        }, 5000)
-      }
-    } catch {}
-  }, [turnActive])
-
   useEffect(() => {
     if (hidden) return
     const hasQueue = pendingQueue.pendingMessages.length > 0

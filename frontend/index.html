@@ -169,21 +169,20 @@
   </head>
   <!-- Theme bg comes from var(--bg), set by the pre-paint script above. -->
   <body style="margin:0;background:var(--bg,#0d0d0d)">
-    <!-- Theme bg comes from var(--bg), set by the pre-paint script above. -->
-    <div id="splash" style="position:fixed;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;background:var(--bg,#0d0d0d);z-index:9999;transition:opacity .3s ease;contain:strict">
-      <img src="/moebius.png" width="44" height="44" alt="" style="opacity:.4;will-change:opacity" />
-    </div>
+    <!-- Keep startup visually continuous with the saved theme without adding a
+         second brand mark after the device's native splash screen. -->
+    <div id="splash" aria-hidden="true" style="position:fixed;top:0;left:0;right:0;bottom:0;background:var(--bg,#0d0d0d);z-index:9999;transition:opacity .3s ease;contain:strict"></div>
     <div id="root"></div>
     <script>
       // The embedded document must remain blank while its one-use capability
       // is exchanged; never cover that inert state with the full-shell logo.
-      // Only top-level shell loads consult the owner's browser token.
       var isChatEmbed = window.location.pathname === '/shell/embed/chat'
-      var hasOwnerToken = false
-      if (!isChatEmbed) {
-        try { hasOwnerToken = !!localStorage.getItem('token') } catch (_) {}
-      }
-      if (isChatEmbed || hasOwnerToken) {
+      // An authenticated top-level shell keeps this cover through React's
+      // restored-cache and first-frame handshake. Removing it just because a
+      // token exists exposes the empty chat viewport while a long transcript
+      // (especially question cards) is still restoring its reading position.
+      // The opaque embed has no such shell handoff and must stay blank.
+      if (isChatEmbed) {
         var s = document.getElementById('splash')
         if (s) s.remove()
       }
@@ -195,6 +194,11 @@
       // and keep the operator repair path as the last resort.
       setTimeout(function() {
         if (!document.getElementById('root').hasChildNodes()) {
+          // The normal authenticated handoff intentionally retains the cover.
+          // A failed JavaScript boot has no Shell callback to release it, so
+          // remove it before exposing the recovery action.
+          var splash = document.getElementById('splash')
+          if (splash) splash.remove()
           var d = document.createElement('div')
           var retry = document.createElement('a')
           d.setAttribute('role', 'alert')
@@ -229,92 +233,14 @@
       // navigator.serviceWorker throws there, and it must not register or
       // control a worker anyway. Keep the stripped route entirely in-memory.
       if (window.location.pathname !== '/shell/embed/chat' && 'serviceWorker' in navigator) {
-        // The flag prevents a reload loop during one update handoff. Clear it
-        // on the next page load so later shell rebuilds in the same PWA
-        // session can still auto-activate.
-        if (sessionStorage.getItem('sw-auto-reloaded') === '1') {
-          sessionStorage.removeItem('sw-auto-reloaded')
-        }
-        // `sw-skip-initiated` is a one-shot marker Shell.performShellReload sets
-        // right before it posts SKIP_WAITING at an idle apply-boundary. It tells
-        // the controllerchange handler below that a resulting controllerchange
-        // is OURS (an expected apply), not a spontaneous background SW flip to
-        // suppress. Clear it on the next load so a later spontaneous
-        // controllerchange can't be mistaken for a page-initiated apply.
-        if (sessionStorage.getItem('sw-skip-initiated') === '1') {
-          sessionStorage.removeItem('sw-skip-initiated')
-        }
         // A page that loaded WITHOUT a controller is a first-ever SW install:
         // the worker claiming this page is NOT an update (it just re-fetches the
         // same bundle), so reloading is a wasted splash-flash for real first-time
-        // users AND — in e2e — a navigation that destroys the running test's
-        // execution context mid-action (app-canvas/steer/handleStop flakes). Only
-        // reload when the page was ALREADY controlled and a NEW worker takes over
-        // (a genuine deploy/update).
+        // users. It is also not permission for this boot script to reload a live
+        // page. Shell's apply-on-idle controller is the ONE owner of generation
+        // handoff and reload; this script only discovers registrations and stale
+        // precache state for that controller to claim safely after mount.
         const hadControllerAtLoad = !!navigator.serviceWorker.controller
-        const rememberShellStateForAutoReload = () => {
-          try {
-            const activeView = localStorage.getItem('moebius_active_view') || 'chat'
-            const rawAppId = localStorage.getItem('moebius_active_app')
-            const activeAppId = rawAppId ? Number(rawAppId) : null
-            sessionStorage.setItem('shell-reload', JSON.stringify({
-              activeView,
-              activeAppId: Number.isFinite(activeAppId) ? activeAppId : null,
-              drawerOpen: false,
-              activeChatId: localStorage.getItem('moebius_active_chat') || null,
-            }))
-          } catch (_) {
-            // Best-effort: a failed storage read should not block an update.
-          }
-        }
-        const reloadAfterControllerChange = () => {
-          // Reload on a controllerchange ONLY when the page itself asked the
-          // waiting worker to take over — Shell.performShellReload set
-          // `sw-skip-initiated` before posting SKIP_WAITING at an idle
-          // boundary. The SW no longer skipWaiting()s on its own, so the only
-          // legitimate controllerchange here is one we initiated; a spontaneous
-          // one (a background generation flip) must NEVER reload a live turn.
-          // This is the belt-and-suspenders fast path — Shell also reloads
-          // directly — and the shared `sw-auto-reloaded` guard keeps it to one.
-          if (!sessionStorage.getItem('sw-skip-initiated')) return
-          if (hadControllerAtLoad
-              && navigator.serviceWorker.controller
-              && !sessionStorage.getItem('sw-auto-reloaded')) {
-            sessionStorage.setItem('sw-auto-reloaded', '1')
-            // Shell.performShellReload captures its live ref-backed route
-            // before requesting the worker handoff. Keep that authoritative
-            // snapshot: localStorage mirrors React state in effects and can
-            // still describe the previous view during a just-mounted cold
-            // deep-link. The early boot handler is only a fallback for a
-            // controller change that has no Shell-owned snapshot.
-            if (!sessionStorage.getItem('shell-reload')) {
-              rememberShellStateForAutoReload()
-            }
-            window.location.reload()
-          }
-        }
-        navigator.serviceWorker.addEventListener(
-          'controllerchange',
-          reloadAfterControllerChange,
-        )
-        const watchWorker = (worker) => {
-          if (!worker) return
-          if (worker.state === 'activated') {
-            reloadAfterControllerChange()
-            return
-          }
-          worker.addEventListener('statechange', () => {
-            if (worker.state === 'activated') reloadAfterControllerChange()
-          })
-        }
-        const watchRegistration = (reg) => {
-          if (!reg) return
-          watchWorker(reg.waiting)
-          watchWorker(reg.installing)
-          reg.addEventListener('updatefound', () => {
-            watchWorker(reg.installing)
-          })
-        }
         // Stale-precache escape hatch.
         //
         // The normal path is: /sw.js updates → controllerchange → reload onto
@@ -372,23 +298,21 @@
             // Best-effort self-heal only; never block shell boot.
           }
         }
-        // Watchdog: if the registration we just installed sees a NEW
-        // SW available, refresh once it activates. Attach to the registration
-        // returned by register() immediately; waiting for
-        // navigator.serviceWorker.ready can miss updatefound on Android PWAs.
+        // Register immediately so a new generation can install while React
+        // starts. Do not attach a reload listener here: Shell owns the route
+        // snapshot, cache flush, worker takeover and the one resulting reload.
         navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
         .then(reg => {
-          watchRegistration(reg)
           recoverStalePrecacheIfNeeded(reg)
           // Poll for a new SW whenever the PWA returns to the foreground.
           // The explicit `shell_rebuilt` SSE event (Shell.jsx) handles a
           // PWA with a LIVE connection, but a backgrounded/reopened install
           // may have dropped its EventSource and would otherwise keep
           // running the old shell until a hard reload. reg.update() re-fetches
-          // sw.js; if the deploy shipped a new one, the `updatefound` watchdog
-          // above takes over and soft-reloads once it activates. Cheap (one
+          // sw.js. Shell's foreground watcher observes the resulting waiting
+          // generation and claims it at a safe apply boundary. Cheap (one
           // conditional GET, server sends 304 when unchanged) and only on
-          // visible, so it's not a polling loop.
+          // visible, so this is not a polling loop.
           document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible') {
               reg.update().catch(() => {})
@@ -396,7 +320,6 @@
           })
         }).catch(() => {})
         navigator.serviceWorker.ready.then(reg => {
-          watchRegistration(reg)
           recoverStalePrecacheIfNeeded(reg)
         }).catch(() => {})
       }

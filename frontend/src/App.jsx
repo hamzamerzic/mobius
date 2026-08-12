@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, useEffect } from 'react'
+import { lazy, Suspense, useState, useEffect, useCallback } from 'react'
 import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client'
 import { QueryClientProvider, useIsRestoring } from '@tanstack/react-query'
 import ErrorBoundary from './components/ErrorBoundary/ErrorBoundary.jsx'
@@ -8,7 +8,6 @@ import { api, beginEphemeralAuth, getToken, setToken, BASE } from './api/client.
 import * as setupSession from './lib/setupSession.js'
 import { setupQueries, versionQueries } from './hooks/queries.js'
 import { queryClient, persistOptions } from './queryClient.js'
-import { shellReload } from './lib/shellReloadState.js'
 import { beginEmbedBootstrap } from './lib/chatEmbedBootstrap.js'
 import { startInstallPromptCapture } from './lib/installPrompt.js'
 import { readInstallPass, withoutInstallPass } from './lib/installPassUrl.js'
@@ -76,7 +75,7 @@ export default function App() {
   }
   return (
     <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
-      <ErrorBoundary label="app">
+      <ErrorBoundary label="app" onError={removeSplash}>
         <AppRoot />
       </ErrorBoundary>
     </PersistQueryClientProvider>
@@ -87,8 +86,9 @@ function AppRoot() {
   // PersistQueryClientProvider hydrates the cache asynchronously from
   // IndexedDB on cold load. During that window, `useQuery` returns
   // `isPending: true` even for cached queries. We hold the splash up
-  // until restoration completes so ChatView's useState initializer
-  // sees the hydrated cache (no flash on cold reload).
+  // until restoration completes. The static launch cover stays in place until
+  // Shell also reports its first stable surface, so a long restored chat never
+  // exposes its intentionally hidden scroll-restoration frame.
   const isRestoring = useIsRestoring()
   // Provider setup is deliberately contextual now: a usable Möbius opens
   // immediately and Settings owns agent connections. Ignore the legacy
@@ -118,6 +118,10 @@ function AppRoot() {
                 ? 'sso'
                 : (ssoSignal === 'error' ? 'sso-error' : 'loading'))))
   const [status, setStatus] = useState(initialStatus)
+  const [shellVisualReady, setShellVisualReady] = useState(false)
+  const markShellVisualReady = useCallback(() => {
+    setShellVisualReady(true)
+  }, [])
   // "Continue to the built-in version" hides the notice for THIS mount so the
   // owner can use the working fallback. Deliberately not persisted: any reload
   // re-surfaces it while the platform is still degraded, so it never hides.
@@ -231,20 +235,9 @@ function AppRoot() {
   }, [hasToken])
 
   useEffect(() => {
-    // shell-reload: skip splash entirely, go straight to shell.
-    // shellReloadState parsed and removed the one-shot storage key at module
-    // load. App and useNavigation both share that same captured value.
-    if (shellReload) {
-      const splash = document.getElementById('splash')
-      if (splash) splash.remove()
-      setStatus('shell')
-      return
-    }
-
     if (hasToken) {
       // Clear stale provider-wizard state from pre-contextual onboarding.
       if (savedResumeStep && !resumeStep) setupSession.clearResumeStep()
-      removeSplash()
       return
     }
     if (setupStatusQuery.isSuccess) {
@@ -265,6 +258,18 @@ function AppRoot() {
       removeSplash()
     }
   }, [hasToken, setupStatusQuery.isError, setupStatusQuery.isSuccess, setupStatusQuery.data])
+
+  // A token proves that we may load the shell, not that the restored workspace
+  // has a frame worth showing. Shell owns that final visual boundary for chats;
+  // standalone apps keep their established post-cache-restoration handoff.
+  useEffect(() => {
+    if (!hasToken || status !== 'shell' || isRestoring) return
+    const showingDegradedNotice = !STANDALONE_APP
+      && servedVersionQuery.data?.serving_source === 'baked'
+    if (STANDALONE_APP || shellVisualReady || showingDegradedNotice) {
+      removeSplash()
+    }
+  }, [hasToken, isRestoring, shellVisualReady, status, servedVersionQuery.data])
 
   if (status === 'loading' || isRestoring) {
     return <RouteLoading />
@@ -325,7 +330,7 @@ function AppRoot() {
     <Suspense fallback={<RouteLoading />}>
       {STANDALONE_APP
         ? <StandaloneApp initialApp={STANDALONE_APP} />
-        : <Shell />}
+        : <Shell onInitialVisualReady={markShellVisualReady} />}
     </Suspense>
   )
 }

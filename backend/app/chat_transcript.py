@@ -244,6 +244,18 @@ def _distinctive_activity(block: dict, binding: RecallBinding) -> bool:
   """Keep notable one-line activity beats out of a folded metadata run."""
   if block.get("type") != "tool":
     return False
+  skills = block.get("skills")
+  if (
+    isinstance(skills, list)
+    and any(isinstance(skill, str) and skill.strip() for skill in skills)
+  ):
+    return True
+  if (
+    block.get("tool") == "Skill"
+    and isinstance(block.get("skill"), str)
+    and block["skill"].strip()
+  ):
+    return True
   # Consulting Memory is a beat worth seeing on its own, not shell housekeeping
   # folded into "ran commands". New blocks carry a marker from the event
   # funnel; older Codex blocks recover the same bounded marker from their exact
@@ -400,9 +412,10 @@ def compact_messages_for_detail(
 
   Single activity entries stay inline: introducing a network boundary for one
   ordinary tool/thought would cost more complexity than it saves. Distinctive
-  image-view beats also stay independent, preserving the transcript's visual
-  punctuation. Question-tool twins are omitted when the message already owns
-  the canonical question card, matching the frontend's historical repair.
+  image-view, skill-read, and Memory beats also stay independent, preserving
+  the transcript's visual punctuation. Question-tool twins are omitted when
+  the message already owns the canonical question card, matching the
+  frontend's historical repair.
   """
   projected: list[dict] | None = None
   for page_index, message in enumerate(messages):

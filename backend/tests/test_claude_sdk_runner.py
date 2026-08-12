@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1299,16 +1300,17 @@ def test_dispatch_skill_tool_emits_skill_loaded_and_logs(monkeypatch):
   )
   dispatch_sdk_message(msg, bus, None)
   types = [e["type"] for e in bus.events]
-  # tool_start fires first, then the skill_loaded chip event.
+  # tool_start fires first, then the targeted skill-loaded receipt.
   assert types == ["tool_start", "tool_input", "skill_loaded"]
   loaded = [e for e in bus.events if e["type"] == "skill_loaded"]
-  assert loaded == [{"type": "skill_loaded", "skill": "humanizer"}]
+  assert loaded == [{
+    "type": "skill_loaded", "skill": "humanizer", "tool_use_id": "s1",
+  }]
   assert logged == [("chat-42", "humanizer")]
 
 
 def test_dispatch_skill_tool_without_name_does_not_emit(monkeypatch):
-  """A Skill tool_use with no resolvable skill name emits no chip and
-  logs nothing — an empty chip carries no signal."""
+  """A Skill tool_use with no resolvable name emits no receipt or log."""
   from app import activity
 
   logged: list[tuple] = []
@@ -1859,7 +1861,7 @@ def test_skill_file_read_name_ignores_generated_index():
   assert _skill_file_read_name("Read", {"file_path": path}, "/data") == ""
 
 
-def test_observe_skill_file_read_publishes_chip_and_activity(monkeypatch):
+def test_observe_skill_file_read_publishes_receipt_and_activity(monkeypatch):
   from app import activity
   from app.claude_sdk_runner import observe_skill_file_read
 
@@ -1897,7 +1899,7 @@ async def test_can_use_tool_read_of_skill_file_emits_skill_loaded(
   monkeypatch,
 ):
   """The canonical interception point: the runner's can_use_tool
-  callback observes skill-file Reads — chip event + activity record —
+  callback observes skill-file Reads — targeted receipt + activity record —
   and still allows the tool with its input unchanged."""
   from app import activity, claude_sdk_runner
   from claude_agent_sdk.types import PermissionResultAllow
@@ -1954,10 +1956,14 @@ async def test_can_use_tool_read_of_skill_file_emits_skill_loaded(
   can_use_tool = captured["options"].can_use_tool
   path = os.path.join(_skills_dir(), "notifications.md")
   input_data = {"file_path": path}
-  result = await can_use_tool("Read", input_data, None)
+  context = SimpleNamespace(tool_use_id="read-skill-1")
+  result = await can_use_tool("Read", input_data, context)
   assert isinstance(result, PermissionResultAllow)
   assert result.updated_input == input_data
-  assert {"type": "skill_loaded", "skill": "notifications"} in bus.events
+  assert {
+    "type": "skill_loaded", "skill": "notifications",
+    "tool_use_id": "read-skill-1",
+  } in bus.events
   assert logged == [("chat-42", "notifications")]
 
   # A Read outside the skills dir passes through silently.

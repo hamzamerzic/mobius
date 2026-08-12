@@ -435,8 +435,8 @@ def dispatch_sdk_message(
             **({"edit_preview": edit_preview} if edit_preview else {}),
           })
         # Skill observability: when the agent loads a skill, surface it
-        # as its own `skill_loaded` event (the frontend stamps a chip
-        # onto the Skill tool block) and append a record to the activity
+        # as its own targeted `skill_loaded` event (the frontend presents the
+        # owning tool as a skill-read block) and append a record to the activity
         # log so "most-used skills" can be aggregated. This fires
         # whenever the Skill tool runs at all; whether skills are even
         # OFFERED to the agent is the separate, gated `skills_enabled`
@@ -444,7 +444,11 @@ def dispatch_sdk_message(
         if block.name == "Skill":
           skill = _skill_name_from_input(block.input)
           if skill:
-            bc.publish({"type": "skill_loaded", "skill": skill})
+            bc.publish({
+              "type": "skill_loaded",
+              "skill": skill,
+              "tool_use_id": block.id,
+            })
             activity.log_skill_load(getattr(bc, "chat_id", None), skill)
         continue
       if isinstance(block, ServerToolUseBlock):

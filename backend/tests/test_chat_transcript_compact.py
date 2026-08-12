@@ -373,6 +373,49 @@ def test_image_reads_stay_distinctive_and_question_twins_are_not_rendered():
   )
 
 
+def test_skill_reads_stay_distinctive_in_compact_history():
+  skill_read = {
+    "type": "tool",
+    "tool": "Bash",
+    "tool_use_id": "cmd-skills",
+    "status": "done",
+    "skills": ["recovery", "theming"],
+    "input": "cat /data/shared/skills/recovery.md",
+    "output": "skill text",
+  }
+  messages = [{
+    "role": "assistant",
+    "blocks": [
+      {"type": "thinking", "duration_ms": 10},
+      skill_read,
+      {"type": "tool", "tool": "Read", "input": "/tmp/note.txt"},
+      {"type": "thinking", "duration_ms": 20},
+    ],
+  }]
+
+  compact = compact_messages_for_detail(
+    messages, message_offset=0, binding=EMPTY_RECALL_BINDING,
+  )
+  blocks = compact[0]["blocks"]
+
+  visible_skill_read = next(
+    block for block in blocks
+    if isinstance(block, dict) and block.get("tool_use_id") == "cmd-skills"
+  )
+  assert visible_skill_read == skill_read
+  assert all(
+    not (
+      block.get("type") == "activity"
+      and any(
+        entry.get("item", {}).get("tool_use_id") == "cmd-skills"
+        for entry in block.get("entries", [])
+      )
+    )
+    for block in blocks
+    if isinstance(block, dict)
+  )
+
+
 def test_compact_route_defers_activity_detail_until_expansion(client, auth):
   messages = [{
     "role": "assistant",
