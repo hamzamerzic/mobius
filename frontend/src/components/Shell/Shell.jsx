@@ -1292,14 +1292,25 @@ export default function Shell({ onInitialVisualReady }) {
         if (phone) {
           next = paneModel.openTab(next, chatTab, { paneId: projectPane.id })
         } else {
-          const split = paneModel.splitPaneWithTab(next, chatTab, {
-            paneId: projectPane.id,
-            edge: 'right',
-            focus: true,
-          })
-          next = split === next
-            ? paneModel.openTab(next, chatTab, { paneId: projectPane.id })
-            : split
+          const companionPane = Object.entries(projectChatLookup)
+            .filter(([, meta]) => meta.projectId === String(project.id))
+            .map(([existingChatId]) => paneModel.paneOf(
+              next,
+              tabModel.tabKey(tabModel.makeTab('chat', existingChatId)),
+            ))
+            .find(pane => pane && pane.id !== projectPane.id)
+          if (companionPane) {
+            next = paneModel.openTab(next, chatTab, { paneId: companionPane.id })
+          } else {
+            const split = paneModel.splitPaneWithTab(next, chatTab, {
+              paneId: projectPane.id,
+              edge: 'right',
+              focus: true,
+            })
+            next = split === next
+              ? paneModel.openTab(next, chatTab, { paneId: projectPane.id })
+              : split
+          }
         }
         const owner = paneModel.paneOf(next, chatKey)
         return owner ? paneModel.focusPane(next, owner.id) : next
