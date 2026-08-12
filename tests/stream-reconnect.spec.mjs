@@ -1138,6 +1138,10 @@ test.describe('Stream reconnection', () => {
     await expect(questionCard.locator('.qcard__submit')).toHaveText('Submitted')
     await expect(activeComposer)
       .toHaveValue('keep this draft safe')
-    await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
+    // The answer unfreezes the turn, but the authoritative runtime above still
+    // reports `running:true`; reconnect loss must not invent an idle composer.
+    // Keep the draft safe behind Stop until a later runtime snapshot settles.
+    await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Send' })).toHaveCount(0)
   })
 })
