@@ -206,6 +206,12 @@ def test_app_frame_policy_allows_a_distinct_configured_api_origin():
   assert "img-src https://app.example.test data: blob:" in policy
 
 
+def test_app_frame_policy_does_not_infer_the_backend_localhost_default():
+  policy = app_frame_csp("https://app.example.test", api_origin="")
+  assert "connect-src https://app.example.test;" in policy
+  assert "localhost" not in policy
+
+
 def test_app_frame_policy_drops_malformed_gateway_origin():
   policy = app_frame_csp(
     main.settings.frontend_origin,
