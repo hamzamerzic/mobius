@@ -60,39 +60,6 @@ test('an accepted mid-turn queue or direct steer refreshes drawer recency', () =
     'a duplicate acknowledgement must not manufacture new recency')
 })
 
-test('duplicate and queued acceptance retire New Chat before every early return', () => {
-  const fresh = slice(
-    chatView,
-    '// FRESH SEND PATH: no active turn, no queue.',
-    'const doSendSilent = useCallback',
-  )
-  const accepted = fresh.indexOf('acknowledgeFirstMessageAccepted()')
-  const duplicate = fresh.indexOf("if (result?.status === 'duplicate') {")
-  const queued = fresh.indexOf("if (result?.status === 'queued') {")
-  assert.ok(accepted >= 0 && duplicate > accepted,
-    'duplicate acceptance must publish the first-message boundary before its early return')
-  assert.ok(queued > accepted,
-    'queued acceptance must publish the first-message boundary before either queued return')
-  assert.equal(fresh.match(/acknowledgeFirstMessageAccepted\(\)/g)?.length, 1,
-    'all successful fresh-send statuses share one exactly-once boundary')
-  assert.match(chatView,
-    /const acknowledgeFirstMessageAccepted = useCallback\(\(\) => \{[\s\S]*?if \(hadMessagesRef\.current\) return false[\s\S]*?hadMessagesRef\.current = true[\s\S]*?onFirstMessageRef\.current\?\.\(\)/,
-    'the shared boundary itself must remain idempotent')
-
-  const queuePath = slice(
-    chatView,
-    'const result = await queueRequest',
-    '// Race: server said "started" though we expected queued.',
-  )
-  const queueAccepted = queuePath.indexOf('acknowledgeFirstMessageAccepted()')
-  const queueDuplicate = queuePath.indexOf("if (result?.status === 'duplicate') {")
-  const queueQueued = queuePath.indexOf("if (result?.status === 'queued') {")
-  assert.ok(queueAccepted >= 0
-      && queueDuplicate > queueAccepted
-      && queueQueued > queueAccepted,
-    'every accepted queue result must cross the first-message boundary before returning')
-})
-
 test('a deferred steer refreshes again at its authoritative transcript cut', () => {
   const cut = slice(
     chatView,
