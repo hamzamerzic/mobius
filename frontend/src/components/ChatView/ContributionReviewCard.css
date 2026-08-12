@@ -1,14 +1,11 @@
-/* The chat's contribution review card — docked between the transcript and the
-   composer, so approving the work happens where the work happened. Deliberately
-   quieter than a chat message: it is a pending action, not part of the
-   conversation, and it disappears the moment nothing is staged. */
+/* The chat's contribution review card — floated over the transcript above the
+   composer, so approving the work happens where the work happened without its
+   arrival or confirmation moving the text. Deliberately quieter than a chat
+   message: it is a pending action, not part of the conversation. */
 
-/* The card is a child of `.chat__foot`, which is a transparent absolutely
-   positioned overlay with `pointer-events: none` so the transcript scrolls behind
-   the composer. Every real control in there has to opt back in — the composer
-   pill, the `+` button, the open-app row all do. Without this the card renders
-   perfectly and silently ignores every tap, because the hit test falls straight
-   through to the messages underneath. */
+/* The floating action layer is pointer-transparent so the transcript remains
+   usable around the card. The real card opts back in here. Without this it
+   renders perfectly and silently ignores every tap. */
 .contrib-card-stack,
 .contrib-card {
   pointer-events: auto;
@@ -18,7 +15,6 @@
   box-sizing: border-box;
   width: min(100%, 640px);
   margin-inline: auto;
-  margin-bottom: var(--chat-foot-card-gap);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -27,7 +23,6 @@
 
 .contrib-card-stack--grouped {
   gap: 0;
-  margin-top: 8px;
   padding: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -275,7 +270,7 @@
 }
 
 /* ONE scroller for the whole disclosure. An expanded review can be long (the
-   published text is quoted verbatim), and it is docked above the composer, so it
+   published text is quoted verbatim), and it floats above the composer, so it
    must not push the conversation off the screen. Nesting a second scroller
    inside the quoted text made the two fight on a phone. */
 .contrib-card__details {
