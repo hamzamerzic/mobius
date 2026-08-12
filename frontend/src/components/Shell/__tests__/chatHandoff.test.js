@@ -207,12 +207,12 @@ test('only the painted workspace world can expose its handoff layers', () => {
   )
   assert.match(
     shell,
-    /inert=\{!surfaceVisible \|\| settingsOverlay \|\| role !== 'active'/,
+    /const chatSurfaceInteractive = surfaceVisible[\s\S]*?inert=\{!chatSurfaceInteractive \|\| undefined\}/,
     'a retained chat in the parked workspace world must remain inert',
   )
   assert.match(
     shell,
-    /aria-hidden=\{!surfaceVisible \|\| settingsOverlay \|\| role !== 'active'/,
+    /aria-hidden=\{!chatSurfaceInteractive[\s\S]*?'true' : undefined\}/,
     'a retained chat in the parked workspace world must leave the accessibility tree',
   )
   assert.match(
