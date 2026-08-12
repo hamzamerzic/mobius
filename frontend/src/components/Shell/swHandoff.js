@@ -14,6 +14,70 @@
 // covers a wedged install, where we reload anyway so an apply is never lost (the
 // boot-time re-arm net then catches a stale landing).
 export const SW_TAKEOVER_TIMEOUT_MS = 2000
+export const SW_DISCOVERY_SETTLE_TIMEOUT_MS = 2000
+
+// Force the registration to discover the newest shell generation and wait for
+// that worker's install attempt to settle before choosing `registration.waiting`.
+// `registration.update()` resolves after a newly-found worker enters
+// `installing`, not after its install event settles. Choosing the waiting worker
+// at that earlier instant can hand off to generation N while N+1 is still
+// installing, producing a second immediate reload when N+1 becomes ready.
+//
+// The wait is bounded: a wedged install must not strand the page. On timeout the
+// caller proceeds with the best currently-usable registration state and the
+// boot re-arm net can recover a later generation.
+export async function settleNewestWorkerForHandoff({
+  registration,
+  timeoutMs = SW_DISCOVERY_SETTLE_TIMEOUT_MS,
+  setTimeoutFn = (typeof setTimeout !== 'undefined' ? setTimeout : null),
+  clearTimeoutFn = (typeof clearTimeout !== 'undefined' ? clearTimeout : null),
+} = {}) {
+  if (!registration) return registration
+  let installing = registration.installing
+  const onUpdateFound = () => {
+    installing = registration.installing || installing
+  }
+  registration.addEventListener?.('updatefound', onUpdateFound)
+  if (typeof registration.update === 'function') {
+    try { await registration.update() } catch { /* offline/transient — use current state */ }
+  }
+
+  installing = registration.installing || installing
+  // The specification queues the registration object's `installing` update and
+  // `updatefound` event before resolving update(), so allow that queued task to
+  // publish the worker before deciding that no install exists.
+  if (!installing && setTimeoutFn) {
+    await new Promise(resolve => setTimeoutFn(resolve, 0))
+    installing = registration.installing || installing
+  }
+  registration.removeEventListener?.('updatefound', onUpdateFound)
+  const isSettled = () => (
+    !installing
+    || installing.state === 'installed'
+    || installing.state === 'redundant'
+  )
+  if (isSettled() || typeof installing.addEventListener !== 'function') {
+    return registration
+  }
+
+  await new Promise(resolve => {
+    let finished = false
+    let timer = null
+    const finish = () => {
+      if (finished) return
+      finished = true
+      if (timer != null && clearTimeoutFn) clearTimeoutFn(timer)
+      installing.removeEventListener?.('statechange', onStateChange)
+      resolve()
+    }
+    const onStateChange = () => { if (isSettled()) finish() }
+    installing.addEventListener('statechange', onStateChange)
+    if (setTimeoutFn) timer = setTimeoutFn(finish, timeoutMs)
+    // The worker can settle between the state read and listener attachment.
+    if (isSettled()) finish()
+  })
+  return registration
+}
 
 // Reload only once the waiting worker has actually taken over — not on a blind
 // timer. The previous code posted SKIP_WAITING fire-and-forget and reloaded a

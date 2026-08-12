@@ -191,6 +191,9 @@ export default function Shell() {
     storage: localStorage,
     legacyStorage: sessionStorage,
   })
+  // Navigation reads the current claimant synchronously without closing over
+  // reload-controller state declared later in this component.
+  const beforeNavigateRef = useRef(null)
 
   const {
     activeView,
@@ -213,6 +216,7 @@ export default function Shell() {
     blobValid,
     replaceImplicitBootTab,
     dragActiveRef,
+    beforeNavigateRef,
   })
 
   // A mobile drawer is a history-backed virtual route. A desktop sidebar is a
@@ -1480,7 +1484,10 @@ export default function Shell() {
     voiceDictationActiveRef.current = voiceDictationActive
   }, [voiceDictationActive])
 
-  const { requestShellReload } = useShellReloadController({
+  const {
+    requestShellReload,
+    claimPendingShellReloadNavigation,
+  } = useShellReloadController({
     win: window,
     doc: document,
     nav: navigator,
@@ -1499,6 +1506,7 @@ export default function Shell() {
     activeChatId,
     multiPaneBuilderVisible,
   })
+  beforeNavigateRef.current = claimPendingShellReloadNavigation
 
   // Stable callbacks for ChatView — identity must not change across
   // renders or ChatView's onStreamEnd-handler memoization breaks. The
