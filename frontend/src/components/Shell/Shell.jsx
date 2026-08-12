@@ -649,7 +649,7 @@ export default function Shell({ onInitialVisualReady }) {
     if (initialVisualReadyRef.current) return
     initialVisualReadyRef.current = true
     onInitialVisualReady?.()
-  }, [onInitialVisualReady])>>>>>>> origin/main
+  }, [onInitialVisualReady])
   // A slow New-chat allocation replaces the modal drawer visually without
   // consuming its history entry. Destination navigation owns that entry once
   // the concrete chat exists; avoiding an early Back traversal also keeps the
