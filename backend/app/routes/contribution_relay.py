@@ -198,6 +198,16 @@ def _idempotency_key(app_id: int, record_id: str, record: dict) -> str:
   return "mobius-pr:" + hashlib.sha256(material).hexdigest()
 
 
+def _reviewed_description(record: dict) -> str:
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  return str(
+    plan.get("body_draft")
+    or record.get("description")
+    or record.get("summary")
+    or "Reviewed in Möbius."
+  ).strip()
+
+
 def _relay_failure(
   *, app_id: int, record_path: Path, exc: ContributionBrokerError,
 ) -> dict | None:
@@ -273,9 +283,7 @@ async def submit_through_mobius(
         _merged_snapshot, claimed, diff_path,
       )
     title = str(claimed.get("title") or "Reviewed Möbius contribution").strip()
-    description = str(
-      claimed.get("description") or claimed.get("summary") or "Reviewed in Möbius."
-    ).strip()
+    description = _reviewed_description(claimed)
     payload = {
       "repo": merge["repo"],
       "base_ref": merge["base_ref"],
@@ -359,6 +367,7 @@ async def submit_through_mobius(
     }
     submitted.pop("last_submit_error", None)
     submitted.pop("last_submit_error_code", None)
+    submitted.pop("last_submit_error_detail", None)
     write_record(record_path, submitted)
   return {"record": submitted, "contribution": result}
 
