@@ -1107,19 +1107,17 @@ test.describe('Scroll position', () => {
     // Draft-first New Chat owns a live landing until its final-id composer
     // accepts focus, so the durable route and painted composer—not the old
     // internal empty wrapper—are the settlement boundary.
-    await expect.poll(() => page.evaluate(id => {
-      const active = document.querySelector('[data-chat-surface="painted"]')
-        ?.getAttribute('data-chat-id')
-      return active && active !== id
-        && !document.querySelector('[data-new-chat-presentation]') ? active : null
-    }, chatId), { timeout: 10000 }).not.toBeNull()
-    const decoyChatId = await page.locator('[data-chat-surface="painted"]')
-      .getAttribute('data-chat-id')
+    const presentation = page.locator('[data-new-chat-presentation]')
+    await expect(presentation).toBeVisible({ timeout: 3000 })
+    const decoyChatId = await presentation.getAttribute('data-new-chat-presentation')
     expect(decoyChatId).toBeTruthy()
     expect(decoyChatId).not.toBe(chatId)
-    await expect(page.locator(
-      `[data-chat-surface="painted"][data-chat-id="${decoyChatId}"] textarea`,
-    )).toBeVisible({ timeout: 5000 })
+    const decoySurface = page.locator(
+      `[data-chat-surface="painted"][data-chat-id="${decoyChatId}"]`,
+    )
+    await expect(decoySurface.getByRole('textbox', { name: 'Message Möbius…' }))
+      .toBeVisible({ timeout: 10000 })
+    await expect(presentation).toHaveCount(0, { timeout: 10000 })
 
     returning = true
     await page.evaluate(() => {
