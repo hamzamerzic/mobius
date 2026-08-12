@@ -1094,10 +1094,19 @@ test.describe('Scroll position', () => {
     await page.getByLabel('Primary navigation')
       .getByRole('button', { name: 'New chat', exact: true })
       .click()
-    await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 5000 })
+    // Draft-first New Chat owns a live landing until its final-id composer
+    // accepts focus, so the durable route and painted composer—not the old
+    // internal empty wrapper—are the settlement boundary.
+    await expect.poll(() => page.evaluate(id => {
+      const active = localStorage.getItem('moebius_active_chat')
+      return active && active !== id ? active : null
+    }, chatId), { timeout: 5000 }).not.toBeNull()
     const decoyChatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
     expect(decoyChatId).toBeTruthy()
     expect(decoyChatId).not.toBe(chatId)
+    await expect(page.locator(
+      `[data-chat-surface="painted"][data-chat-id="${decoyChatId}"] textarea`,
+    )).toBeVisible({ timeout: 5000 })
 
     returning = true
     await page.evaluate(() => {
