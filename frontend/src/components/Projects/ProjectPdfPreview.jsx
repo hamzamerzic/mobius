@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import ArrowLeft from 'lucide-react/dist/esm/icons/arrow-left.mjs'
 import ArrowRight from 'lucide-react/dist/esm/icons/arrow-right.mjs'
 
-export default function ProjectPdfPreview({ src, title }) {
+export default function ProjectPdfPreview({ data, title }) {
   const containerRef = useRef(null)
   const canvasRef = useRef(null)
   const [document, setDocument] = useState(null)
@@ -12,7 +12,7 @@ export default function ProjectPdfPreview({ src, title }) {
   const [error, setError] = useState('')
 
   useEffect(() => {
-    if (!src) return undefined
+    if (!data?.byteLength) return undefined
     let active = true
     let loadingTask = null
     let loadedDocument = null
@@ -24,7 +24,7 @@ export default function ProjectPdfPreview({ src, title }) {
     void import('pdfjs-dist').then(pdfjs => {
       if (!active) return null
       pdfjs.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.mjs'
-      loadingTask = pdfjs.getDocument({ url: src })
+      loadingTask = pdfjs.getDocument({ data: data.slice() })
       return loadingTask.promise
     }).then(nextDocument => {
       if (!nextDocument || !active) return
@@ -40,7 +40,7 @@ export default function ProjectPdfPreview({ src, title }) {
       void loadingTask?.destroy?.()
       void loadedDocument?.destroy?.()
     }
-  }, [src])
+  }, [data])
 
   useEffect(() => {
     const container = containerRef.current

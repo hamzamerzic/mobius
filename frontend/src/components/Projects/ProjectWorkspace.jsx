@@ -58,6 +58,7 @@ export default function ProjectWorkspace({
   const [baseline, setBaseline] = useState('')
   const [fileKind, setFileKind] = useState('none')
   const [objectUrl, setObjectUrl] = useState(null)
+  const [pdfData, setPdfData] = useState(null)
   const [creation, setCreation] = useState(null)
   const [creationPath, setCreationPath] = useState('')
   const [activeMenu, setActiveMenu] = useState(null)
@@ -89,6 +90,7 @@ export default function ProjectWorkspace({
     setContent('')
     setBaseline('')
     setObjectUrl(null)
+    setPdfData(null)
     setCreation(null)
     setCreationPath('')
     setActiveMenu(null)
@@ -143,6 +145,7 @@ export default function ProjectWorkspace({
     setContent('')
     setBaseline('')
     replaceObjectUrl(null)
+    setPdfData(null)
     setError('')
   }
 
@@ -154,6 +157,7 @@ export default function ProjectWorkspace({
     if (dirty && !window.confirm('Discard your unsaved changes?')) return
     setSelectedPath(entry.path)
     setError('')
+    setPdfData(null)
     setFileKind('loading')
     try {
       const res = await api.projects.readFile(project.id, entry.path)
@@ -165,12 +169,16 @@ export default function ProjectWorkspace({
         setFileKind('text')
       } else if (res.ok) {
         const blob = await res.blob()
-        replaceObjectUrl(URL.createObjectURL(blob))
-        setFileKind(blob.type.startsWith('image/')
-          ? 'image'
-          : blob.type === 'application/pdf' || entry.path.toLowerCase().endsWith('.pdf')
-            ? 'pdf'
-            : 'binary')
+        const isPdf = blob.type === 'application/pdf' || entry.path.toLowerCase().endsWith('.pdf')
+        if (isPdf) {
+          replaceObjectUrl(null)
+          setPdfData(new Uint8Array(await blob.arrayBuffer()))
+          setFileKind('pdf')
+        } else {
+          setPdfData(null)
+          replaceObjectUrl(URL.createObjectURL(blob))
+          setFileKind(blob.type.startsWith('image/') ? 'image' : 'binary')
+        }
         setContent('')
         setBaseline('')
       } else {
@@ -187,6 +195,7 @@ export default function ProjectWorkspace({
     setBusy(true)
     setError('')
     setSelectedPath(preview.path)
+    setPdfData(null)
     setFileKind('loading')
     try {
       const res = await api.projects.readFile(project.id, preview.path)
@@ -213,7 +222,13 @@ export default function ProjectWorkspace({
         setFileKind('html')
       } else {
         const blob = await res.blob()
-        replaceObjectUrl(URL.createObjectURL(blob))
+        if (preview.kind === 'pdf') {
+          replaceObjectUrl(null)
+          setPdfData(new Uint8Array(await blob.arrayBuffer()))
+        } else {
+          setPdfData(null)
+          replaceObjectUrl(URL.createObjectURL(blob))
+        }
         setContent('')
         setBaseline('')
         setFileKind(preview.kind)
@@ -314,6 +329,7 @@ export default function ProjectWorkspace({
       setFileKind('none')
       setContent('')
       setBaseline('')
+      setPdfData(null)
       replaceObjectUrl(null)
       await filesQuery.refetch()
     } catch (cause) {
@@ -380,7 +396,7 @@ export default function ProjectWorkspace({
           ) : fileKind === 'image' ? (
             <div className="project-preview project-preview--asset"><img src={objectUrl || ''} alt={`Preview of ${selectedPath}`} /></div>
           ) : fileKind === 'pdf' ? (
-            <ProjectPdfPreview src={objectUrl || ''} title={selectedPath} />
+            <ProjectPdfPreview data={pdfData} title={selectedPath} />
           ) : fileKind === 'binary' ? (
             <div className="project-document__empty"><File size={42} strokeWidth={1.4} /><h2>Preview unavailable</h2><p>This file is preserved as-is and can be downloaded.</p><button type="button" onClick={downloadFile}>Download</button></div>
           ) : fileKind === 'missing-preview' ? (
