@@ -47,8 +47,46 @@ export function startToolLifecycle(prev, event) {
     output: '',
     status: 'running',
     ...(event?.recall ? { recall: event.recall } : {}),
+    ...(event?.edit_preview ? { edit_preview: event.edit_preview } : {}),
     ...(event?.tool_use_id ? { tool_use_id: event.tool_use_id } : {}),
   }]
+}
+
+/** Backfill a tool's final input and provider metadata through stable identity. */
+export function attachToolInput(prev, event) {
+  const updated = [...prev]
+  let i = event?.tool_use_id
+    ? updated.findIndex(
+        block => block.type === 'tool' && block.tool_use_id === event.tool_use_id,
+      )
+    : -1
+  if (i < 0 && event?.tool_use_id) {
+    let candidate = -1
+    for (let index = 0; index < updated.length; index += 1) {
+      const block = updated[index]
+      if (block.type !== 'tool' || block.status === 'done'
+          || block.tool_use_id || block.input) continue
+      if (candidate !== -1) {
+        candidate = -1
+        break
+      }
+      candidate = index
+    }
+    i = candidate
+  } else if (i < 0) {
+    i = updated.findIndex(block => block.type === 'tool' && !block.input)
+  }
+  if (i === -1) return prev
+  updated[i] = {
+    ...updated[i],
+    input: event?.input || '',
+    ...(event?.recall ? { recall: event.recall } : {}),
+    ...(event?.edit_preview ? { edit_preview: event.edit_preview } : {}),
+    ...(event?.tool_use_id && !updated[i].tool_use_id
+      ? { tool_use_id: event.tool_use_id }
+      : {}),
+  }
+  return updated
 }
 
 /**

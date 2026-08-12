@@ -1,6 +1,10 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Check, Copy } from '@openai/apps-sdk-ui/components/Icon'
-import { formatToolResult, toolResultCopyText } from './toolResultFormat.js'
+import {
+  formatToolResult,
+  toolBlockFailed,
+  toolResultCopyText,
+} from './toolResultFormat.js'
 import { copyPlainText } from './messageCopy.js'
 import { fetchLazyText } from './lazySidecar.js'
 import {
@@ -22,6 +26,8 @@ import {
   textSelectionSnapshot,
 } from '../../lib/selectableTextControl.js'
 import { useToolImagePreview } from './useToolImagePreview.js'
+import ToolEditPreview from './ToolEditPreview.jsx'
+import { toolEditPreview } from './toolEditPreview.js'
 
 // Render an already-formatted tool result (see toolResultFormat.js) so shell
 // output reads as a terminal (stdout / stderr / exit code) and a structured
@@ -122,6 +128,15 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
   const label = toolCallLabel(t)
   const iconKind = toolActivityIcon(effectiveName)
   const isImageTool = effectiveName === 'ViewImage'
+  const hasEditPreview = typeof t.edit_preview?.diff === 'string'
+  const failed = toolBlockFailed(t)
+  // Historical activities can contain many closed edits. Keep the durable
+  // marker cheap and defer parsing until this disclosure is prepared.
+  const wantsPreparation = prepareRequested || desiredOpen
+  const editPreview = useMemo(
+    () => (wantsPreparation && !failed ? toolEditPreview(t.edit_preview) : null),
+    [failed, t.edit_preview, wantsPreparation],
+  )
   const durableImage = useMemo(() => (
     isImageTool ? durableImageReference(t.input) : null
   ), [isImageTool, t.input])
@@ -129,7 +144,7 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
   // end of the message (MessageSources), where they belong to the answer
   // rather than to the one search that found them. They deliberately do not
   // make a tool row expandable on their own.
-  const hasDetail = !!(t.input || t.output || t.output_truncated)
+  const hasDetail = !!(t.input || t.output || t.output_truncated || hasEditPreview)
 
   useEffect(() => {
     // `loadingPreview` is intentionally not a dependency or start guard. Setting
@@ -243,7 +258,6 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
     && t.tool_use_id
   )
   const previewReady = !waitsForPreview
-  const wantsPreparation = prepareRequested || desiredOpen
   const imagePreview = useToolImagePreview(imageReference, {
     enabled: isImageTool && wantsPreparation && previewReady,
     onSettled: revealBeforeReady,
@@ -266,7 +280,6 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
   const exitCode = t.output_exit_code != null
     ? t.output_exit_code
     : (r && r.kind === 'terminal' ? r.exitCode : null)
-  const failed = exitCode != null && exitCode !== 0
   const excerptOnly = !!t.output_truncated && (
     t.status === 'running'
     || missingOutput
@@ -474,7 +487,9 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
         <div
           ref={detailRef}
           id={detailId}
-          className="chat__tool-detail"
+          className={`chat__tool-detail${
+            editPreview ? ' chat__tool-detail--edit' : ''
+          }`}
           role="region"
           aria-labelledby={headerId}
           tabIndex={open ? 0 : undefined}
@@ -493,6 +508,7 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
               </pre>
             </div>
           )}
+          {open && editPreview && <ToolEditPreview preview={editPreview} />}
           {open && (r || t.output_truncated || isImageTool) && (
             <div className={isImageTool ? 'chat__tool-image-result' : 'chat__tool-section'}>
               {!isImageTool && (
