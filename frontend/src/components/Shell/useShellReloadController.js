@@ -53,6 +53,7 @@ export default function useShellReloadController(inputs) {
   const lastInteractionAtRef = useRef(0)
   const heldSinceRef = useRef(0)
   const performingRef = useRef(false)
+  const performingPassiveRef = useRef(false)
   const destinationRef = useRef(null)
   const navigationCommittedRef = useRef(false)
 
@@ -155,6 +156,7 @@ export default function useShellReloadController(inputs) {
       return
     }
     performingRef.current = true
+    performingPassiveRef.current = passive
     pendingRef.current = false
     passiveRef.current = false
     heldSinceRef.current = 0
@@ -254,7 +256,11 @@ export default function useShellReloadController(inputs) {
     if (!destination?.view) return false
     if (!pendingRef.current && !performingRef.current) return false
     if (navigationCommittedRef.current) return false
-    const passive = passiveRef.current
+    // performReload clears queued state before its async handoff. Keep the
+    // claimant on that request's immutable policy until it commits or defers.
+    const passive = performingRef.current
+      ? performingPassiveRef.current
+      : passiveRef.current
     if (wouldDisruptUser({
       passive,
       destination,
