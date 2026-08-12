@@ -540,14 +540,24 @@ def _standalone_index_html(app: models.App, install_pass: str = "") -> str:
   )
   html = _replace_html_text(html, "</head>", f"  {boot_slot}\n  </head>")
 
-  # Make the pre-JS loading moment app-specific without coupling the backend to
-  # the shell artwork's filename, dimensions, or other presentation details.
-  html = re.sub(
-    r'(<div id="splash"[^>]*>\s*<img\b[^>]*\bsrc=")[^"]*(")',
-    rf'\g<1>/apps/{slug}/icon-192.png?v={version}\g<2>',
+  # The ordinary shell launch cover is intentionally artwork-free. Standalone
+  # installs still need their app-specific pre-JS loading mark, so the route
+  # owns that variant and inserts it into the stable splash slot.
+  html, splash_replacements = re.subn(
+    r'(<div id="splash"[^>]*>)(\s*</div>)',
+    rf'\g<1><img src="/apps/{slug}/icon-192.png?v={version}" '
+    r'width="44" height="44" alt="" '
+    r'style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);'
+    r'opacity:.4;will-change:opacity" />\g<2>',
     html,
     count=1,
   )
+  if splash_replacements != 1:
+    raise HTTPException(
+      status_code=503,
+      detail="Frontend and standalone host are out of sync.",
+      headers={"Retry-After": "1"},
+    )
   return html
 
 
