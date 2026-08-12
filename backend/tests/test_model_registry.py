@@ -126,6 +126,14 @@ def test_model_specific_effort_levels_are_registry_metadata(monkeypatch):
   assert entry["effort_levels"] == ["low", "medium", "high", "max"]
 
 
+def test_mobius_effort_scales_only_expose_distinct_fireworks_tiers():
+  assert providers.MODEL_EFFORT_LEVELS["inkling"] == [
+    "minimal", "low", "medium", "high", "max",
+  ]
+  assert providers.MODEL_EFFORT_LEVELS["deepseek-flash"] == ["high", "max"]
+  assert providers.MODEL_EFFORT_LEVELS["glm"] == ["high", "max"]
+
+
 # --- Expired-token refresh (the 401 root cause) -----------------------
 
 

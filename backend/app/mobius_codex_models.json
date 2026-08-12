@@ -6,8 +6,11 @@
       "description": "Fast trial coding agent",
       "default_reasoning_level": "medium",
       "supported_reasoning_levels": [
+        {"effort": "minimal", "description": "Minimal reasoning"},
+        {"effort": "low", "description": "Light reasoning"},
         {"effort": "medium", "description": "Balanced reasoning"},
-        {"effort": "high", "description": "Deeper reasoning"}
+        {"effort": "high", "description": "Deeper reasoning"},
+        {"effort": "max", "description": "Maximum reasoning"}
       ],
       "shell_type": "shell_command",
       "visibility": "list",
@@ -44,10 +47,10 @@
       "slug": "deepseek-flash",
       "display_name": "DeepSeek V4 Flash",
       "description": "Fast, cost-efficient trial coding agent",
-      "default_reasoning_level": "medium",
+      "default_reasoning_level": "high",
       "supported_reasoning_levels": [
-        {"effort": "medium", "description": "Balanced reasoning"},
-        {"effort": "high", "description": "Deeper reasoning"}
+        {"effort": "high", "description": "Reasoning enabled"},
+        {"effort": "max", "description": "Thorough reasoning"}
       ],
       "shell_type": "shell_command",
       "visibility": "list",
@@ -86,8 +89,8 @@
       "description": "Higher-capability trial coding agent",
       "default_reasoning_level": "high",
       "supported_reasoning_levels": [
-        {"effort": "medium", "description": "Balanced reasoning"},
-        {"effort": "high", "description": "Deeper reasoning"}
+        {"effort": "high", "description": "High reasoning"},
+        {"effort": "max", "description": "Maximum reasoning"}
       ],
       "shell_type": "shell_command",
       "visibility": "list",

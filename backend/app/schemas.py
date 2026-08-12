@@ -576,7 +576,7 @@ class ChatProviderSwitch(BaseModel):
         "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
       },
       "claude": {"low", "medium", "high", "xhigh", "max", "ultracode"},
-      "mobius": {"medium", "high"},
+      "mobius": {"minimal", "low", "medium", "high", "max"},
     }
     if effort not in allowed_efforts[self.provider]:
       raise ValueError("target effort does not belong to target provider")

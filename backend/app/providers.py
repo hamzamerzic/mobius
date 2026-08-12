@@ -96,9 +96,12 @@ MODEL_EFFORT_LEVELS: dict[str, list[str]] = {
   "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
   "gpt-5.6-terra": ["low", "medium", "high", "xhigh", "max", "ultra"],
   "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
-  "inkling": ["medium", "high"],
-  "deepseek-flash": ["medium", "high"],
-  "glm": ["medium", "high"],
+  # Fireworks applies these scales in the model chat templates. Keep only
+  # semantically distinct tiers: DeepSeek V4 and GLM 5.2 both collapse
+  # low/medium to high, while Inkling has a genuinely graduated scale.
+  "inkling": ["minimal", "low", "medium", "high", "max"],
+  "deepseek-flash": ["high", "max"],
+  "glm": ["high", "max"],
 }
 
 # Runtime recovery defaults are intentionally independent of picker order.
