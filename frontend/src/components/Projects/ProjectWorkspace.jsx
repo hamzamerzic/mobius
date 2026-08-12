@@ -17,6 +17,7 @@ import Trash2 from 'lucide-react/dist/esm/icons/trash-2.mjs'
 import { api, jsonOrThrow } from '../../api/client.js'
 import { projectQueries } from '../../hooks/queries.js'
 import { assembleProjectHtmlPreview, projectPreviewSandbox } from '../../lib/projectPreview.js'
+import ProjectPdfPreview from './ProjectPdfPreview.jsx'
 import './Projects.css'
 
 const VIEW_KEY = 'mobius.projects.files-view'
@@ -379,7 +380,7 @@ export default function ProjectWorkspace({
           ) : fileKind === 'image' ? (
             <div className="project-preview project-preview--asset"><img src={objectUrl || ''} alt={`Preview of ${selectedPath}`} /></div>
           ) : fileKind === 'pdf' ? (
-            <div className="project-preview project-preview--asset"><iframe title={`${selectedPath} PDF`} src={objectUrl || ''} /></div>
+            <ProjectPdfPreview src={objectUrl || ''} title={selectedPath} />
           ) : fileKind === 'binary' ? (
             <div className="project-document__empty"><File size={42} strokeWidth={1.4} /><h2>Preview unavailable</h2><p>This file is preserved as-is and can be downloaded.</p><button type="button" onClick={downloadFile}>Download</button></div>
           ) : fileKind === 'missing-preview' ? (

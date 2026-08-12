@@ -442,6 +442,12 @@
 .project-preview--asset { padding: 14px; overflow: auto; }
 .project-preview--asset img { max-width: 100%; max-height: 100%; margin: auto; object-fit: contain; }
 .project-preview--asset iframe { min-height: 100%; border-radius: 8px; }
+.project-pdf { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #2a2a2a; }
+.project-pdf__toolbar { min-height: 38px; display: flex; align-items: center; justify-content: center; gap: 9px; border-bottom: 1px solid rgba(255, 255, 255, .1); color: #f4f4f4; background: #202020; font-size: 12px; }
+.project-pdf__toolbar button { width: 30px; height: 30px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 7px; color: inherit; background: transparent; cursor: pointer; }
+.project-pdf__toolbar button:hover:not(:disabled) { background: rgba(255, 255, 255, .1); }
+.project-pdf__viewport { flex: 1; min-height: 0; overflow: auto; display: flex; align-items: flex-start; justify-content: center; padding: 14px; }
+.project-pdf__viewport canvas { display: block; max-width: 100%; background: white; box-shadow: 0 4px 16px rgba(0, 0, 0, .28); }
 .project-document__empty { flex: 1; display: grid; place-content: center; justify-items: center; gap: 8px; padding: 28px; color: var(--muted); text-align: center; }
 .project-document__empty h2 { font-size: 18px; }
 .project-document__empty p { max-width: 46ch; margin: 0; line-height: 1.5; }
