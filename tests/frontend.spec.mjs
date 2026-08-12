@@ -113,7 +113,7 @@ test.use({ serviceWorkers: 'block' })
 test.describe('Input behavior', () => {
   test('returning to the tab collapses stale empty-composer geometry', async ({ page }) => {
     await setup(page)
-    await newChat(page)
+    const originalChat = await newChat(page)
 
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.evaluate(el => {
@@ -1157,7 +1157,11 @@ test.describe('Scroll position', () => {
       requestAnimationFrame(sample)
     })
 
-    await page.goBack({ waitUntil: 'domcontentloaded' })
+    await page.getByLabel('Toggle navigation').click()
+    await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
+    await page.getByLabel('Primary navigation')
+      .getByRole('button', { name: originalChat.title, exact: true })
+      .click()
 
     await page.waitForFunction(id => {
       const surface = document.querySelector(
