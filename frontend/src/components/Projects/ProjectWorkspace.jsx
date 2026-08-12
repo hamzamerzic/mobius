@@ -536,7 +536,7 @@ export default function ProjectWorkspace({
         </div>
         <div className="project-workspace__header-actions">
           {buildAction && (
-            <button type="button" className="project-build-button" disabled={busy} onClick={() => onRunAction(project, buildAction)}>
+            <button type="button" className="project-build-button" aria-label={buildAction.name || 'Build'} title={buildAction.name || 'Build'} disabled={busy} onClick={() => onRunAction(project, buildAction)}>
               <Hammer size={16} aria-hidden="true" /><span>{buildAction.name || 'Build'}</span>
             </button>
           )}
@@ -544,6 +544,7 @@ export default function ProjectWorkspace({
             <button type="button" className="project-icon-button" aria-label="Add to project" title="Add to project" aria-haspopup="menu" aria-expanded={activeMenu === 'create'} onClick={() => setActiveMenu(current => current === 'create' ? null : 'create')}><Plus size={19} /></button>
             {activeMenu === 'create' && (
               <div className="project-menu__popover" role="menu">
+                <button type="button" role="menuitem" disabled={busy || creatingChat} onClick={() => { setActiveMenu(null); void createChat() }}><MessageSquarePlus size={16} /> {creatingChat ? 'Creating chat…' : 'New chat'}</button>
                 <button type="button" role="menuitem" disabled={busy} onClick={() => { setActiveMenu(null); beginCreate('file') }}><FileText size={16} /> New file</button>
                 <button type="button" role="menuitem" disabled={busy} onClick={() => { setActiveMenu(null); beginCreate('folder') }}><FolderPlus size={16} /> New folder</button>
                 <button type="button" role="menuitem" disabled={busy} onClick={() => { setActiveMenu(null); uploadRef.current?.click() }}><Upload size={16} /> Upload files</button>
