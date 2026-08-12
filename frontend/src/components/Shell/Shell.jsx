@@ -36,6 +36,7 @@ import {
 } from '../../hooks/queries.js'
 import ProjectsDirectory from '../Projects/ProjectsDirectory.jsx'
 import ProjectWorkspace from '../Projects/ProjectWorkspace.jsx'
+import { defaultProjectName } from '../Projects/ProjectTypeIcon.jsx'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
 import { bumpChatRunSignal, chatRunSignal } from '../../lib/chatRunSignal.js'
 import { clearAppFrameStorage, clearCachedAppToken } from '../../lib/appFrameStorage.js'
@@ -635,7 +636,7 @@ export default function Shell({ onInitialVisualReady }) {
   const navigationSurfaceOpen = modalDrawerOpen && newChatPresentation == null
 
   const requestComposer = useCallback((chatId, {
-    draft, focus = false,
+    draft, focus = false, submit = false,
   } = {}) => {
     if (chatId == null) return
     if (draft == null && !focus) return
@@ -645,6 +646,7 @@ export default function Shell({ onInitialVisualReady }) {
       token: composerRequestTokenRef.current,
       draft: draft == null ? null : String(draft),
       focus: focus === true,
+      submit: submit === true,
     })
   }, [])
 
@@ -1196,7 +1198,7 @@ export default function Shell({ onInitialVisualReady }) {
     return m
   }, [projects])
   const [projectLocations, setProjectLocations] = useState({})
-  const [projectCreateRequest, setProjectCreateRequest] = useState(0)
+  const [projectRenameId, setProjectRenameId] = useState(null)
   const labelForTab = useCallback((tab) => {
     if (tab.kind === 'apps') return 'Apps'
     if (tab.kind === 'projects') return 'Projects'
@@ -1260,15 +1262,26 @@ export default function Shell({ onInitialVisualReady }) {
         const chatKey = tabModel.tabKey(chatTab)
         const chatPane = paneModel.paneOf(next, chatKey)
         const rect = contentRectRef.current
-        const edge = paneModel.modeForRect(rect) === 'phone' ? 'bottom' : 'right'
-        if (chatPane?.id === projectPane.id) {
-          next = paneModel.moveTab(next, chatKey, { paneId: projectPane.id, edge })
+        const phone = paneModel.modeForRect(rect) === 'phone'
+        // On a phone, files and chat are sibling tabs in one pane. Rendering a
+        // permanent vertical split made every project a long two-screen page
+        // and obscured where the user was. Desktop keeps the useful side-by-side
+        // files + chat pair.
+        if (phone && chatPane?.id !== projectPane.id) {
+          next = chatPane
+            ? paneModel.moveTab(next, chatKey, { paneId: projectPane.id })
+            : paneModel.openTab(next, chatTab, {
+              paneId: projectPane.id, activate: false, focus: false,
+            })
+        } else if (phone) {
+          // Already co-located: the active project tab is selected below.
+        } else if (chatPane?.id === projectPane.id) {
+          next = paneModel.moveTab(next, chatKey, { paneId: projectPane.id, edge: 'right' })
         } else if (chatPane) {
           next = paneModel.setActiveTab(next, chatPane.id, chatKey)
         } else {
           const split = paneModel.splitPaneWithTab(next, chatTab, {
-            paneId: projectPane.id,
-            edge,
+            paneId: projectPane.id, edge: 'right',
             focus: false,
           })
           next = split === next
@@ -1285,9 +1298,34 @@ export default function Shell({ onInitialVisualReady }) {
     })
   }
 
-  function startProjectCreation() {
-    navTo('projects')
-    setProjectCreateRequest(current => current + 1)
+  async function createProjectFromTemplate(template) {
+    const templateId = template?.key || 'blank'
+    const response = await api.projects.create({
+      name: defaultProjectName(template),
+      template_id: templateId,
+      recovery_request_id: crypto.randomUUID(),
+    })
+    const project = await jsonOrThrow(response, 'Project creation failed:')
+    projectsRef.current = [
+      project,
+      ...projectsRef.current.filter(row => String(row.id) !== String(project.id)),
+    ]
+    queryClient.setQueryData(projectQueries.keys.all, projectsRef.current)
+    void projectQueries.legacy.invalidate(queryClient)
+    setProjectRenameId(String(project.id))
+    openProject(project)
+    return project
+  }
+
+  async function renameProject(project, name) {
+    const response = await api.projects.update(project.id, { name })
+    const updated = await jsonOrThrow(response, 'Project rename failed:')
+    projectsRef.current = projectsRef.current.map(row => (
+      String(row.id) === String(updated.id) ? updated : row
+    ))
+    queryClient.setQueryData(projectQueries.keys.all, projectsRef.current)
+    setProjectRenameId(null)
+    return updated
   }
   const openProjectRef = useRef(openProject)
   openProjectRef.current = openProject
@@ -1295,9 +1333,9 @@ export default function Shell({ onInitialVisualReady }) {
   function runProjectAction(project, action) {
     if (!project?.chat_id || !action?.prompt) return
     const chatId = String(project.chat_id)
-    stageComposerHandoff(chatId, action.prompt)
+    stageComposerHandoff(chatId, action.prompt, { autoSend: true })
     navTo('chat', { chatId })
-    requestComposer(chatId, { draft: action.prompt, focus: true })
+    requestComposer(chatId, { draft: action.prompt, submit: true })
   }
 
   // Per-chat repair callback for a mounted chat pane (design §2 M13). A pane
@@ -2074,6 +2112,7 @@ export default function Shell({ onInitialVisualReady }) {
           ...projectsRef.current.filter(row => String(row.id) !== String(project.id)),
         ]
         queryClient.setQueryData(projectQueries.keys.all, projectsRef.current)
+        setProjectRenameId(String(project.id))
         openProjectRef.current(project)
         return project
       }
@@ -3618,9 +3657,10 @@ export default function Shell({ onInitialVisualReady }) {
         projects={projects}
         projectsStatus={projectsStatus}
         activeProjectId={activeProjectId}
+        projectTemplates={projectTemplates}
         onProject={openProject}
         onProjectsOpen={() => navTo('projects')}
-        onProjectCreate={startProjectCreation}
+        onProjectCreate={createProjectFromTemplate}
         chats={chats}
         chatsStatus={chatsStatus}
         onRetryChats={() => chatsQuery.refetch()}
@@ -4052,7 +4092,7 @@ export default function Shell({ onInitialVisualReady }) {
                   legacyProjectsQuery.refetch(),
                 ])}
                 onOpen={openProject}
-                createRequest={projectCreateRequest}
+                onCreate={createProjectFromTemplate}
               />
             </div>
           )
@@ -4104,6 +4144,9 @@ export default function Shell({ onInitialVisualReady }) {
                 ))}
                 onDelete={deleteProject}
                 onRunAction={runProjectAction}
+                startRenaming={String(projectRenameId) === String(project.id)}
+                onRename={name => renameProject(project, name)}
+                onRenameEnd={() => setProjectRenameId(null)}
               />
             </div>
           )

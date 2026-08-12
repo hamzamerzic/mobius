@@ -12,8 +12,9 @@ import {
   ProjectsNavIcon,
   SettingsNavIcon,
 } from '../navigationIcons.js'
-import Folder from 'lucide-react/dist/esm/icons/folder.mjs'
 import AppIcon from '../AppIcon.jsx'
+import ProjectCreateMenu from '../Projects/ProjectCreateMenu.jsx'
+import ProjectTypeIcon from '../Projects/ProjectTypeIcon.jsx'
 import { preloadAppIcons } from '../appIcon.js'
 import {
   computePinnedDrag,
@@ -87,6 +88,7 @@ export default function Drawer({
   projects = EMPTY_LIST,
   projectsStatus = 'success',
   activeProjectId,
+  projectTemplates = EMPTY_LIST,
   onProject,
   onProjectsOpen,
   onProjectCreate,
@@ -1086,15 +1088,12 @@ export default function Drawer({
                   </span>
                   <span className="drawer__item-text">Projects</span>
                 </button>
-                <button
-                  type="button"
+                <ProjectCreateMenu
+                  templates={projectTemplates}
+                  onCreate={onProjectCreate}
                   className="drawer__projects-add"
-                  aria-label="Create project"
-                  title="Create project"
-                  onClick={onProjectCreate || onProjectsOpen}
-                >
-                  +
-                </button>
+                  align="end"
+                />
               </div>
               {projectsStatus === 'loading' ? (
                 <p className="drawer__projects-status" role="status">Loading projects…</p>
@@ -1110,7 +1109,7 @@ export default function Drawer({
                         aria-current={active ? 'page' : undefined}
                         onClick={() => onProject?.(project)}
                       >
-                        <span aria-hidden="true"><Folder size={14} /></span>
+                        <span aria-hidden="true"><ProjectTypeIcon value={project} size={14} /></span>
                         <span>{project.name}</span>
                       </button>
                     )

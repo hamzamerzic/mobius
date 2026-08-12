@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import Folder from 'lucide-react/dist/esm/icons/folder.mjs'
 import Grid2X2 from 'lucide-react/dist/esm/icons/grid-2x2.mjs'
 import List from 'lucide-react/dist/esm/icons/list.mjs'
-import Plus from 'lucide-react/dist/esm/icons/plus.mjs'
 import { api, jsonOrThrow } from '../../api/client.js'
 import { projectQueries } from '../../hooks/queries.js'
+import ProjectCreateMenu from './ProjectCreateMenu.jsx'
+import ProjectTypeIcon from './ProjectTypeIcon.jsx'
 import './Projects.css'
 
 const VIEW_KEY = 'mobius.projects.directory-view'
@@ -25,63 +25,16 @@ export default function ProjectsDirectory({
   status,
   onRetry,
   onOpen,
-  createRequest = 0,
+  onCreate,
 }) {
   const queryClient = useQueryClient()
-  const [creating, setCreating] = useState(false)
   const [view, setView] = useState(initialView)
-  const [name, setName] = useState('')
-  const [templateId, setTemplateId] = useState('blank')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const requestIdRef = useRef(null)
-  const nameRef = useRef(null)
-  const availableTemplates = useMemo(() => (
-    templates.length ? templates : [{ key: 'blank', name: 'Blank project', description: '' }]
-  ), [templates])
-
-  useEffect(() => {
-    if (creating) nameRef.current?.focus()
-  }, [creating])
-
-  useEffect(() => {
-    if (!createRequest) return
-    setCreating(true)
-    setError('')
-  }, [createRequest])
 
   function chooseView(next) {
     setView(next)
     try { localStorage.setItem(VIEW_KEY, next) } catch { /* private browsing */ }
-  }
-
-  async function createProject(event) {
-    event.preventDefault()
-    if (busy) return
-    setBusy(true)
-    setError('')
-    requestIdRef.current ||= crypto.randomUUID()
-    try {
-      const selected = availableTemplates.find(template => template.key === templateId)
-      const res = await api.projects.create({
-        name: name.trim() || selected?.name || 'Untitled project',
-        template_id: templateId,
-        recovery_request_id: requestIdRef.current,
-      })
-      const project = await jsonOrThrow(res, 'Project creation failed:')
-      requestIdRef.current = null
-      setName('')
-      setCreating(false)
-      await Promise.all([
-        projectQueries.list.invalidate(queryClient),
-        projectQueries.legacy.invalidate(queryClient),
-      ])
-      onOpen(project)
-    } catch (cause) {
-      setError(cause?.message || 'Could not create the project.')
-    } finally {
-      setBusy(false)
-    }
   }
 
   async function importLegacy(row) {
@@ -107,8 +60,6 @@ export default function ProjectsDirectory({
     }
   }
 
-  const selectedTemplate = availableTemplates.find(template => template.key === templateId)
-
   return (
     <section className="projects-directory" aria-label="Projects">
       <header className="projects-directory__header">
@@ -121,45 +72,10 @@ export default function ProjectsDirectory({
             <button type="button" aria-label="Icon view" aria-pressed={view === 'icons'} onClick={() => chooseView('icons')}><Grid2X2 size={17} /></button>
             <button type="button" aria-label="List view" aria-pressed={view === 'list'} onClick={() => chooseView('list')}><List size={18} /></button>
           </div>
-          <button
-            type="button"
-            className="projects-add"
-            aria-label={creating ? 'Close new project form' : 'Create project'}
-            aria-expanded={creating}
-            onClick={() => { setCreating(current => !current); setError('') }}
-          >
-            <Plus size={20} />
-          </button>
+          <ProjectCreateMenu templates={templates} onCreate={onCreate} className="projects-add-menu" />
         </div>
       </header>
       <div className="projects-directory__scroll">
-        {creating && (
-          <form className="projects-create" onSubmit={createProject} onKeyDown={event => {
-            if (event.key === 'Escape' && !busy) setCreating(false)
-          }}>
-            <label>
-              <span>Name</span>
-              <input
-                ref={nameRef}
-                value={name}
-                placeholder="Untitled project"
-                maxLength={256}
-                onChange={event => setName(event.target.value)}
-              />
-            </label>
-            <label>
-              <span>Type</span>
-              <select value={templateId} onChange={event => setTemplateId(event.target.value)}>
-                {availableTemplates.map(template => (
-                  <option key={template.key} value={template.key}>{template.name}</option>
-                ))}
-              </select>
-            </label>
-            <button type="submit" disabled={busy}>{busy ? 'Creating…' : 'Create'}</button>
-            {selectedTemplate?.description && <p>{selectedTemplate.description}</p>}
-          </form>
-        )}
-
         {error && <p className="projects-error" role="alert">{error}</p>}
 
         {status === 'loading' ? (
@@ -171,15 +87,15 @@ export default function ProjectsDirectory({
           </div>
         ) : projects.length === 0 ? (
           <div className="projects-empty">
-            <Folder size={42} strokeWidth={1.4} aria-hidden="true" />
+            <ProjectTypeIcon value="blank" size={42} strokeWidth={1.4} aria-hidden="true" />
             <p>No projects yet.</p>
-            <button type="button" onClick={() => setCreating(true)}>Create a project</button>
+            <button type="button" onClick={() => onCreate?.(templates[0] || { key: 'blank', name: 'Blank project' })}>Create a project</button>
           </div>
         ) : (
           <div className={`projects-collection projects-collection--${view}`}>
             {projects.map(project => (
               <button key={project.id} type="button" onClick={() => onOpen(project)}>
-                <span className="projects-collection__icon" aria-hidden="true"><Folder size={view === 'icons' ? 42 : 24} /></span>
+                <span className="projects-collection__icon" aria-hidden="true"><ProjectTypeIcon value={project} size={view === 'icons' ? 38 : 22} /></span>
                 <span className="projects-collection__copy">
                   <strong>{project.name}</strong>
                   <small>{project.template?.name || project.project_type}</small>
@@ -205,7 +121,7 @@ export default function ProjectsDirectory({
                   disabled={busy}
                   onClick={() => importLegacy(row)}
                 >
-                  <span className="projects-collection__icon" aria-hidden="true"><Folder size={24} /></span>
+                  <span className="projects-collection__icon" aria-hidden="true"><ProjectTypeIcon value={row.app_name} size={22} /></span>
                   <span className="projects-collection__copy">
                     <strong>{row.name}</strong>
                     <small>{row.app_name}</small>

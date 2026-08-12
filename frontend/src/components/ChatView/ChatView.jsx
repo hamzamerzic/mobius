@@ -645,6 +645,15 @@ export default function ChatView({
       handleComposerInputChange(composerRequest.draft)
     }
 
+    if (composerRequest.submit === true && typeof composerRequest.draft === 'string') {
+      setPendingComposerSubmit({
+        token,
+        text: composerRequest.draft,
+        storedHandoff: true,
+      })
+      return
+    }
+
     if (!shouldApplyComposerFocusRequest({
       focusRequest: composerRequest,
       chatId,
@@ -664,7 +673,15 @@ export default function ChatView({
       cancelled = true
       cancelAnimationFrame(raf)
     }
-  }, [chatId, composerRequest, embedded, onComposerRequestHandled])
+  }, [
+    chatId,
+    composerRequest,
+    embedded,
+    handleComposerInputChange,
+    inputValueRef,
+    onComposerRequestHandled,
+    setPendingComposerSubmit,
+  ])
 
   // Lifecycle guards. `hadMessagesRef` reflects the cached length so
   // doSend's "first message" branch doesn't fire spuriously.

@@ -15,6 +15,13 @@ export function groupActivityRuns(entries) {
 
   for (const entry of entries) {
     const type = entry?.item?.type
+    // Some providers persist separator text blocks that contain only a line
+    // break between reasoning and tool events. They have no visible content,
+    // so treating them as prose split one coherent activity into many repeated
+    // disclosure rows. Keep meaningful prose as the boundary; ignore only the
+    // truly transparent separator.
+    const content = entry?.item?.content
+    if (type === 'text' && typeof content === 'string' && content.length > 0 && !content.trim()) continue
     if (isDistinctiveActivityTool(entry?.item)) {
       flush()
       nodes.push({ group: [entry] })

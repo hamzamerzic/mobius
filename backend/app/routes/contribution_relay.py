@@ -152,7 +152,8 @@ def _merged_snapshot(record: dict, diff_path: Path) -> tuple[dict, list[dict]]:
     tokens.pop()
   if len(tokens) % 2 or len(tokens) > 160:
     raise ContributionSubmitError(
-      "This contribution has too many or unsupported file changes."
+      "This contribution is too large to send safely as one pull request. Ask your agent to split it into smaller reviewed changes.",
+      code="review_changed_large_diff",
     )
   files = []
   for index in range(0, len(tokens), 2):

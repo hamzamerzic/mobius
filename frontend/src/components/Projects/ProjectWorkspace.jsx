@@ -7,10 +7,12 @@ import FileText from 'lucide-react/dist/esm/icons/file-text.mjs'
 import Folder from 'lucide-react/dist/esm/icons/folder.mjs'
 import FolderPlus from 'lucide-react/dist/esm/icons/folder-plus.mjs'
 import Grid2X2 from 'lucide-react/dist/esm/icons/grid-2x2.mjs'
+import Hammer from 'lucide-react/dist/esm/icons/hammer.mjs'
 import Image from 'lucide-react/dist/esm/icons/image.mjs'
 import List from 'lucide-react/dist/esm/icons/list.mjs'
 import MessageSquare from 'lucide-react/dist/esm/icons/message-square.mjs'
 import Ellipsis from 'lucide-react/dist/esm/icons/ellipsis.mjs'
+import Pencil from 'lucide-react/dist/esm/icons/pencil.mjs'
 import Plus from 'lucide-react/dist/esm/icons/plus.mjs'
 import Upload from 'lucide-react/dist/esm/icons/upload.mjs'
 import Trash2 from 'lucide-react/dist/esm/icons/trash-2.mjs'
@@ -18,6 +20,7 @@ import { api, jsonOrThrow } from '../../api/client.js'
 import { projectQueries } from '../../hooks/queries.js'
 import { assembleProjectHtmlPreview, projectPreviewSandbox } from '../../lib/projectPreview.js'
 import ProjectPdfPreview from './ProjectPdfPreview.jsx'
+import ProjectTypeIcon from './ProjectTypeIcon.jsx'
 import './Projects.css'
 
 const VIEW_KEY = 'mobius.projects.files-view'
@@ -49,7 +52,14 @@ function fileIcon(entry, size) {
 }
 
 export default function ProjectWorkspace({
-  project, onOpenChat, onLocationChange, onDelete, onRunAction,
+  project,
+  onOpenChat,
+  onLocationChange,
+  onDelete,
+  onRunAction,
+  startRenaming = false,
+  onRename,
+  onRenameEnd,
 }) {
   const [path, setPath] = useState('')
   const [view, setView] = useState(initialView)
@@ -64,10 +74,14 @@ export default function ProjectWorkspace({
   const [activeMenu, setActiveMenu] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [renaming, setRenaming] = useState(false)
+  const [renameValue, setRenameValue] = useState(project.name)
+  const [renameBusy, setRenameBusy] = useState(false)
   const uploadRef = useRef(null)
   const creationInputRef = useRef(null)
   const createMenuRef = useRef(null)
   const moreMenuRef = useRef(null)
+  const renameInputRef = useRef(null)
 
   const filesQuery = useQuery({
     queryKey: projectQueries.keys.files(project.id, path),
@@ -82,6 +96,7 @@ export default function ProjectWorkspace({
   const actions = project.template?.actions || []
   const selectedPreview = previews.find(preview => preview.path === selectedPath)
   const buildAction = actions.find(action => /build/i.test(action.name || action.id || ''))
+  const secondaryActions = actions.filter(action => action !== buildAction)
 
   useEffect(() => {
     setPath('')
@@ -95,7 +110,20 @@ export default function ProjectWorkspace({
     setCreationPath('')
     setActiveMenu(null)
     setError('')
+    setRenaming(false)
   }, [project.id])
+
+  useEffect(() => {
+    if (!renaming) setRenameValue(project.name)
+  }, [project.name, renaming])
+
+  useEffect(() => {
+    if (!startRenaming) return
+    setRenameValue(project.name)
+    setRenaming(true)
+    const frame = requestAnimationFrame(() => renameInputRef.current?.select())
+    return () => cancelAnimationFrame(frame)
+  }, [project.id, project.name, startRenaming])
 
   useEffect(() => () => {
     if (objectUrl) URL.revokeObjectURL(objectUrl)
@@ -363,6 +391,29 @@ export default function ProjectWorkspace({
     if (!deleted) setBusy(false)
   }
 
+  async function saveProjectName() {
+    if (renameBusy) return
+    const next = renameValue.trim()
+    if (!next || next === project.name) {
+      setRenameValue(project.name)
+      setRenaming(false)
+      onRenameEnd?.()
+      return
+    }
+    setRenameBusy(true)
+    setError('')
+    try {
+      await onRename?.(next)
+      setRenaming(false)
+      onRenameEnd?.()
+    } catch (cause) {
+      setError(cause?.message || 'Could not rename this project.')
+      requestAnimationFrame(() => renameInputRef.current?.focus())
+    } finally {
+      setRenameBusy(false)
+    }
+  }
+
   const breadcrumb = useMemo(() => path.split('/').filter(Boolean), [path])
   if (selectedPath) {
     return (
@@ -426,10 +477,41 @@ export default function ProjectWorkspace({
     <section className="project-workspace" aria-label={`${project.name} project`}>
       <header className="project-workspace__header">
         <div className="project-workspace__identity">
-          <span className="project-workspace__mark" aria-hidden="true"><Folder size={25} /></span>
-          <div><h1>{project.name}</h1><p>{project.template?.name || project.project_type}</p></div>
+          <span className="project-workspace__mark" aria-hidden="true"><ProjectTypeIcon value={project} size={23} /></span>
+          <div>
+            {renaming ? (
+              <form className="project-workspace__rename" onSubmit={event => { event.preventDefault(); renameInputRef.current?.blur() }}>
+                <input
+                  ref={renameInputRef}
+                  value={renameValue}
+                  maxLength={256}
+                  aria-label="Project name"
+                  disabled={renameBusy}
+                  onChange={event => setRenameValue(event.target.value)}
+                  onBlur={() => void saveProjectName()}
+                  onKeyDown={event => {
+                    if (event.key !== 'Escape' || renameBusy) return
+                    event.preventDefault()
+                    setRenameValue(project.name)
+                    setRenaming(false)
+                    onRenameEnd?.()
+                  }}
+                />
+              </form>
+            ) : (
+              <button type="button" className="project-workspace__title" title="Rename project" onClick={() => { setRenameValue(project.name); setRenaming(true) }}>
+                <h1>{project.name}</h1><Pencil size={13} aria-hidden="true" />
+              </button>
+            )}
+            <p>{project.template?.name || project.project_type}</p>
+          </div>
         </div>
         <div className="project-workspace__header-actions">
+          {buildAction && (
+            <button type="button" className="project-build-button" disabled={busy} onClick={() => onRunAction(project, buildAction)}>
+              <Hammer size={16} aria-hidden="true" /><span>{buildAction.name || 'Build'}</span>
+            </button>
+          )}
           <button type="button" className="project-icon-button" aria-label="Open project chat" title="Project chat" onClick={() => onOpenChat(project.chat_id)}><MessageSquare size={18} /></button>
           <div className="projects-view-toggle" role="group" aria-label="File view">
             <button type="button" aria-label="Icon view" aria-pressed={view === 'icons'} onClick={() => chooseView('icons')}><Grid2X2 size={17} /></button>
@@ -512,14 +594,14 @@ export default function ProjectWorkspace({
         )}
         {!filesQuery.isLoading && !filesQuery.isError && entries.length === 0 && path && <p className="projects-empty">This folder is empty.</p>}
       </div>
-      {(previews.length > 0 || actions.length > 0) && (
+      {(previews.length > 0 || secondaryActions.length > 0) && (
         <footer className="project-actions" role="group" aria-label="Project actions">
           {previews.map(preview => (
             <button key={preview.id} type="button" disabled={busy} onClick={() => openPreview(preview)}>
               {previewButtonLabel(preview)}
             </button>
           ))}
-          {actions.map(action => <button key={action.id} type="button" onClick={() => onRunAction(project, action)}>{action.name}</button>)}
+          {secondaryActions.map(action => <button key={action.id} type="button" onClick={() => onRunAction(project, action)}>{action.name}</button>)}
         </footer>
       )}
     </section>
