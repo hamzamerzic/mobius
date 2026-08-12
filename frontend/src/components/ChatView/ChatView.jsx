@@ -751,6 +751,7 @@ export default function ChatView({
   // gates the scroll-handler in useScrollMode from misclassifying
   // post-prepend scroll-clamps as user gestures.
   const loadingOlder = useRef(false)
+  const [olderHistoryError, setOlderHistoryError] = useState(false)
 
   // ── Scroll subsystem ─────────────────────────────────────────────
   //
@@ -2069,6 +2070,7 @@ export default function ChatView({
     const el = scrollRef.current
     if (!el || loadingOlder.current || loading || before <= 0) return
     loadingOlder.current = true
+    setOlderHistoryError(false)
     // Snapshot the topmost rendered msg + its current offset for
     // post-prepend restore. The anchor key/offset is stable: after
     // the prepend, the SAME message has a larger offsetTop (older
@@ -2133,7 +2135,10 @@ export default function ChatView({
           }
         })
       })
-      .catch(() => { loadingOlder.current = false })
+      .catch(() => {
+        loadingOlder.current = false
+        setOlderHistoryError(true)
+      })
   }
 
   // A tall viewport or an unusually compact page can have older history but no
@@ -4345,6 +4350,15 @@ export default function ChatView({
             </div>
           )}
           <div className="chat__offscreen-nudges">
+            {olderHistoryError && offset > 0 && (
+              <button
+                type="button"
+                className="chat__history-retry"
+                onClick={() => loadOlderMessages()}
+              >
+                Earlier messages didn’t load — retry
+              </button>
+            )}
             {hasPendingQuestion && pendingCardOffscreen && (
               <button
                 type="button"

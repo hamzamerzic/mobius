@@ -219,6 +219,21 @@ test('older history loads before its boundary appears and fills a short page', (
   })), false, 'layout-owned top landings must not fetch history')
 })
 
+test('failed short-page pagination leaves an explicit retry path', () => {
+  const source = readFileSync(
+    new URL('../ChatView.jsx', import.meta.url),
+    'utf8',
+  )
+  assert.match(
+    source,
+    /\.catch\(\(\) => \{[\s\S]*?setOlderHistoryError\(true\)[\s\S]*?\}\)/,
+  )
+  assert.match(
+    source,
+    /olderHistoryError && offset > 0[\s\S]*?onClick=\{\(\) => loadOlderMessages\(\)\}[\s\S]*?Earlier messages didn’t load — retry/,
+  )
+})
+
 test('only scrolling keys claim reader ownership', () => {
   assert.equal(readerInputMayScroll('keydown', 'a'), false)
   assert.equal(readerInputMayScroll('keydown', 'Enter'), false)
