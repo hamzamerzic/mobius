@@ -1099,25 +1099,22 @@ test.describe('Scroll position', () => {
       { timeout: 3000 },
     )
 
-    await page.getByLabel('Toggle navigation').click()
-    await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
-    await page.getByLabel('Primary navigation')
-      .getByRole('button', { name: 'New chat', exact: true })
-      .click()
-    // Draft-first New Chat owns a live landing until its final-id composer
-    // accepts focus, so the durable route and painted composer—not the old
-    // internal empty wrapper—are the settlement boundary.
-    const presentation = page.locator('[data-new-chat-presentation]')
-    await expect(presentation).toBeVisible({ timeout: 3000 })
-    const decoyChatId = await presentation.getAttribute('data-new-chat-presentation')
+    // Move to an explicitly distinct durable chat. The transcript above is a
+    // route mock layered over an otherwise untouched server row, so invoking
+    // New Chat here would correctly reuse that row and would not exercise the
+    // previous-chat restoration contract this test owns.
+    const decoy = await createTaggedChat(page)
+    const decoyChatId = decoy?.id
     expect(decoyChatId).toBeTruthy()
     expect(decoyChatId).not.toBe(chatId)
+    await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(decoyChatId)}`, {
+      waitUntil: 'domcontentloaded',
+    })
     const decoySurface = page.locator(
       `[data-chat-surface="painted"][data-chat-id="${decoyChatId}"]`,
     )
     await expect(decoySurface.getByRole('textbox', { name: 'Message Möbius…' }))
       .toBeVisible({ timeout: 10000 })
-    await expect(presentation).toHaveCount(0, { timeout: 10000 })
 
     returning = true
     await page.evaluate(() => {
