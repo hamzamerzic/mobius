@@ -16,6 +16,7 @@ import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode, {
   isNearContentBottom,
+  olderHistoryRetryShown,
   olderHistoryShouldLoad,
   remapSavedReadingAnchor,
   retireSavedReadingPosition,
@@ -4332,7 +4333,7 @@ export default function ChatView({
             <>
               {offscreenControlsVisible && (
                 <div className="chat__offscreen-nudges">
-                  {olderHistoryError && offset > 0 && (
+                  {olderHistoryRetryShown(olderHistoryError, offset) && (
                     <button
                       type="button"
                       className="chat__history-retry"

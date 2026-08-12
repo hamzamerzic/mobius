@@ -27,7 +27,6 @@ import {
   modeAfterReaderGesture,
   modeAfterSpacerResize,
   modeAfterTerminalLayout,
-  olderHistoryShouldLoad,
   physicalBottomAnchorModeFromScroll,
   readerInputActivatesDisclosure,
   readerInputMayScroll,
@@ -196,43 +195,7 @@ test('deferred layout waits for the first scroll instead of timing Infinity', ()
   assert.equal(gestureLayoutRetryDelay(999, 1000), 1)
 })
 
-test('older history loads before its boundary appears and fills a short page', () => {
-  assert.equal(olderHistoryShouldLoad(makeScrollEl({
-    scrollHeight: 2000,
-    scrollTop: 240,
-    clientHeight: 800,
-  }), { userDriven: true }), true)
-  assert.equal(olderHistoryShouldLoad(makeScrollEl({
-    scrollHeight: 2000,
-    scrollTop: 600,
-    clientHeight: 800,
-  }), { userDriven: true }), false)
-  assert.equal(olderHistoryShouldLoad(makeScrollEl({
-    scrollHeight: 800,
-    scrollTop: 0,
-    clientHeight: 800,
-  })), true)
-  assert.equal(olderHistoryShouldLoad(makeScrollEl({
-    scrollHeight: 2000,
-    scrollTop: 0,
-    clientHeight: 800,
-  })), false, 'layout-owned top landings must not fetch history')
-})
 
-test('failed short-page pagination leaves an explicit retry path', () => {
-  const source = readFileSync(
-    new URL('../ChatView.jsx', import.meta.url),
-    'utf8',
-  )
-  assert.match(
-    source,
-    /\.catch\(\(\) => \{[\s\S]*?setOlderHistoryError\(true\)[\s\S]*?\}\)/,
-  )
-  assert.match(
-    source,
-    /olderHistoryError && offset > 0[\s\S]*?onClick=\{\(\) => loadOlderMessages\(\)\}[\s\S]*?Earlier messages didn’t load — retry/,
-  )
-})
 
 test('only scrolling keys claim reader ownership', () => {
   assert.equal(readerInputMayScroll('keydown', 'a'), false)

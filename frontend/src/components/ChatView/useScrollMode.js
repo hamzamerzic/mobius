@@ -98,6 +98,10 @@ const PHYSICAL_BOTTOM_EPSILON_PX = 4
 export const HISTORY_PREFETCH_PX = 240
 
 
+export function olderHistoryRetryShown(error, offset) {
+  return Boolean(error) && Number(offset) > 0
+}
+
 export function olderHistoryShouldLoad(scrollEl, { userDriven = false } = {}) {
   if (!scrollEl) return false
   return scrollEl.scrollHeight <= scrollEl.clientHeight + 1
