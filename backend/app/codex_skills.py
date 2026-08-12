@@ -24,6 +24,7 @@ drops the manifest name. Unmanaged project-local skills and Codex's built-in
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
@@ -42,6 +43,7 @@ _MANIFEST = ".mobius-managed.json"
 _ENTRY_MARKER = ".mobius-skill-cache.json"
 _SYNC_LOCK = ".mobius-skills.lock"
 _CACHE_VERSION = 1
+_RENAME_EXCHANGE = 2
 _UNSAFE = re.compile(r"[^a-zA-Z0-9._-]+")
 
 
@@ -227,6 +229,32 @@ def _entry_matches(entry: Path, kind: str, digest: str) -> bool:
     return False
 
 
+def _atomic_exchange(left: Path, right: Path) -> None:
+  """Atomically exchange two paths on the Linux deployment filesystem."""
+  libc = ctypes.CDLL(None, use_errno=True)
+  renameat2 = getattr(libc, "renameat2", None)
+  if renameat2 is None:
+    raise OSError("renameat2 is unavailable")
+  renameat2.argtypes = [
+    ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+    ctypes.c_uint,
+  ]
+  renameat2.restype = ctypes.c_int
+  result = renameat2(
+    -100, os.fsencode(left), -100, os.fsencode(right), _RENAME_EXCHANGE,
+  )
+  if result != 0:
+    error = ctypes.get_errno()
+    raise OSError(error, os.strerror(error))
+
+
+def _discard_path(path: Path) -> None:
+  if path.is_symlink():
+    path.unlink(missing_ok=True)
+  elif path.exists():
+    shutil.rmtree(path)
+
+
 def _materialize_entry(
   target: Path,
   entry: Path,
@@ -247,9 +275,19 @@ def _materialize_entry(
     _write_entry_marker(temp, kind, digest)
     if _tree_digest(temp, ignore_marker=True) != digest:
       raise OSError("skill source changed while its cache entry was copied")
-    temp.replace(entry)
+    if entry.exists() or entry.is_symlink():
+      # After the exchange `entry` is the complete new cache and `temp` is the
+      # old one. Readers see one valid directory before and after the syscall,
+      # and cleanup failure can only leave a hidden stale sibling.
+      _atomic_exchange(temp, entry)
+      _discard_path(temp)
+    else:
+      temp.replace(entry)
   except Exception:
-    shutil.rmtree(temp, ignore_errors=True)
+    try:
+      _discard_path(temp)
+    except OSError:
+      pass
     raise
 
 
@@ -329,8 +367,6 @@ def _sync_codex_skills(data_dir: str | Path, enabled: bool) -> list[str]:
       continue
 
     try:
-      if not _remove_managed_entry(target, safe):
-        continue
       _materialize_entry(
         target, entry, source, kind, source_digest, flat_content,
       )

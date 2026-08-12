@@ -145,6 +145,86 @@ def test_old_pointer_writer_cannot_overwrite_directory_source_and_cache_self_rep
   assert cache.read_text(encoding="utf-8") == authored
 
 
+def test_failed_replacement_keeps_the_prior_valid_cache(tmp_path, monkeypatch):
+  _make_skill(tmp_path, "alpha", "Alpha skill.", "Old instructions.")
+  assert sync_codex_skills(str(tmp_path), True) == ["alpha"]
+  source = tmp_path / "shared" / "skills" / "alpha.md"
+  cache = tmp_path / ".codex" / "skills" / "alpha" / "SKILL.md"
+  source.write_text(
+    "---\nname: alpha\ndescription: Alpha skill.\n---\nNew instructions.\n",
+    encoding="utf-8",
+  )
+
+  def fail_exchange(_left, _right):
+    raise OSError("injected exchange failure")
+
+  monkeypatch.setattr(codex_skills, "_atomic_exchange", fail_exchange)
+
+  assert sync_codex_skills(str(tmp_path), True) == []
+  assert "Old instructions." in cache.read_text(encoding="utf-8")
+  assert not any(
+    path.name.startswith(".alpha-")
+    for path in cache.parent.parent.iterdir()
+  )
+
+
+def test_failed_marker_write_keeps_the_prior_valid_cache(tmp_path, monkeypatch):
+  _make_skill(tmp_path, "alpha", "Alpha skill.", "Old instructions.")
+  assert sync_codex_skills(str(tmp_path), True) == ["alpha"]
+  source = tmp_path / "shared" / "skills" / "alpha.md"
+  cache = tmp_path / ".codex" / "skills" / "alpha" / "SKILL.md"
+  source.write_text("# Alpha\n\nNew instructions.\n", encoding="utf-8")
+  def fail_marker(*_args):
+    raise OSError("injected marker failure")
+
+  monkeypatch.setattr(codex_skills, "_write_entry_marker", fail_marker)
+
+  assert sync_codex_skills(str(tmp_path), True) == []
+  assert "Old instructions." in cache.read_text(encoding="utf-8")
+
+
+def test_failed_materialized_digest_keeps_the_prior_valid_cache(tmp_path, monkeypatch):
+  _make_skill(tmp_path, "alpha", "Alpha skill.", "Old instructions.")
+  assert sync_codex_skills(str(tmp_path), True) == ["alpha"]
+  source = tmp_path / "shared" / "skills" / "alpha.md"
+  cache = tmp_path / ".codex" / "skills" / "alpha" / "SKILL.md"
+  source.write_text("# Alpha\n\nNew instructions.\n", encoding="utf-8")
+  original = codex_skills._tree_digest
+
+  def fail_temp_digest(root, **kwargs):
+    if root.name.startswith(".alpha-"):
+      raise OSError("injected verification failure")
+    return original(root, **kwargs)
+
+  monkeypatch.setattr(codex_skills, "_tree_digest", fail_temp_digest)
+
+  assert sync_codex_skills(str(tmp_path), True) == []
+  assert "Old instructions." in cache.read_text(encoding="utf-8")
+
+
+def test_replacement_exchange_never_exposes_a_missing_entry(tmp_path, monkeypatch):
+  _make_skill(tmp_path, "alpha", "Alpha skill.", "Old instructions.")
+  assert sync_codex_skills(str(tmp_path), True) == ["alpha"]
+  source = tmp_path / "shared" / "skills" / "alpha.md"
+  entry = tmp_path / ".codex" / "skills" / "alpha"
+  source.write_text(
+    "---\nname: alpha\ndescription: Alpha skill.\n---\nNew instructions.\n",
+    encoding="utf-8",
+  )
+  original = codex_skills._atomic_exchange
+
+  def observe_exchange(left, right):
+    assert right == entry
+    assert (right / "SKILL.md").is_file()
+    original(left, right)
+    assert (right / "SKILL.md").is_file()
+
+  monkeypatch.setattr(codex_skills, "_atomic_exchange", observe_exchange)
+
+  assert sync_codex_skills(str(tmp_path), True) == ["alpha"]
+  assert "New instructions." in (entry / "SKILL.md").read_text(encoding="utf-8")
+
+
 def test_sync_disabled_prunes_only_managed_shims(tmp_path):
   _make_skill(tmp_path, "alpha", "Alpha skill.")
   sync_codex_skills(str(tmp_path), True)
