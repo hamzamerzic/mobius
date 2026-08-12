@@ -2532,6 +2532,13 @@ export default function Shell() {
         markChatRunFinished(chatId)
         markStreamingEnd(chatId)
         markChatRunState(chatId, false)
+        // Project agents write directly into the project directory. Refresh
+        // every mounted folder query for that project so generated artifacts
+        // appear as soon as the run finishes, without polling the filesystem.
+        const project = projectsRef.current.find(
+          row => String(row.chat_id) === String(chatId),
+        )
+        if (project) void projectQueries.files.invalidate(queryClient, project.id)
         // Attention iff the finished chat is NOT visible in ANY pane — membership
         // in the visible set, not equality with one global id, so a chat visible
         // in a background split gets no false dot (finding D-iii).

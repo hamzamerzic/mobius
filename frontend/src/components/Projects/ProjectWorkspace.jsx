@@ -31,6 +31,13 @@ function parentPath(path) {
   return parts.join('/')
 }
 
+function previewButtonLabel(preview) {
+  const name = String(preview?.name || '').trim()
+  if (!name || name.toLowerCase() === 'preview') return 'Preview'
+  if (name.toLowerCase() === 'pdf') return 'Preview PDF'
+  return `Preview ${name}`
+}
+
 function fileIcon(entry, size) {
   if (entry.type === 'directory') return <Folder size={size} />
   const extension = entry.name.split('.').pop()?.toLowerCase()
@@ -69,6 +76,10 @@ export default function ProjectWorkspace({
   })
   const entries = filesQuery.data?.entries || []
   const dirty = fileKind === 'text' && content !== baseline
+  const previews = project.template?.previews || []
+  const actions = project.template?.actions || []
+  const selectedPreview = previews.find(preview => preview.path === selectedPath)
+  const buildAction = actions.find(action => /build/i.test(action.name || action.id || ''))
 
   useEffect(() => {
     setPath('')
@@ -166,7 +177,7 @@ export default function ProjectWorkspace({
       }
     } catch (cause) {
       setError(cause?.message || 'Could not open that file.')
-      setFileKind('none')
+      setFileKind('error')
     }
   }
 
@@ -178,6 +189,13 @@ export default function ProjectWorkspace({
     setFileKind('loading')
     try {
       const res = await api.projects.readFile(project.id, preview.path)
+      if (!res.ok) {
+        if (res.status === 404) {
+          setFileKind('missing-preview')
+          return
+        }
+        throw new Error('This preview could not be opened.')
+      }
       if (preview.kind === 'html') {
         const data = await jsonOrThrow(res, 'Preview failed:')
         const assembled = await assembleProjectHtmlPreview(
@@ -193,7 +211,6 @@ export default function ProjectWorkspace({
         setBaseline('')
         setFileKind('html')
       } else {
-        if (!res.ok) throw new Error(`Preview failed: ${res.status}`)
         const blob = await res.blob()
         replaceObjectUrl(URL.createObjectURL(blob))
         setContent('')
@@ -202,7 +219,7 @@ export default function ProjectWorkspace({
       }
     } catch (cause) {
       setError(cause?.message || 'Could not open that preview.')
-      setFileKind('none')
+      setFileKind('error')
     } finally {
       setBusy(false)
     }
@@ -330,9 +347,6 @@ export default function ProjectWorkspace({
   }
 
   const breadcrumb = useMemo(() => path.split('/').filter(Boolean), [path])
-  const previews = project.template?.previews || []
-  const actions = project.template?.actions || []
-
   if (selectedPath) {
     return (
       <section className="project-workspace project-document" aria-label={`${selectedPath} in ${project.name}`}>
@@ -342,10 +356,10 @@ export default function ProjectWorkspace({
           <div className="project-document__actions">
             {['binary', 'image', 'pdf'].includes(fileKind) && <button type="button" onClick={downloadFile}>Download</button>}
             {fileKind === 'text' && <button type="button" disabled={!dirty || busy} onClick={saveFile}>{busy ? 'Saving…' : 'Save'}</button>}
-            <button type="button" className="project-document__delete" aria-label={`Delete ${selectedPath}`} title="Delete file" disabled={busy} onClick={deleteCurrentFile}><Trash2 size={17} /></button>
+            {!['loading', 'missing-preview', 'error'].includes(fileKind) && <button type="button" className="project-document__delete" aria-label={`Delete ${selectedPath}`} title="Delete file" disabled={busy} onClick={deleteCurrentFile}><Trash2 size={17} /></button>}
           </div>
         </header>
-        {error && <p className="projects-error" role="alert">{error}</p>}
+        {error && fileKind !== 'error' && <p className="projects-error" role="alert">{error}</p>}
         <div className="project-document__surface">
           {fileKind === 'text' ? (
             <textarea
@@ -368,6 +382,21 @@ export default function ProjectWorkspace({
             <div className="project-preview project-preview--asset"><iframe title={`${selectedPath} PDF`} src={objectUrl || ''} /></div>
           ) : fileKind === 'binary' ? (
             <div className="project-document__empty"><File size={42} strokeWidth={1.4} /><h2>Preview unavailable</h2><p>This file is preserved as-is and can be downloaded.</p><button type="button" onClick={downloadFile}>Download</button></div>
+          ) : fileKind === 'missing-preview' ? (
+            <div className="project-document__empty" role="status">
+              <FileText size={42} strokeWidth={1.4} />
+              <h2>{selectedPreview?.name || 'Preview'} isn’t ready</h2>
+              <p>{buildAction ? 'Build this project first. The preview will be ready when the agent finishes.' : `Create ${selectedPath} in this project, then try again.`}</p>
+              {buildAction && <button type="button" onClick={() => onRunAction(project, buildAction)}>{buildAction.name}</button>}
+              {!buildAction && selectedPreview && <button type="button" onClick={() => openPreview(selectedPreview)}>Try again</button>}
+            </div>
+          ) : fileKind === 'error' ? (
+            <div className="project-document__empty" role="alert">
+              <File size={42} strokeWidth={1.4} />
+              <h2>Couldn’t open this file</h2>
+              <p>{error || 'The file may have moved or become unavailable.'}</p>
+              {selectedPreview && <button type="button" onClick={() => openPreview(selectedPreview)}>Try again</button>}
+            </div>
           ) : (
             <div className="project-document__empty" role="status"><p>Opening file…</p></div>
           )}
@@ -470,7 +499,7 @@ export default function ProjectWorkspace({
         <footer className="project-actions" role="group" aria-label="Project actions">
           {previews.map(preview => (
             <button key={preview.id} type="button" disabled={busy} onClick={() => openPreview(preview)}>
-              Preview {preview.name.toLowerCase()}
+              {previewButtonLabel(preview)}
             </button>
           ))}
           {actions.map(action => <button key={action.id} type="button" onClick={() => onRunAction(project, action)}>{action.name}</button>)}

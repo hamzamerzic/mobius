@@ -429,6 +429,12 @@ export const projectQueries = {
     useQuery: useLegacyProjectsQuery,
     invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: legacyProjectsKey }),
   },
+  files: {
+    key: (projectId, path = '') => ['projects', 'files', projectId, path],
+    invalidate: (queryClient, projectId) => queryClient.invalidateQueries({
+      queryKey: ['projects', 'files', projectId],
+    }),
+  },
 }
 
 export const chatQueries = {
