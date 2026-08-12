@@ -54,7 +54,7 @@ test('edit previews parse only when their tool disclosure is prepared', () => {
   assert.match(src, /const hasEditPreview = typeof t\.edit_preview\?\.diff === 'string'/,
     'a cheap durable marker keeps a closed edit row inspectable')
   assert.match(src,
-    /const wantsPreparation = prepareRequested \|\| desiredOpen[\s\S]*?wantsPreparation \? toolEditPreview\(t\.edit_preview\) : null/,
+    /const wantsPreparation = prepareRequested \|\| desiredOpen[\s\S]*?wantsPreparation && !failed \? toolEditPreview\(t\.edit_preview\) : null/,
     'opening a historical activity must not parse every still-closed diff')
   assert.match(src,
     /t\.input \|\| t\.output \|\| t\.output_truncated \|\| hasEditPreview/,
