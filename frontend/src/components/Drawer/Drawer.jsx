@@ -88,6 +88,7 @@ export default function Drawer({
   projects = EMPTY_LIST,
   projectsStatus = 'success',
   activeProjectId,
+  activeProjectChatProjectId,
   projectTemplates = EMPTY_LIST,
   onProject,
   onProjectsOpen,
@@ -140,7 +141,8 @@ export default function Drawer({
   const newAppSet = newAppIds || EMPTY_SET
   const activeProject = projects.find(project => (
     (activeView === 'project' && String(activeProjectId) === String(project.id))
-    || (activeView === 'chat' && String(activeChatId) === String(project.chat_id))
+    || (activeView === 'chat'
+      && String(activeProjectChatProjectId) === String(project.id))
   ))
   // One source of truth for which row the focused pane is showing, so a chat
   // and an app are selected by the same rule wherever the row is rendered.

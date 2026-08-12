@@ -182,6 +182,12 @@ class Chat(Base):
   created_by_app_id = Column(
     Integer, ForeignKey("apps.id"), nullable=True, default=None
   )
+  # Optional first-class Project membership. A project may contain any number
+  # of chats (including none); each chat remains an ordinary Chat row so the
+  # runtime, transcript, recovery, and provider paths stay shared.
+  project_id = Column(
+    String(64), nullable=True, default=None, index=True,
+  )
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
@@ -789,7 +795,7 @@ class App(Base):
 
 
 class Project(Base):
-  """A first-class owner workspace with one durable primary chat.
+  """A first-class owner workspace containing files, chats, and artifacts.
 
   Project files live outside the database. ``root_path`` is nevertheless
   explicit so a non-destructive legacy import can point at an existing
@@ -798,16 +804,17 @@ class Project(Base):
   """
 
   __tablename__ = "projects"
-  __table_args__ = (
-    UniqueConstraint("chat_id", name="uq_projects_chat_id"),
-  )
+  __table_args__ = (UniqueConstraint("chat_id", name="uq_projects_chat_id"),)
 
   id = Column(String(64), primary_key=True)
   name = Column(String(256), nullable=False)
   project_type = Column(String(128), nullable=False, default="blank")
   root_path = Column(String(1024), nullable=False, unique=True)
+  # Rolling-upgrade compatibility for projects created by the original
+  # one-primary-chat implementation. Migration 0014 moves that relationship
+  # to Chat.project_id and clears this pointer. New projects leave it NULL.
   chat_id = Column(
-    String(64), ForeignKey("chats.id"), nullable=False, unique=True, index=True,
+    String(64), ForeignKey("chats.id"), nullable=True, unique=True, index=True,
   )
   source_app_id = Column(
     Integer, ForeignKey("apps.id", ondelete="SET NULL"),

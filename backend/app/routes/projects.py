@@ -65,7 +65,6 @@ class ProjectPatch(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
   name: str | None = Field(default=None, min_length=1, max_length=256)
-  chat_id: str | None = Field(default=None, min_length=1, max_length=64)
 
   @field_validator("name")
   @classmethod
@@ -75,6 +74,21 @@ class ProjectPatch(BaseModel):
     value = value.strip()
     if not value:
       raise ValueError("name must not be blank")
+    return value
+
+
+class ProjectChatCreate(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+
+  title: str = Field(default="New chat", min_length=1, max_length=256)
+  recovery_request_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+  @field_validator("title")
+  @classmethod
+  def clean_title(cls, value: str) -> str:
+    value = value.strip()
+    if not value:
+      raise ValueError("title must not be blank")
     return value
 
 
@@ -105,7 +119,9 @@ class FolderCreate(BaseModel):
   path: str = Field(min_length=1, max_length=2048)
 
 
-def _project_response(project: models.Project) -> dict[str, Any]:
+def _project_response(
+  project: models.Project, chats: list[models.Chat] | None = None,
+) -> dict[str, Any]:
   return {
     "id": project.id,
     "name": project.name,
@@ -116,7 +132,31 @@ def _project_response(project: models.Project) -> dict[str, Any]:
     "legacy_source": project.legacy_source_json,
     "created_at": project.created_at,
     "updated_at": project.updated_at,
+    "chats": [_project_chat_response(chat) for chat in (chats or [])],
   }
+
+
+def _project_chat_response(chat: models.Chat) -> dict[str, Any]:
+  return {
+    "id": chat.id,
+    "title": chat.title,
+    "has_messages": bool(chat.has_messages),
+    "provider": chat.provider,
+    "created_at": chat.created_at,
+    "updated_at": chat.updated_at,
+    "activity_at": chat.activity_at,
+  }
+
+
+def _live_project_chat_rows(db: Session, project_id: str) -> list[models.Chat]:
+  return db.query(models.Chat).filter(
+    models.Chat.project_id == project_id,
+    models.Chat.deleted_at.is_(None),
+  ).order_by(
+    models.Chat.activity_at.desc(),
+    models.Chat.updated_at.desc(),
+    models.Chat.created_at.desc(),
+  ).all()
 
 
 def _live_project(db: Session, project_id: str) -> models.Project:
@@ -203,7 +243,7 @@ def _templates(db: Session) -> list[tuple[dict, models.App | None]]:
   rows: list[tuple[dict, models.App | None]] = [({
     "id": "blank",
     "name": "Blank project",
-    "description": "Start with an empty folder and a project-aware chat.",
+    "description": "Start with an empty folder.",
     "guidance": "Work only inside this project's root unless the user asks otherwise.",
     "skills": [],
     "dependencies": [],
@@ -231,7 +271,10 @@ def _template_by_id(db: Session, template_id: str) -> tuple[dict, models.App | N
   return matches[0]
 
 
-def _new_chat(db: Session, *, chat_id: str, title: str, owner: models.Owner) -> models.Chat:
+def _new_chat(
+  db: Session, *, chat_id: str, title: str, owner: models.Owner,
+  project_id: str | None = None,
+) -> models.Chat:
   provider = providers.resolve_default_provider(
     get_settings().data_dir, owner.provider if owner else None,
   )
@@ -243,6 +286,7 @@ def _new_chat(db: Session, *, chat_id: str, title: str, owner: models.Owner) -> 
     agent_settings_json=None,
     auto_resume_on_limit=bool(owner.auto_resume_on_limit_default),
     auto_resume_on_restart=bool(owner.auto_resume_on_restart_default),
+    project_id=project_id,
   )
 
 
@@ -278,13 +322,30 @@ def list_projects(
   rows = db.query(models.Project).filter(
     models.Project.deleted_at.is_(None),
   ).order_by(models.Project.updated_at.desc(), models.Project.created_at.desc()).all()
-  return [_project_response(row) for row in rows]
+  project_ids = [row.id for row in rows]
+  chats_by_project: dict[str, list[models.Chat]] = {
+    project_id: [] for project_id in project_ids
+  }
+  if project_ids:
+    chat_rows = db.query(models.Chat).filter(
+      models.Chat.project_id.in_(project_ids),
+      models.Chat.deleted_at.is_(None),
+    ).order_by(
+      models.Chat.activity_at.desc(),
+      models.Chat.updated_at.desc(),
+      models.Chat.created_at.desc(),
+    ).all()
+    for chat in chat_rows:
+      chats_by_project.setdefault(str(chat.project_id), []).append(chat)
+  return [
+    _project_response(row, chats_by_project.get(str(row.id), [])) for row in rows
+  ]
 
 
 @router.post("", dependencies=[Depends(reject_cross_site)])
 def create_project(
   body: ProjectCreate,
-  owner: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
   with PROJECT_LIFECYCLE_LOCK:
@@ -293,7 +354,6 @@ def create_project(
       project_id = str(uuid.uuid5(
         uuid.NAMESPACE_URL, f"mobius:project:{body.recovery_request_id}",
       ))
-      chat_id = str(uuid.uuid5(uuid.UUID(project_id), "primary-chat"))
       existing = db.query(models.Project).filter(models.Project.id == project_id).first()
       if existing is not None:
         if existing.deleted_at is not None:
@@ -301,7 +361,6 @@ def create_project(
         return _project_response(existing)
     else:
       project_id = str(uuid.uuid4())
-      chat_id = str(uuid.uuid4())
 
     root_locator = Path("projects") / project_id
     root = (Path(get_settings().data_dir) / root_locator).resolve()
@@ -311,17 +370,15 @@ def create_project(
     try:
       _copy_template_files(root, template, app)
       snapshot = _safe_template(template, app)
-      chat = _new_chat(db, chat_id=chat_id, title=body.name, owner=owner)
       project = models.Project(
         id=project_id,
         name=body.name,
         project_type=_template_key(template, app),
         root_path=root_locator.as_posix(),
-        chat_id=chat_id,
+        chat_id=None,
         source_app_id=app.id if app is not None else None,
         template_snapshot_json=snapshot,
       )
-      db.add(chat)
       db.add(project)
       db.commit()
     except Exception:
@@ -417,7 +474,10 @@ def _legacy_chat_id(app: models.App, legacy_id: str, db: Session) -> str | None:
   ).first()
   if chat is None:
     return None
-  linked = db.query(models.Project.id).filter(models.Project.chat_id == value).first()
+  linked = db.query(models.Project.id).filter(
+    (models.Project.chat_id == value)
+    | (models.Project.id == chat.project_id)
+  ).first()
   return None if linked else value
 
 
@@ -443,7 +503,7 @@ def import_legacy_project(
     if source.get("app_id") == app.id and source.get("project_id") == body.legacy_project_id:
       if project.deleted_at is not None:
         raise HTTPException(409, "This imported project is in recovery.")
-      return _project_response(project)
+      return _project_response(project, _live_project_chat_rows(db, project.id))
 
   legacy_rows = _read_legacy_projects(app)
   legacy = next(
@@ -465,15 +525,15 @@ def import_legacy_project(
     f"mobius:legacy-project:{app.id}:{body.legacy_project_id}",
   ))
   chat_id = _legacy_chat_id(app, body.legacy_project_id, db)
-  if chat_id is None:
-    chat_id = str(uuid.uuid5(uuid.UUID(project_id), "primary-chat"))
-    db.add(_new_chat(db, chat_id=chat_id, title=name, owner=owner))
+  legacy_chat = db.get(models.Chat, chat_id) if chat_id else None
+  if legacy_chat is not None:
+    legacy_chat.project_id = project_id
   project = models.Project(
     id=project_id,
     name=name,
     project_type=_template_key(template, app),
     root_path=root.relative_to(Path(get_settings().data_dir).resolve()).as_posix(),
-    chat_id=chat_id,
+    chat_id=None,
     source_app_id=app.id,
     template_snapshot_json=_safe_template(template, app),
     legacy_source_json={
@@ -491,10 +551,69 @@ def import_legacy_project(
     db.rollback()
     existing = db.query(models.Project).filter(models.Project.id == project_id).first()
     if existing is not None:
-      return _project_response(existing)
+      return _project_response(existing, _live_project_chat_rows(db, existing.id))
     raise
   db.refresh(project)
-  return _project_response(project)
+  return _project_response(
+    project, [legacy_chat] if legacy_chat is not None else [],
+  )
+
+
+@router.get("/{project_id}/chats")
+def list_project_chats(
+  project_id: str,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  _live_project(db, project_id)
+  rows = _live_project_chat_rows(db, project_id)
+  return [_project_chat_response(row) for row in rows]
+
+
+@router.post(
+  "/{project_id}/chats", status_code=201,
+  dependencies=[Depends(reject_cross_site)],
+)
+def create_project_chat(
+  project_id: str,
+  body: ProjectChatCreate,
+  owner: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  project = _live_project(db, project_id)
+  chat_id = (
+    str(uuid.uuid5(uuid.UUID(project.id), body.recovery_request_id))
+    if body.recovery_request_id
+    else str(uuid.uuid4())
+  )
+  existing = db.get(models.Chat, chat_id)
+  if existing is not None:
+    if existing.deleted_at is not None:
+      raise HTTPException(409, "Project chat was deleted.")
+    if existing.project_id != project.id:
+      raise HTTPException(409, "Chat identity is already in use.")
+    return _project_chat_response(existing)
+  chat = _new_chat(
+    db, chat_id=chat_id, title=body.title, owner=owner,
+    project_id=project.id,
+  )
+  db.add(chat)
+  project.updated_at = now_naive_utc()
+  try:
+    db.commit()
+  except IntegrityError:
+    db.rollback()
+    existing = db.get(models.Chat, chat_id)
+    if existing is None or existing.project_id != project.id:
+      raise
+    return _project_chat_response(existing)
+  db.refresh(chat)
+  get_system_broadcast().publish({
+    "type": "project_chat_created",
+    "projectId": str(project.id),
+    "chatId": str(chat.id),
+  })
+  return _project_chat_response(chat)
 
 
 @router.get("/{project_id}")
@@ -503,7 +622,9 @@ def get_project(
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
-  return _project_response(_live_project(db, project_id))
+  project = _live_project(db, project_id)
+  chats = _live_project_chat_rows(db, project.id)
+  return _project_response(project, chats)
 
 
 @router.post(
@@ -538,28 +659,13 @@ def patch_project(
   project = _live_project(db, project_id)
   if body.name is not None:
     project.name = body.name
-  if body.chat_id is not None and body.chat_id != project.chat_id:
-    chat = db.query(models.Chat).filter(
-      models.Chat.id == body.chat_id,
-      models.Chat.deleted_at.is_(None),
-      models.Chat.created_by_app_id.is_(None),
-    ).first()
-    if chat is None:
-      raise HTTPException(422, "Replacement chat must be a live owner chat.")
-    occupied = db.query(models.Project.id).filter(
-      models.Project.chat_id == body.chat_id,
-      models.Project.id != project.id,
-    ).first()
-    if occupied:
-      raise HTTPException(409, "That chat already belongs to another project.")
-    project.chat_id = body.chat_id
   try:
     db.commit()
   except IntegrityError as exc:
     db.rollback()
-    raise HTTPException(409, "Project chat is already in use.") from exc
+    raise HTTPException(409, "Project could not be updated.") from exc
   db.refresh(project)
-  return _project_response(project)
+  return _project_response(project, _live_project_chat_rows(db, project.id))
 
 
 @router.delete(
@@ -571,44 +677,49 @@ async def delete_project(
   db: Session = Depends(get_db),
 ):
   project = _live_project(db, project_id)
-  chat = db.query(models.Chat).filter(
-    models.Chat.id == project.chat_id,
+  chats = db.query(models.Chat).filter(
+    models.Chat.project_id == project.id,
     models.Chat.deleted_at.is_(None),
-  ).first()
-  if chat is None:
-    raise HTTPException(409, "Project primary chat is unavailable.")
-  if is_chat_running(chat.id):
-    try:
-      stopped, _ = await stop_chat_for(chat.id, db=db)
-    except Exception:
-      log.warning("Failed to stop project chat %s during delete", chat.id)
-      stopped = False
-    if not stopped:
-      raise HTTPException(409, "Could not stop the active project agent; retry.")
-  # One tombstone timestamp and one commit make project + primary chat a single
-  # recovery unit. The root remains untouched throughout the recovery window.
-  bump_run_generation(chat.id)
+  ).all()
+  for chat in chats:
+    if is_chat_running(chat.id):
+      try:
+        stopped, _ = await stop_chat_for(chat.id, db=db)
+      except Exception:
+        log.warning("Failed to stop project chat %s during delete", chat.id)
+        stopped = False
+      if not stopped:
+        raise HTTPException(
+          409, "Could not stop an active project agent; retry."
+        )
+  # One timestamp and one commit make the project and all currently-live chats
+  # a recovery unit. Chats deleted earlier keep their own tombstone and are not
+  # unexpectedly recovered with the project.
+  for chat in chats:
+    bump_run_generation(chat.id)
   with PROJECT_LIFECYCLE_LOCK:
     deleted_at = now_naive_utc()
     project.deleted_at = deleted_at
-    chat.deleted_at = deleted_at
+    for chat in chats:
+      chat.deleted_at = deleted_at
     db.commit()
-  questions.cancel(chat.id)
-  mark_chat_deleted(chat.id)
-  try:
-    await _finish_run(chat.id, terminal_status="stopped")
-  except Exception:
-    log.exception(
-      "Project %s was deleted but chat %s run cleanup failed",
-      project.id, chat.id,
+  for chat in chats:
+    questions.cancel(chat.id)
+    mark_chat_deleted(chat.id)
+    try:
+      await _finish_run(chat.id, terminal_status="stopped")
+    except Exception:
+      log.exception(
+        "Project %s was deleted but chat %s run cleanup failed",
+        project.id, chat.id,
+      )
+    get_system_broadcast().publish(
+      {"type": "chat_deleted", "chatId": str(chat.id)}
     )
-  get_system_broadcast().publish(
-    {"type": "chat_deleted", "chatId": str(chat.id)}
-  )
   get_system_broadcast().publish({
     "type": "project_deleted",
     "projectId": str(project.id),
-    "chatId": str(chat.id),
+    "chatIds": [str(chat.id) for chat in chats],
   })
   return Response(status_code=204)
 
@@ -628,22 +739,28 @@ def recover_project(
       raise HTTPException(404, "Project not found or not deleted.")
     if now_naive_utc() - project.deleted_at >= SOFT_DELETE_TTL:
       raise HTTPException(410, "Recovery window has expired.")
-    chat = db.query(models.Chat).filter(models.Chat.id == project.chat_id).first()
-    if chat is None or not _project_root(project).is_dir():
-      raise HTTPException(409, "Project chat or files are unavailable.")
+    if not _project_root(project).is_dir():
+      raise HTTPException(409, "Project files are unavailable.")
+    deleted_at = project.deleted_at
+    chats = db.query(models.Chat).filter(
+      models.Chat.project_id == project.id,
+      models.Chat.deleted_at == deleted_at,
+    ).all()
     project.deleted_at = None
-    chat.deleted_at = None
+    for chat in chats:
+      chat.deleted_at = None
     db.commit()
-  recover_chat_generation(chat.id)
-  get_system_broadcast().publish(
-    {"type": "chat_recovered", "chatId": str(chat.id)}
-  )
+  for chat in chats:
+    recover_chat_generation(chat.id)
+    get_system_broadcast().publish(
+      {"type": "chat_recovered", "chatId": str(chat.id)}
+    )
   get_system_broadcast().publish({
     "type": "project_recovered",
     "projectId": str(project.id),
-    "chatId": str(chat.id),
+    "chatIds": [str(chat.id) for chat in chats],
   })
-  return _project_response(project)
+  return _project_response(project, chats)
 
 
 @router.get("/{project_id}/files")
@@ -695,7 +812,10 @@ def read_project_file(
   media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
   if not download and (
     media_type.startswith("text/")
-    or media_type in ("application/json", "application/javascript", "image/svg+xml")
+    or media_type in (
+      "application/json", "application/javascript", "application/x-latex",
+      "application/x-tex", "image/svg+xml",
+    )
   ):
     try:
       return {"path": path, "content": target.read_text(encoding="utf-8"), "mime_type": media_type}

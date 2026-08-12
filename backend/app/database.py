@@ -1644,6 +1644,99 @@ def _add_app_project_templates(eng) -> None:
       ))
 
 
+def _add_project_chat_collection(eng) -> None:
+  """Move Projects from one required primary chat to zero-or-more chats.
+
+  Existing primary chats are preserved and associated through
+  ``chats.project_id``. SQLite cannot drop a NOT NULL constraint in place, so
+  its small metadata-only Projects table is rebuilt transactionally. Project
+  files remain outside the database and are untouched.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  tables = set(inspector.get_table_names())
+  if not {"projects", "chats"}.issubset(tables):
+    return
+  project_columns = {
+    column["name"]: column for column in inspector.get_columns("projects")
+  }
+  if not project_columns["chat_id"].get("nullable", True):
+    if eng.dialect.name == "sqlite":
+      # No table points at Projects before this migration. Rebuild it before
+      # adding chats.project_id so SQLite cannot retarget an incoming FK to the
+      # temporary table name during ALTER TABLE RENAME.
+      raw = eng.raw_connection()
+      try:
+        cursor = raw.cursor()
+        cursor.execute("PRAGMA foreign_keys=OFF")
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute("ALTER TABLE projects RENAME TO projects__pre_0014")
+        cursor.execute(
+          "CREATE TABLE projects ("
+          "id VARCHAR(64) NOT NULL PRIMARY KEY, "
+          "name VARCHAR(256) NOT NULL, "
+          "project_type VARCHAR(128) NOT NULL, "
+          "root_path VARCHAR(1024) NOT NULL UNIQUE, "
+          "chat_id VARCHAR(64) NULL UNIQUE REFERENCES chats(id), "
+          "source_app_id INTEGER NULL REFERENCES apps(id) ON DELETE SET NULL, "
+          "template_snapshot_json JSON NOT NULL, "
+          "legacy_source_json JSON NULL, "
+          "deleted_at DATETIME NULL, "
+          "created_at DATETIME NULL, "
+          "updated_at DATETIME NULL"
+          ")"
+        )
+        cursor.execute(
+          "INSERT INTO projects "
+          "(id, name, project_type, root_path, chat_id, source_app_id, "
+          "template_snapshot_json, legacy_source_json, deleted_at, created_at, updated_at) "
+          "SELECT id, name, project_type, root_path, chat_id, source_app_id, "
+          "template_snapshot_json, legacy_source_json, deleted_at, created_at, updated_at "
+          "FROM projects__pre_0014"
+        )
+        cursor.execute("DROP TABLE projects__pre_0014")
+        cursor.execute("CREATE INDEX ix_projects_chat_id ON projects (chat_id)")
+        cursor.execute("CREATE INDEX ix_projects_source_app_id ON projects (source_app_id)")
+        raw.commit()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+      except Exception:
+        raw.rollback()
+        raise
+      finally:
+        raw.close()
+    else:
+      with eng.begin() as conn:
+        conn.execute(text(
+          "ALTER TABLE projects ALTER COLUMN chat_id DROP NOT NULL"
+        ))
+
+  inspector = sa_inspect(eng)
+  chat_columns = {column["name"] for column in inspector.get_columns("chats")}
+  with eng.begin() as conn:
+    if "project_id" not in chat_columns:
+      if eng.dialect.name == "sqlite":
+        conn.execute(text(
+          "ALTER TABLE chats ADD COLUMN project_id VARCHAR(64) NULL"
+        ))
+      else:
+        conn.execute(text(
+          "ALTER TABLE chats ADD COLUMN project_id VARCHAR(64) NULL"
+        ))
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_chats_project_id ON chats (project_id)"
+    ))
+    conn.execute(text(
+      "UPDATE chats SET project_id = ("
+      "SELECT projects.id FROM projects WHERE projects.chat_id = chats.id"
+      ") WHERE project_id IS NULL AND EXISTS ("
+      "SELECT 1 FROM projects WHERE projects.chat_id = chats.id"
+      ")"
+    ))
+    conn.execute(text("UPDATE projects SET chat_id = NULL WHERE chat_id IS NOT NULL"))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -1658,6 +1751,7 @@ _SCHEMA_MIGRATIONS = (
   ("0011_delegation_parent_wake", _add_delegation_parent_wake),
   ("0012_connector_oauth_gcloud", _add_connector_oauth_gcloud_fields),
   ("0013_app_project_templates", _add_app_project_templates),
+  ("0014_project_chat_collection", _add_project_chat_collection),
 )
 
 

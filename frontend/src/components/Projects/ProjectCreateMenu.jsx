@@ -6,7 +6,7 @@ import './ProjectCreateMenu.css'
 const FALLBACK_TEMPLATES = [{
   key: 'blank',
   name: 'Blank project',
-  description: 'Start with an empty folder and a project chat.',
+  description: 'Start with an empty folder.',
 }]
 
 export default function ProjectCreateMenu({

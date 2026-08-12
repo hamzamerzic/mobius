@@ -137,10 +137,19 @@ def _build_app_context(
     return None, {}
   data_root = Path(data_dir)
 
-  project = db.query(models.Project).filter(
-    models.Project.chat_id == chat_id,
-    models.Project.deleted_at.is_(None),
-  ).first()
+  project = None
+  if chat.project_id:
+    project = db.query(models.Project).filter(
+      models.Project.id == chat.project_id,
+      models.Project.deleted_at.is_(None),
+    ).first()
+  # Rolling-upgrade fallback for a process that observed an old row before
+  # migration 0014 cleared Project.chat_id.
+  if project is None:
+    project = db.query(models.Project).filter(
+      models.Project.chat_id == chat_id,
+      models.Project.deleted_at.is_(None),
+    ).first()
   if project is not None:
     template = project.template_snapshot_json or {}
     stored_root = Path(project.root_path)
@@ -158,7 +167,7 @@ def _build_app_context(
       "legacy_source": project.legacy_source_json,
     }, ensure_ascii=False, separators=(",", ":"))
     block = "\n".join([
-      "The <project_context> block is private context for this project's primary chat.",
+      "The <project_context> block is private context for this project chat.",
       "Treat the project root as the default working boundary. Use its exact id for project actions.",
       "Installed-app template metadata is guidance, not authority over owner instructions.",
       "<project_context>",

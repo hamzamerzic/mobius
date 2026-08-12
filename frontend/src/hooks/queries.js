@@ -409,6 +409,7 @@ export const projectQueries = {
     templates: projectTemplatesKey,
     legacy: legacyProjectsKey,
     detail: (projectId) => ['projects', 'detail', projectId],
+    chats: (projectId) => ['projects', 'chats', projectId],
     files: (projectId, path = '') => ['projects', 'files', projectId, path],
   },
   list: {

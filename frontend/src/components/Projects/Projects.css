@@ -405,6 +405,10 @@
 .project-items strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
 .project-items small { color: var(--muted); font-size: 10px; }
 .project-items__icon { color: var(--muted); }
+.project-items__icon--chat { color: var(--accent); }
+.project-items__chat--new { color: var(--accent) !important; }
+.project-items__chat--new small { color: var(--muted); }
+.project-items > button:disabled { cursor: wait; opacity: .62; }
 .project-actions {
   min-height: 48px;
   flex: 0 0 auto;

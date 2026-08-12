@@ -1558,7 +1558,7 @@ test('resolveInitialFocusedPaneView round-trips a real maximized 2-pane workspac
   assert.equal(restored, bPane, 'a maximized pane survives a serialize→parse→resolve round-trip')
 })
 
-test('project and its primary chat persist as two unique native workspace tabs', () => {
+test('a project and one of its chats persist as two unique native workspace tabs', () => {
   let ws = paneModel.seedFromFlatTabs([tabModel.projectTab('project-1')])
   ws = paneModel.splitPaneWithTab(ws, tabModel.makeTab('chat', 'chat-1'), {
     paneId: ws.focusedPaneId,

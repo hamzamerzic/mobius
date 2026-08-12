@@ -11,6 +11,7 @@ import Hammer from 'lucide-react/dist/esm/icons/hammer.mjs'
 import Image from 'lucide-react/dist/esm/icons/image.mjs'
 import List from 'lucide-react/dist/esm/icons/list.mjs'
 import MessageSquare from 'lucide-react/dist/esm/icons/message-square.mjs'
+import MessageSquarePlus from 'lucide-react/dist/esm/icons/message-square-plus.mjs'
 import Ellipsis from 'lucide-react/dist/esm/icons/ellipsis.mjs'
 import Pencil from 'lucide-react/dist/esm/icons/pencil.mjs'
 import Plus from 'lucide-react/dist/esm/icons/plus.mjs'
@@ -54,6 +55,7 @@ function fileIcon(entry, size) {
 export default function ProjectWorkspace({
   project,
   onOpenChat,
+  onCreateChat,
   onLocationChange,
   onDelete,
   onRunAction,
@@ -77,6 +79,7 @@ export default function ProjectWorkspace({
   const [renaming, setRenaming] = useState(false)
   const [renameValue, setRenameValue] = useState(project.name)
   const [renameBusy, setRenameBusy] = useState(false)
+  const [creatingChat, setCreatingChat] = useState(false)
   const uploadRef = useRef(null)
   const creationInputRef = useRef(null)
   const createMenuRef = useRef(null)
@@ -90,7 +93,19 @@ export default function ProjectWorkspace({
       'Project files failed:',
     ),
   })
+  const chatsQuery = useQuery({
+    queryKey: projectQueries.keys.chats(project.id),
+    queryFn: async () => {
+      const rows = await jsonOrThrow(
+        await api.projects.chats(project.id),
+        'Project chats failed:',
+      )
+      return Array.isArray(rows) ? rows : []
+    },
+    initialData: Array.isArray(project.chats) ? project.chats : undefined,
+  })
   const entries = filesQuery.data?.entries || []
+  const chats = chatsQuery.data || []
   const dirty = fileKind === 'text' && content !== baseline
   const previews = project.template?.previews || []
   const actions = project.template?.actions || []
@@ -384,7 +399,7 @@ export default function ProjectWorkspace({
   }
 
   async function deleteProject() {
-    if (busy || !window.confirm(`Delete “${project.name}” and its project chat?`)) return
+    if (busy || !window.confirm(`Delete “${project.name}”, its files, and its chats?`)) return
     setBusy(true)
     setError('')
     const deleted = await onDelete(project)
@@ -411,6 +426,19 @@ export default function ProjectWorkspace({
       requestAnimationFrame(() => renameInputRef.current?.focus())
     } finally {
       setRenameBusy(false)
+    }
+  }
+
+  async function createChat() {
+    if (creatingChat) return
+    setCreatingChat(true)
+    setError('')
+    try {
+      await onCreateChat?.()
+    } catch (cause) {
+      setError(cause?.message || 'Could not create a project chat.')
+    } finally {
+      setCreatingChat(false)
     }
   }
 
@@ -512,7 +540,6 @@ export default function ProjectWorkspace({
               <Hammer size={16} aria-hidden="true" /><span>{buildAction.name || 'Build'}</span>
             </button>
           )}
-          <button type="button" className="project-icon-button" aria-label="Open project chat" title="Project chat" onClick={() => onOpenChat(project.chat_id)}><MessageSquare size={18} /></button>
           <div ref={createMenuRef} className="project-menu">
             <button type="button" className="project-icon-button" aria-label="Add to project" title="Add to project" aria-haspopup="menu" aria-expanded={activeMenu === 'create'} onClick={() => setActiveMenu(current => current === 'create' ? null : 'create')}><Plus size={19} /></button>
             {activeMenu === 'create' && (
@@ -577,19 +604,24 @@ export default function ProjectWorkspace({
           <div className="projects-empty" role="alert"><p>Files are unavailable.</p><button type="button" onClick={() => filesQuery.refetch()}>Try again</button></div>
         ) : (
           <div className={`project-items project-items--${view}`}>
+            {!path && chats.map(chat => (
+              <button key={chat.id} type="button" className="project-items__chat" onClick={() => onOpenChat(chat)}>
+                <span className="project-items__icon project-items__icon--chat" aria-hidden="true"><MessageSquare size={view === 'icons' ? 34 : 21} /></span>
+                <span><strong>{chat.title || 'New chat'}</strong><small>{chat.has_messages ? 'Chat' : 'Empty chat'}</small></span>
+              </button>
+            ))}
+            {!path && (
+              <button type="button" className="project-items__chat project-items__chat--new" disabled={creatingChat} onClick={() => void createChat()}>
+                <span className="project-items__icon project-items__icon--chat" aria-hidden="true"><MessageSquarePlus size={view === 'icons' ? 34 : 21} /></span>
+                <span><strong>{creatingChat ? 'Creating…' : 'New chat'}</strong><small>Start a conversation</small></span>
+              </button>
+            )}
             {entries.map(entry => (
               <button key={entry.path} type="button" onClick={() => openFile(entry)}>
                 <span className="project-items__icon" aria-hidden="true">{fileIcon(entry, view === 'icons' ? 38 : 22)}</span>
                 <span><strong>{entry.name}</strong><small>{entry.type === 'directory' ? 'Folder' : entry.size < 1024 ? `${entry.size} B` : `${Math.ceil(entry.size / 1024)} KB`}</small></span>
               </button>
             ))}
-          </div>
-        )}
-        {!filesQuery.isLoading && !filesQuery.isError && entries.length === 0 && !path && (
-          <div className="projects-empty">
-            <Folder size={42} strokeWidth={1.4} aria-hidden="true" />
-            <p>This project is empty.</p>
-            <button type="button" onClick={() => beginCreate('file')}>Add the first file</button>
           </div>
         )}
         {!filesQuery.isLoading && !filesQuery.isError && entries.length === 0 && path && <p className="projects-empty">This folder is empty.</p>}

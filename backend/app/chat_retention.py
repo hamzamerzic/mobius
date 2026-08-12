@@ -9,7 +9,7 @@ listing.
 import shutil
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app import models, questions
@@ -50,10 +50,13 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
   expired_chat_ids = select(models.Chat.id).where(
     models.Chat.deleted_at.isnot(None),
     models.Chat.deleted_at < cutoff,
-    # A project tombstone keeps its root + primary chat recoverable together.
-    # Exclude every referenced chat (including projects themselves in recovery)
-    # so independent chat cleanup cannot sever that durable pair.
-    ~models.Chat.id.in_(select(models.Project.chat_id)),
+    # A project tombstone keeps its root + chat collection recoverable together.
+    # Once the project row is purged, its expired chats become ordinary cleanup
+    # candidates (including on upgraded SQLite databases without an added FK).
+    or_(
+      models.Chat.project_id.is_(None),
+      ~models.Chat.project_id.in_(select(models.Project.id)),
+    ),
   )
   chat_ids = [
     chat_id for chat_id in db.scalars(expired_chat_ids).all()

@@ -569,13 +569,13 @@ def list_chats(
     models.Chat.pending_question_id,
   ).filter(
     models.Chat.deleted_at.is_(None),
-    # A project chat is reached through its project, not duplicated in the
-    # global Recents list. It remains a normal Chat row so the existing chat
-    # runtime, direct routes, search, recovery, and agent lifecycle stay the
-    # single implementation for every conversation surface.
+    models.Chat.project_id.is_(None),
+    # Rolling-upgrade compatibility for a row not yet backfilled by migration
+    # 0014. Project chats live inside Projects, not duplicated in Recents.
     ~models.Chat.id.in_(
       db.query(models.Project.chat_id).filter(
         models.Project.deleted_at.is_(None),
+        models.Project.chat_id.isnot(None),
       )
     ),
   )
@@ -1763,29 +1763,6 @@ async def delete_chat(
   db: Session = Depends(get_db),
 ):
   """Soft-deletes a chat and stops any running agent for it."""
-  linked_project = db.query(
-    models.Project.id, models.Project.name, models.Project.deleted_at,
-  ).filter(
-    models.Project.chat_id == chat_id,
-  ).first()
-  if linked_project is not None:
-    project_deleted = linked_project.deleted_at is not None
-    raise HTTPException(
-      status_code=409,
-      detail={
-        "code": "project_primary_chat",
-        "message": (
-          f"This is the primary chat for project “{linked_project.name}”. "
-          + (
-            "Recover it through the project."
-            if project_deleted
-            else "Delete the project or attach a different chat first."
-          )
-        ),
-        "project_id": linked_project.id,
-        "project_deleted": project_deleted,
-      },
-    )
   # Only attempt to stop if the chat is actually running. An idle chat
   # has no proc/SDK client/session to interrupt, so calling
   # stop_chat_for would be a no-op — but a transient error during the
@@ -1859,14 +1836,17 @@ def recover_chat(
   db: Session = Depends(get_db),
 ):
   """Restores a soft-deleted chat if the TTL window has not expired."""
-  linked_project = db.query(models.Project.id).filter(
-    models.Project.chat_id == chat_id,
+  linked_project = db.query(models.Project.id).join(
+    models.Chat, models.Chat.project_id == models.Project.id,
+  ).filter(
+    models.Chat.id == chat_id,
+    models.Project.deleted_at.isnot(None),
   ).first()
   if linked_project is not None:
     raise HTTPException(
       status_code=409,
       detail={
-        "code": "project_primary_chat",
+        "code": "project_deleted",
         "message": "Recover this chat through its project.",
         "project_id": linked_project.id,
       },

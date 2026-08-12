@@ -15,7 +15,20 @@ from app.project_retention import purge_expired_project_tombstones
 from app.timeutil import SOFT_DELETE_TTL, now_naive_utc
 
 
-def test_blank_project_creates_unique_primary_chat_and_confined_files(
+def _create_project_chat(client, auth, project, title="New chat", request_id=None):
+  response = client.post(
+    f"/api/projects/{project['id']}/chats",
+    headers=auth,
+    json={
+      "title": title,
+      "recovery_request_id": request_id or f"{project['id']}:{title}",
+    },
+  )
+  assert response.status_code == 201, response.text
+  return response.json()
+
+
+def test_blank_project_starts_without_chat_and_has_confined_files(
   client, auth, db,
 ):
   created = client.post(
@@ -26,16 +39,31 @@ def test_blank_project_creates_unique_primary_chat_and_confined_files(
   assert created.status_code == 200, created.text
   project = created.json()
   assert project["name"] == "Research"
-  assert project["chat_id"]
-  assert db.query(models.Chat).filter(
-    models.Chat.id == project["chat_id"],
-    models.Chat.deleted_at.is_(None),
-  ).one()
-  # Project chats remain directly addressable, but their project is the one
-  # drawer location. They must not also appear as unrelated global Recents.
+  assert project["chat_id"] is None
+  assert client.get(
+    f"/api/projects/{project['id']}/chats", headers=auth,
+  ).json() == []
+
+  first_chat = _create_project_chat(
+    client, auth, project, "Research notes", "notes-chat",
+  )
+  second_chat = _create_project_chat(
+    client, auth, project, "Implementation", "implementation-chat",
+  )
+  listed_chats = client.get(
+    f"/api/projects/{project['id']}/chats", headers=auth,
+  ).json()
+  assert {row["id"] for row in listed_chats} == {
+    first_chat["id"], second_chat["id"],
+  }
+  assert all(db.get(models.Chat, row["id"]).project_id == project["id"]
+             for row in listed_chats)
+  # Project chats remain directly addressable, but live inside their Project
+  # rather than appearing as unrelated global Recents.
   chat_list = client.get("/api/chats", headers=auth)
   assert chat_list.status_code == 200
-  assert project["chat_id"] not in {row["id"] for row in chat_list.json()}
+  assert not ({first_chat["id"], second_chat["id"]}
+              & {row["id"] for row in chat_list.json()})
 
   saved = client.put(
     f"/api/projects/{project['id']}/file?path=notes/idea.md",
@@ -109,7 +137,7 @@ def test_project_creation_retry_is_idempotent(client, auth, db):
   assert first.json()["id"] == second.json()["id"]
   assert first.json()["chat_id"] == second.json()["chat_id"]
   assert db.query(models.Project).count() == 1
-  assert db.query(models.Chat).count() == 1
+  assert db.query(models.Chat).count() == 0
 
 
 def test_concurrent_project_creation_retry_has_one_row_and_root(client, auth, db):
@@ -126,26 +154,29 @@ def test_concurrent_project_creation_retry_has_one_row_and_root(client, auth, db
   assert [response.status_code for response in responses] == [200, 200]
   assert len({response.json()["id"] for response in responses}) == 1
   assert db.query(models.Project).count() == 1
-  assert db.query(models.Chat).count() == 1
+  assert db.query(models.Chat).count() == 0
   row = db.query(models.Project).one()
   assert (Path(os.environ["DATA_DIR"]) / row.root_path).is_dir()
 
 
-def test_linked_chat_cannot_be_deleted_and_project_context_is_injected(
+def test_each_project_chat_gets_context_and_can_be_deleted_independently(
   client, auth, db,
 ):
   project = client.post(
     "/api/projects", headers=auth,
     json={"name": "Site", "template_id": "blank"},
   ).json()
-  deleted = client.delete(f"/api/chats/{project['chat_id']}", headers=auth)
-  assert deleted.status_code == 409
-  assert deleted.json()["detail"]["code"] == "project_primary_chat"
+  chat = _create_project_chat(client, auth, project, "Site plan")
 
-  block, env = _build_app_context(db, project["chat_id"], os.environ["DATA_DIR"])
+  block, env = _build_app_context(db, chat["id"], os.environ["DATA_DIR"])
   assert "<project_context>" in block
   assert env["PROJECT_ID"] == project["id"]
   assert Path(env["PROJECT_ROOT"]).is_dir()
+  deleted = client.delete(f"/api/chats/{chat['id']}", headers=auth)
+  assert deleted.status_code == 204
+  assert client.get(
+    f"/api/projects/{project['id']}/chats", headers=auth,
+  ).json() == []
 
 
 def test_manifest_template_scaffolds_files_and_snapshots_metadata(
@@ -314,7 +345,9 @@ def test_legacy_import_reuses_project_chat_without_moving_files(
   )
   assert imported.status_code == 200, imported.text
   project = imported.json()
-  assert project["chat_id"] == chat.id
+  assert project["chat_id"] is None
+  db.refresh(chat)
+  assert chat.project_id == project["id"]
   assert (legacy / "files" / "index.html").is_file()
   opened = client.get(
     f"/api/projects/{project['id']}/file?path=index.html", headers=auth,
@@ -327,13 +360,15 @@ def test_legacy_import_reuses_project_chat_without_moving_files(
   assert (legacy / "files" / "index.html").read_text() == "<h1>Mine</h1>"
 
 
-def test_project_delete_and_recover_are_atomic_with_primary_chat(
+def test_project_delete_and_recover_are_atomic_with_its_live_chats(
   client, auth, db,
 ):
   project = client.post(
     "/api/projects", headers=auth,
     json={"name": "Recover me", "template_id": "blank"},
   ).json()
+  first = _create_project_chat(client, auth, project, "Plan")
+  second = _create_project_chat(client, auth, project, "Build")
   row = db.get(models.Project, project["id"])
   root = Path(os.environ["DATA_DIR"]) / row.root_path
   deleted = client.delete(f"/api/projects/{project['id']}", headers=auth)
@@ -341,30 +376,23 @@ def test_project_delete_and_recover_are_atomic_with_primary_chat(
   assert root.is_dir()
   db.expire_all()
   assert db.get(models.Project, project["id"]).deleted_at is not None
-  assert db.get(models.Chat, project["chat_id"]).deleted_at is not None
-  assert all(
-    row["id"] != project["chat_id"]
-    for row in client.get("/api/chats", headers=auth).json()
-  )
+  assert db.get(models.Chat, first["id"]).deleted_at is not None
+  assert db.get(models.Chat, second["id"]).deleted_at is not None
 
   direct_chat_recovery = client.post(
-    f"/api/chats/{project['chat_id']}/recover", headers=auth,
+    f"/api/chats/{first['id']}/recover", headers=auth,
   )
   assert direct_chat_recovery.status_code == 409
-  assert direct_chat_recovery.json()["detail"]["code"] == "project_primary_chat"
-  direct_chat_delete = client.delete(
-    f"/api/chats/{project['chat_id']}", headers=auth,
-  )
-  assert direct_chat_delete.status_code == 409
+  assert direct_chat_recovery.json()["detail"]["code"] == "project_deleted"
 
   recovered = client.post(
     f"/api/projects/{project['id']}/recover", headers=auth,
   )
   assert recovered.status_code == 200
-  assert recovered.json()["chat_id"] == project["chat_id"]
   db.expire_all()
   assert db.get(models.Project, project["id"]).deleted_at is None
-  assert db.get(models.Chat, project["chat_id"]).deleted_at is None
+  assert db.get(models.Chat, first["id"]).deleted_at is None
+  assert db.get(models.Chat, second["id"]).deleted_at is None
 
 
 def _expire_project_pair(db, project_id: str, chat_id: str) -> None:
@@ -383,6 +411,7 @@ def test_project_retention_removes_native_root_and_chat_but_preserves_legacy_roo
   ).json()
   native_row = db.get(models.Project, native["id"])
   native_root = Path(os.environ["DATA_DIR"]) / native_row.root_path
+  native_chat = _create_project_chat(client, auth, native, "Native chat")
 
   legacy_root = Path(os.environ["DATA_DIR"]) / "apps" / "legacy" / "files"
   legacy_root.mkdir(parents=True)
@@ -393,24 +422,25 @@ def test_project_retention_removes_native_root_and_chat_but_preserves_legacy_roo
     name="Imported legacy",
     project_type="webstudio:web-app",
     root_path="apps/legacy/files",
-    chat_id=legacy_chat.id,
+    chat_id=None,
     template_snapshot_json={},
     legacy_source_json={"app_id": 1, "project_id": "default"},
   )
   legacy_project_id = legacy_project.id
   legacy_chat_id = legacy_chat.id
+  legacy_chat.project_id = legacy_project_id
   db.add_all([legacy_chat, legacy_project])
   db.commit()
-  _expire_project_pair(db, native["id"], native["chat_id"])
+  _expire_project_pair(db, native["id"], native_chat["id"])
   _expire_project_pair(db, legacy_project_id, legacy_chat_id)
 
   purged_chats = purge_expired_chat_tombstones(db)
 
   assert db.get(models.Project, native["id"]) is None
   assert db.get(models.Project, legacy_project_id) is None
-  assert db.get(models.Chat, native["chat_id"]) is None
+  assert db.get(models.Chat, native_chat["id"]) is None
   assert db.get(models.Chat, legacy_chat_id) is None
-  assert native["chat_id"] in purged_chats
+  assert native_chat["id"] in purged_chats
   assert legacy_chat_id in purged_chats
   assert not native_root.exists()
   assert (legacy_root / "keep.txt").read_text() == "legacy"
@@ -425,7 +455,8 @@ def test_project_retention_does_not_touch_root_when_database_commit_fails(
   ).json()
   row = db.get(models.Project, project["id"])
   root = Path(os.environ["DATA_DIR"]) / row.root_path
-  _expire_project_pair(db, project["id"], project["chat_id"])
+  chat = _create_project_chat(client, auth, project, "Still recoverable chat")
+  _expire_project_pair(db, project["id"], chat["id"])
 
   real_commit = db.commit
   monkeypatch.setattr(db, "commit", lambda: (_ for _ in ()).throw(RuntimeError("commit failed")))
@@ -436,7 +467,7 @@ def test_project_retention_does_not_touch_root_when_database_commit_fails(
   monkeypatch.setattr(db, "commit", real_commit)
   db.expire_all()
   assert db.get(models.Project, project["id"]) is not None
-  assert db.get(models.Chat, project["chat_id"]) is not None
+  assert db.get(models.Chat, chat["id"]) is not None
 
 
 def test_project_retention_retries_native_orphan_after_filesystem_failure(
@@ -448,7 +479,8 @@ def test_project_retention_retries_native_orphan_after_filesystem_failure(
   ).json()
   row = db.get(models.Project, project["id"])
   root = Path(os.environ["DATA_DIR"]) / row.root_path
-  _expire_project_pair(db, project["id"], project["chat_id"])
+  chat = _create_project_chat(client, auth, project, "Retry cleanup chat")
+  _expire_project_pair(db, project["id"], chat["id"])
 
   import app.project_retention as retention
   real_remove = retention._remove_owned_root

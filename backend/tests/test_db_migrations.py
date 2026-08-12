@@ -1017,8 +1017,56 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0011_delegation_parent_wake",
     "0012_connector_oauth_gcloud",
     "0013_app_project_templates",
+    "0014_project_chat_collection",
   ]
   assert second == first
+
+
+def test_project_chat_collection_migration_preserves_and_backfills_legacy_pair(
+  tmp_path,
+):
+  eng = create_engine(f"sqlite:///{tmp_path / 'project-chats.db'}")
+  with eng.begin() as conn:
+    conn.execute(text("CREATE TABLE apps (id INTEGER PRIMARY KEY)"))
+    conn.execute(text(
+      "CREATE TABLE chats ("
+      "id VARCHAR(64) PRIMARY KEY, title VARCHAR(256) NOT NULL"
+      ")"
+    ))
+    conn.execute(text(
+      "CREATE TABLE projects ("
+      "id VARCHAR(64) PRIMARY KEY, name VARCHAR(256) NOT NULL, "
+      "project_type VARCHAR(128) NOT NULL, root_path VARCHAR(1024) NOT NULL UNIQUE, "
+      "chat_id VARCHAR(64) NOT NULL UNIQUE REFERENCES chats(id), "
+      "source_app_id INTEGER NULL REFERENCES apps(id) ON DELETE SET NULL, "
+      "template_snapshot_json JSON NOT NULL, legacy_source_json JSON NULL, "
+      "deleted_at DATETIME NULL, created_at DATETIME NULL, updated_at DATETIME NULL"
+      ")"
+    ))
+    conn.execute(text("INSERT INTO chats (id, title) VALUES ('chat-1', 'Legacy')"))
+    conn.execute(text(
+      "INSERT INTO projects "
+      "(id, name, project_type, root_path, chat_id, template_snapshot_json) "
+      "VALUES ('project-1', 'Legacy', 'blank', 'projects/project-1', "
+      "'chat-1', '{}')"
+    ))
+
+  database._add_project_chat_collection(eng)
+  database._add_project_chat_collection(eng)
+
+  project_columns = {
+    column["name"]: column for column in inspect(eng).get_columns("projects")
+  }
+  chat_columns = {column["name"] for column in inspect(eng).get_columns("chats")}
+  assert project_columns["chat_id"]["nullable"] is True
+  assert "project_id" in chat_columns
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT project_id FROM chats WHERE id = 'chat-1'"
+    )).scalar() == "project-1"
+    assert conn.execute(text(
+      "SELECT chat_id FROM projects WHERE id = 'project-1'"
+    )).scalar() is None
 
 
 def test_pending_question_migration_backfills_only_active_latest_question(

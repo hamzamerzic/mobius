@@ -966,8 +966,8 @@ export default function Shell({ onInitialVisualReady }) {
   const appsPaned = workspaceChromeActive ? visibleTabRects.get(APPS_KEY) : null
   const appsFullBleed = !appsPaned && fullBleedKey === APPS_KEY
   // Projects launcher and each project are ordinary canonical workspace items.
-  // The project tab owns files/editor state; its primary chat remains a distinct
-  // chat tab, so opening both never mounts a second ChatView inside Projects.
+  // Project chats are separate resource tabs opened explicitly from the
+  // project browser, so Projects never mounts a second ChatView internally.
   const PROJECTS_KEY = tabModel.PROJECTS_TAB_KEY
   const projectsVisibleAsTab = fullBleedKey === PROJECTS_KEY
     || projection.visibleLeaves.some(id => workspace.panes[id]?.activeTabKey === PROJECTS_KEY)
@@ -1192,20 +1192,34 @@ export default function Shell({ onInitialVisualReady }) {
     for (const project of projects) m.set(String(project.id), project)
     return m
   }, [projects])
-  const projectByChatId = useMemo(() => {
-    const m = new Map()
-    for (const project of projects) m.set(String(project.chat_id), project)
-    return m
-  }, [projects])
   const [projectLocations, setProjectLocations] = useState({})
   const [projectRenameId, setProjectRenameId] = useState(null)
+  const [projectChatMeta, setProjectChatMeta] = useState({})
+  const projectChatLookup = useMemo(() => {
+    const next = { ...projectChatMeta }
+    for (const project of projects) {
+      for (const chat of project.chats || []) {
+        next[String(chat.id)] = {
+          projectId: String(project.id),
+          projectName: project.name,
+          title: chat.title,
+        }
+      }
+    }
+    return next
+  }, [projectChatMeta, projects])
+  const activeProjectChatProjectId = activeView === 'chat'
+    ? projectChatLookup[String(activeChatId)]?.projectId
+    : null
   const labelForTab = useCallback((tab) => {
     if (tab.kind === 'apps') return 'Apps'
     if (tab.kind === 'projects') return 'Projects'
     if (tab.kind === 'settings') return 'Settings'
     if (tab.kind === 'chat') {
-      const project = projectByChatId.get(tab.id)
-      return project ? `${project.name} · Chat` : chatById.get(tab.id)?.title || 'Chat'
+      const projectChat = projectChatLookup[tab.id]
+      return projectChat
+        ? `${projectChat.projectName} · ${projectChat.title || 'Chat'}`
+        : chatById.get(tab.id)?.title || 'Chat'
     }
     if (tab.kind === 'project') {
       const name = projectById.get(tab.id)?.name || 'Project'
@@ -1213,7 +1227,7 @@ export default function Shell({ onInitialVisualReady }) {
       return location ? `${name} · ${location.split('/').pop()}` : name
     }
     return appById.get(tab.id)?.name || 'App'
-  }, [chatById, appById, projectByChatId, projectById, projectLocations])
+  }, [chatById, appById, projectById, projectChatLookup, projectLocations])
 
   const renderedProjectIds = useMemo(() => {
     const ids = new Set(
@@ -1225,77 +1239,107 @@ export default function Shell({ onInitialVisualReady }) {
   }, [openTabs, workspace.singleScreen])
 
   function openProject(project) {
-    if (!project?.id || !project?.chat_id) return
-    // The project list is authoritative evidence that its primary chat exists;
-    // avoid treating its intentional absence from global Recents as a possible
-    // deletion and issuing a redundant direct-chat probe on every open.
-    knownExistingOffListChatIdsRef.current.add(String(project.chat_id))
+    if (!project?.id) return
     navTo('project', { projectId: project.id })
     dispatchWorkspace({
       type: 'APPLY_PLACEMENT',
       toast: null,
       resolve: (current) => {
         let next = paneModel.setViewMode(current, 'panes')
-        // Opening a project establishes one clear files + companion-chat pair.
-        // Retire companion chats from other projects so repeated project opens
-        // do not grow an accidental pane wall; their files tabs remain open and
-        // selecting either project restores its chat immediately.
-        for (const other of projectsRef.current) {
-          if (
-            String(other.id) !== String(project.id)
-            && other.chat_id
-          ) {
-            next = paneModel.closeTab(
-              next,
-              tabModel.tabKey(tabModel.makeTab('chat', other.chat_id)),
-            )
-          }
-        }
         const projectKey = tabModel.tabKey(tabModel.projectTab(project.id))
         if (!paneModel.paneOf(next, projectKey)) {
           next = paneModel.openTab(next, tabModel.projectTab(project.id))
         }
-        let projectPane = paneModel.paneOf(next, projectKey)
-        if (!projectPane) return next
-
-        const chatTab = tabModel.makeTab('chat', project.chat_id)
-        const chatKey = tabModel.tabKey(chatTab)
-        const chatPane = paneModel.paneOf(next, chatKey)
-        const rect = contentRectRef.current
-        const phone = paneModel.modeForRect(rect) === 'phone'
-        // On a phone, files and chat are sibling tabs in one pane. Rendering a
-        // permanent vertical split made every project a long two-screen page
-        // and obscured where the user was. Desktop keeps the useful side-by-side
-        // files + chat pair.
-        if (phone && chatPane?.id !== projectPane.id) {
-          next = chatPane
-            ? paneModel.moveTab(next, chatKey, { paneId: projectPane.id })
-            : paneModel.openTab(next, chatTab, {
-              paneId: projectPane.id, activate: false, focus: false,
-            })
-        } else if (phone) {
-          // Already co-located: the active project tab is selected below.
-        } else if (chatPane?.id === projectPane.id) {
-          next = paneModel.moveTab(next, chatKey, { paneId: projectPane.id, edge: 'right' })
-        } else if (chatPane) {
-          next = paneModel.setActiveTab(next, chatPane.id, chatKey)
-        } else {
-          const split = paneModel.splitPaneWithTab(next, chatTab, {
-            paneId: projectPane.id, edge: 'right',
-            focus: false,
-          })
-          next = split === next
-            ? paneModel.openTab(next, chatTab, {
-              paneId: projectPane.id, activate: false, focus: false,
-            })
-            : split
-        }
-        projectPane = paneModel.paneOf(next, projectKey)
+        const projectPane = paneModel.paneOf(next, projectKey)
         if (!projectPane) return next
         next = paneModel.setActiveTab(next, projectPane.id, projectKey)
         return paneModel.focusPane(next, projectPane.id)
       },
     })
+  }
+
+  function openProjectChat(project, rawChat) {
+    const rawChatId = typeof rawChat === 'object' ? rawChat?.id : rawChat
+    if (!project?.id || !rawChatId) return
+    const chatId = String(rawChatId)
+    setProjectChatMeta(current => ({
+      ...current,
+      [chatId]: {
+        projectId: String(project.id),
+        projectName: project.name,
+        title: typeof rawChat === 'object' ? rawChat.title : current[chatId]?.title,
+      },
+    }))
+    knownExistingOffListChatIdsRef.current.add(chatId)
+    navTo('chat', { chatId })
+    dispatchWorkspace({
+      type: 'APPLY_PLACEMENT',
+      toast: null,
+      resolve: (current) => {
+        let next = paneModel.setViewMode(current, 'panes')
+        const chatTab = tabModel.makeTab('chat', chatId)
+        const chatKey = tabModel.tabKey(chatTab)
+        const chatPane = paneModel.paneOf(next, chatKey)
+        if (chatPane) {
+          next = paneModel.setActiveTab(next, chatPane.id, chatKey)
+          return paneModel.focusPane(next, chatPane.id)
+        }
+
+        const projectKey = tabModel.tabKey(tabModel.projectTab(project.id))
+        const projectPane = paneModel.paneOf(next, projectKey)
+        if (!projectPane) return paneModel.openTab(next, chatTab)
+        const phone = paneModel.modeForRect(contentRectRef.current) === 'phone'
+        if (phone) {
+          next = paneModel.openTab(next, chatTab, { paneId: projectPane.id })
+        } else {
+          const split = paneModel.splitPaneWithTab(next, chatTab, {
+            paneId: projectPane.id,
+            edge: 'right',
+            focus: true,
+          })
+          next = split === next
+            ? paneModel.openTab(next, chatTab, { paneId: projectPane.id })
+            : split
+        }
+        const owner = paneModel.paneOf(next, chatKey)
+        return owner ? paneModel.focusPane(next, owner.id) : next
+      },
+    })
+  }
+
+  async function createProjectChat(project, { title = 'New chat', prompt = null } = {}) {
+    if (!project?.id) return null
+    const response = await api.projects.createChat(project.id, {
+      title,
+      recovery_request_id: crypto.randomUUID(),
+    })
+    const chat = await jsonOrThrow(response, 'Project chat creation failed:')
+    knownExistingOffListChatIdsRef.current.add(String(chat.id))
+    queryClient.setQueryData(projectQueries.keys.chats(project.id), current => [
+      chat,
+      ...(Array.isArray(current)
+        ? current.filter(row => String(row.id) !== String(chat.id))
+        : []),
+    ])
+    queryClient.setQueryData(projectQueries.keys.all, current => (
+      Array.isArray(current)
+        ? current.map(row => String(row.id) === String(project.id)
+          ? {
+            ...row,
+            chats: [
+              chat,
+              ...(row.chats || []).filter(item => String(item.id) !== String(chat.id)),
+            ],
+          }
+          : row)
+        : current
+    ))
+    openProjectChat(project, chat)
+    if (prompt) {
+      stageComposerHandoff(chat.id, prompt, { autoSend: true })
+      requestComposer(chat.id, { draft: prompt, submit: true })
+    }
+    return chat
   }
 
   async function createProjectFromTemplate(template) {
@@ -1330,12 +1374,12 @@ export default function Shell({ onInitialVisualReady }) {
   const openProjectRef = useRef(openProject)
   openProjectRef.current = openProject
 
-  function runProjectAction(project, action) {
-    if (!project?.chat_id || !action?.prompt) return
-    const chatId = String(project.chat_id)
-    stageComposerHandoff(chatId, action.prompt, { autoSend: true })
-    navTo('chat', { chatId })
-    requestComposer(chatId, { draft: action.prompt, submit: true })
+  async function runProjectAction(project, action) {
+    if (!project?.id || !action?.prompt) return
+    await createProjectChat(project, {
+      title: action.name || `Build ${project.name}`,
+      prompt: action.prompt,
+    })
   }
 
   // Per-chat repair callback for a mounted chat pane (design §2 M13). A pane
@@ -1922,10 +1966,35 @@ export default function Shell({ onInitialVisualReady }) {
       title: event.title,
       updatedAt: event.updatedAt,
     }))
-  }, [projectChatList])
+    const projectChat = projectChatLookup[String(event.chatId)]
+    if (projectChat) {
+      queryClient.setQueryData(
+        projectQueries.keys.chats(projectChat.projectId),
+        rows => withChatRename(Array.isArray(rows) ? rows : [], event.chatId, {
+          title: event.title,
+          updatedAt: event.updatedAt,
+        }),
+      )
+      queryClient.setQueryData(projectQueries.keys.all, rows => (
+        Array.isArray(rows)
+          ? rows.map(project => String(project.id) === projectChat.projectId
+            ? {
+              ...project,
+              chats: withChatRename(
+                Array.isArray(project.chats) ? project.chats : [],
+                event.chatId,
+                { title: event.title, updatedAt: event.updatedAt },
+              ),
+            }
+            : project)
+          : rows
+      ))
+    }
+  }, [projectChatList, projectChatLookup, queryClient])
 
   const confirmChatDeleted = useCallback((id) => {
     const sid = String(id)
+    const projectChat = projectChatLookup[sid]
     rememberConfirmedDeletion(deletedChatIdsRef.current, sid)
     recentlyCreatedChatsRef.current.delete(sid)
     queryClient.setQueryData(chatQueries.keys.all, current => {
@@ -1936,7 +2005,25 @@ export default function Shell({ onInitialVisualReady }) {
       chatsRef.current = next
       return next
     })
-  }, [queryClient])
+    if (projectChat) {
+      queryClient.setQueryData(
+        projectQueries.keys.chats(projectChat.projectId),
+        rows => (Array.isArray(rows)
+          ? rows.filter(chat => String(chat.id) !== sid)
+          : rows),
+      )
+      queryClient.setQueryData(projectQueries.keys.all, rows => (
+        Array.isArray(rows)
+          ? rows.map(project => String(project.id) === projectChat.projectId
+            ? {
+              ...project,
+              chats: (project.chats || []).filter(chat => String(chat.id) !== sid),
+            }
+            : project)
+          : rows
+      ))
+    }
+  }, [projectChatLookup, queryClient])
 
   const confirmAppDeleted = useCallback((id) => {
     const sid = String(id)
@@ -1953,7 +2040,13 @@ export default function Shell({ onInitialVisualReady }) {
 
   const confirmChatRecovered = useCallback((id) => {
     forgetConfirmedDeletion(deletedChatIdsRef.current, id)
-  }, [])
+    const projectChat = projectChatLookup[String(id)]
+    if (projectChat) {
+      void queryClient.invalidateQueries({
+        queryKey: projectQueries.keys.chats(projectChat.projectId), exact: true,
+      })
+    }
+  }, [projectChatLookup, queryClient])
 
   const confirmChatIdentityIsLive = useCallback((id) => (
     forgetConfirmedDeletionIfExists(
@@ -3306,7 +3399,16 @@ export default function Shell({ onInitialVisualReady }) {
 
   async function deleteProject(project) {
     const projectId = String(project.id)
-    const chatId = String(project.chat_id)
+    let projectChats = queryClient.getQueryData(projectQueries.keys.chats(projectId))
+    if (!Array.isArray(projectChats)) {
+      try {
+        const chatsResponse = await api.projects.chats(projectId)
+        projectChats = await jsonOrThrow(chatsResponse, 'Project chats failed:')
+      } catch {
+        projectChats = []
+      }
+    }
+    const chatIds = projectChats.map(chat => String(chat.id))
     let res
     try {
       res = await api.projects.remove(projectId)
@@ -3323,9 +3425,12 @@ export default function Shell({ onInitialVisualReady }) {
       return false
     }
 
-    confirmChatDeleted(chatId)
-    clearComposerDraft(chatId)
-    chatQueries.messages.remove(queryClient, chatId)
+    for (const chatId of chatIds) {
+      confirmChatDeleted(chatId)
+      clearComposerDraft(chatId)
+      chatQueries.messages.remove(queryClient, chatId)
+    }
+    queryClient.removeQueries({ queryKey: projectQueries.keys.chats(projectId), exact: true })
     queryClient.setQueryData(projectQueries.keys.all, current => (
       Array.isArray(current)
         ? current.filter(candidate => String(candidate.id) !== projectId)
@@ -3333,21 +3438,23 @@ export default function Shell({ onInitialVisualReady }) {
     ))
     navStackRef.current = navStackRef.current.filter(entry => (
       String(entry.projectId ?? '') !== projectId
-      && String(entry.chatId ?? '') !== chatId
+      && !chatIds.includes(String(entry.chatId ?? ''))
     ))
     tombstoneRoute('project', projectId)
-    tombstoneRoute('chat', chatId)
+    for (const chatId of chatIds) tombstoneRoute('chat', chatId)
     navTo('projects')
     dispatchWorkspace({
       type: 'CLOSE_TAB',
       tabKey: tabModel.tabKey(tabModel.projectTab(projectId)),
       reason: 'deleted',
     })
-    dispatchWorkspace({
-      type: 'CLOSE_TAB',
-      tabKey: tabModel.tabKey(tabModel.makeTab('chat', chatId)),
-      reason: 'deleted',
-    })
+    for (const chatId of chatIds) {
+      dispatchWorkspace({
+        type: 'CLOSE_TAB',
+        tabKey: tabModel.tabKey(tabModel.makeTab('chat', chatId)),
+        reason: 'deleted',
+      })
+    }
     await Promise.all([
       projectsQuery.refetch(),
       refreshChats(),
@@ -3360,7 +3467,10 @@ export default function Shell({ onInitialVisualReady }) {
           try {
             const recoverRes = await api.projects.recover(projectId)
             const recovered = await jsonOrThrow(recoverRes, 'Project recovery failed')
-            confirmChatRecovered(chatId)
+            for (const chatId of chatIds) confirmChatRecovered(chatId)
+            void queryClient.invalidateQueries({
+              queryKey: projectQueries.keys.chats(projectId), exact: true,
+            })
             queryClient.setQueryData(projectQueries.keys.all, current => {
               const rows = Array.isArray(current) ? current : []
               return [recovered, ...rows.filter(row => String(row.id) !== projectId)]
@@ -3605,7 +3715,7 @@ export default function Shell({ onInitialVisualReady }) {
           </button>
           <button
             type="button"
-            className={`shell__rail-action${activeView === 'projects' || activeView === 'project' ? ' shell__rail-action--active' : ''}`}
+            className={`shell__rail-action${activeView === 'projects' || activeView === 'project' || activeProjectChatProjectId ? ' shell__rail-action--active' : ''}`}
             aria-label="Projects shortcut"
             title="Projects"
             aria-current={activeView === 'projects' ? 'page' : undefined}
@@ -3657,6 +3767,7 @@ export default function Shell({ onInitialVisualReady }) {
         projects={projects}
         projectsStatus={projectsStatus}
         activeProjectId={activeProjectId}
+        activeProjectChatProjectId={activeProjectChatProjectId}
         projectTemplates={projectTemplates}
         onProject={openProject}
         onProjectsOpen={() => navTo('projects')}
@@ -4136,7 +4247,8 @@ export default function Shell({ onInitialVisualReady }) {
             >
               <ProjectWorkspace
                 project={project}
-                onOpenChat={chatId => navTo('chat', { chatId })}
+                onOpenChat={chat => openProjectChat(project, chat)}
+                onCreateChat={() => createProjectChat(project)}
                 onLocationChange={location => setProjectLocations(current => (
                   current[project.id] === location
                     ? current

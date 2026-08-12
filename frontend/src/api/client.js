@@ -527,6 +527,11 @@ export const api = {
     recover: (projectId) => apiFetch(`/projects/${encodeURIComponent(projectId)}/recover`, {
       method: 'POST',
     }),
+    chats: (projectId) => apiFetch(`/projects/${encodeURIComponent(projectId)}/chats`),
+    createChat: (projectId, payload) => apiFetch(`/projects/${encodeURIComponent(projectId)}/chats`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
     files: (projectId, path = '') => apiFetch(
       `/projects/${encodeURIComponent(projectId)}/files?path=${encodeURIComponent(path)}`,
     ),
