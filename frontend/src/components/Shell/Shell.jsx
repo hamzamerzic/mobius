@@ -155,7 +155,7 @@ const EMPTY_LIST = Object.freeze([])
 // transition completion owns its lifetime, so Shell has no animation timers.
 const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
 
-export default function Shell() {
+export default function Shell({ onInitialVisualReady }) {
   const {
     desktop: desktopSidebarMode,
     open: desktopSidebarOpen,
@@ -601,6 +601,16 @@ export default function Shell() {
   // typing across that ID-less interval.
   const [newChatPresentation, setNewChatPresentation] = useState(null)
   const newChatPresentationRef = useRef(null)
+  // App owns the static launch cover; Shell owns the first rendered workspace
+  // surface. Publish this one-way readiness boundary once so a browser refresh
+  // cannot reveal a chat while its scroll restoration is still deliberately
+  // hidden.
+  const initialVisualReadyRef = useRef(false)
+  const markInitialVisualReady = useCallback(() => {
+    if (initialVisualReadyRef.current) return
+    initialVisualReadyRef.current = true
+    onInitialVisualReady?.()
+  }, [onInitialVisualReady])
   // A slow New-chat allocation replaces the modal drawer visually without
   // consuming its history entry. Destination navigation owns that entry once
   // the concrete chat exists; avoiding an early Back traversal also keeps the
@@ -1012,6 +1022,10 @@ export default function Shell() {
     // Surface owners include both real builder panes and the single world's
     // synthetic slot, so resolve the selected key through their shared boundary.
     if (paneModel.activeKeyForOwner(workspaceStateRef.current.ws, paneKey) !== `chat:${id}`) return
+    // PaneChatView calls this after the destination's display-ready frame has
+    // painted. On the first chat this is also the exact boundary where the
+    // static launch cover may yield without exposing scroll restoration.
+    markInitialVisualReady()
     setPresentedChatBySurface(prev => {
       const next = new Map(prev)
       let changed = false
@@ -1057,9 +1071,22 @@ export default function Shell() {
   }, [
     finishDrawerNavigationPresentation,
     focusedPaneViewIdRef,
+    markInitialVisualReady,
     requestComposer,
     workspaceStateRef,
   ])
+
+  // A launch that opens an app, Settings, or the empty-chat landing has no
+  // ChatView display-ready callback. Once the shell knows it is not waiting on
+  // a concrete chat, one browser frame is the honest visual boundary. A real
+  // chat always takes the callback path above instead.
+  useEffect(() => {
+    if (initialVisualReadyRef.current) return undefined
+    if (activeView === 'chat' && activeChatId) return undefined
+    if (activeView === 'chat' && !chatsQuery.isFetched) return undefined
+    const frame = requestAnimationFrame(() => markInitialVisualReady())
+    return () => cancelAnimationFrame(frame)
+  }, [activeChatId, activeView, chatsQuery.isFetched, markInitialVisualReady])
 
   const finishNewChatPresentationRelease = useCallback((presentation) => {
     if (!presentation?.releasing || newChatPresentationRef.current !== presentation) return

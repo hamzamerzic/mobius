@@ -169,21 +169,20 @@
   </head>
   <!-- Theme bg comes from var(--bg), set by the pre-paint script above. -->
   <body style="margin:0;background:var(--bg,#0d0d0d)">
-    <!-- Theme bg comes from var(--bg), set by the pre-paint script above. -->
-    <div id="splash" style="position:fixed;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;background:var(--bg,#0d0d0d);z-index:9999;transition:opacity .3s ease;contain:strict">
-      <img src="/moebius.png" width="44" height="44" alt="" style="opacity:.4;will-change:opacity" />
-    </div>
+    <!-- Keep startup visually continuous with the saved theme without adding a
+         second brand mark after the device's native splash screen. -->
+    <div id="splash" aria-hidden="true" style="position:fixed;top:0;left:0;right:0;bottom:0;background:var(--bg,#0d0d0d);z-index:9999;transition:opacity .3s ease;contain:strict"></div>
     <div id="root"></div>
     <script>
       // The embedded document must remain blank while its one-use capability
       // is exchanged; never cover that inert state with the full-shell logo.
-      // Only top-level shell loads consult the owner's browser token.
       var isChatEmbed = window.location.pathname === '/shell/embed/chat'
-      var hasOwnerToken = false
-      if (!isChatEmbed) {
-        try { hasOwnerToken = !!localStorage.getItem('token') } catch (_) {}
-      }
-      if (isChatEmbed || hasOwnerToken) {
+      // An authenticated top-level shell keeps this cover through React's
+      // restored-cache and first-frame handshake. Removing it just because a
+      // token exists exposes the empty chat viewport while a long transcript
+      // (especially question cards) is still restoring its reading position.
+      // The opaque embed has no such shell handoff and must stay blank.
+      if (isChatEmbed) {
         var s = document.getElementById('splash')
         if (s) s.remove()
       }
@@ -195,6 +194,11 @@
       // and keep the operator repair path as the last resort.
       setTimeout(function() {
         if (!document.getElementById('root').hasChildNodes()) {
+          // The normal authenticated handoff intentionally retains the cover.
+          // A failed JavaScript boot has no Shell callback to release it, so
+          // remove it before exposing the recovery action.
+          var splash = document.getElementById('splash')
+          if (splash) splash.remove()
           var d = document.createElement('div')
           var retry = document.createElement('a')
           d.setAttribute('role', 'alert')
