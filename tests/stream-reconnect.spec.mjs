@@ -1106,7 +1106,9 @@ test.describe('Stream reconnection', () => {
 
     // A preserved draft remains editable, but the question barrier owns the
     // action slot: offer Stop rather than a Send that can only receive 409.
-    await page.getByLabel('Message Möbius…').fill('keep this draft safe')
+    const activeComposer = page.locator('[data-chat-surface="painted"]')
+      .getByLabel('Message Möbius…')
+    await activeComposer.fill('keep this draft safe')
     await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Send' })).toHaveCount(0)
 
@@ -1134,7 +1136,7 @@ test.describe('Stream reconnection', () => {
     expect(JSON.stringify(answerPosted.answers)).toContain('Red')
     await expect(questionCard).toHaveCount(1)
     await expect(questionCard.locator('.qcard__submit')).toHaveText('Submitted')
-    await expect(page.getByLabel('Message Möbius…'))
+    await expect(activeComposer)
       .toHaveValue('keep this draft safe')
     await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
   })
