@@ -1258,6 +1258,26 @@ def test_dispatch_claude_edit_carries_shared_diff_preview(tmp_path):
   assert "-before\n+after" in bus.events[1]["edit_preview"]["diff"]
 
 
+def test_failed_claude_edit_result_carries_explicit_failure_status():
+  bus = _Bus()
+  msg = UserMessage(content=[ToolResultBlock(
+    tool_use_id="edit-1",
+    content="old_string was not found",
+    is_error=True,
+  )])
+
+  dispatch_sdk_message(msg, bus, None)
+
+  assert bus.events[0] == {
+    "type": "tool_output",
+    "content": "old_string was not found",
+    "tool_use_id": "edit-1",
+    "output_complete": True,
+    "output_exit_code": 1,
+  }
+  assert bus.events[1] == {"type": "tool_end", "tool_use_id": "edit-1"}
+
+
 def test_dispatch_skill_tool_emits_skill_loaded_and_logs(monkeypatch):
   """A Skill tool_use emits a skill_loaded event AFTER its tool_start
   and appends one skill_loaded record to the activity log."""

@@ -532,6 +532,7 @@ def dispatch_sdk_message(
           "content": output,
           "tool_use_id": block.tool_use_id,
           "output_complete": True,
+          **({"output_exit_code": 1} if block.is_error else {}),
         })
         if output.startswith("Web search results for query"):
           sources = sources_from_websearch_text(output)

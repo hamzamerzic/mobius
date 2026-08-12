@@ -1,6 +1,10 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Check, Copy } from '@openai/apps-sdk-ui/components/Icon'
-import { formatToolResult, toolResultCopyText } from './toolResultFormat.js'
+import {
+  formatToolResult,
+  toolBlockFailed,
+  toolResultCopyText,
+} from './toolResultFormat.js'
 import { copyPlainText } from './messageCopy.js'
 import { fetchLazyText } from './lazySidecar.js'
 import {
@@ -125,12 +129,13 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
   const iconKind = toolActivityIcon(effectiveName)
   const isImageTool = effectiveName === 'ViewImage'
   const hasEditPreview = typeof t.edit_preview?.diff === 'string'
+  const failed = toolBlockFailed(t)
   // Historical activities can contain many closed edits. Keep the durable
   // marker cheap and defer parsing until this disclosure is prepared.
   const wantsPreparation = prepareRequested || desiredOpen
   const editPreview = useMemo(
-    () => (wantsPreparation ? toolEditPreview(t.edit_preview) : null),
-    [t.edit_preview, wantsPreparation],
+    () => (wantsPreparation && !failed ? toolEditPreview(t.edit_preview) : null),
+    [failed, t.edit_preview, wantsPreparation],
   )
   const durableImage = useMemo(() => (
     isImageTool ? durableImageReference(t.input) : null
@@ -275,7 +280,6 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
   const exitCode = t.output_exit_code != null
     ? t.output_exit_code
     : (r && r.kind === 'terminal' ? r.exitCode : null)
-  const failed = exitCode != null && exitCode !== 0
   const excerptOnly = !!t.output_truncated && (
     t.status === 'running'
     || missingOutput

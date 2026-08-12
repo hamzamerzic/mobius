@@ -85,6 +85,14 @@ test('technical command failures stay behind the top-level disclosure', () => {
     'collapsed activity chrome stays visually neutral')
 })
 
+test('failed edit tools do not present proposed input as completed changes', () => {
+  assert.match(toolBlock, /const failed = toolBlockFailed\(t\)/)
+  assert.match(
+    toolBlock,
+    /wantsPreparation && !failed \? toolEditPreview\(t\.edit_preview\) : null/,
+  )
+})
+
 test('viewed images expand directly without repeating their path or result card', () => {
   assert.match(toolBlock, /open && t\.input && !isImageTool/,
     'the disclosure row already names a viewed image path')
