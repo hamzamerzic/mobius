@@ -48,7 +48,7 @@ test('focusComposerElement preserves scroll and the current selection', () => {
   }
   assert.equal(focusComposerElement(el), true)
   assert.deepEqual(calls, [[{ preventScroll: true }]])
-  assert.deepEqual(selections, [])
+  assert.deepEqual(selections, [[11, 11]])
 })
 
 test('focusComposerElement falls back for older focus implementations', () => {

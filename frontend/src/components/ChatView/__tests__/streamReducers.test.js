@@ -31,6 +31,7 @@ import {
   repairInterleavedQuestionText,
   replaceTextItem,
   startToolLifecycle,
+  attachToolInput,
 } from '../streamReducers.js'
 import { questionKey } from '../questionKey.js'
 
@@ -56,6 +57,35 @@ test('Codex tool start preserves provider-neutral Memory recall metadata', () =>
   })
   assert.deepEqual(items[0].recall, { status: 'searching' })
   assert.equal(items[0].tool_use_id, 'cmd-1')
+})
+
+test('tool start preserves the shared edit preview for either provider', () => {
+  const editPreview = {
+    diff: 'diff --git a/a b/a\n@@ -1 +1 @@\n-a\n+b',
+    truncated: false,
+  }
+  const items = startToolLifecycle([], {
+    tool: 'Edit', input: 'a', tool_use_id: 'edit-1', edit_preview: editPreview,
+  })
+
+  assert.equal(items[0].edit_preview, editPreview)
+})
+
+test('a later Codex patch update replaces the live edit preview by identity', () => {
+  const first = { diff: 'diff --git a/a b/a', truncated: false }
+  const final = {
+    diff: 'diff --git a/a b/a\n@@ -1 +1 @@\n-a\n+b',
+    truncated: false,
+  }
+  const started = startToolLifecycle([], {
+    tool: 'Edit', input: 'a', tool_use_id: 'edit-1', edit_preview: first,
+  })
+  const updated = attachToolInput(started, {
+    type: 'tool_input', input: 'a', tool_use_id: 'edit-1', edit_preview: final,
+  })
+
+  assert.equal(updated[0].edit_preview, final)
+  assert.equal(started[0].edit_preview, first, 'the live snapshot stays immutable')
 })
 
 test('text item identity keeps late deltas before an interleaved question', () => {

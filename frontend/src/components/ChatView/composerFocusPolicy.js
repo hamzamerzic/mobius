@@ -27,5 +27,6 @@ export function focusComposerElement(el) {
   } catch {
     el.focus()
   }
+  placeCaretAtTextEnd(el)
   return true
 }

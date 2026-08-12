@@ -65,6 +65,75 @@ def test_app_token_can_create_and_send_to_own_chat(client, owner_token, db):
   assert r.status_code == 202, r.text
 
 
+def test_app_chat_first_send_preserves_provider_selected_at_create(
+  client, owner_token, db, monkeypatch,
+):
+  """An unrelated owner default cannot replace an app chat's provider."""
+  from app.routes import chats_stream
+
+  _, app_token = _make_app(client, owner_token, "provider-preserving-chat")
+  monkeypatch.setattr(
+    chats_stream, "resolve_default_provider", lambda *_: "claude",
+  )
+
+  for sender_token in (app_token, owner_token):
+    created = client.post(
+      "/api/app-chats",
+      json={"title": "Codex workflow", "provider": "codex"},
+      headers={"Authorization": f"Bearer {app_token}"},
+    )
+    assert created.status_code == 201, created.text
+    chat_id = created.json()["id"]
+
+    sent = client.post(
+      f"/api/chats/{chat_id}/messages",
+      json={"content": "run the selected workflow provider"},
+      headers={"Authorization": f"Bearer {sender_token}"},
+    )
+    assert sent.status_code == 202, sent.text
+    db.expire_all()
+    row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+    assert row.provider == "codex"
+    run = db.query(models.ChatRun).filter(
+      models.ChatRun.chat_id == chat_id,
+    ).order_by(models.ChatRun.started_at.desc()).first()
+    assert run is not None
+    assert run.provider == "codex"
+
+
+def test_owner_chat_first_send_still_uses_live_default(
+  client, owner_token, db, monkeypatch,
+):
+  """The app-chat exception must not freeze an ordinary empty chat."""
+  from app.routes import chats_stream
+
+  created = client.post(
+    "/api/chats",
+    json={"title": "Empty owner chat"},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert created.status_code == 200, created.text
+  chat_id = created.json()["id"]
+  monkeypatch.setattr(
+    chats_stream, "resolve_default_provider", lambda *_: "codex",
+  )
+
+  sent = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={"content": "use my current default"},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert sent.status_code == 202, sent.text
+  db.expire_all()
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  assert row.provider == "codex"
+  run = db.query(models.ChatRun).filter(
+    models.ChatRun.chat_id == chat_id,
+  ).order_by(models.ChatRun.started_at.desc()).first()
+  assert run is not None
+  assert run.provider == "codex"
+
+
 def test_owner_chat_list_includes_only_owner_visible_app_chats(
   client, owner_token, db
 ):

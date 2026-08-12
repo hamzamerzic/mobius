@@ -1,0 +1,12 @@
+/* Edit previews belong to the transcript's one vertical scroll surface. */
+
+/* Generic command/result details are deliberately capped. An edit diff is
+   different: it is reading content, already bounded at the provider boundary,
+   and its own code surface handles long lines horizontally. Letting the generic
+   200px detail scroller survive here creates two vertical owners; wheel/touch
+   gestures then spill from the tool into the transcript and make the dynamic
+   tail reservation appear to jump. */
+.chat__tool-detail.chat__tool-detail--edit {
+  max-height: none;
+  overflow-y: visible;
+}

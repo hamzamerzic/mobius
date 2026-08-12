@@ -614,6 +614,8 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       block["tool_use_id"] = tool_use_id
     if isinstance(event.get("recall"), dict):
       block["recall"] = event["recall"]
+    if isinstance(event.get("edit_preview"), dict):
+      block["edit_preview"] = event["edit_preview"]
     assistant_blocks.append(block)
     return True
 
@@ -629,6 +631,8 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       # that authorizes the later output phase to cite notes.
       if isinstance(event.get("recall"), dict):
         blk["recall"] = event["recall"]
+      if isinstance(event.get("edit_preview"), dict):
+        blk["edit_preview"] = event["edit_preview"]
 
     tool_use_id = event.get("tool_use_id")
     if tool_use_id:

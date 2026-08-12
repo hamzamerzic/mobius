@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 const toolBlock = readFileSync(new URL('../ToolBlock.jsx', import.meta.url), 'utf8')
 const toolImageResult = readFileSync(new URL('../ToolImageResult.jsx', import.meta.url), 'utf8')
 const toolImagePreview = readFileSync(new URL('../useToolImagePreview.js', import.meta.url), 'utf8')
+const toolEditPreviewCss = readFileSync(new URL('../ToolEditPreview.css', import.meta.url), 'utf8')
 const activityHeader = readFileSync(new URL('../ActivityLineHeader.jsx', import.meta.url), 'utf8')
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 const indexCss = readFileSync(new URL('../../../index.css', import.meta.url), 'utf8')
@@ -59,6 +60,19 @@ test('tool detail is a third nested level with labeled command and output', () =
     'output aligns beneath the child label')
 })
 
+test('edit detail hands vertical scrolling to the transcript', () => {
+  assert.match(toolBlock,
+    /editPreview \? ' chat__tool-detail--edit' : ''/,
+    'only a successfully parsed edit preview escapes the generic output cap')
+  const editRule = toolEditPreviewCss.match(
+    /\.chat__tool-detail\.chat__tool-detail--edit\s*\{[^}]*\}/s,
+  )?.[0] || ''
+  assert.match(editRule, /max-height:\s*none/)
+  assert.match(editRule, /overflow-y:\s*visible/,
+    'an edit card must not retain a second vertical scroll owner')
+  assert.doesNotMatch(editRule, /overflow-y:\s*(?:auto|scroll)/)
+})
+
 test('technical command failures stay behind the top-level disclosure', () => {
   assert.doesNotMatch(activityHeader, /exitCode|chat__activity-chip|displayState === 'error'/,
     'a collapsed activity overview must not present a command exit as a turn-level alarm')
@@ -69,6 +83,14 @@ test('technical command failures stay behind the top-level disclosure', () => {
     'the exact code remains available in the disclosed command output')
   assert.doesNotMatch(chatCss, /\.chat__activity--error|\.chat__activity-chip/,
     'collapsed activity chrome stays visually neutral')
+})
+
+test('failed edit tools do not present proposed input as completed changes', () => {
+  assert.match(toolBlock, /const failed = toolBlockFailed\(t\)/)
+  assert.match(
+    toolBlock,
+    /wantsPreparation && !failed \? toolEditPreview\(t\.edit_preview\) : null/,
+  )
 })
 
 test('viewed images expand directly without repeating their path or result card', () => {

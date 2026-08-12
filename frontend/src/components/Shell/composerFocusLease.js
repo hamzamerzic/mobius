@@ -21,10 +21,7 @@ export function beginTouchComposerFocusLease(el, {
   if (matchMediaImpl(TOUCH_PRIMARY_QUERY)?.matches !== true) return false
   el.value = typeof initialValue === 'string' ? initialValue : ''
   const focused = focusComposerElement(el)
-  if (focused) {
-    leaseOwners.set(el, owner)
-    placeCaretAtTextEnd(el)
-  }
+  if (focused) leaseOwners.set(el, owner)
   return focused
 }
 
