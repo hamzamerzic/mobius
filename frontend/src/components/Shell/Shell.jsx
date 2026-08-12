@@ -3417,6 +3417,13 @@ export default function Shell() {
           const surfaceVisible = !!(paned || fullBleed)
           const appSurfaceInert = !surfaceVisible || heldForChat
           const appRuntimeVisible = visibleAppIds.has(String(id)) && !heldForChat
+          // The held app is the visual handoff cover. Keep its frame visibly
+          // foreground until the chat has painted: apps may legitimately clear
+          // their own UI after `frame-visibility:false`, which would otherwise
+          // reveal the chat's still-settling frame beneath this wrapper. Its
+          // logical runtime remains inactive, so it cannot navigate or claim a
+          // capability during the handoff.
+          const appFrameVisible = appRuntimeVisible || heldForChat
           const posStyle = paned ? {
             top: paned.y,
             left: paned.x,
@@ -3457,12 +3464,15 @@ export default function Shell() {
               // Focused-pane-only: gates safe-area insets + the immersive holder
               // (global last-writer-wins).
               active={tabKey === focusedActiveKey}
-              // Visible in ANY pane: gates frame-visibility + nav-push (§5). A
+              // Visible in ANY pane: gates app navigation and capabilities. A
               // background split's app keeps running and can install sentinels;
               // Settings/immersive-solo/hidden panes exclude it (visibleAppIds).
-              // A held app still paints its last frame as a chat handoff cover,
-              // but it is no longer an active app runtime.
+              // Logical ownership controls app navigation and capabilities.
               visible={appRuntimeVisible}
+              // The cover owns the frame's visual lifetime, independently of
+              // logical app ownership, so its already-painted pixels remain
+              // stable until the chat takes over.
+              frameVisible={appFrameVisible}
               // Every visible pane remains painted beneath the modal scrim, but
               // suspend its iframe interaction while the drawer is open OR during any
               // mode scene (cross-origin app interaction is inert throughout).
