@@ -300,6 +300,78 @@ def test_answer_recovers_durable_question_without_live_pending(
   asyncio.run(go())
 
 
+def test_recovered_answer_clears_pending_question_marker(
+  client, auth, chat, monkeypatch,
+):
+  """The recovered-answer path must clear the durable pending_question_id.
+
+  After a restart, ParkRun re-derives `pending_question_id` from the open tail
+  question, and the in-memory future is gone — so the answer submit takes the
+  RECOVERED path (AppendPending, not AnswerQuestion). If that path merges the
+  answer but leaves the marker set, the marker stays on for the entire recovered
+  turn, so the composer stays question-blocked (Stop-only; no queue, no steer)
+  until the turn finishes. This regression pins that the marker clears the
+  instant the answer is recorded.
+  """
+  scheduled: list[dict] = []
+
+  def fake_schedule_continuation(**kwargs):
+    scheduled.append(kwargs)
+    chat_mod.discard_starting(kwargs["chat_id"])
+
+  monkeypatch.setattr(
+    chats_stream, "_schedule_continuation", fake_schedule_continuation,
+  )
+
+  async def go():
+    qid = "q-marker-clear"
+    _seed_question_block(chat.id, qid)
+    # A real restart's ParkRun leaves the durable marker set to the open
+    # question. Reproduce that starting condition.
+    db = SessionLocal()
+    try:
+      row = db.query(models.Chat).filter(models.Chat.id == chat.id).first()
+      row.pending_question_id = qid
+      db.commit()
+    finally:
+      db.close()
+    assert questions.get(chat.id) is None
+
+    res = await asyncio.get_event_loop().run_in_executor(
+      None,
+      lambda: client.post(
+        f"/api/chats/{chat.id}/messages",
+        json={
+          "content": "- Pick one: b",
+          "hidden": True,
+          "answers": {"Pick one": "b"},
+          "question_id": qid,
+        },
+        headers=auth,
+      ),
+    )
+
+    assert res.status_code == 202, res.text
+    assert res.json()["status"] == "started"
+    assert scheduled, "recovered answer should start a hidden continuation"
+
+    db = SessionLocal()
+    try:
+      row = db.query(models.Chat).filter(models.Chat.id == chat.id).first()
+      question = [
+        b for b in row.messages[1]["blocks"]
+        if b.get("type") == "question"
+      ][0]
+      assert question["answers"] == {"Pick one": "b"}
+      # The marker MUST be cleared so the composer unblocks with the answer,
+      # not only when the recovered turn eventually ends.
+      assert row.pending_question_id is None
+    finally:
+      db.close()
+
+  asyncio.run(go())
+
+
 def test_answer_after_completed_stop_recovers_durable_question(
   client, auth, chat, monkeypatch,
 ):

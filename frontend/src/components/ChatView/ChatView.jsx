@@ -3950,6 +3950,17 @@ export default function ChatView({
   const resumeCardOffscreen = useOffscreenNudge(
     scrollRef, hasPendingResume, resumeCardEl,
   )
+  const questionNudgeShown = hasPendingQuestion && pendingCardOffscreen
+  const resumeNudgeShown = hasPendingResume && resumeCardOffscreen
+  const jumpToLatestVisible = jumpToLatestShown({
+    awayFromTail: awayFromLatest,
+    questionNudgeShown,
+    resumeNudgeShown,
+  })
+  const offscreenControlsVisible = olderHistoryError
+    || questionNudgeShown
+    || resumeNudgeShown
+    || jumpToLatestVisible
 
   // The ONE active <li> carries this data-key for both DB and live payloads.
   // ANCHOR_AT resolves `[data-key]`, so source selection must never change it.
@@ -4317,108 +4328,92 @@ export default function ChatView({
 
       <div ref={footRef} className="chat__foot">
         {/* Foot order, top to bottom:
-            attention actions → build-progress rail → connection/retry → queued
-            messages → composer. The shell owns the one persistent offline
-            explanation; the composer retains contextual send-failure copy. */}
-        {/* A LOST connection hides transient actions: while the terminal
-            'disconnected' state is set, nudges hide so the one thing on screen
-            is the problem and its Retry
-            (owner ask, 2026-07-17). ONLY 'disconnected' gates: 'retrying'
-            is a transient bare-EOF auto-reconnect that clears itself in
-            ~300ms — blanking and popping the whole stack on every mobile
-            blip would be flicker, not signal (review 2026-07-17; the
-            reconnect effect keys on the same distinction). The healthy
-            sleep/wake reattach note (`reconnecting`) likewise hides
-            nothing — the stream is being replaced, not failing. */}
-        {connectionError !== 'disconnected' && (
-          <>
-          {openAppCtas.length > 0 && (
-            <div className="chat__open-app">
-              {openAppCtas.map(({ app, vm }) => {
-                const pulsing = pulsedAppId === Number(app.id)
-                return (
-                  <button
-                    key={app.id}
-                    className={`chat__open-app-btn${pulsing ? ' chat__open-app-btn--pulse' : ''}`}
-                    aria-label={pulsing ? `Preview updated for ${app.name || 'app'}` : vm.ariaLabel}
-                    onClick={() => onOpenApp?.(app, { final: !turnActive })}
-                  >
-                    {pulsing ? 'Preview updated ✓' : `${vm.label} →`}
-                  </button>
-                )
-              })}
-            </div>
+            floating actions overlay the transcript without joining the measured
+            footer; build-progress rail → connection/retry → queued messages →
+            composer remain in normal footer flow. The shell owns the one persistent
+            offline explanation; the composer retains contextual send-failure copy. */}
+        <div className="chat__floating-actions">
+          {/* Contribution staged from THIS chat: approve it where the work
+              happened, but keep the transient card out of composer-height
+              measurement so confirmation cannot move the transcript. */}
+          {!embedded && (
+            <ContributionReviewCard
+              chatId={chatId}
+              turnActive={turnActive}
+              onOpenApp={onOpenApp}
+            />
           )}
-          <div className="chat__offscreen-nudges">
-            {olderHistoryError && offset > 0 && (
-              <button
-                type="button"
-                className="chat__history-retry"
-                onClick={() => loadOlderMessages()}
-              >
-                Earlier messages didn’t load — retry
-              </button>
-            )}
-            {hasPendingQuestion && pendingCardOffscreen && (
-              <button
-                type="button"
-                className="chat__question-nudge"
-                onClick={revealConversationTail}
-              >
-                Möbius asked you something — tap to answer
-              </button>
-            )}
-            {hasPendingResume && resumeCardOffscreen && (
-              <button
-                type="button"
-                className="chat__resume-nudge"
-                onClick={revealConversationTail}
-              >
-                {pendingResumeBlock?.pause?.resets_at
-                  ? 'Rate limit reached — tap to resume'
-                  : 'Turn paused — tap to resume'}
-              </button>
-            )}
-            {/* Jump-to-latest: same one-shot tail navigation as the nudges
-                (contract R5a — lands as a settled hold, never live-follow),
-                shown once the reader has scrolled away from the end. Yields
-                to a visible nudge, which goes to the same place with more
-                context. */}
-            {jumpToLatestShown({
-              awayFromTail: awayFromLatest,
-              questionNudgeShown: hasPendingQuestion && pendingCardOffscreen,
-              resumeNudgeShown: hasPendingResume && resumeCardOffscreen,
-            }) && (
-              <button
-                type="button"
-                className="chat__jump-latest"
-                aria-label="Jump to the latest message"
-                title="Jump to latest"
-                onClick={revealConversationTail}
-              >
-                <ArrowDown size={18} strokeWidth={2.25} aria-hidden="true" />
-              </button>
-            )}
-          </div>
-          </>
-        )}
-        <ProgressRail
+          {/* The viewport cues and post-turn cards share one floating stack so
+              they clear each other without entering footer or scroll geometry. */}
+          {connectionError !== 'disconnected' && (
+            <>
+              {offscreenControlsVisible && (
+                <div className="chat__offscreen-nudges">
+                  {olderHistoryError && offset > 0 && (
+                    <button
+                      type="button"
+                      className="chat__history-retry"
+                      onClick={() => loadOlderMessages()}
+                    >
+                      Earlier messages didn’t load — retry
+                    </button>
+                  )}
+                  {questionNudgeShown && (
+                    <button
+                      type="button"
+                      className="chat__question-nudge"
+                      onClick={revealConversationTail}
+                    >
+                      Möbius asked you something — tap to answer
+                    </button>
+                  )}
+                  {resumeNudgeShown && (
+                    <button
+                      type="button"
+                      className="chat__resume-nudge"
+                      onClick={revealConversationTail}
+                    >
+                      {pendingResumeBlock?.pause?.resets_at
+                        ? 'Rate limit reached — tap to resume'
+                        : 'Turn paused — tap to resume'}
+                    </button>
+                  )}
+                  {jumpToLatestVisible && (
+                    <button
+                      type="button"
+                      className="chat__jump-latest"
+                      aria-label="Jump to the latest message"
+                      title="Jump to latest"
+                      onClick={revealConversationTail}
+                    >
+                      <ArrowDown size={18} strokeWidth={2.25} aria-hidden="true" />
+                    </button>
+                  )}
+                </div>
+              )}
+              {openAppCtas.length > 0 && (
+                <div className="chat__open-app">
+                  {openAppCtas.map(({ app, vm }) => {
+                    const pulsing = pulsedAppId === Number(app.id)
+                    return (
+                      <button
+                        key={app.id}
+                        className={`chat__open-app-btn${pulsing ? ' chat__open-app-btn--pulse' : ''}`}
+                        aria-label={pulsing ? `Preview updated for ${app.name || 'app'}` : vm.ariaLabel}
+                        onClick={() => onOpenApp?.(app, { final: !turnActive })}
+                      >
+                        {pulsing ? 'Preview updated ✓' : `${vm.label} →`}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+            </>
+          )}
+        </div>        <ProgressRail
           items={progressRail}
           ariaLabel={visibleGoalObjective ? 'Goal progress' : 'Build progress'}
         />
-        {/* Contribution staged from THIS chat: approve it where the work
-            happened. Renders nothing unless something is actually waiting.
-            Owner-shell only: an app-embedded chat runs on a capability token
-            that is deliberately scoped to one chat, so it can neither list apps
-            nor take a public GitHub action, and there is no owner surface there
-            to approve one. */}
-        {!embedded && (
-          <ContributionReviewCard
-            chatId={chatId}
-            turnActive={turnActive}
-            onOpenApp={onOpenApp}
-          />
-        )}
         <ConnectionStatus
           error={connectionError}
           reconnecting={reconnecting}

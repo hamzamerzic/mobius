@@ -173,12 +173,18 @@ test('viewport-derived nudges never participate in footer geometry', () => {
     'the resume cue shares the same geometry owner')
 
   const layerCss = css.match(/\.chat__offscreen-nudges\s*\{[\s\S]*?\}/)?.[0] ?? ''
-  assert.match(layerCss, /position:\s*absolute/,
-    'showing or hiding a viewport cue must not resize the footer')
-  assert.match(layerCss, /bottom:\s*100%/,
-    'the cue remains immediately above the flow-owned footer controls')
+  assert.doesNotMatch(layerCss, /position:\s*absolute|bottom:/,
+    'the cue uses the shared floating stack instead of overlapping sibling cards')
+  assert.match(layerCss, /width:\s*min\(100%,\s*720px\)/,
+    'the cue stays inside the composer column')
   assert.match(layerCss, /pointer-events:\s*none/,
     'the overlay lane itself must not block transcript interaction')
+
+  const stackCss = css.match(/\.chat__floating-actions\s*\{[\s\S]*?\}/)?.[0] ?? ''
+  assert.match(stackCss, /position:\s*absolute/,
+    'the shared parent keeps every cue outside measured footer geometry')
+  assert.match(stackCss, /bottom:\s*calc\(100% \+ var\(--chat-foot-card-gap\)\)/,
+    'the shared stack clears every flow-owned footer control')
 
   const nudgeCss = css.match(
     /\.chat__question-nudge,\s*\n\.chat__resume-nudge\s*\{[\s\S]*?\}/,

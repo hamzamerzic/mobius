@@ -1033,8 +1033,18 @@ async def _send_message_locked(
     run_token = alloc_run_token()
     user_msg = _user_message_from_body(chat, body)
     owner = db.query(models.Owner).first()
-    default_provider = resolve_default_provider(
+    global_default_provider = resolve_default_provider(
       get_settings().data_dir, owner.provider if owner else None,
+    )
+    # An app-owned chat chooses its provider when the app creates the chat.
+    # Preserve that explicit contract through the first StartTurn instead of
+    # replacing it with whichever provider the owner most recently selected
+    # in an unrelated chat. Owner-created empty chats deliberately retain the
+    # live-default behavior documented by create_chat.
+    default_provider = (
+      (chat.provider or global_default_provider)
+      if chat.created_by_app_id is not None
+      else global_default_provider
     )
 
     ack = get_writer().submit(
