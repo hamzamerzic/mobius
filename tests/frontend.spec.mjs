@@ -113,7 +113,7 @@ test.use({ serviceWorkers: 'block' })
 test.describe('Input behavior', () => {
   test('returning to the tab collapses stale empty-composer geometry', async ({ page }) => {
     await setup(page)
-    const originalChat = await newChat(page)
+    await newChat(page)
 
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.evaluate(el => {
@@ -991,7 +991,7 @@ test.describe('Scroll position', () => {
 
   test('10d. Previous-chat entry stays held until catch-up, then settles without movement', async ({ page }) => {
     await setup(page, { width: 900, height: 760 })
-    await newChat(page)
+    const originalChat = await newChat(page)
 
     const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
     expect(chatId).toBeTruthy()
