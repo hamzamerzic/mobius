@@ -1372,3 +1372,13 @@ test('authenticated launch cover waits for the shell first frame', () => {
     /if \(activeView === 'chat' && activeChatId\) return undefined/,
     'the generic fallback must not pre-empt a concrete chat restoration')
 })
+
+test('root recovery releases the authenticated launch cover', () => {
+  const app = readFileSync(new URL('../../../App.jsx', import.meta.url), 'utf8')
+  const boundary = readFileSync(
+    new URL('../../ErrorBoundary/ErrorBoundary.jsx', import.meta.url),
+    'utf8',
+  )
+  assert.match(app, /<ErrorBoundary label="app" onError=\{removeSplash\}>/)
+  assert.match(boundary, /componentDidCatch\(error, info\)[\s\S]*?this\.props\.onError\?\.\(error\)/)
+})

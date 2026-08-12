@@ -76,7 +76,7 @@ export default function App() {
   }
   return (
     <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
-      <ErrorBoundary label="app">
+      <ErrorBoundary label="app" onError={removeSplash}>
         <AppRoot />
       </ErrorBoundary>
     </PersistQueryClientProvider>
