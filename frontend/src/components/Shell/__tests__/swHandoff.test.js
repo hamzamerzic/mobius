@@ -4,8 +4,10 @@ import assert from 'node:assert/strict'
 import {
   reloadIfGenerationStale,
   reloadWhenWorkerTakesOver,
+  settleNewestWorkerForHandoff,
   shouldRearmShellApply,
   watchForShellUpdateOnForeground,
+  SW_DISCOVERY_SETTLE_TIMEOUT_MS,
   SW_TAKEOVER_TIMEOUT_MS,
 } from '../swHandoff.js'
 
@@ -44,7 +46,18 @@ function makeSwWith(reg, { controller = null, onUpdate } = {}) {
   }
 }
 function makeReg({ waiting = null, active = null, installing = null, onUpdate } = {}) {
-  const reg = { waiting, active, installing }
+  const listeners = {}
+  const reg = {
+    waiting,
+    active,
+    installing,
+    addEventListener(t, fn) { (listeners[t] ||= []).push(fn) },
+    removeEventListener(t, fn) {
+      listeners[t] = (listeners[t] || []).filter(f => f !== fn)
+    },
+    emit(t) { (listeners[t] || []).slice().forEach(fn => fn()) },
+    count(t) { return (listeners[t] || []).length },
+  }
   reg.update = async () => { if (onUpdate) onUpdate(reg) }
   return reg
 }
@@ -258,6 +271,83 @@ function fakeTimers() {
   }
 }
 
+test('settleNewestWorkerForHandoff: waits for the newest install before choosing a waiting worker', async () => {
+  const workerA = { id: 'A' }
+  const installingB = makeInstalling('installing')
+  let updates = 0
+  const reg = makeReg({
+    waiting: workerA,
+    onUpdate: (current) => {
+      updates += 1
+      current.installing = installingB
+    },
+  })
+
+  let settled = false
+  const handoffReady = settleNewestWorkerForHandoff({
+    registration: reg,
+    setTimeoutFn: null,
+  }).then(() => { settled = true })
+  await flush()
+  assert.equal(updates, 1, 'the handoff forces a fresh generation check')
+  assert.equal(settled, false, 'the older waiting worker is not chosen while B installs')
+  assert.equal(installingB.count('statechange'), 1)
+
+  reg.waiting = { id: 'B' }
+  installingB.become('installed')
+  await handoffReady
+  assert.equal(settled, true)
+  assert.equal(reg.waiting.id, 'B', 'the caller now sees the newest waiting generation')
+  assert.equal(installingB.count('statechange'), 0)
+})
+
+test('settleNewestWorkerForHandoff: observes an installing worker published after update resolves', async () => {
+  const workerA = { id: 'A' }
+  const installingB = makeInstalling('installing')
+  const queuedTasks = []
+  const reg = makeReg({ waiting: workerA })
+  let settled = false
+
+  const handoffReady = settleNewestWorkerForHandoff({
+    registration: reg,
+    setTimeoutFn: fn => { queuedTasks.push(fn); return queuedTasks.length },
+    clearTimeoutFn: () => {},
+  }).then(() => { settled = true })
+  await flush()
+  assert.equal(queuedTasks.length, 1, 'the helper yields for the queued registration update')
+
+  reg.installing = installingB
+  reg.emit('updatefound')
+  queuedTasks.shift()()
+  await flush()
+  assert.equal(settled, false, 'the newly-published worker owns the handoff wait')
+
+  reg.waiting = { id: 'B' }
+  installingB.become('installed')
+  await handoffReady
+  assert.equal(settled, true)
+  assert.equal(reg.count('updatefound'), 0)
+})
+
+test('settleNewestWorkerForHandoff: a wedged install has a bounded escape', async () => {
+  const installing = makeInstalling('installing')
+  const reg = makeReg({ installing })
+  const timers = fakeTimers()
+  let settled = false
+  const handoffReady = settleNewestWorkerForHandoff({
+    registration: reg,
+    setTimeoutFn: timers.setTimeoutFn,
+    clearTimeoutFn: timers.clearTimeoutFn,
+  }).then(() => { settled = true })
+  await flush()
+  assert.equal(settled, false)
+  assert.equal(timers.count(), 1)
+  timers.fire()
+  await handoffReady
+  assert.equal(settled, true)
+  assert.equal(installing.count('statechange'), 0)
+})
+
 test('reloadWhenWorkerTakesOver: no waiting worker reloads immediately', () => {
   let reloads = 0
   reloadWhenWorkerTakesOver({
@@ -370,6 +460,7 @@ test('reloadWhenWorkerTakesOver: a worker already activated at attach reloads im
 
 test('SW_TAKEOVER_TIMEOUT_MS is a sane bounded fallback', () => {
   assert.ok(SW_TAKEOVER_TIMEOUT_MS >= 1000 && SW_TAKEOVER_TIMEOUT_MS <= 3000)
+  assert.ok(SW_DISCOVERY_SETTLE_TIMEOUT_MS >= 1000 && SW_DISCOVERY_SETTLE_TIMEOUT_MS <= 3000)
 })
 
 test('shouldRearmShellApply: healthy page (controller is the active worker) does not re-arm', () => {

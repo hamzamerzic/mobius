@@ -48,6 +48,7 @@ if str(BACKEND_DIR) not in sys.path:
   sys.path.insert(0, str(BACKEND_DIR))
 
 from app.chat_notes import extract_cumulative_summary, extract_section
+from app.sqlite_policy import connection_pragmas
 
 # When the configured provider has a demonstrably tool-free text mode we may
 # use it to distill the note.  There is always an extractive local fallback, so
@@ -196,18 +197,7 @@ def _apply_sqlite_policy(con: sqlite3.Connection) -> None:
   from the engine's settings — most visibly `journal_size_limit`, which is a
   per-connection setting: a writer that skips it leaves the WAL's high-water
   allocation in place no matter what the server's connections declare.
-
-  Imported lazily, and tolerant of failure, because publishing a chat note is
-  worth more than a pragma: the script also runs in contexts where the app
-  package is not importable.
   """
-  backend_text = str(Path(__file__).resolve().parents[1])
-  if backend_text not in sys.path:
-    sys.path.insert(0, backend_text)
-  try:
-    from app.sqlite_policy import connection_pragmas
-  except ImportError:
-    return
   for pragma in connection_pragmas():
     con.execute(pragma)
 
@@ -221,6 +211,7 @@ class ChatSnapshot(NamedTuple):
   transcript: str
   updated_at: str
   messages: list[dict] | None
+  provider: str | None = None
 
   @property
   def message_count(self) -> int | None:
@@ -260,7 +251,7 @@ def _read_chat_snapshot(chat_id: str) -> ChatSnapshot | None:
     con = sqlite3.connect(str(DB))
     _apply_sqlite_policy(con)
     row = con.execute(
-      "select messages, updated_at from chats "
+      "select messages, updated_at, provider from chats "
       "where id=? and deleted_at is null "
       "and not exists (select 1 from chat_runs "
       "where chat_runs.chat_id=chats.id "
@@ -278,6 +269,7 @@ def _read_chat_snapshot(chat_id: str) -> ChatSnapshot | None:
     transcript=_render_transcript(raw),
     updated_at=str(row[1]),
     messages=messages,
+    provider=str(row[2]).strip().lower() if row[2] is not None else None,
   )
 
 
@@ -379,19 +371,30 @@ def _build_prompt(transcript: str, existing: str) -> str:
   return "".join(parts)
 
 
-def _configured_provider() -> str:
+def _configured_provider(chat_provider: str | None = None) -> str:
+  """Resolve a usable provider for this chat note, or stay provider-free.
+
+  The settled chat owns its provider. Reading the account-wide default here
+  let another chat's last picker change race this publication and, on older
+  installs, selected the historical Claude default even when only Codex was
+  connected. Preflight the selected provider before spawning it: the local
+  deterministic note is cheaper and more reliable than starting a CLI that
+  cannot authenticate merely to discover the same fallback.
+  """
   override = os.environ.get("CHAT_NOTE_PROVIDER", "auto").strip().lower()
-  if override and override != "auto":
-    return override
-  try:
-    con = sqlite3.connect(str(DB))
-    _apply_sqlite_policy(con)
-    row = con.execute("select provider from owner limit 1").fetchone()
-    con.close()
-  except sqlite3.Error:
+  requested = override if override and override != "auto" else chat_provider
+  if requested == "deterministic":
     return "deterministic"
-  value = str(row[0] or "").strip().lower() if row else ""
-  return value if value in ("claude", "codex") else "deterministic"
+  if requested not in ("claude", "codex"):
+    return "deterministic"
+  try:
+    from app import providers
+    provider = providers.PROVIDERS.get(requested)
+    if provider is None or provider.check_auth(str(DATA_DIR)) is not None:
+      return "deterministic"
+  except Exception:
+    return "deterministic"
+  return requested
 
 
 def _run_codex_tool_free(prompt: str) -> str:
@@ -402,10 +405,6 @@ def _run_codex_tool_free(prompt: str) -> str:
   ignored repository rules, and every tool-bearing feature disabled. Reuse it
   here instead of maintaining a second (and inevitably drifting) command.
   """
-  backend_dir = Path(__file__).resolve().parents[1]
-  backend_text = str(backend_dir)
-  if backend_text not in sys.path:
-    sys.path.insert(0, backend_text)
   from app.compaction import _run_codex_summarize_turn
 
   return asyncio.run(_run_codex_summarize_turn(
@@ -538,9 +537,13 @@ def _deterministic_note(transcript: str, existing: str) -> str:
   return note.rstrip()
 
 
-def _summarize(transcript: str, existing: str) -> str:
+def _summarize(
+  transcript: str,
+  existing: str,
+  chat_provider: str | None = None,
+) -> str:
   """Use a safe configured text provider, with a provider-free fallback."""
-  provider = _configured_provider()
+  provider = _configured_provider(chat_provider)
   if provider == "codex":
     try:
       out = _clean_note_output(_run_codex_tool_free(
@@ -727,7 +730,9 @@ def run() -> int:
   out = (
     existing
     if start_index is not None and not transcript
-    else _clean_note_output(_summarize(transcript, existing))
+    else _clean_note_output(
+      _summarize(transcript, existing, snapshot.provider)
+    )
   )
   out = _set_source_cursor(out, current_cursor)
   if not _looks_like_note(out):

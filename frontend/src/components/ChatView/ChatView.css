@@ -1050,18 +1050,6 @@
 }
 .chat__tool-icon--running { color: var(--accent); /* CONTRACT: vivid accent marks the active child step */ }
 
-.chat__tool-chip {
-  flex-shrink: 0;
-  padding: 1px 6px;
-  border-radius: 9px;
-  font-size: 12px; /* floor raised from 9.5px */
-  font-family: var(--mono); /* CONTRACT: monospace font stack, matches tool output */
-  color: var(--accent); /* CONTRACT: vivid accent text — marks the skill load */
-  background: color-mix(in srgb, var(--accent) 12%, transparent); /* CONTRACT: faint accent tint on the opaque tool fill */
-  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border-light)); /* CONTRACT: accent-tinted hairline */
-  white-space: nowrap;
-}
-
 .chat__tool-detail {
   display: flex;
   flex-direction: column;
@@ -1072,6 +1060,25 @@
   max-height: 200px;
   overflow-y: auto;
   line-height: 1.5;
+}
+
+/* Skill reads are transcript landmarks, not technical output. A batched read
+   opens to one plain list before the original command/result detail, so narrow
+   screens stay calm without hiding which guidance the agent consulted. */
+.chat__skill-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.chat__skill-list li {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .chat__tool-detail:focus-visible {
@@ -1099,6 +1106,103 @@
   justify-content: space-between;
   min-height: 28px;
   gap: 8px;
+}
+
+.chat__tool-diff-section { gap: 5px; }
+
+.chat__tool-diff-files {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chat__tool-diff-file {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.chat__tool-diff-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 30px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-light);
+  background: var(--surface2);
+}
+
+.chat__tool-diff-head code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font: 500 11.5px/1.35 var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat__tool-diff-stat {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  font: 600 11px/1.2 var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat__tool-diff-add { color: var(--green); }
+.chat__tool-diff-delete { color: var(--danger); }
+
+.chat__tool-diff-scroll {
+  min-width: 0;
+  /* The chat transcript owns vertical scrolling. A capped scroller here made
+     wheel and trackpad gestures stop inside the diff, especially once they hit
+     an edge. Keep this surface horizontally scrollable for long code lines,
+     but let its full height participate in the one continuous transcript. */
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* Shell scrollbars stay hidden on touch devices. On pointer-accurate web
+   clients, opt this genuinely two-dimensional content back into a visible
+   horizontal affordance instead of requiring Shift+wheel discovery. */
+@media (hover: hover) and (pointer: fine) {
+  .chat__tool-diff-scroll {
+    --shell-scrollbar-width: thin;
+    --shell-scrollbar-display: block;
+    scrollbar-color: color-mix(in srgb, var(--muted) 32%, transparent) transparent;
+  }
+
+  .chat__tool-diff-scroll::-webkit-scrollbar { height: 10px; }
+  .chat__tool-diff-scroll::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--muted) 32%, transparent);
+    background-clip: padding-box;
+  }
+}
+
+.chat__tool-diff-scroll .diff-view {
+  border: 0;
+  border-radius: 0;
+}
+
+.chat__tool-diff-section--relative .diff-view__hunk-header {
+  grid-template-columns: minmax(max-content, 1fr);
+}
+
+.chat__tool-diff-section--relative .diff-view__line {
+  grid-template-columns: 2ch minmax(max-content, 1fr);
+}
+
+.chat__tool-diff-section--relative :is(
+  .diff-view__hunk-gutter,
+  .diff-view__numbers
+) {
+  display: none;
 }
 
 .chat__tool-copy {
@@ -1974,11 +2078,24 @@
 .chat__foot .chat__question-nudge,
 .chat__foot .chat__resume-nudge,
 .chat__foot .chat__jump-latest,
-.chat__foot .chat__open-app,
 .chat__foot .chat__progress-step--toggle,
 .chat__foot .slash-menu,
 .chat__foot .chat__pill,
 .chat__foot .composer-plus { pointer-events: auto; }
+
+/* One geometry-neutral stack for every control that floats above the measured
+   footer. Keeping cards and viewport cues in this same lane makes them clear
+   one another without changing --composer-h or the transcript scroll tail. */
+.chat__floating-actions {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: calc(100% + var(--chat-foot-card-gap));
+  display: flex;
+  flex-direction: column;
+  gap: var(--chat-foot-card-gap);
+  pointer-events: none;
+}
 
 /* Embedded composer: the app sheet (not the chat) owns the device
    safe area, so any `env(safe-area-inset-bottom)` reservation here
@@ -2269,20 +2386,17 @@
 }
 .chat__steer:hover { background: var(--accent-hover); /* CONTRACT: vivid opaque accent on hover */ }
 
-/* Pending-question nudge — shown in the foot when an unanswered
+/* Pending-question nudge — shown in the floating stack when an unanswered
    AskUserQuestion card sits outside the viewport, so the frozen turn
    doesn't read as a hang. A tap scrolls the card into view (user-initiated
    — the no-auto-scroll contract stays intact). Same frosted accent chip
    recipe as .chat__open-app-btn: it must read as a card over the chat
    scrolling behind the transparent foot. Centered, because it speaks for
-   the whole conversation rather than the queued tray. The positioning layer
-   sits immediately above the flow-owned footer: viewport visibility may mount
-   or unmount either nudge without changing transcript geometry. */
+   the whole conversation rather than the queued tray. Its parent stack owns
+   the absolute position; this lane only orders nearby floating controls. */
 .chat__offscreen-nudges {
-  position: absolute;
-  right: 12px;
-  bottom: 100%;
-  left: 12px;
+  width: min(100%, 720px);
+  margin: 0 auto;
   pointer-events: none;
 }
 
@@ -2960,8 +3074,8 @@
 }
 
 .chat__open-app {
-  max-width: 720px;
-  margin: 0 auto 8px;
+  width: min(100%, 720px);
+  margin: 0 auto;
   display: flex;
   /* One CTA row per built app, stacked and right-aligned (most recent last). */
   flex-direction: column;

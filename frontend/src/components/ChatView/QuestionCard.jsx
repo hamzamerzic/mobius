@@ -7,6 +7,7 @@ import {
   writeQuestionDraft,
 } from './questionDraft.js'
 import { textareaUsesNativeSizing } from './composerTextareaSizing.js'
+import { placeCaretAtTextEnd } from './composerFocusPolicy.js'
 import {
   pointerSelectionChangedWithin,
   textSelectionSnapshot,
@@ -82,6 +83,7 @@ function CustomAnswerArea({
       rows={1}
       value={value}
       onChange={e => onChange(e.target.value)}
+      onFocus={e => placeCaretAtTextEnd(e.currentTarget)}
       readOnly={answered}
       disabled={disabled && !answered}
       onKeyDown={e => {

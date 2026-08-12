@@ -43,7 +43,7 @@ test('mutually exclusive top-level flows remain lazy route boundaries', () => {
   }
 })
 
-test('route loading is blank without removing the launch mark', () => {
+test('route loading and the theme-matched launch cover contain no artwork', () => {
   const routeLoading = SOURCE.slice(
     SOURCE.indexOf('function RouteLoading'),
     SOURCE.indexOf('function StartupError'),
@@ -55,9 +55,10 @@ test('route loading is blank without removing the launch mark', () => {
 
   assert.doesNotMatch(routeLoading, /Möbius|moebius\.(?:png|svg)|<img|<span|role="status"/)
   assert.match(routeLoading, /return <div className="app-route-loading" aria-hidden="true" \/>/)
-  assert.match(
+  assert.match(launchSplash, /<div id="splash" aria-hidden="true"/)
+  assert.doesNotMatch(
     launchSplash,
-    /<img src="\/moebius\.png" width="44" height="44"/,
-    'the tight logo canvas must keep the splash artwork at its established apparent size',
+    /Möbius|moebius\.(?:png|svg)|<img|<svg|<span/,
+    'the startup handoff must remain an artwork-free theme cover',
   )
 })

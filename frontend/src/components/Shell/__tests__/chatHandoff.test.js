@@ -223,6 +223,16 @@ test('only the painted workspace world can expose its handoff layers', () => {
     /aria-hidden=\{!surfaceVisible \|\| settingsOverlay \|\| role !== 'active'/,
     'a retained chat in the parked workspace world must leave the accessibility tree',
   )
+  assert.match(
+    shell,
+    /const appRuntimeVisible = visibleAppIds\.has\(String\(id\)\) && !heldForChat[\s\S]*?const appFrameVisible = appRuntimeVisible \|\| heldForChat/,
+    'the visual cover must not turn the outgoing app back into the active runtime',
+  )
+  assert.match(
+    shell,
+    /visible=\{appRuntimeVisible\}[\s\S]*?frameVisible=\{appFrameVisible\}[\s\S]*?interactive=\{appRuntimeVisible/,
+    'the visually retained app keeps its frame foreground while navigation and interaction stay inactive',
+  )
 })
 
 test('app-supplied drafts update retained composers as well as remounted chats', () => {
@@ -260,8 +270,14 @@ test('direct chat actions hand focus to the destination composer', () => {
     /beginTouchComposerFocusLease\([\s\S]*?await resolveNewChatId/,
     'New chat must reserve phone keyboard focus before its first async boundary')
   assert.match(shell,
-    /composerFocusLeaseRef\.current\?\.value[\s\S]*?requestComposer\(chatId, \{[\s\S]*?draft: draftText \|\| undefined,[\s\S]*?focus: true/,
-    'New chat must carry early lease typing into the focused destination composer')
+    /composerFocusLeaseRef\.current\?\.value[\s\S]*?composerFocusLeaseHandoff\(\{[\s\S]*?stageComposerHandoff\(chatId, handoff\.text/,
+    'New chat must carry early lease typing into the destination composer')
+  assert.match(shell,
+    /String\(presentation\?\.chatId \?\? ''\) === id[\s\S]*?requestComposer\(id, \{ focus: true \}\)/,
+    'an immediate New chat presentation must hand focus over at display readiness')
+  assert.match(shell,
+    /if \(focusComposer && \(!presentation \|\| alreadyPresented\)\) \{[\s\S]*?requestComposer\(chatId/,
+    'allocation must not consume the focus request before the presentation is ready')
   assert.match(shell,
     /className="shell__composer-focus-lease"[\s\S]*?aria-label="New chat message"/,
     'the keyboard lease must remain a named, programmatically focused text control')

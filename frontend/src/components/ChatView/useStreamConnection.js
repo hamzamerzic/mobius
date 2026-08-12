@@ -18,6 +18,8 @@ import {
   appendTextItem,
   replaceTextItem,
   startToolLifecycle,
+  applySkillLoaded,
+  attachToolInput,
 } from './streamReducers.js'
 import {
   readStoredStreamSnapshot,
@@ -119,9 +121,9 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  *   tool_sources          WebSearch source metadata
  *                         { sources }. Stamps source chips onto block.
  *   tool_end              Marks the running tool done (status flip).
- *   skill_loaded          Agent loaded a skill { skill }. Stamps the
- *                         name onto the matching Skill tool block so
- *                         ToolBlock renders a chip.
+ *   skill_loaded          Agent loaded a skill { skill }. Adds a receipt to
+ *                         the running tool; the transcript derives a quiet,
+ *                         standalone skill-read activity from it.
  *   task_start            A delegating turn spawned a background helper
  *                         { task_id, description, task_type, tool_use_id }.
  *                         Upserts a live subagent chip (SubagentChips).
@@ -974,44 +976,7 @@ export default function useStreamConnection(chatId, {
             // Backfill by stable identity. Older id-less events retain their
             // earliest-input-less fallback; a late id may be adopted only when
             // there is one unambiguous id-less candidate.
-            applyStreamItems(prev => {
-              const updated = [...prev]
-              let i = event.tool_use_id
-                ? updated.findIndex(
-                    b => b.type === 'tool' && b.tool_use_id === event.tool_use_id,
-                  )
-                : -1
-              if (i < 0 && event.tool_use_id) {
-                let candidate = -1
-                for (let idx = 0; idx < updated.length; idx++) {
-                  const block = updated[idx]
-                  if (block.type !== 'tool' || block.status === 'done'
-                      || block.tool_use_id || block.input) continue
-                  if (candidate !== -1) {
-                    candidate = -1
-                    break
-                  }
-                  candidate = idx
-                }
-                i = candidate
-              } else if (i < 0) {
-                i = updated.findIndex(b => b.type === 'tool' && !b.input)
-              }
-              if (i !== -1) {
-                updated[i] = {
-                  ...updated[i],
-                  input: event.input,
-                  // A Memory lookup names itself from its command, so the live
-                  // line can read "Searching Memory…" while the search runs
-                  // rather than a generic "Running a command".
-                  ...(event.recall ? { recall: event.recall } : {}),
-                  ...(event.tool_use_id && !updated[i].tool_use_id
-                    ? { tool_use_id: event.tool_use_id }
-                    : {}),
-                }
-              }
-              return updated
-            })
+            applyStreamItems(prev => attachToolInput(prev, event))
           } else if (event.type === 'tool_output') {
             // Targets the tool's stable identity; legacy id-less events use the
             // last open lifecycle. An absorbed question still swallows its
@@ -1026,20 +991,9 @@ export default function useStreamConnection(chatId, {
               prev => closeToolLifecycle(prev, event.tool_use_id),
             )
           } else if (event.type === 'skill_loaded') {
-            // Skill observability: stamp the loaded skill's name onto
-            // the most recent Skill tool block so ToolBlock renders a
-            // chip. Mirrors backend/app/events.py:process_event so the
-            // live stream and the persisted transcript agree.
-            applyStreamItems(prev => {
-              const updated = [...prev]
-              for (let i = updated.length - 1; i >= 0; i--) {
-                if (updated[i].type === 'tool' && updated[i].tool === 'Skill') {
-                  updated[i] = { ...updated[i], skill: event.skill }
-                  break
-                }
-              }
-              return updated
-            })
+            // One pure reducer owns the live receipt shape; the backend event
+            // reducer mirrors it for reloads and transcript compaction.
+            applyStreamItems(prev => applySkillLoaded(prev, event))
           } else if (
             event.type === 'task_start'
             || event.type === 'task_progress'

@@ -107,7 +107,10 @@ import {
   textareaUsesNativeSizing,
   syncComposerTallClass,
 } from './composerTextareaSizing.js'
-import { focusComposerElement } from './composerFocusPolicy.js'
+import {
+  focusComposerElement,
+  placeCaretAtTextEnd,
+} from './composerFocusPolicy.js'
 
 
 // Detect touch-primary once (same heuristic ChatView uses).
@@ -670,7 +673,7 @@ export default function ChatInputBar({
     onInputChange(value)
     // The textarea never lost focus (rows suppress pointerdown), but a click
     // accept still needs the caret put back after the controlled update.
-    inputRef?.current?.focus({ preventScroll: true })
+    focusComposerElement(inputRef?.current)
   }
 
   const canSubmit = !submissionBlocked && !questionBlocked
@@ -844,7 +847,10 @@ export default function ChatInputBar({
               onChange={handleTextareaChange}
               onPaste={handlePaste}
               onKeyDown={handleKeyDown}
-              onFocus={() => setSlashInputFocused(true)}
+              onFocus={(event) => {
+                placeCaretAtTextEnd(event.currentTarget)
+                setSlashInputFocused(true)
+              }}
               onBlur={() => setSlashInputFocused(false)}
               placeholder="Message Möbius…"
               aria-label="Message Möbius…"

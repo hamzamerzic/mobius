@@ -289,7 +289,7 @@ test('the payoff line matches who benefits and keeps acceptance conditional', ()
   for (const line of [platform, app]) assert.match(line, /^If it's accepted/)
 })
 
-test('the docked card reduces a multi-line diff stat to its aggregate', () => {
+test('the floating card reduces a multi-line diff stat to its aggregate', () => {
   assert.equal(
     diffStatSummary(
       ' frontend/src/a.js | 12 +++++\n backend/app/b.py | 3 ---\n 2 files changed, 12 insertions(+), 3 deletions(-)',

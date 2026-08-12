@@ -6,6 +6,7 @@ from pathlib import Path
 from app.chat import (
   AVAILABLE_SKILLS_CONTEXT_LIMIT,
   _build_available_skills_block,
+  _build_provider_skills_block,
 )
 
 
@@ -50,6 +51,29 @@ def test_available_skills_lists_flat_and_directory_skills(tmp_path):
 
 def test_available_skills_missing_directory_is_silent(tmp_path):
   assert _build_available_skills_block(tmp_path) == ""
+
+
+def test_complete_codex_native_discovery_replaces_duplicate_startup_inventory(
+  tmp_path,
+):
+  skills_dir = tmp_path / "shared" / "skills"
+  skills_dir.mkdir(parents=True)
+  (skills_dir / "alpha.md").write_text(
+    "# Alpha\n\nComplete alpha instructions.", encoding="utf-8",
+  )
+  assert _build_provider_skills_block(
+    tmp_path, "Codex", codex_native_ready=True,
+  ) == ""
+  assert "alpha" in _build_provider_skills_block(tmp_path, "Claude Code")
+
+
+def test_incomplete_codex_native_discovery_keeps_mobius_inventory(tmp_path):
+  skills_dir = tmp_path / "shared" / "skills"
+  skills_dir.mkdir(parents=True)
+  (skills_dir / "alpha.md").write_text(
+    "# Alpha\n\nComplete alpha instructions.", encoding="utf-8",
+  )
+  assert "alpha" in _build_provider_skills_block(tmp_path, "Codex")
 
 
 def test_available_skills_discovery_failure_never_blocks_chat(

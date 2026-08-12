@@ -31,6 +31,7 @@ function readStalePrecacheFlag() {
  *   label     — names the guarded surface in the crash record / console
  *   onReset   — optional; called before a refresh so the caller can notify
  *               an owning surface that its child failed
+ *   onError   — optional; called when recovery replaces the guarded subtree
  *   variant   — 'fullscreen' (default) covers the viewport; 'inline' fills
  *               the nearest positioned ancestor, so a guarded view can fail
  *               without taking the surrounding chrome (drawer/nav) down
@@ -57,6 +58,7 @@ export default class ErrorBoundary extends Component {
 
   componentDidCatch(error, info) {
     clearTimeout(this.stableTimer)
+    this.props.onError?.(error)
     // Record through the shared client-error log (console + owner-readable ring
     // buffer), same sink the global window handlers use.
     recordClientError({

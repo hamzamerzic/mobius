@@ -43,10 +43,9 @@ This split is why a section can read either "this is intentionally hackable, don
 
 ```
 Dockerfile (root)     Single-container image: frontend build + backend + CLI tools
-docker-compose.yml    Self-hosted: Caddy (TLS) + app; on-demand recovery profile
+docker-compose.yml    Self-hosted: Caddy (TLS) + app
 ├── caddy             HTTPS reverse proxy — forwards everything to app:8000
-├── app               FastAPI serves the API + the frontend static files
-└── recovery profile  stopped-app root target + read-only worker on loopback
+└── app               FastAPI serves the API + the frontend static files
 ```
 
 The image bundles everything the agent needs at runtime (the Claude and Codex CLIs, Rolldown, Node) so the platform works out of the box. To join an existing Caddy setup instead of the bundled one, use `docker-compose.override.example.yml`.
@@ -82,8 +81,8 @@ used by update preview, Apply/status, and the image-dependency fingerprint:
 | `server_restart` | `backend/app/`, `skill/core.md` | restart the FastAPI process |
 | `proxy_reload` | `Caddyfile` | self-hosted host checkout + Caddy reload |
 | `container_recreate` | Compose topology or `railway.toml` | recreate services or trigger a managed deployment |
-| `image_rebuild` | Dockerfile, dependency locks, baked scripts/supervisors/recovery | rebuild the image and replace the app container |
-| `host_maintenance` | host-operated deployment/recovery tooling | update and act from the host |
+| `image_rebuild` | Dockerfile, dependency locks, baked scripts/supervisors | rebuild the image and replace the app container |
+| `host_maintenance` | host-operated deployment/repair tooling | update and act from the host |
 
 Rules can be deployment-scoped: Railway does not pretend to reload Caddy, and a
 self-hosted install does not pretend to apply `railway.toml`. Mixed updates keep
@@ -91,7 +90,7 @@ every applicable reason and order by the highest action. Settings shows this
 impact before Apply and never offers **Restart to finish** for a higher level.
 The backend records external activation remainders but never invokes Docker,
 Caddy, Railway, or host package/kernel tools. In-container sudo cannot make
-those changes durable, and mounting a Docker socket would weaken the recovery
+those changes durable, and mounting a Docker socket would weaken the container
 boundary rather than solve the ownership problem.
 
 **lodash is pinned to 4.18.1 via `overrides`.** `@openai/apps-sdk-ui` pulls lodash transitively — only through its `Slider` component, which the shell does not import. The 4.17.x line sat unfixed against several advisories for a long stretch; 4.18.x restored maintenance and patched them, so `frontend/package.json` `overrides` forces the transitive lodash to 4.18.1 (`npm audit` is clean). As defense-in-depth, `frontend/src/lib/__tests__/appsSdkLodash.test.js` also fails if the shell ever imports `Slider`, which keeps lodash tree-shaken out of the shipped bundle regardless of the pin.
@@ -123,18 +122,11 @@ The platform clone differs: it fetches the selected origin target and either fas
 
 ### Baked boot infrastructure is outside the served clone
 
-`protected-files.txt` names the root entrypoint, sudo configurator, boot-attempt
-counter, and restart-ledger supervisor. The image also owns
-`backend/recovery_target/targetd.py`. These files are copied to `/app`, remain
-root-owned/non-writable, and are never imported from the mutable `/data/platform`
-clone. `MOBIUS_BOOT_MODE=recovery` execs the target with `python -I` before the
-entrypoint touches `/data`; normal mode never starts that listener.
-
-The external worker is not present in this repository or image. CI publishes a
-tested worker image, and the managed control plane creates and replaces that
-worker container. There is no in-process recovery updater. Self-hosted recovery
-does not run a worker — the operator repairs the live container directly with
-`scripts/mobiusctl recovery` (see below).
+`protected-files.txt` names the root entrypoint, sudo configurator, and
+restart-ledger supervisor. These files are copied to `/app`, remain
+root-owned/non-writable, and are never imported from the mutable
+`/data/platform` clone. The image has one boot path and contains no recovery
+daemon, alternate boot mode, control-plane token, or recovery worker.
 
 ### Where each surface stands
 
@@ -207,57 +199,17 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `theme.py` | Theme CSS management and HTML injection |
 | `push.py` | VAPID key management and Web Push delivery |
 
-### External recovery target
+### Recovery boundary
 
-The Mobius image contains one recovery component:
-`backend/recovery_target/targetd.py`. In `MOBIUS_BOOT_MODE=recovery`, the baked
-entrypoint execs this stdlib daemon as root before initializing or importing
-anything from `/data`. It listens privately on port 18002, authenticates every
-`/v1/*` request (including health) with a high-entropy one-time bearer token,
-requires a base-10 Unix-epoch deadline no more than 24 hours in the future, and
-offers bounded argv execution plus bounded read/write/list operations. At the
-deadline it revokes the verifier, retires every active repair process, closes
-the listener, and parks PID 1 so an `unless-stopped` policy cannot hot-loop.
-Normal mode never starts the listener.
+Managed recovery lives entirely outside this repository and process. The
+launcher creates a short-lived worker on demand and relays a fixed-session
+command through Railway's native SSH endpoint to the exact running service
+instance. Möbius is not restarted, redeployed, reconfigured, or asked to run a
+recovery listener. The worker is deleted when the session finishes or expires.
 
-The entrypoint removes the target bearer from the exec environment and passes
-it once through an unlinked descriptor; targetd must be container PID 1,
-consumes and closes that descriptor, marks itself non-dumpable, and removes
-packet-capture, ptrace, and mount capabilities from every capability set
-(including bounding) before listening. The raw bearer is immediately wiped;
-only a domain-separated SHA-256 verifier remains at rest. Convenience file
-operations are kernel-confined with `openat2` to `/data`, `/app`, and `/tmp`
-(writes omit `/app`) without symlink, magic-link, `..`, or nested-mount
-escapes. Thus a root repair child can neither inspect target memory or file
-descriptors nor enlist target PID1 to read its own `/proc` memory. Target health
-reports the immutable image-baked Git revision and non-secret absolute expiry,
-never a runtime identity env. Each argv execution has its own child-subreaper
-supervisor: session changes and double forks cannot outlive the response, and
-expiry/timeout/output-limit cleanup freezes, kills, and reaps the whole tree.
-
-The reasoning worker is a separate non-root, read-only image. It has no sudo,
-Docker socket, Railway credential, persistent code volume, or update endpoint;
-only its fixed target URL and one-time token. Managed deployments create or
-wake it inside the instance's Railway project, and its target authority lasts
-one hour by default (the launcher accepts an explicit 300–86400 second TTL).
-
-Self-hosted deployments do not run this worker. The operator already has host
-and Docker root, so `scripts/mobiusctl recovery` opens a root shell
-(`docker exec -u 0`) in the live app container to repair `/data/platform` in
-place; the app is never stopped or recreated. Normal boot deletes the retired `.recovery-secret`,
-`.recovery-owner.json`, and `.recover-pending` authority before importing
-persisted code; a legacy user-authored `recovery_chat.jsonl` is retained and
-included in ordinary backup/restore.
-
-The one-time managed core cutover is digest-native. Public `mobius:main` and
-`mobius:external-recovery` remain permanently frozen at the compatible A'
-identity. The protected workflow publishes B only under a unique
-workflow-attempt reference, verifies the manifest by `repository@sha256:...`,
-durably binds that digest in Möbius Launch, and invokes fleet finalization
-immediately. Recovery R is likewise proved through its exact digest rather than
-through a mutable `stable` tag. The retired compatibility-bootstrap publisher
-is absent from the current tree, and this cutover workflow refuses unrelated
-later SHAs until a separate durable digest-release state machine owns them.
+Self-hosters use the authority they already own:
+`docker compose exec -u 0 app bash`. This attaches to the live container and
+does not replace its normal process.
 
 ### Misc shared helpers
 
@@ -496,7 +448,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 
 ## In-product agent context — three layers
 
-The in-product agent is a first-class reader of this code, and its behavior has three layers. (1) **Base constitution** — the live platform checkout's `skill/core.md`; `chat._read_skill_text()` caches only this tracked platform text for the process lifetime, so edits and platform updates take effect after a server restart. `/app/skill/core.md` is only the image-baked degraded-boot fallback when the live checkout is unavailable. (2) **Installed system-app contributions** — a manifest may declare one root-level `system_prompt` markdown file only with explicit `system_app: true`. When a chat starts its first turn, live (`deleted_at IS NULL`) app fragments are composed in stable id order with its effective base constitution and stored as one content-addressed prompt snapshot. Every later turn, provider switch, and compaction uses those exact bytes. Install, update, and uninstall affect chats started afterwards, while an existing chat keeps the prompt it began with. (3) **On-demand skills** — `/data/shared/skills/*.md`; base skills are seeded create-if-absent, while app-owned skills arrive through manifests and are deactivated/restored with their owner app. Independently of optional apps, every chat maintains its name, a bounded `## Digest`, and an uncapped cumulative `## Summary` under `/data/shared/memory/chats/<id>/index.md`. New sessions receive only recent descriptions + Digests. `chat_note.py` is the tool-free, compare-and-swap turn-end writer, and compaction prefers the chat's cumulative Summary. The optional Memory app owns graph instructions, its skill, reader, seeds, builder, Git publisher, and retrieval telemetry; no router/fact note is injected. Uninstall changes future chat prompts and removes the skill/jobs while leaving existing prompt snapshots and core chat summaries intact.
+The in-product agent is a first-class reader of this code, and its behavior has three layers. (1) **Base constitution** — the live platform checkout's `skill/core.md`; `chat._read_skill_text()` caches only this tracked platform text for the process lifetime, so edits and platform updates take effect after a server restart. `/app/skill/core.md` is only the image-baked degraded-boot fallback when the live checkout is unavailable. (2) **Installed system-app contributions** — a manifest may declare one root-level `system_prompt` markdown file only with explicit `system_app: true`. When a chat starts its first turn, live (`deleted_at IS NULL`) app fragments are composed in stable id order with its effective base constitution and stored as one content-addressed prompt snapshot. Every later turn, provider switch, and compaction uses those exact bytes. Install, update, and uninstall affect chats started afterwards, while an existing chat keeps the prompt it began with. (3) **On-demand skills** — `/data/shared/skills/*.md`; base skills are seeded create-if-absent, while app-owned skills arrive through manifests and are deactivated/restored with their owner app. Independently of optional apps, every chat maintains its name, a bounded `## Digest`, and an uncapped cumulative `## Summary` under `/data/shared/memory/chats/<id>/index.md`. New sessions receive only recent descriptions + Digests. `chat_note.py` is the tool-free, compare-and-swap turn-end writer; it uses the provider captured with that settled chat only when its auth preflight passes, otherwise publishing the local deterministic fallback without spawning a dead CLI. Compaction prefers the chat's cumulative Summary. The optional Memory app owns graph instructions, its skill, reader, seeds, builder, Git publisher, and retrieval telemetry; no router/fact note is injected. Uninstall changes future chat prompts and removes the skill/jobs while leaving existing prompt snapshots and core chat summaries intact.
 
 ## Data layout (`/data/` volume)
 
@@ -522,8 +474,7 @@ The in-product agent is a first-class reader of this code, and its behavior has 
 **Layers + where they live:** core platform = `/data/platform`, a git repo whose
 backend is served from `backend/` and frontend from `frontend/dist`; mini-apps
 (`/data/apps/<slug>`, each a git repo); baked boot infrastructure in the image;
-and the external recovery target/worker boundary described above. Runtime trees
-are gitignored (db, compiled, app-secrets, cli-auth).
+Runtime trees are gitignored (db, compiled, app-secrets, cli-auth).
 
 **Updates** flow through git. `backend/app/platform_update.py` is clone-native:
 `/data/platform` is a real `git clone` of the canonical repo, so an update
@@ -556,33 +507,20 @@ update and divergence rules as any other catalog app. The bootstrap path also
 migrates rows left by old images whose source still points at the retired
 platform-core tree; no app snapshot is baked into the platform image.
 
-**Recovery and self-heal.** Recovery is deliberately outside both the editable
-platform and the normal app process. The managed control plane launches the
-latest promoted worker image on demand. Updating means replacing the container from outside,
-never letting the recovery agent modify itself.
-
-The normal app and recovery target are mutually exclusive boot modes only on
-managed. Managed recovery clean-redeploys the target service with a one-time
-token and reaches it over the project's private network; the worker can perform
-arbitrary root repair through the authenticated target but cannot access the
-host control plane. Finishing managed recovery clean-redeploys the normal app.
-
-Self-hosted recovery is not a separate boot mode at all. The operator already
-has host and Docker root, so `scripts/mobiusctl recovery` opens a root shell
-(`docker exec -u 0`) in the live app container and repairs `/data/platform` in
-place; the app is never stopped or recreated. Self-heal makes this reliable: a
-broken clone falls back to the baked backend (below), so the container stays
-reachable to repair.
+**Recovery and self-heal.** Recovery is outside both the editable platform and
+the normal app process. Managed recovery attaches through Railway native SSH;
+self-hosted recovery attaches with `docker compose exec -u 0 app bash`. Neither
+path introduces an alternate Möbius boot mode. A broken persistent clone falls
+back to the baked backend, so the live container remains reachable to inspect.
 
 Normal platform boot serves `/data/platform/backend` directly after an import
 probe. It fetches `origin/main`, commits stray local edits, and merges that target
 into local `main` (fast-forwarding when possible); a conflict or failed post-merge
-probe returns to the exact pre-reconcile commit and leaves a visible flag. An invalid existing clone serves
-the baked backend without overwriting the broken tree. Independently, three
-consecutive boots that never reach `/api/health` quarantine the served clone and
-reseed it on the next attempt. These mechanisms recover code; owner-data disaster
-recovery is the separate `backup-data.py` / `restore-data.py` flow and is not
-automatically armed by installing Möbius.
+probe returns to the exact pre-reconcile commit and leaves a visible flag. An
+invalid existing clone serves the baked backend without overwriting, quarantining,
+or reseeding the broken tree. Owner-data disaster recovery is the separate
+`backup-data.py` / `restore-data.py` flow and is not automatically armed by
+installing Möbius.
 
 ## Chat scroll + steer contract
 
