@@ -90,6 +90,70 @@ export function attachToolInput(prev, event) {
 }
 
 /**
+ * Attach one skill-read receipt to the tool that performed it.
+ *
+ * Skill loads arrive as a side-band event after Read/Bash/Skill starts. Keeping
+ * names on that owning tool makes repeated events idempotent and lets the
+ * renderer present one calm, provider-neutral block while preserving the raw
+ * tool details underneath. Mirrors backend/app/events.py exactly.
+ */
+export function applySkillLoaded(prev, event) {
+  const skill = typeof event?.skill === 'string' ? event.skill.trim() : ''
+  if (!skill) return prev
+
+  const updated = [...prev]
+  let target = event?.tool_use_id
+    ? updated.findIndex(item => (
+        item?.type === 'tool' && item.tool_use_id === event.tool_use_id
+      ))
+    : -1
+  if (target === -1 && event?.tool_use_id) {
+    const candidates = updated
+      .map((item, index) => ({ item, index }))
+      .filter(({ item }) => (
+        item?.type === 'tool' && item.status !== 'done' && !item.tool_use_id
+      ))
+    if (candidates.length === 1) target = candidates[0].index
+  } else if (target === -1) {
+    for (let i = updated.length - 1; i >= 0; i -= 1) {
+      if (updated[i]?.type === 'tool' && updated[i].status !== 'done') {
+        target = i
+        break
+      }
+    }
+  }
+
+  if (target !== -1) {
+    const tool = updated[target]
+    const skills = Array.isArray(tool.skills) ? tool.skills : []
+    updated[target] = {
+      ...tool,
+      skills: skills.includes(skill) ? skills : [...skills, skill],
+      ...(tool.tool === 'Skill' ? { skill } : {}),
+      ...(event?.tool_use_id && !tool.tool_use_id
+        ? { tool_use_id: event.tool_use_id }
+        : {}),
+    }
+    return updated
+  }
+
+  const latestTool = [...updated].reverse().find(item => item?.type === 'tool')
+  if (Array.isArray(latestTool?.skills) && latestTool.skills.includes(skill)) {
+    return prev
+  }
+
+  return [...updated, {
+    type: 'tool',
+    tool: 'Skill',
+    skill,
+    skills: [skill],
+    input: '',
+    output: '',
+    status: 'done',
+  }]
+}
+
+/**
  * Append a streamed text delta to its provider message item.
  *
  * A synchronous question can be published between two deltas belonging to

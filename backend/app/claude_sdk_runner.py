@@ -705,10 +705,11 @@ def observe_skill_file_read(
   bc,
   chat_id: str,
   cwd: str,
+  tool_use_id: str | None = None,
 ) -> None:
   """Fire-and-forget skill observability for skill-file Reads.
 
-  Publishes the same `skill_loaded` event + activity record the Skill
+  Publishes the same targeted `skill_loaded` event + activity record the Skill
   tool path emits (see the dispatch below), so the activity log's
   most-used-skills cross-check sees Read-based loads too — before
   this, the cross-check endpoint returned empty every night because
@@ -720,7 +721,11 @@ def observe_skill_file_read(
     skill = _skill_file_read_name(tool_name, input_data, cwd)
     if not skill:
       return
-    bc.publish({"type": "skill_loaded", "skill": skill})
+    bc.publish({
+      "type": "skill_loaded",
+      "skill": skill,
+      **({"tool_use_id": tool_use_id} if tool_use_id else {}),
+    })
     activity.log_skill_load(chat_id, skill)
   except Exception:
     log.debug("skill_loaded read observability failed", exc_info=True)
@@ -840,7 +845,6 @@ async def run_claude_sdk_turn(
     input_data: dict[str, Any],
     context,
   ) -> PermissionResultAllow | PermissionResultDeny:
-    del context
     if run_policy is not None:
       nested_tools = {
         "Task", "TaskOutput", "TaskStop", "Workflow", "Workflows", "Agent",
@@ -873,6 +877,7 @@ async def run_claude_sdk_turn(
     if tool_name != "AskUserQuestion":
       observe_skill_file_read(
         tool_name, input_data, bc=bc, chat_id=chat_id, cwd=cwd,
+        tool_use_id=getattr(context, "tool_use_id", None),
       )
       return PermissionResultAllow(updated_input=input_data)
 

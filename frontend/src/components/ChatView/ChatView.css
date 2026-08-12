@@ -1050,18 +1050,6 @@
 }
 .chat__tool-icon--running { color: var(--accent); /* CONTRACT: vivid accent marks the active child step */ }
 
-.chat__tool-chip {
-  flex-shrink: 0;
-  padding: 1px 6px;
-  border-radius: 9px;
-  font-size: 12px; /* floor raised from 9.5px */
-  font-family: var(--mono); /* CONTRACT: monospace font stack, matches tool output */
-  color: var(--accent); /* CONTRACT: vivid accent text — marks the skill load */
-  background: color-mix(in srgb, var(--accent) 12%, transparent); /* CONTRACT: faint accent tint on the opaque tool fill */
-  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border-light)); /* CONTRACT: accent-tinted hairline */
-  white-space: nowrap;
-}
-
 .chat__tool-detail {
   display: flex;
   flex-direction: column;
@@ -1072,6 +1060,25 @@
   max-height: 200px;
   overflow-y: auto;
   line-height: 1.5;
+}
+
+/* Skill reads are transcript landmarks, not technical output. A batched read
+   opens to one plain list before the original command/result detail, so narrow
+   screens stay calm without hiding which guidance the agent consulted. */
+.chat__skill-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.chat__skill-list li {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .chat__tool-detail:focus-visible {

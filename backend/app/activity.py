@@ -545,12 +545,12 @@ def _yield_events_from(path: Path):
 
 
 def log_skill_load(chat_id: str | None, skill: str, ts: str | None = None) -> None:
-  """Records one Skill-tool invocation in the activity log.
+  """Records one detected skill load in the activity log.
 
   Thin wrapper over `log_event` so the runner has a single, named call
   site for the skill-observability path and doesn't repeat the event
-  vocabulary. A blank skill name is dropped — an empty chip carries no
-  signal and would only pollute the "most-used" aggregation.
+  vocabulary. A blank skill name is dropped — an unnamed read carries no
+  useful signal and would only pollute the "most-used" aggregation.
   """
   skill = (skill or "").strip()
   if not skill:
