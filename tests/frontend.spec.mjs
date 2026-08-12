@@ -917,7 +917,7 @@ test.describe('Scroll position', () => {
 
     await page.goto(`${BASE}/shell/?chat=${chatId}`, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
-      () => document.querySelector('[data-chat-surface="painted"] .chat__scroll'),
+      () => document.querySelector('[data-key="history-cid-44"]'),
       { timeout: 10000 },
     )
     // Older pages now prefetch from the reader's near-top gesture instead of
