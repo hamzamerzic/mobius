@@ -1152,11 +1152,12 @@ test.describe('Scroll position', () => {
       history.back()
     })
 
-    await page.waitForFunction(
-      id => localStorage.getItem('moebius_active_chat') === id,
-      chatId,
-      { timeout: 3000 },
-    )
+    await page.waitForFunction(id => {
+      const surface = document.querySelector(
+        `[data-chat-surface="painted"][data-chat-id="${id}"]`,
+      )
+      return !!surface && getComputedStyle(surface).visibility !== 'hidden'
+    }, chatId, { timeout: 10000 })
     await expect(page.locator('.shell__chat-view--held')).toHaveCount(1)
     expect(catchUpServed).toBe(false)
     releaseCatchUp()
