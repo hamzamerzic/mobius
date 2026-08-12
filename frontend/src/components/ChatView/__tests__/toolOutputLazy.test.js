@@ -49,6 +49,18 @@ test('explicit copy fetches full output without retaining it in React state', ()
     'copy success and failure are announced independently of the button label')
 })
 
+test('edit previews parse only when their tool disclosure is prepared', () => {
+  const src = readFileSync(new URL('../ToolBlock.jsx', import.meta.url), 'utf8')
+  assert.match(src, /const hasEditPreview = typeof t\.edit_preview\?\.diff === 'string'/,
+    'a cheap durable marker keeps a closed edit row inspectable')
+  assert.match(src,
+    /const wantsPreparation = prepareRequested \|\| desiredOpen[\s\S]*?wantsPreparation && !failed \? toolEditPreview\(t\.edit_preview\) : null/,
+    'opening a historical activity must not parse every still-closed diff')
+  assert.match(src,
+    /t\.input \|\| t\.output \|\| t\.output_truncated \|\| hasEditPreview/,
+    'deferring the parse must not turn the closed edit row into a dead label')
+})
+
 test('the live stream forwards reduction metadata into its tool item', () => {
   const src = readFileSync(new URL('../useStreamConnection.js', import.meta.url), 'utf8')
   assert.match(src, /attachToolOutput\(prev, event\.content, event\)/,

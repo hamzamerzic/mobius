@@ -23,6 +23,7 @@ const ACTIVITY_ICONS = {
   web: Globe,
   plan: Tasks,
   image: ImageSquare,
+  skill: Sparkle,
 }
 
 export function ActivityTypeIcon({ kind }) {
