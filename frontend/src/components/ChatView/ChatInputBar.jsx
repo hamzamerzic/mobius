@@ -672,6 +672,7 @@ export default function ChatInputBar({
     // The textarea never lost focus (rows suppress pointerdown), but a click
     // accept still needs the caret put back after the controlled update.
     focusComposerElement(inputRef?.current)
+    requestAnimationFrame(() => placeCaretAtTextEnd(inputRef?.current))
   }
 
   function handleKeyDown(e) {
