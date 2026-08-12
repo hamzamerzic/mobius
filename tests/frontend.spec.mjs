@@ -991,7 +991,7 @@ test.describe('Scroll position', () => {
 
   test('10d. Previous-chat entry stays held until catch-up, then settles without movement', async ({ page }) => {
     await setup(page, { width: 900, height: 760 })
-    const originalChat = await newChat(page)
+    await newChat(page)
 
     const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
     expect(chatId).toBeTruthy()
@@ -1111,16 +1111,16 @@ test.describe('Scroll position', () => {
       { timeout: 3000 },
     )
 
-    // Move through the owner-facing New Chat action so browser history records
-    // the transition that this previous-chat restoration contract exercises.
     await page.getByLabel('Toggle navigation').click()
     await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
-    await page.locator('.drawer__item--new').click()
-    await page.waitForFunction(id => {
-      const surface = document.querySelector('[data-chat-surface="painted"]')
-      return !!surface && surface.getAttribute('data-chat-id') !== id
-        && getComputedStyle(surface).visibility !== 'hidden'
-    }, chatId, { timeout: 10000 })
+    await page.getByLabel('Primary navigation')
+      .getByRole('button', { name: 'New chat', exact: true })
+      .click()
+    await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap'))
+      .toBeVisible({ timeout: 5000 })
+    const decoyChatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
+    expect(decoyChatId).toBeTruthy()
+    expect(decoyChatId).not.toBe(chatId)
 
     returning = true
     await page.evaluate(() => {
@@ -1155,20 +1155,14 @@ test.describe('Scroll position', () => {
         if (performance.now() - started < 1500) requestAnimationFrame(sample)
       }
       requestAnimationFrame(sample)
+      history.back()
     })
 
-    await page.getByLabel('Toggle navigation').click()
-    await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
-    await page.getByLabel('Primary navigation')
-      .getByRole('button', { name: originalChat.title, exact: true })
-      .click()
-
-    await page.waitForFunction(id => {
-      const surface = document.querySelector(
-        `[data-chat-surface="painted"][data-chat-id="${id}"]`,
-      )
-      return !!surface && getComputedStyle(surface).visibility !== 'hidden'
-    }, chatId, { timeout: 10000 })
+    await page.waitForFunction(
+      id => localStorage.getItem('moebius_active_chat') === id,
+      chatId,
+      { timeout: 3000 },
+    )
     await expect(page.locator('.shell__chat-view--held')).toHaveCount(1)
     expect(catchUpServed).toBe(false)
     releaseCatchUp()
