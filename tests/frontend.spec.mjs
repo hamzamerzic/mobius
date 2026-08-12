@@ -63,6 +63,7 @@ async function newChat(page) {
     })
   }
   await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 8000 })
+  return chat
 }
 
 async function sendMessage(page, text) {
@@ -990,7 +991,7 @@ test.describe('Scroll position', () => {
 
   test('10d. Previous-chat entry stays held until catch-up, then settles without movement', async ({ page }) => {
     await setup(page, { width: 900, height: 760 })
-    await newChat(page)
+    const originalChat = await newChat(page)
 
     const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
     expect(chatId).toBeTruthy()
@@ -1149,8 +1150,13 @@ test.describe('Scroll position', () => {
         if (performance.now() - started < 1500) requestAnimationFrame(sample)
       }
       requestAnimationFrame(sample)
-      history.back()
     })
+
+    await page.getByLabel('Toggle navigation').click()
+    await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
+    await page.getByLabel('Primary navigation')
+      .getByRole('button', { name: originalChat.title, exact: true })
+      .click()
 
     await page.waitForFunction(id => {
       const surface = document.querySelector(
