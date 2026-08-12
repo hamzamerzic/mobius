@@ -17,8 +17,8 @@ test('expansion keeps ordinary output bounded and image fallback cancellable', (
     'an intermediate sidecar is never read before the matching tool settles')
   assert.match(effect, /\+ \(isImageTool \? '' : '\?preview=1'\)/,
     'ordinary expansion stays server-bounded; only a visual image fallback requests its complete envelope')
-  assert.match(effect, /if \(isImageTool && durableImage\) return/,
-    'durable images use their existing protected route without fetching duplicated base64')
+  assert.match(effect, /if \(isImageTool && servedImage\) return/,
+    'served images use their protected route without fetching duplicated base64')
   assert.doesNotMatch(effect, /previewOutput !== null \|\| loadingPreview/,
     'loading state cannot prevent the request it just started from settling')
   const dependencies = effect.match(/\}, \[([^\]]+)\]\)/)?.[1] || ''

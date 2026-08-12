@@ -18,7 +18,7 @@ import { useDisclosureState } from './disclosureState.js'
 import MemoryRecallCard from './MemoryRecallCard.jsx'
 import ToolImageResult from './ToolImageResult.jsx'
 import {
-  durableImageReference,
+  servedImageReference,
   toolImageReference,
 } from './toolImageResult.js'
 import {
@@ -140,9 +140,9 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
     () => (wantsPreparation && !failed ? toolEditPreview(t.edit_preview) : null),
     [failed, t.edit_preview, wantsPreparation],
   )
-  const durableImage = useMemo(() => (
-    isImageTool ? durableImageReference(t.input) : null
-  ), [isImageTool, t.input])
+  const servedImage = useMemo(() => (
+    isImageTool ? servedImageReference(t.input, chatId) : null
+  ), [isImageTool, t.input, chatId])
   // `t.sources` is NOT rendered here: the turn's sources surface once at the
   // end of the message (MessageSources), where they belong to the answer
   // rather than to the one search that found them. They deliberately do not
@@ -169,11 +169,11 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
     // barrier then guarantees the final queued stash wins the query.
     if (t.status === 'running') return
     if (!t.output_truncated || previewOutput !== null || missingOutput) return
-    // Durable chat media and installed app icons can render through their
-    // existing narrow routes, avoiding the image tool's much larger base64
-    // sidecar altogether. An image viewed elsewhere needs the complete result
-    // (not the ordinary 20k text preview) so the fallback data URL is valid.
-    if (isImageTool && durableImage) return
+    // Protected chat media and /tmp rasters render through narrow routes,
+    // avoiding the image tool's much larger base64 sidecar. An image viewed
+    // elsewhere needs the complete result (not the ordinary 20k text preview)
+    // so the fallback data URL is valid.
+    if (isImageTool && servedImage) return
     if (!chatId) return
     // Contract rule 6: a reduced block carries a stable tool_use_id and fetches
     // its full text from the side-table endpoint. Every large block is tagged
@@ -224,7 +224,7 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
     chatId,
     loadAttempt,
     isImageTool,
-    durableImage,
+    servedImage,
   ])
 
   // Show the larger bounded preview once it lands; until then the inline
@@ -246,8 +246,8 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
     || !!t.output_truncated
     || (t.status !== 'running' && shownOutput === '')
   const imageReference = useMemo(
-    () => (isImageTool ? toolImageReference(t.input, shownOutput) : null),
-    [isImageTool, shownOutput, t.input],
+    () => (isImageTool ? toolImageReference(t.input, shownOutput, chatId) : null),
+    [isImageTool, shownOutput, t.input, chatId],
   )
   const r = useMemo(
     () => (hasOutput && !isImageTool
@@ -258,7 +258,7 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
   const waitsForPreview = !!(
     t.output_truncated
     && t.status !== 'running'
-    && !durableImage
+    && !servedImage
     && previewOutput === null
     && !missingOutput
     && !loadError
@@ -367,7 +367,7 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
     setLoadAttempt(value => value + 1)
   }
 
-  const showLazyStatus = !!t.output_truncated && !durableImage && (
+  const showLazyStatus = !!t.output_truncated && !servedImage && (
     t.status === 'running'
     || loadingPreview
     || missingOutput
