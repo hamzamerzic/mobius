@@ -27,7 +27,7 @@ const ACTIVITY_LABELS = new Map([
   ['Workflow', 'Working in the background'],
   ['TaskOutput', 'Working in the background'],
   ['AskUserQuestion', 'Asking you'],
-  ['Skill', 'Using a skill'],
+  ['Skill', 'Using skills'],
   // Image-viewing (owner ref 2026-07-17). Codex will emit ViewImage directly
   // once its ImageViewThreadItem is wired; a Claude image view is a Read of an
   // image file, mapped here by extension via effectiveToolName. Plural here —
@@ -61,7 +61,7 @@ const PAST_LABELS = new Map([
   ['Workflow', 'Worked in the background'],
   ['TaskOutput', 'Worked in the background'],
   ['AskUserQuestion', 'Asked you'],
-  ['Skill', 'Used a skill'],
+  ['Skill', 'Used skills'],
   ['ViewImage', 'Viewed images'],
   ['MemoryRecall', 'Recalled from Memory'],
 ])
@@ -76,11 +76,13 @@ const PRESENT_SINGULAR = new Map([
   ['Running commands', 'Running a command'],
   ['Reading files', 'Reading a file'],
   ['Viewing images', 'Viewing an image'],
+  ['Using skills', 'Using a skill'],
 ])
 const PAST_SINGULAR = new Map([
   ['Ran commands', 'Ran a command'],
   ['Read files', 'Read a file'],
   ['Viewed images', 'Viewed an image'],
+  ['Used skills', 'Used a skill'],
 ])
 
 // A small muted type glyph keyed off the FIRST activity in a settled line
@@ -102,7 +104,7 @@ const ACTIVITY_ICONS = new Map([
   ['TodoWrite', 'plan'],
   ['ToolSearch', 'plan'],
   ['AskUserQuestion', 'dot'],
-  ['Skill', 'dot'],
+  ['Skill', 'skill'],
   ['ViewImage', 'image'],
   ['MemoryRecall', 'search'],
 ])
@@ -162,6 +164,17 @@ export function toolCallLabel(tool) {
   // glance. "Nothing relevant" is stated explicitly, because a silent recall
   // is indistinguishable from never having looked.
   if (name === 'MemoryRecall') return memoryRecallLabel(tool)
+  if (name === 'Skill') {
+    const skills = Array.isArray(tool?.skills)
+      ? tool.skills.filter(skill => typeof skill === 'string' && skill.trim())
+      : (typeof tool?.skill === 'string' && tool.skill.trim() ? [tool.skill.trim()] : [])
+    if (skills.length === 1) {
+      return `${tool?.status === 'running' ? 'Reading' : 'Read'} the ${skills[0]} skill`
+    }
+    if (skills.length > 1) {
+      return `${tool?.status === 'running' ? 'Reading' : 'Read'} ${skills.length} skills`
+    }
+  }
   let input = typeof tool?.input === 'string' ? tool.input.trim() : ''
   if (name === 'ViewImage') input = imagePathFromInput(tool?.input) || input
   const verbs = INSTANCE_VERBS.get(name)
@@ -197,6 +210,7 @@ export function effectiveToolName(tool) {
   // point for both runners, and it keeps working after transcript compaction
   // strips the command string from a settled activity block.
   if (tool?.recall && typeof tool.recall === 'object') return 'MemoryRecall'
+  if (Array.isArray(tool?.skills) && tool.skills.length > 0) return 'Skill'
   if (IMAGE_TOOL_NAMES.has(name)) return 'ViewImage'
   if (name === 'Read') {
     // On the wire tool.input is the STRING summary the backend builds
@@ -215,11 +229,10 @@ export function effectiveToolName(tool) {
 // files, ran commands" summary (owner ref 2026-07-17). The read/grep/edit/bash
 // plumbing is the agent's background housekeeping — one calm folded line is
 // right — but a notable beat like viewing an image is worth seeing on its own,
-// so scanning the transcript tells the story. Extensible: skill reads, context
-// compaction, and subagent spawns join here once the backend surfaces their
-// events (today only image views are frontend-detectable — a Skill load is
-// swallowed into a chip, not a tool block).
-const DISTINCTIVE_ACTIVITIES = new Set(['ViewImage', 'MemoryRecall'])
+// so scanning the transcript tells the story. Skill reads use the same lane:
+// effectiveToolName reclassifies their receipt-bearing Read/Bash block without
+// losing its expandable raw details.
+const DISTINCTIVE_ACTIVITIES = new Set(['ViewImage', 'MemoryRecall', 'Skill'])
 
 // The one-line story of a memory lookup, including honest operational failure.
 // Reading the count from the result set the backend already parsed keeps the

@@ -724,6 +724,11 @@ test('one held drawer-row gesture resolves menu, reorder, or workspace drag', ()
     'a stationary tab hold opens actions from the shared hold timer, while still held')
   assert.doesNotMatch(drawerPointerUp, /openTabMenuAtRef/,
     'releasing a tab hold no longer opens actions — the hold timer does, like the drawer')
+  assert.match(
+    dragBinding,
+    /ctxListener = \(ev\) => \{[\s\S]*?preventDefault\(\)[\s\S]*?stopImmediatePropagation\(\)/,
+    'touch contextmenu must not bypass the shared hold timer',
+  )
   assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)
   assert.match(shell, /const drawerRowGesturesRef = useRef\(new Map\(\)\)/)
   assert.match(drawer, /const registry = drawerRowGesturesRef\.current[\s\S]*?registry\.set\(key, drawerGestureHandlerRef\)/)

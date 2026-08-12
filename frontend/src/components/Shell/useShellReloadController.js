@@ -7,7 +7,10 @@ import {
 } from '../../queryClient.js'
 import * as paneModel from './paneModel.js'
 import { shouldDeferShellReload } from './shellReloadPolicy.js'
-import { reloadWhenWorkerTakesOver } from './swHandoff.js'
+import {
+  reloadWhenWorkerTakesOver,
+  settleNewestWorkerForHandoff,
+} from './swHandoff.js'
 
 const RECHECK_MS = 6000
 
@@ -15,13 +18,22 @@ export function deriveShellReloadState({
   workspace,
   activeView,
   drawerOpen,
+  destination = null,
 }) {
   const content = paneModel.activeContentRoute(workspace)
+  const destinationView = destination?.view
+  const destinationIsSettings = destinationView === 'settings'
   return {
-    activeView: activeView === 'settings' ? 'settings' : content.view,
-    activeAppId: content.appId,
-    activeChatId: content.chatId,
-    drawerOpen,
+    activeView: destinationIsSettings
+      ? 'settings'
+      : (destinationView || (activeView === 'settings' ? 'settings' : content.view)),
+    activeAppId: destination && !destinationIsSettings
+      ? (destination.appId ?? null)
+      : content.appId,
+    activeChatId: destination && !destinationIsSettings
+      ? (destination.chatId ?? null)
+      : content.chatId,
+    drawerOpen: destination ? false : drawerOpen,
   }
 }
 
@@ -40,6 +52,10 @@ export default function useShellReloadController(inputs) {
   const timerRef = useRef(null)
   const lastInteractionAtRef = useRef(0)
   const heldSinceRef = useRef(0)
+  const performingRef = useRef(false)
+  const performingPassiveRef = useRef(false)
+  const destinationRef = useRef(null)
+  const navigationCommittedRef = useRef(false)
 
   // The recent-interaction window is a POLITENESS debounce, not a safety
   // invariant: it exists so an apply does not land in the same breath as the
@@ -66,7 +82,11 @@ export default function useShellReloadController(inputs) {
       && activeChatIdRef.current != null
   }
 
-  function wouldDisruptUser({ passive = false } = {}) {
+  function wouldDisruptUser({
+    passive = false,
+    destination = null,
+    ignoreRecentInteraction = false,
+  } = {}) {
     const {
       doc,
       activeViewRef,
@@ -78,14 +98,14 @@ export default function useShellReloadController(inputs) {
     } = inputsRef.current
     return shouldDeferShellReload({
       activeElement: doc.activeElement,
-      activeView: activeViewRef.current,
-      activeChatId: activeChatIdRef.current,
+      activeView: destination?.view || activeViewRef.current,
+      activeChatId: destination?.chatId ?? activeChatIdRef.current,
       multiPaneBuilderVisible: multiPaneBuilderVisibleRef.current,
       streamingChatIds: streamingChatIdsRef.current,
       activeChatWaitingOnQuestion: activeChatWaitingOnQuestionRef.current,
       passiveRebuild: passive,
       voiceDictationActive: voiceDictationActiveRef.current,
-      lastUserInteractionAt: interactionGraceSpent()
+      lastUserInteractionAt: ignoreRecentInteraction || interactionGraceSpent()
         ? 0
         : lastInteractionAtRef.current,
       visibilityState: doc.visibilityState,
@@ -114,7 +134,11 @@ export default function useShellReloadController(inputs) {
     if (!hasStableVisibleHold(passiveRef.current)) scheduleCheck()
   }
 
-  async function performReload({ passive = false } = {}) {
+  async function performReload({ passive = false, destination = null } = {}) {
+    if (destination && !navigationCommittedRef.current) {
+      destinationRef.current = destination
+    }
+    if (performingRef.current) return
     const {
       win,
       nav,
@@ -131,6 +155,8 @@ export default function useShellReloadController(inputs) {
       deferReload({ passive })
       return
     }
+    performingRef.current = true
+    performingPassiveRef.current = passive
     pendingRef.current = false
     passiveRef.current = false
     heldSinceRef.current = 0
@@ -139,16 +165,28 @@ export default function useShellReloadController(inputs) {
       timerRef.current = null
     }
 
+    let registration = null
+    if (nav.serviceWorker?.getRegistration) {
+      try {
+        registration = await nav.serviceWorker.getRegistration()
+        await settleNewestWorkerForHandoff({ registration })
+      } catch {
+        registration = null
+      }
+    }
+
     win.dispatchEvent(new win.Event(BEFORE_SHELL_RELOAD_EVENT))
     await awaitCacheFlushBeforeReload(flushPersistedQueryCache(queryClient))
+    if (wouldDisruptUser({
+      passive,
+      destination: destinationRef.current,
+      ignoreRecentInteraction: destinationRef.current != null,
+    })) {
+      performingRef.current = false
+      deferReload({ passive })
+      return
+    }
     persistWorkspaceSnapshot()
-    storage.setItem('shell-reload', JSON.stringify(deriveShellReloadState({
-      workspace: workspaceStateRef.current.ws,
-      activeView: activeViewRef.current,
-      drawerOpen: drawerOpenRef.current,
-    })))
-    replaceNavEntry('base', '/shell/')
-    try { storage.setItem('sw-skip-initiated', '1') } catch { /* ignore */ }
 
     if (stalePrecache) {
       // Let the new worker replace its precache during activation. Deleting the
@@ -157,15 +195,35 @@ export default function useShellReloadController(inputs) {
       try { storage.setItem('sw-stale-precache-recovering', '1') } catch { /* ignore */ }
     }
 
-    const reload = () => win.location.reload()
-    if (nav.serviceWorker?.getRegistration) {
-      nav.serviceWorker.getRegistration()
-        .then(registration => reloadWhenWorkerTakesOver({
-          registration,
-          serviceWorker: nav.serviceWorker,
-          reload,
-        }))
-        .catch(reload)
+    // Commit the route at the LAST possible instant. A navigation during the
+    // worker handoff can still replace destinationRef and be revealed only by
+    // the incoming document instead of flashing in the outgoing one.
+    const reload = () => {
+      if (wouldDisruptUser({
+        passive,
+        destination: destinationRef.current,
+        ignoreRecentInteraction: destinationRef.current != null,
+      })) {
+        performingRef.current = false
+        deferReload({ passive })
+        return
+      }
+      navigationCommittedRef.current = true
+      storage.setItem('shell-reload', JSON.stringify(deriveShellReloadState({
+        workspace: workspaceStateRef.current.ws,
+        activeView: activeViewRef.current,
+        drawerOpen: drawerOpenRef.current,
+        destination: destinationRef.current,
+      })))
+      replaceNavEntry('base', '/shell/')
+      win.location.reload()
+    }
+    if (registration) {
+      reloadWhenWorkerTakesOver({
+        registration,
+        serviceWorker: nav.serviceWorker,
+        reload,
+      })
     } else {
       reload()
     }
@@ -186,11 +244,39 @@ export default function useShellReloadController(inputs) {
   }, [])
 
   const requestShellReload = useCallback(({ passive = false } = {}) => {
+    if (performingRef.current) return
     if (wouldDisruptUser({ passive })) {
       deferReload({ passive })
     } else {
       performReload({ passive })
     }
+  }, [])
+
+  const claimPendingShellReloadNavigation = useCallback((destination) => {
+    if (!destination?.view) return false
+    if (!pendingRef.current && !performingRef.current) return false
+    if (navigationCommittedRef.current) return false
+    // performReload clears queued state before its async handoff. Keep the
+    // claimant on that request's immutable policy until it commits or defers.
+    const passive = performingRef.current
+      ? performingPassiveRef.current
+      : passiveRef.current
+    if (wouldDisruptUser({
+      passive,
+      destination,
+      // The navigation tap is the apply boundary the owner just chose. Its own
+      // pointerdown must not re-arm the generic politeness debounce.
+      ignoreRecentInteraction: true,
+    })) {
+      // A newer navigation that cannot be folded into this reload wins. Clear
+      // any older claimed route so the final safety check sees the surface that
+      // navigation is about to paint.
+      destinationRef.current = null
+      return false
+    }
+    destinationRef.current = destination
+    if (!performingRef.current) void performReload({ passive, destination })
+    return true
   }, [])
 
   useEffect(() => {
@@ -231,5 +317,9 @@ export default function useShellReloadController(inputs) {
     inputs.multiPaneBuilderVisible,
   ])
 
-  return { requestShellReload, checkPendingShellReload }
+  return {
+    requestShellReload,
+    checkPendingShellReload,
+    claimPendingShellReloadNavigation,
+  }
 }

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   focusComposerElement,
+  placeCaretAtTextEnd,
   shouldApplyComposerFocusRequest,
 } from '../composerFocusPolicy.js'
 
@@ -39,9 +40,15 @@ test('draft-only and embedded requests do not focus the composer', () => {
 
 test('focusComposerElement preserves scroll when the browser supports it', () => {
   const calls = []
-  const el = { focus: (...args) => calls.push(args) }
+  const selections = []
+  const el = {
+    value: 'saved draft',
+    focus: (...args) => calls.push(args),
+    setSelectionRange: (...args) => selections.push(args),
+  }
   assert.equal(focusComposerElement(el), true)
   assert.deepEqual(calls, [[{ preventScroll: true }]])
+  assert.deepEqual(selections, [[11, 11]])
 })
 
 test('focusComposerElement falls back for older focus implementations', () => {
@@ -54,4 +61,16 @@ test('focusComposerElement falls back for older focus implementations', () => {
   }
   assert.equal(focusComposerElement(el), true)
   assert.deepEqual(calls, [[{ preventScroll: true }], []])
+})
+
+test('text controls land at the end whenever their focus surface activates', () => {
+  const selections = []
+  const el = {
+    value: 'custom answer',
+    setSelectionRange: (...args) => selections.push(args),
+  }
+
+  assert.equal(placeCaretAtTextEnd(el), true)
+  assert.deepEqual(selections, [[13, 13]])
+  assert.equal(placeCaretAtTextEnd({ value: 'unsupported' }), false)
 })

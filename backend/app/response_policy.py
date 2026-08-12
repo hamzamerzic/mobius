@@ -47,10 +47,18 @@ def _validated_frontend_origin(frontend_origin: str) -> str:
   return origin
 
 
-def app_frame_csp(frontend_origin: str, gateway_origin: str = "") -> str:
+def app_frame_csp(
+  frontend_origin: str,
+  gateway_origin: str = "",
+  api_origin: str = "",
+) -> str:
   """Complete policy for the opaque mini-app document."""
   origin = _validated_frontend_origin(frontend_origin)
   frame_sources = [origin]
+  connect_sources = [origin]
+  api = absolute_csp_origin(api_origin)
+  if api is not None and api != origin:
+    connect_sources.append(api)
   gateway = absolute_csp_origin(gateway_origin)
   if gateway is not None and gateway != origin:
     frame_sources.append(gateway)
@@ -63,7 +71,7 @@ def app_frame_csp(frontend_origin: str, gateway_origin: str = "") -> str:
     "blob: https://esm.sh; "
     f"style-src {origin} 'unsafe-inline' https://fonts.googleapis.com; "
     f"font-src {origin} https://fonts.gstatic.com https://cdn.openai.com; "
-    f"connect-src {origin}; "
+    f"connect-src {' '.join(connect_sources)}; "
     f"img-src {origin} data: blob:; "
     f"frame-src {' '.join(frame_sources)}; "
     "frame-ancestors 'self'"

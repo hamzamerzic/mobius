@@ -8,7 +8,6 @@ import { api, beginEphemeralAuth, getToken, setToken, BASE } from './api/client.
 import * as setupSession from './lib/setupSession.js'
 import { setupQueries, versionQueries } from './hooks/queries.js'
 import { queryClient, persistOptions } from './queryClient.js'
-import { shellReload } from './lib/shellReloadState.js'
 import { beginEmbedBootstrap } from './lib/chatEmbedBootstrap.js'
 import { startInstallPromptCapture } from './lib/installPrompt.js'
 import { readInstallPass, withoutInstallPass } from './lib/installPassUrl.js'
@@ -236,16 +235,6 @@ function AppRoot() {
   }, [hasToken])
 
   useEffect(() => {
-    // shell-reload: skip splash entirely, go straight to shell.
-    // shellReloadState parsed and removed the one-shot storage key at module
-    // load. App and useNavigation both share that same captured value.
-    if (shellReload) {
-      const splash = document.getElementById('splash')
-      if (splash) splash.remove()
-      setStatus('shell')
-      return
-    }
-
     if (hasToken) {
       // Clear stale provider-wizard state from pre-contextual onboarding.
       if (savedResumeStep && !resumeStep) setupSession.clearResumeStep()

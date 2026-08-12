@@ -79,6 +79,31 @@ test('original entry metadata is carried through untouched', () => {
   assert.deepEqual(nodes[0].group.map(x => x.idx), [7, 8])
 })
 
+test('a read-based skill receipt reclassifies its owning tool as one block', () => {
+  const items = [{
+    item: tool({
+      tool: 'Bash', tool_use_id: 'cmd-1', skills: ['recovery', 'theming'],
+    }),
+    idx: 4,
+  }]
+  const nodes = groupActivityRuns(items)
+  assert.equal(nodes.length, 1)
+  assert.equal(nodes[0].group[0], items[0])
+  assert.equal(effectiveToolName(nodes[0].group[0].item), 'Skill')
+  assert.equal(isDistinctiveActivityTool(nodes[0].group[0].item), true)
+})
+
+test('a native Skill tool is not duplicated by its own receipt', () => {
+  const items = [{
+    item: tool({ tool: 'Skill', skill: 'humanizer', skills: ['humanizer'] }),
+    idx: 2,
+  }]
+  const nodes = groupActivityRuns(items)
+  assert.equal(nodes.length, 1)
+  assert.equal(nodes[0].group.length, 1)
+  assert.equal(nodes[0].group[0], items[0])
+})
+
 test('a thinking-first stretch keeps the thinking entry first for keying', () => {
   // The stretch is keyed by its FIRST entry, so a thinking-first stretch that
   // later gains a tool must keep the thinking entry (its idx) at position 0.
@@ -141,6 +166,15 @@ test('toolGroupSummary: an unknown tool name passes through raw', () => {
     toolGroupSummary([tool({ tool: 'FooTool' }), tool({ tool: 'Bash' })]),
     'FooTool · Running a command'
   )
+})
+
+test('activity memo identity changes when a command becomes a skill read', async () => {
+  const { activityMemoSig } = await import('../groupBlocks.js')
+  const command = [{ item: tool({ tool: 'Bash', status: 'running' }) }]
+  const skillRead = [{
+    item: tool({ tool: 'Bash', status: 'running', skills: ['recovery'] }),
+  }]
+  assert.notEqual(activityMemoSig(command), activityMemoSig(skillRead))
 })
 
 test('toolGroupSummary: the running tool leads while the run is live', () => {
@@ -207,6 +241,18 @@ test('toolCallLabel names the concrete nested step in progressive and past tense
   assert.equal(
     toolCallLabel({ tool: 'WebSearch', input: 'nested UI', status: 'done' }),
     'Searched the web for nested UI',
+  )
+  assert.equal(
+    toolCallLabel({
+      tool: 'Bash', skills: ['recovery'], status: 'done',
+    }),
+    'Read the recovery skill',
+  )
+  assert.equal(
+    toolCallLabel({
+      tool: 'Bash', skills: ['recovery', 'theming'], status: 'running',
+    }),
+    'Reading 2 skills',
   )
   assert.equal(toolCallLabel({ tool: 'Bash', status: 'done' }), 'Ran a command')
   assert.equal(

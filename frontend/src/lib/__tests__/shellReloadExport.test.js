@@ -53,8 +53,9 @@ test('shellReload: returns null when sandbox storage is unavailable', () => {
   assert.equal(consumeShellReload(storage), null)
 })
 
-test('startup and navigation share the lightweight shell-reload reader', () => {
-  assert.match(APP_SOURCE, /from '\.\/lib\/shellReloadState\.js'/)
+test('navigation is the only startup consumer of reload state', () => {
+  assert.doesNotMatch(APP_SOURCE, /from '\.\/lib\/shellReloadState\.js'/)
   assert.match(NAV_SOURCE, /from '\.\.\/lib\/shellReloadState\.js'/)
   assert.doesNotMatch(APP_SOURCE, /from '\.\/hooks\/useNavigation\.js'/)
+  assert.doesNotMatch(APP_SOURCE, /if \(shellReload\)/)
 })

@@ -15,12 +15,7 @@ export function beginTouchComposerFocusLease(el, {
   if (!el || activeElement === el || typeof matchMediaImpl !== 'function') return false
   if (matchMediaImpl(TOUCH_PRIMARY_QUERY)?.matches !== true) return false
   el.value = String(initialValue)
-  const focused = focusComposerElement(el)
-  if (focused) {
-    const end = el.value.length
-    try { el.setSelectionRange?.(end, end) } catch {}
-  }
-  return focused
+  return focusComposerElement(el)
 }
 
 export function releaseComposerFocusLease(el, {
