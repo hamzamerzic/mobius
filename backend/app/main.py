@@ -315,6 +315,7 @@ _SHELL_CSP = shell_csp(os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", ""))
 _APP_FRAME_CSP = app_frame_csp(
   settings.frontend_origin,
   os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", ""),
+  settings.api_base_url,
 )
 
 # Published sites (`/sites/<token>/`) are public snapshots of the owner's own
