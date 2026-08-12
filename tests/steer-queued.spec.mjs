@@ -58,18 +58,24 @@ async function newChat(page) {
     () => !document.querySelector('.drawer--open'),
     { timeout: 3000 }
   )
+  await page.waitForFunction(
+    () => !document.querySelector('[data-new-chat-presentation]'),
+    { timeout: 10000 },
+  )
 }
 
 async function sendMessage(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
+  const surface = page.locator('[data-chat-surface="painted"]')
+  const input = surface.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
   await page.keyboard.press('Enter')
 }
 
 async function tapSend(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
+  const surface = page.locator('[data-chat-surface="painted"]')
+  const input = surface.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
-  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await surface.getByRole('button', { name: 'Send', exact: true }).click()
 }
 
 // The real service worker claims the page ~1s after load; from then on its
