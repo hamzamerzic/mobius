@@ -2934,7 +2934,7 @@ def test_skill_names_in_command_extracts_and_dedupes():
   assert names == ["memory", "building-apps"]
 
 
-def test_skill_names_in_command_attributes_codex_resources_to_their_skill():
+def test_skill_names_in_command_counts_entry_documents_not_resources():
   cmd = (
     "cat /data/.codex/skills/theming/SKILL.md && "
     "node /data/.codex/skills/impeccable/scripts/context.mjs "
@@ -2943,7 +2943,7 @@ def test_skill_names_in_command_attributes_codex_resources_to_their_skill():
     "cat .codex/skills/impeccable/reference/craft-floor.md"
   )
   names = codex_sdk_runner._skill_names_in_command(cmd, "/data")
-  assert names == ["theming", "impeccable"]
+  assert names == ["theming"]
 
 
 def test_skill_names_in_command_ignores_other_paths():

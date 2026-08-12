@@ -1562,8 +1562,8 @@ def test_corrupt_sidecar_fails_install_closed_and_preserves_ownership(
   assert d.is_dir()
 
 
-def test_codex_usage_counts_directory_skill_by_id(skills_dir):
-  """A directory skill and its resources count under the directory id."""
+def test_codex_usage_counts_directory_entry_by_id(skills_dir):
+  """A directory entry counts by id; its resources are not another load."""
   from app.codex_sdk_runner import _skill_names_in_command
   from app.config import get_settings
 
@@ -1576,4 +1576,4 @@ def test_codex_usage_counts_directory_skill_by_id(skills_dir):
   assert _skill_names_in_command(cmd, data_dir) == ["pdf", "cron"]
   assert _skill_names_in_command(
     f"cat {data_dir}/shared/skills/pdf/reference.md", data_dir,
-  ) == ["pdf"]
+  ) == []

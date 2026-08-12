@@ -891,12 +891,10 @@ def _skill_names_in_command(command: str, data_dir: str) -> list[str]:
   Codex has no Read tool and no `can_use_tool` hook — its closest
   interception point is the command-execution item stream, where a
   skill load can target either Möbius's authoritative shared tree or
-  Codex's project-local `.codex/skills` tree. A directory skill's scripts,
-  references, and other resources still belong to that skill, so any path
-  below its top-level directory counts. Any reference to a matching path in
-  a command counts as a load; that over-counts an edit-in-place, which is
-  acceptable for an aggregate most-used signal. Returns deduped names in
-  first-mention order.
+  Codex's project-local `.codex/skills` tree. Provider-neutral semantics count
+  only the entry document: a flat shared skill or a directory's SKILL.md.
+  Bundled scripts and references are use *after* loading, not another load.
+  Returns deduped names in first-mention order.
   """
   if not command:
     return []
@@ -913,17 +911,16 @@ def _skill_names_in_command(command: str, data_dir: str) -> list[str]:
   # is lexical on purpose and never reads the referenced file.
   boundary = r"(?<![A-Za-z0-9._/-])"
   name_part = r"[A-Za-z0-9][A-Za-z0-9._-]*"
-  resource_tail = r"/[^\s'\"`;&|()<>]+"
   shared_pattern = re.compile(
     boundary
     + rf"(?:{shared_root}|shared/skills)/"
     + rf"(?P<shared_name>{name_part})"
-    + rf"(?:\.md\b|{resource_tail})"
+    + r"(?:\.md\b|/(?i:SKILL\.md)\b)"
   )
   codex_pattern = re.compile(
     boundary
     + rf"(?:{codex_root}|\.codex/skills)/"
-    + rf"(?:\.system/)?(?P<codex_name>{name_part}){resource_tail}"
+    + rf"(?:\.system/)?(?P<codex_name>{name_part})/(?i:SKILL\.md)\b"
   )
 
   matches = [
