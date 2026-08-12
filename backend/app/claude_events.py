@@ -53,6 +53,7 @@ except ImportError:
 
 from app import activity
 from app.sdk_emit import emit_unknown_enabled, unknown_event
+from app.tool_edit_preview import claude_edit_preview
 from app.tool_summaries import summarize_tool_input
 from app.tool_sources import normalize_tool_sources, sources_from_websearch_text
 from app.usage_metrics import normalize_claude_usage
@@ -424,16 +425,18 @@ def dispatch_sdk_message(
           "tool_use_id": block.id,
         })
         summary = summarize_tool_input(block.name, block.input)
-        if summary:
+        edit_preview = claude_edit_preview(block.name, block.input)
+        if summary or edit_preview:
           bc.publish({
             "type": "tool_input",
             "tool": block.name,
             "input": summary,
             "tool_use_id": block.id,
+            **({"edit_preview": edit_preview} if edit_preview else {}),
           })
         # Skill observability: when the agent loads a skill, surface it
-        # as its own `skill_loaded` event (the frontend stamps a chip
-        # onto the Skill tool block) and append a record to the activity
+        # as its own targeted `skill_loaded` event (the frontend presents the
+        # owning tool as a skill-read block) and append a record to the activity
         # log so "most-used skills" can be aggregated. This fires
         # whenever the Skill tool runs at all; whether skills are even
         # OFFERED to the agent is the separate, gated `skills_enabled`
@@ -441,7 +444,11 @@ def dispatch_sdk_message(
         if block.name == "Skill":
           skill = _skill_name_from_input(block.input)
           if skill:
-            bc.publish({"type": "skill_loaded", "skill": skill})
+            bc.publish({
+              "type": "skill_loaded",
+              "skill": skill,
+              "tool_use_id": block.id,
+            })
             activity.log_skill_load(getattr(bc, "chat_id", None), skill)
         continue
       if isinstance(block, ServerToolUseBlock):
@@ -529,6 +536,7 @@ def dispatch_sdk_message(
           "content": output,
           "tool_use_id": block.tool_use_id,
           "output_complete": True,
+          **({"output_exit_code": 1} if block.is_error else {}),
         })
         if output.startswith("Web search results for query"):
           sources = sources_from_websearch_text(output)

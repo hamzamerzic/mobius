@@ -167,7 +167,7 @@ export function activityMemoSig(entries, { liveThinkingTail = false } = {}) {
     .map(e => {
       const it = e?.item
       if (it?.type === 'tool') {
-        return `t:${it.tool || ''}:${it.status || ''}`
+        return `t:${effectiveToolName(it) || ''}:${it.status || ''}`
       }
       return 'k'
     })

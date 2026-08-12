@@ -16,6 +16,7 @@ from typing import Any
 
 from app.codex_appserver import _extract_bash_command
 from app.json_safety import json_safe
+from app.tool_edit_preview import codex_edit_preview
 from app.tool_sources import normalize_tool_sources
 
 log = logging.getLogger("moebius.chat")
@@ -595,10 +596,12 @@ def _tool_start_event(item: Any, sdk: dict[str, Any]) -> dict[str, Any] | None:
   if isinstance(item, sdk["FileChangeThreadItem"]):
     first = item.changes[0] if item.changes else None
     path = _model_dump(first).get("path", "") if first is not None else ""
+    edit_preview = _file_change_edit_preview(item.changes)
     return {
       "type": "tool_start",
       "tool": "Edit",
       "input": path,
+      **({"edit_preview": edit_preview} if edit_preview else {}),
     }
   if isinstance(item, sdk["McpToolCallThreadItem"]):
     tool_name = f"{item.server}:{item.tool}" if item.server else item.tool
@@ -890,31 +893,50 @@ def _skill_names_in_command(command: str, data_dir: str) -> list[str]:
 
   Codex has no Read tool and no `can_use_tool` hook — its closest
   interception point is the command-execution item stream, where a
-  skill load looks like `cat /data/shared/skills/<name>.md` (flat) or
-  `cat /data/shared/skills/<id>/SKILL.md` (the directory shape installed
-  skills use), possibly via sed/head/grep over the same path. Any
-  reference to a skill file in a command counts as a load; that
-  over-counts an edit-in-place, which is acceptable for an aggregate
-  most-used signal. A directory skill is keyed by its DIRECTORY name —
-  the on-disk id — matching the Claude Read observer and the usage
-  aggregation; a deeper resource read inside the directory is not a
-  load. Returns deduped names in first-mention order.
+  skill load can target either Möbius's authoritative shared tree or
+  Codex's project-local `.codex/skills` tree. Provider-neutral semantics count
+  only the entry document: a flat shared skill or a directory's SKILL.md.
+  Bundled scripts and references are use *after* loading, not another load.
+  Returns deduped names in first-mention order.
   """
   if not command:
     return []
   from app.skills import GENERATED_INDEX_STEMS
 
-  prefix = re.escape(
-    os.path.normpath(os.path.join(data_dir, "shared", "skills"))
+  shared_root = re.escape(os.path.normpath(
+    os.path.join(data_dir, "shared", "skills")
+  ))
+  codex_root = re.escape(os.path.normpath(
+    os.path.join(data_dir, ".codex", "skills")
+  ))
+  # The boundary keeps relative forms from matching the tail of an unrelated
+  # absolute path. Shell punctuation terminates a resource path; the detector
+  # is lexical on purpose and never reads the referenced file.
+  boundary = r"(?<![A-Za-z0-9._/-])"
+  name_part = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+  shared_pattern = re.compile(
+    boundary
+    + rf"(?:{shared_root}|shared/skills)/"
+    + rf"(?P<shared_name>{name_part})"
+    + r"(?:\.md\b|/(?i:SKILL\.md)\b)"
   )
+  codex_pattern = re.compile(
+    boundary
+    + rf"(?:{codex_root}|\.codex/skills)/"
+    + rf"(?:\.system/)?(?P<codex_name>{name_part})/(?i:SKILL\.md)\b"
+  )
+
+  matches = [
+    (match.start(), match.group("shared_name"))
+    for match in shared_pattern.finditer(command)
+  ]
+  matches.extend(
+    (match.start(), match.group("codex_name"))
+    for match in codex_pattern.finditer(command)
+  )
+
   names: list[str] = []
-  # Either `<id>/SKILL.md` (directory skill, id = the dir name, SKILL.md
-  # case-insensitive) or a flat `<name>.md` directly under skills/. The two
-  # alternatives are disjoint (a flat match can't span a `/`), so one pass in
-  # command order preserves first-mention order without double counting.
-  pattern = prefix + r"/([A-Za-z0-9._-]+)(?:/(?i:SKILL\.md)|\.md)\b"
-  for match in re.finditer(pattern, command):
-    name = match.group(1)
+  for _, name in sorted(matches):
     # Reading a generated index is consulting a listing, not loading a skill.
     if name not in names and name not in GENERATED_INDEX_STEMS:
       names.append(name)
@@ -926,8 +948,8 @@ def _observe_skill_reads(
 ) -> None:
   """Fire-and-forget `skill_loaded` events for skill-file shell reads.
 
-  Mirrors `observe_skill_file_read` in claude_sdk_runner: same wire
-  event (chip), same activity record (most-used-skills aggregation).
+  Mirrors `observe_skill_file_read` in claude_sdk_runner: same targeted wire
+  receipt, same activity record (most-used-skills aggregation).
   Never raises — observability must not break the notification loop.
   """
   try:
@@ -937,8 +959,13 @@ def _observe_skill_reads(
     from app.config import get_settings
     command = _extract_bash_command(item.command or "")
     skills = _skill_names_in_command(command, get_settings().data_dir)
+    tool_use_id = getattr(item, "id", None)
     for skill in skills:
-      bc.publish({"type": "skill_loaded", "skill": skill})
+      bc.publish({
+        "type": "skill_loaded",
+        "skill": skill,
+        **({"tool_use_id": tool_use_id} if tool_use_id else {}),
+      })
       activity.log_skill_load(chat_id, skill)
   except Exception:
     log.debug("codex skill_loaded observability failed", exc_info=True)
@@ -955,3 +982,8 @@ def _file_change_patch_summary(changes: list[Any]) -> str:
     if line:
       lines.append(line)
   return "\n".join(lines)
+
+
+def _file_change_edit_preview(changes: list[Any]) -> dict | None:
+  """Normalize SDK file changes into the shared bounded diff preview."""
+  return codex_edit_preview([_model_dump(change) for change in changes])

@@ -31,6 +31,8 @@ import {
   repairInterleavedQuestionText,
   replaceTextItem,
   startToolLifecycle,
+  applySkillLoaded,
+  attachToolInput,
 } from '../streamReducers.js'
 import { questionKey } from '../questionKey.js'
 
@@ -56,6 +58,67 @@ test('Codex tool start preserves provider-neutral Memory recall metadata', () =>
   })
   assert.deepEqual(items[0].recall, { status: 'searching' })
   assert.equal(items[0].tool_use_id, 'cmd-1')
+})
+
+test('skill loads attach by tool id and accumulate without duplicates', () => {
+  const running = [
+    toolItem('Bash', { tool_use_id: 'cmd-1' }),
+    toolItem('Bash', { tool_use_id: 'cmd-2' }),
+  ]
+  const first = applySkillLoaded(running, {
+    skill: 'recovery', tool_use_id: 'cmd-1',
+  })
+  const duplicate = applySkillLoaded(first, {
+    skill: 'recovery', tool_use_id: 'cmd-1',
+  })
+  const second = applySkillLoaded(duplicate, {
+    skill: 'theming', tool_use_id: 'cmd-1',
+  })
+
+  assert.deepEqual(second[0].skills, ['recovery', 'theming'])
+  assert.equal(second[0].tool, 'Bash')
+  assert.equal(second[1].skills, undefined, 'a parallel tool is never misattributed')
+  assert.equal(running[0].skills, undefined, 'the prior live snapshot stays immutable')
+})
+
+test('skill loads remain visible when no owning tool start arrived', () => {
+  const items = applySkillLoaded([], { skill: 'humanizer' })
+  assert.deepEqual(items, [{
+    type: 'tool', tool: 'Skill', skill: 'humanizer',
+    skills: ['humanizer'],
+    input: '', output: '', status: 'done',
+  }])
+  assert.equal(applySkillLoaded(items, { skill: 'humanizer' }), items,
+    'a replayed settled receipt is idempotent')
+})
+
+test('tool start preserves the shared edit preview for either provider', () => {
+  const editPreview = {
+    diff: 'diff --git a/a b/a\n@@ -1 +1 @@\n-a\n+b',
+    truncated: false,
+  }
+  const items = startToolLifecycle([], {
+    tool: 'Edit', input: 'a', tool_use_id: 'edit-1', edit_preview: editPreview,
+  })
+
+  assert.equal(items[0].edit_preview, editPreview)
+})
+
+test('a later Codex patch update replaces the live edit preview by identity', () => {
+  const first = { diff: 'diff --git a/a b/a', truncated: false }
+  const final = {
+    diff: 'diff --git a/a b/a\n@@ -1 +1 @@\n-a\n+b',
+    truncated: false,
+  }
+  const started = startToolLifecycle([], {
+    tool: 'Edit', input: 'a', tool_use_id: 'edit-1', edit_preview: first,
+  })
+  const updated = attachToolInput(started, {
+    type: 'tool_input', input: 'a', tool_use_id: 'edit-1', edit_preview: final,
+  })
+
+  assert.equal(updated[0].edit_preview, final)
+  assert.equal(started[0].edit_preview, first, 'the live snapshot stays immutable')
 })
 
 test('text item identity keeps late deltas before an interleaved question', () => {
