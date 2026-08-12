@@ -3,9 +3,10 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
   chatImageReference,
-  durableImageReference,
   imagePathFromInput,
   inlineImageReference,
+  servedImageReference,
+  temporaryImageReference,
   toolImageReference,
 } from '../toolImageResult.js'
 
@@ -53,6 +54,26 @@ test('paths outside chat-owned image storage do not become browser URLs', () => 
   assert.equal(chatImageReference('/data/apps/private.png'), null)
 })
 
+test('a viewed /tmp image resolves through the owning chat only', () => {
+  assert.deepEqual(
+    temporaryImageReference('/tmp/visuals/render one.png', 'chat-123'),
+    {
+      kind: 'tmp',
+      chatId: 'chat-123',
+      filename: 'visuals/render one.png',
+    },
+  )
+  assert.deepEqual(
+    servedImageReference(
+      JSON.stringify({ path: '/tmp/inspect.png', detail: 'original' }),
+      'chat-123',
+    ),
+    { kind: 'tmp', chatId: 'chat-123', filename: 'inspect.png' },
+  )
+  assert.equal(temporaryImageReference('/tmp/visual.png', ''), null)
+  assert.equal(temporaryImageReference('/var/tmp/visual.png', 'chat-123'), null)
+})
+
 test('a base64 image result is an explicit fallback for non-chat paths', () => {
   const output = JSON.stringify({
     type: 'image',
@@ -67,11 +88,15 @@ test('a base64 image result is an explicit fallback for non-chat paths', () => {
     { kind: 'inline', src: 'data:image/png;base64,aGVsbG8=' },
   )
   assert.deepEqual(
-    toolImageReference('/tmp/visual.png', output),
+    toolImageReference('/tmp/visual.png', output, 'chat-123'),
+    { kind: 'tmp', chatId: 'chat-123', filename: 'visual.png' },
+  )
+  assert.deepEqual(
+    toolImageReference('/var/tmp/visual.png', output, 'chat-123'),
     { kind: 'inline', src: 'data:image/png;base64,aGVsbG8=' },
   )
   assert.equal(
-    durableImageReference('/data/apps/example-app/icon.png'),
+    servedImageReference('/data/apps/example-app/icon.png'),
     null,
     'editable app files are not replaced by a potentially different runtime asset',
   )

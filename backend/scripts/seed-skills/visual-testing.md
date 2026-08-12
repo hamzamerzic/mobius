@@ -40,11 +40,12 @@ atomic-output checks. Raw capture remains appropriate for non-Möbius pages.
 
 Core moves once a page is open: `set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT" "$VIEWPORT_PIXEL_RATIO"` (the helper sets the complete geometry for you; needed when driving raw non-Möbius pages), `snapshot` (a11y tree with `@eN` refs), `click/fill/type @eN`, `wait` (on a signal — `wait @eN` / `--text` / `--fn` / `--url` — not a guessed duration), `batch "cmd1" "cmd2"` (ordered, fewer round-trips), `diff snapshot` / `diff screenshot --baseline <before>.png`.
 
-**Write a viewable image once, at its final home.** Any screenshot, render,
-crop, montage, or other raster image you intend to pass to `Read`/`view_image`
-must be created directly under `/data/chats/$CHAT_ID/media/`, not created in
-`/tmp` and copied afterward. The chat shell deliberately cannot serve
-arbitrary `/tmp` files. Mint a unique final path before the producing command:
+**Write a shareable image once, at its final home.** Any screenshot, render,
+crop, montage, or other raster image you intend to embed in your reply must be
+created directly under `/data/chats/$CHAT_ID/media/`, not created in `/tmp` and
+copied afterward. The chat can preview raster files you inspect under `/tmp`
+inside the protected tool activity, but temporary files still cannot be used as
+durable message embeds. Mint a unique final path before the producing command:
 
 ```bash
 MEDIA_DIR="/data/chats/$CHAT_ID/media"
@@ -54,10 +55,11 @@ bash "$SCRIPTS_DIR/agent-screenshot.sh" --current-page <route> "$OUT"
 ```
 
 `/tmp` remains correct for logs, diffs, test workspaces, disposable browser
-warm-ups, and images that will never be inspected or shown. When an external
-tool controls its own output location, publish that unavoidable pre-existing
-file once with `publish_chat_image.py`; do not make `/tmp` the default for
-images you create yourself.
+warm-ups, and images you only need to inspect through `Read`/`view_image`. When
+an external tool controls its own output location and you need to show that
+image in your reply, publish the unavoidable pre-existing file once with
+`publish_chat_image.py`; do not make `/tmp` the default for shareable images
+you create yourself.
 
 For textboxes, use `fill @eN "value"` directly. Do not split that into
 `click`, `Control+A`, and a selector-less `type`; the extra commands add
@@ -106,7 +108,7 @@ Two gotchas every session:
 
 Loading a PNG into your vision (`Read` on Claude, `view_image` on Codex) lets YOU inspect it. The partner sees ONLY your text plus any `![caption](/api/chats/$CHAT_ID/media/<name>.png)` embeds you explicitly write. The failure mode: you view it, describe it ("the grid rendered beautifully"), but never embed — so the partner trusts an unverified claim. Pattern:
 
-1. `Bash`: capture with `bash "$SCRIPTS_DIR/agent-screenshot.sh" <route>` — with no output path it lands in the chat's served media dir (`/data/chats/$CHAT_ID/media/shot-*.png`) and prints the path **plus a ready-to-paste `![screenshot](/api/chats/…)` embed line** — copy that line into your reply (step 3) so the shot actually shows. For an already-open Möbius state, mint the unique final media path first and use the same helper with `--current-page`; reserve raw `agent-browser screenshot "$OUT"` for non-Möbius pages. Only files under that dir embed; an image created under `/tmp` cannot preview in the chat.
+1. `Bash`: capture with `bash "$SCRIPTS_DIR/agent-screenshot.sh" <route>` — with no output path it lands in the chat's served media dir (`/data/chats/$CHAT_ID/media/shot-*.png`) and prints the path **plus a ready-to-paste `![screenshot](/api/chats/…)` embed line** — copy that line into your reply (step 3) so the shot actually shows. For an already-open Möbius state, mint the unique final media path first and use the same helper with `--current-page`; reserve raw `agent-browser screenshot "$OUT"` for non-Möbius pages. Only files under that dir embed in replies; `/tmp` images preview only inside their protected tool activity.
 2. `Read` / `view_image`: the path it printed.
 3. **Text** (same message, BEFORE interpreting): `![first render](/api/chats/$CHAT_ID/media/<name>.png)` — the embed path must match the file and carry the resolved chat id — a literal `$CHAT_ID` only expands in Bash, never in your markdown. Then a one-line description.
 4. Continue.
