@@ -991,10 +991,21 @@ test.describe('Scroll position', () => {
 
   test('10d. Previous-chat entry stays held until catch-up, then settles without movement', async ({ page }) => {
     await setup(page, { width: 900, height: 760 })
-    const originalChat = await newChat(page)
+    await newChat(page)
 
     const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
     expect(chatId).toBeTruthy()
+
+    // This test overlays a populated transcript through a route mock. Persist a
+    // small occupancy marker too so the New Chat action owns a genuinely new
+    // draft instead of correctly reusing the otherwise untouched server row.
+    const token = await page.evaluate(() => localStorage.getItem('token'))
+    expect(token).toBeTruthy()
+    const occupyResponse = await page.request.put(`${BASE}/api/chats/${chatId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { messages: [{ role: 'user', content: 'Entry restoration fixture' }] },
+    })
+    expect(occupyResponse.ok()).toBe(true)
 
     let returning = false
     let streamCount = 0
@@ -1100,22 +1111,16 @@ test.describe('Scroll position', () => {
       { timeout: 3000 },
     )
 
-    // Move to an explicitly distinct durable chat. The transcript above is a
-    // route mock layered over an otherwise untouched server row, so invoking
-    // New Chat here would correctly reuse that row and would not exercise the
-    // previous-chat restoration contract this test owns.
-    const decoy = await createTaggedChat(page)
-    const decoyChatId = decoy?.id
-    expect(decoyChatId).toBeTruthy()
-    expect(decoyChatId).not.toBe(chatId)
-    await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(decoyChatId)}`, {
-      waitUntil: 'domcontentloaded',
-    })
-    const decoySurface = page.locator(
-      `[data-chat-surface="painted"][data-chat-id="${decoyChatId}"]`,
-    )
-    await expect(decoySurface.getByRole('textbox', { name: 'Message Möbius…' }))
-      .toBeVisible({ timeout: 10000 })
+    // Move through the owner-facing New Chat action so browser history records
+    // the transition that this previous-chat restoration contract exercises.
+    await page.getByLabel('Toggle navigation').click()
+    await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
+    await page.locator('.drawer__item--new').click()
+    await page.waitForFunction(id => {
+      const surface = document.querySelector('[data-chat-surface="painted"]')
+      return !!surface && surface.getAttribute('data-chat-id') !== id
+        && getComputedStyle(surface).visibility !== 'hidden'
+    }, chatId, { timeout: 10000 })
 
     returning = true
     await page.evaluate(() => {
@@ -1152,11 +1157,7 @@ test.describe('Scroll position', () => {
       requestAnimationFrame(sample)
     })
 
-    await page.getByLabel('Toggle navigation').click()
-    await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
-    await page.getByLabel('Primary navigation')
-      .getByRole('button', { name: originalChat.title, exact: true })
-      .click()
+    await page.goBack({ waitUntil: 'domcontentloaded' })
 
     await page.waitForFunction(id => {
       const surface = document.querySelector(
