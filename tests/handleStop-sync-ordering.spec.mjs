@@ -39,9 +39,6 @@ async function setupChat(page) {
 }
 
 async function newChat(page) {
-  const previousChatId = await page
-    .locator('[data-chat-surface="painted"]')
-    .getAttribute('data-chat-id')
   await page.evaluate(() => {
     const btn = document.querySelector('[aria-expanded]')
     if (btn && btn.getAttribute('aria-expanded') !== 'true') btn.click()
@@ -58,23 +55,22 @@ async function newChat(page) {
     () => !document.querySelector('.drawer--open'),
     { timeout: 3000 }
   )
-  // New Chat presents and focuses the empty composer before its durable chat
-  // allocation finishes. This test mocks a chat-id-scoped stream, so wait for
-  // the new identity rather than racing the first send against allocation.
-  await page.waitForFunction(previous => {
+  // New Chat may correctly reuse the already-visible untouched chat. Wait for
+  // the draft-first cover to hand off to whichever durable composer owns the
+  // destination rather than requiring a newly allocated identity.
+  await page.waitForFunction(() => {
     const surface = document.querySelector('[data-chat-surface="painted"]')
-    const next = surface?.getAttribute('data-chat-id')
     const composer = surface?.querySelector('[aria-label="Message Möbius…"]')
-    return !!next
-      && next !== previous
+    return !!surface?.getAttribute('data-chat-id')
       && !document.querySelector('[data-new-chat-presentation]')
       && !!composer
       && !composer.disabled
-  }, previousChatId, { timeout: 10000 })
+  }, undefined, { timeout: 10000 })
 }
 
 async function sendMessage(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
+  const input = page.locator('[data-chat-surface="painted"]')
+    .getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
   await input.press('Enter')
 }

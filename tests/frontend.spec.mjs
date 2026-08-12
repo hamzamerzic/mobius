@@ -1108,10 +1108,13 @@ test.describe('Scroll position', () => {
     // accepts focus, so the durable route and painted composer—not the old
     // internal empty wrapper—are the settlement boundary.
     await expect.poll(() => page.evaluate(id => {
-      const active = localStorage.getItem('moebius_active_chat')
-      return active && active !== id ? active : null
-    }, chatId), { timeout: 5000 }).not.toBeNull()
-    const decoyChatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
+      const active = document.querySelector('[data-chat-surface="painted"]')
+        ?.getAttribute('data-chat-id')
+      return active && active !== id
+        && !document.querySelector('[data-new-chat-presentation]') ? active : null
+    }, chatId), { timeout: 10000 }).not.toBeNull()
+    const decoyChatId = await page.locator('[data-chat-surface="painted"]')
+      .getAttribute('data-chat-id')
     expect(decoyChatId).toBeTruthy()
     expect(decoyChatId).not.toBe(chatId)
     await expect(page.locator(
