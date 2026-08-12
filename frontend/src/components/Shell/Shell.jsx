@@ -3022,17 +3022,25 @@ export default function Shell({ onInitialVisualReady }) {
       // Re-check the captured identity against the current list before the
       // detail probe. A chat that became populated/running while the scene was
       // moving must not be revived by the offline reuse path.
-      const candidateId = pending.resolvedChatId ?? pending.candidateId
-      const reusable = candidateId == null
-        ? null
-        : currentReusableEmptyChat(chatsRef.current, {
-            activeChatId: candidateId,
-            recoveredChatIds: recoveredChatIdsRef.current,
-            streamingChatIds: streamingChatIdsRef.current,
-          })
-      const { chatId, reason } = await resolveNewChatId({
-        reuseChatId: reusable?.id ?? null,
-      })
+      // A superseded request can hand this token the row it just created.
+      // That response is already authoritative and the row has never been
+      // exposed to a composer, so reuse it directly: probing it as a generic
+      // candidate can race a stale list and manufacture a second empty row.
+      let chatId = pending.resolvedChatId ?? null
+      let reason = null
+      if (chatId == null) {
+        const candidateId = pending.candidateId
+        const reusable = candidateId == null
+          ? null
+          : currentReusableEmptyChat(chatsRef.current, {
+              activeChatId: candidateId,
+              recoveredChatIds: recoveredChatIdsRef.current,
+              streamingChatIds: streamingChatIdsRef.current,
+            })
+        ;({ chatId, reason } = await resolveNewChatId({
+          reuseChatId: reusable?.id ?? null,
+        }))
+      }
       // Stale-guard: if a newer empty-single request arrived during the await, hand
       // it this already-validated/created untouched row. That preserves latest-token
       // ownership without abandoning a server row or issuing a duplicate POST.
