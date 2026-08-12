@@ -2934,15 +2934,29 @@ def test_skill_names_in_command_extracts_and_dedupes():
   assert names == ["memory", "building-apps"]
 
 
+def test_skill_names_in_command_counts_entry_documents_not_resources():
+  cmd = (
+    "cat /data/.codex/skills/theming/SKILL.md && "
+    "node /data/.codex/skills/impeccable/scripts/context.mjs "
+    "--target frontend/src/components/ChatView/ChatView.jsx && "
+    "cat /data/.codex/skills/impeccable/reference/optimize.md && "
+    "cat .codex/skills/impeccable/reference/craft-floor.md"
+  )
+  names = codex_sdk_runner._skill_names_in_command(cmd, "/data")
+  assert names == ["theming"]
+
+
 def test_skill_names_in_command_ignores_other_paths():
   fn = codex_sdk_runner._skill_names_in_command
   assert fn("cat /data/shared/memory/index.md", "/data") == []
   assert fn("cat /elsewhere/shared/skills/memory.md", "/data") == []
+  assert fn("cat /elsewhere/.codex/skills/theming/SKILL.md", "/data") == []
   assert fn("cat /data/shared/skills/notes.txt", "/data") == []
+  assert fn("cat /data/.codex/skills/.mobius-managed.json", "/data") == []
   assert fn("", "/data") == []
 
 
-def test_observe_skill_reads_publishes_chip_and_activity(monkeypatch):
+def test_observe_skill_reads_publishes_targeted_receipt_and_activity(monkeypatch):
   import os
 
   from app import activity
@@ -2957,13 +2971,17 @@ def test_observe_skill_reads_publishes_chip_and_activity(monkeypatch):
   class _Cmd:
     def __init__(self, command):
       self.command = command
+      self.id = "cmd-skill-1"
 
   sdk = {"CommandExecutionThreadItem": _Cmd}
   bc = _FakeBroadcast()
   skills = os.path.join(get_settings().data_dir, "shared", "skills")
   item = _Cmd(f"cat {skills}/cron.md")
   codex_sdk_runner._observe_skill_reads(item, sdk, bc=bc, chat_id="cx-1")
-  assert bc.events == [{"type": "skill_loaded", "skill": "cron"}]
+  assert bc.events == [{
+    "type": "skill_loaded", "skill": "cron",
+    "tool_use_id": "cmd-skill-1",
+  }]
   assert logged == [("cx-1", "cron")]
 
   # Non-command items and non-skill commands emit nothing.

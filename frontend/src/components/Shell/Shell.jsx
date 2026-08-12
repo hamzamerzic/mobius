@@ -159,7 +159,7 @@ const EMPTY_LIST = Object.freeze([])
 // transition completion owns its lifetime, so Shell has no animation timers.
 const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
 
-export default function Shell() {
+export default function Shell({ onInitialVisualReady }) {
   const {
     desktop: desktopSidebarMode,
     open: desktopSidebarOpen,
@@ -195,6 +195,9 @@ export default function Shell() {
     storage: localStorage,
     legacyStorage: sessionStorage,
   })
+  // Navigation reads the current claimant synchronously without closing over
+  // reload-controller state declared later in this component.
+  const beforeNavigateRef = useRef(null)
 
   const {
     activeView,
@@ -218,6 +221,7 @@ export default function Shell() {
     blobValid,
     replaceImplicitBootTab,
     dragActiveRef,
+    beforeNavigateRef,
   })
 
   // A mobile drawer is a history-backed virtual route. A desktop sidebar is a
@@ -611,6 +615,16 @@ export default function Shell() {
   // typing across that ID-less interval.
   const [newChatPresentation, setNewChatPresentation] = useState(null)
   const newChatPresentationRef = useRef(null)
+  // App owns the static launch cover; Shell owns the first rendered workspace
+  // surface. Publish this one-way readiness boundary once so a browser refresh
+  // cannot reveal a chat while its scroll restoration is still deliberately
+  // hidden.
+  const initialVisualReadyRef = useRef(false)
+  const markInitialVisualReady = useCallback(() => {
+    if (initialVisualReadyRef.current) return
+    initialVisualReadyRef.current = true
+    onInitialVisualReady?.()
+  }, [onInitialVisualReady])
   // A slow New-chat allocation replaces the modal drawer visually without
   // consuming its history entry. Destination navigation owns that entry once
   // the concrete chat exists; avoiding an early Back traversal also keeps the
@@ -1034,6 +1048,10 @@ export default function Shell() {
     // Surface owners include both real builder panes and the single world's
     // synthetic slot, so resolve the selected key through their shared boundary.
     if (paneModel.activeKeyForOwner(workspaceStateRef.current.ws, paneKey) !== `chat:${id}`) return
+    // PaneChatView calls this after the destination's display-ready frame has
+    // painted. On the first chat this is also the exact boundary where the
+    // static launch cover may yield without exposing scroll restoration.
+    markInitialVisualReady()
     setPresentedChatBySurface(prev => {
       const next = new Map(prev)
       let changed = false
@@ -1079,9 +1097,22 @@ export default function Shell() {
   }, [
     finishDrawerNavigationPresentation,
     focusedPaneViewIdRef,
+    markInitialVisualReady,
     requestComposer,
     workspaceStateRef,
   ])
+
+  // A launch that opens an app, Settings, or the empty-chat landing has no
+  // ChatView display-ready callback. Once the shell knows it is not waiting on
+  // a concrete chat, one browser frame is the honest visual boundary. A real
+  // chat always takes the callback path above instead.
+  useEffect(() => {
+    if (initialVisualReadyRef.current) return undefined
+    if (activeView === 'chat' && activeChatId) return undefined
+    if (activeView === 'chat' && !chatsQuery.isFetched) return undefined
+    const frame = requestAnimationFrame(() => markInitialVisualReady())
+    return () => cancelAnimationFrame(frame)
+  }, [activeChatId, activeView, chatsQuery.isFetched, markInitialVisualReady])
 
   const finishNewChatPresentationRelease = useCallback((presentation) => {
     if (!presentation?.releasing || newChatPresentationRef.current !== presentation) return
@@ -1614,7 +1645,10 @@ export default function Shell() {
     voiceDictationActiveRef.current = voiceDictationActive
   }, [voiceDictationActive])
 
-  const { requestShellReload } = useShellReloadController({
+  const {
+    requestShellReload,
+    claimPendingShellReloadNavigation,
+  } = useShellReloadController({
     win: window,
     doc: document,
     nav: navigator,
@@ -1633,6 +1667,7 @@ export default function Shell() {
     activeChatId,
     multiPaneBuilderVisible,
   })
+  beforeNavigateRef.current = claimPendingShellReloadNavigation
 
   // Stable callbacks for ChatView — identity must not change across
   // renders or ChatView's onStreamEnd-handler memoization breaks. The
@@ -3721,6 +3756,13 @@ export default function Shell() {
           const surfaceVisible = !!(paned || fullBleed)
           const appSurfaceInert = !surfaceVisible || heldForChat
           const appRuntimeVisible = visibleAppIds.has(String(id)) && !heldForChat
+          // The held app is the visual handoff cover. Keep its frame visibly
+          // foreground until the chat has painted: apps may legitimately clear
+          // their own UI after `frame-visibility:false`, which would otherwise
+          // reveal the chat's still-settling frame beneath this wrapper. Its
+          // logical runtime remains inactive, so it cannot navigate or claim a
+          // capability during the handoff.
+          const appFrameVisible = appRuntimeVisible || heldForChat
           const posStyle = paned ? {
             top: paned.y,
             left: paned.x,
@@ -3761,12 +3803,15 @@ export default function Shell() {
               // Focused-pane-only: gates safe-area insets + the immersive holder
               // (global last-writer-wins).
               active={tabKey === focusedActiveKey}
-              // Visible in ANY pane: gates frame-visibility + nav-push (§5). A
+              // Visible in ANY pane: gates app navigation and capabilities. A
               // background split's app keeps running and can install sentinels;
               // Settings/immersive-solo/hidden panes exclude it (visibleAppIds).
-              // A held app still paints its last frame as a chat handoff cover,
-              // but it is no longer an active app runtime.
+              // Logical ownership controls app navigation and capabilities.
               visible={appRuntimeVisible}
+              // The cover owns the frame's visual lifetime, independently of
+              // logical app ownership, so its already-painted pixels remain
+              // stable until the chat takes over.
+              frameVisible={appFrameVisible}
               // Every visible pane remains painted beneath the modal scrim, but
               // suspend its iframe interaction while the drawer is open OR during any
               // mode scene (cross-origin app interaction is inert throughout).

@@ -224,8 +224,7 @@ def test_explicit_unknown_tool_id_never_corrupts_a_batch():
 
 
 def test_skill_loaded_stamps_skill_onto_skill_tool_block():
-  """A skill_loaded event stamps the skill name onto the most recent
-  Skill tool block so the persisted transcript carries the chip data."""
+  """A native Skill tool keeps the exact name and shared read receipt."""
   blocks = [
     {"type": "tool", "tool": "Skill", "input": "humanizer",
      "output": "", "status": "running"},
@@ -235,17 +234,51 @@ def test_skill_loaded_stamps_skill_onto_skill_tool_block():
   )
   assert changed
   assert blocks[0]["skill"] == "humanizer"
+  assert blocks[0]["skills"] == ["humanizer"]
 
 
-def test_skill_loaded_without_skill_block_is_noop():
-  """No Skill tool block to attach to → no change, no crash."""
-  blocks = [{"type": "tool", "tool": "Bash", "input": "ls",
-             "output": "", "status": "done"}]
+def test_skill_loaded_attaches_to_the_running_read_tool_and_dedupes():
+  """Read-based loads survive even though providers rarely use Skill."""
+  blocks = [{"type": "tool", "tool": "Read", "input": "skill.md",
+             "output": "", "status": "running", "tool_use_id": "read-1"}]
+  changed = process_event(
+    {"type": "skill_loaded", "skill": "humanizer",
+     "tool_use_id": "read-1"}, blocks,
+  )
+  assert changed
+  assert blocks[0]["skills"] == ["humanizer"]
+
+  process_event({"type": "skill_loaded", "skill": "humanizer",
+                 "tool_use_id": "read-1"}, blocks)
+  process_event({"type": "skill_loaded", "skill": "theming",
+                 "tool_use_id": "read-1"}, blocks)
+  assert blocks[0]["skills"] == ["humanizer", "theming"]
+
+
+def test_skill_loaded_targets_its_parallel_read_by_id():
+  blocks = [
+    {"type": "tool", "tool": "Read", "status": "running",
+     "tool_use_id": "read-1"},
+    {"type": "tool", "tool": "Read", "status": "running",
+     "tool_use_id": "read-2"},
+  ]
+  process_event({"type": "skill_loaded", "skill": "memory",
+                 "tool_use_id": "read-1"}, blocks)
+  assert blocks[0]["skills"] == ["memory"]
+  assert "skills" not in blocks[1]
+
+
+def test_skill_loaded_without_an_owning_tool_appends_visible_fallback():
+  blocks = []
   changed = process_event(
     {"type": "skill_loaded", "skill": "humanizer"}, blocks,
   )
-  assert changed is False
-  assert "skill" not in blocks[0]
+  assert changed
+  assert blocks == [{
+    "type": "tool", "tool": "Skill", "skill": "humanizer",
+    "skills": ["humanizer"],
+    "input": "", "output": "", "status": "done",
+  }]
 
 
 def test_skill_loaded_empty_name_is_noop():

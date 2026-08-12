@@ -1,6 +1,10 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Check, Copy } from '@openai/apps-sdk-ui/components/Icon'
-import { formatToolResult, toolResultCopyText } from './toolResultFormat.js'
+import {
+  formatToolResult,
+  toolBlockFailed,
+  toolResultCopyText,
+} from './toolResultFormat.js'
 import { copyPlainText } from './messageCopy.js'
 import { fetchLazyText } from './lazySidecar.js'
 import {
@@ -22,6 +26,8 @@ import {
   textSelectionSnapshot,
 } from '../../lib/selectableTextControl.js'
 import { useToolImagePreview } from './useToolImagePreview.js'
+import ToolEditPreview from './ToolEditPreview.jsx'
+import { toolEditPreview } from './toolEditPreview.js'
 
 // Render an already-formatted tool result (see toolResultFormat.js) so shell
 // output reads as a terminal (stdout / stderr / exit code) and a structured
@@ -118,10 +124,22 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
   const copyControllerRef = useRef(null)
   const pointerSelectionRef = useRef(null)
   const effectiveName = effectiveToolName(t)
-  const isShell = effectiveName === 'Bash' || effectiveName === 'shell'
+  // Skill reads keep the raw owning tool beneath their plain-language header.
+  // Use that raw identity for command/result formatting even though
+  // effectiveToolName intentionally classifies the collapsed row as Skill.
+  const isShell = t?.tool === 'Bash' || t?.tool === 'shell'
   const label = toolCallLabel(t)
   const iconKind = toolActivityIcon(effectiveName)
   const isImageTool = effectiveName === 'ViewImage'
+  const hasEditPreview = typeof t.edit_preview?.diff === 'string'
+  const failed = toolBlockFailed(t)
+  // Historical activities can contain many closed edits. Keep the durable
+  // marker cheap and defer parsing until this disclosure is prepared.
+  const wantsPreparation = prepareRequested || desiredOpen
+  const editPreview = useMemo(
+    () => (wantsPreparation && !failed ? toolEditPreview(t.edit_preview) : null),
+    [failed, t.edit_preview, wantsPreparation],
+  )
   const durableImage = useMemo(() => (
     isImageTool ? durableImageReference(t.input) : null
   ), [isImageTool, t.input])
@@ -129,7 +147,12 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
   // end of the message (MessageSources), where they belong to the answer
   // rather than to the one search that found them. They deliberately do not
   // make a tool row expandable on their own.
-  const hasDetail = !!(t.input || t.output || t.output_truncated)
+  const skillNames = effectiveName === 'Skill' && Array.isArray(t.skills)
+    ? t.skills.filter(skill => typeof skill === 'string' && skill.trim())
+    : []
+  const hasDetail = !!(
+    t.input || t.output || t.output_truncated || hasEditPreview || skillNames.length > 1
+  )
 
   useEffect(() => {
     // `loadingPreview` is intentionally not a dependency or start guard. Setting
@@ -243,7 +266,6 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
     && t.tool_use_id
   )
   const previewReady = !waitsForPreview
-  const wantsPreparation = prepareRequested || desiredOpen
   const imagePreview = useToolImagePreview(imageReference, {
     enabled: isImageTool && wantsPreparation && previewReady,
     onSettled: revealBeforeReady,
@@ -266,7 +288,6 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
   const exitCode = t.output_exit_code != null
     ? t.output_exit_code
     : (r && r.kind === 'terminal' ? r.exitCode : null)
-  const failed = exitCode != null && exitCode !== 0
   const excerptOnly = !!t.output_truncated && (
     t.status === 'running'
     || missingOutput
@@ -387,10 +408,6 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
       >
         <ActivityTypeIcon kind={iconKind} />
       </span>
-      {/* Skill observability: when the Skill tool loaded a named
-          skill, show its name as a chip so the user can see which
-          skill the agent reached for this turn. */}
-      {t.skill && <span className="chat__tool-chip">skill: {t.skill}</span>}
       {/* The group header names the category ("Ran commands"); each child row
           names the concrete operation ("Ran git status -sb"). */}
       <span className="chat__tool-name" title={label}>
@@ -474,12 +491,22 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
         <div
           ref={detailRef}
           id={detailId}
-          className="chat__tool-detail"
+          className={`chat__tool-detail${
+            editPreview ? ' chat__tool-detail--edit' : ''
+          }`}
           role="region"
           aria-labelledby={headerId}
           tabIndex={open ? 0 : undefined}
           hidden={!open}
         >
+          {open && skillNames.length > 1 && (
+            <div className="chat__tool-section">
+              <span className="chat__tool-section-label">Skills</span>
+              <ul className="chat__skill-list">
+                {skillNames.map(skill => <li key={skill}>{skill}</li>)}
+              </ul>
+            </div>
+          )}
           {open && t.input && !isImageTool && (
             <div className="chat__tool-section">
               <span className="chat__tool-section-label">
@@ -493,6 +520,7 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
               </pre>
             </div>
           )}
+          {open && editPreview && <ToolEditPreview preview={editPreview} />}
           {open && (r || t.output_truncated || isImageTool) && (
             <div className={isImageTool ? 'chat__tool-image-result' : 'chat__tool-section'}>
               {!isImageTool && (

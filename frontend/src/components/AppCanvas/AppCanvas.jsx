@@ -243,26 +243,24 @@ const AppCanvas = forwardRef(function AppCanvas({
   // status-bar-preserving chrome collapse, or null. One value keeps safe-area
   // forwarding and the runtime echo from observing contradictory booleans.
   immersiveMode = null,
-  // Whether this app is the currently-visible canvas (canvas view + active
-  // app). One prop, two consumers:
-  //   - `moebius:frame-visibility` — the shell keeps recently-used apps
-  //     MOUNTED and merely toggles `visibility:hidden` on the inactive ones
-  //     (Shell.css .shell__view), which does NOT change a nested iframe's
-  //     Page Visibility state, so the verdict is forwarded to the frame and
-  //     an app can pause background work (audio, rAF, timers) on navigate-away.
-  //   - Immersive gating — Shell's immersive holder is GLOBAL
+  // Whether this app owns the focused pane. Shell's immersive holder is GLOBAL
   //     last-writer-wins, so immersive intent may only be forwarded/replayed
   //     while this canvas is active; otherwise a hidden cached app (or its
   //     freshly-promoted rebuild) steals chrome/insets from the app on screen.
   // Defaults true so any caller that omits it keeps apps un-paused (back-compat).
   active = true,
-  // Whether this app is the active tab of ANY visible pane (design §5). Drives
-  // the frame-visibility signal and the nav-push gate — an app visible in a
-  // background split still runs and can install nested-view sentinels. `active`
+  // Whether this app is the active tab of any painted pane. An app visible in a
+  // background split still runs and can install nested-view sentinels. `visible`
+  // gates navigation and capabilities, while `active`
   // (the FOCUSED pane's app) stays focused-pane-only and continues to gate
   // safe-area insets + the immersive holder (global last-writer-wins). Defaults
   // to `active` so a single-pane caller (where visible === focused) is unchanged.
   visible = active,
+  // The frame's foreground signal normally follows its logical pane visibility.
+  // A shell-owned visual handoff may keep the already-painted frame foreground
+  // for a few frames after its pane became inactive, without reviving app
+  // navigation or capabilities.
+  frameVisible = visible,
   // Whether the live frame may receive direct interaction. This differs from
   // `visible` while the shell drawer is open: each pane remains painted behind
   // the scrim, but compositor momentum inside its iframe must be cancelled so
@@ -474,6 +472,8 @@ const AppCanvas = forwardRef(function AppCanvas({
   interactiveRef.current = interactive
   const visibleRef = useRef(visible)
   visibleRef.current = visible
+  const frameVisibleRef = useRef(frameVisible)
+  frameVisibleRef.current = frameVisible
   const capabilityContractRef = useRef(capabilityContract)
   capabilityContractRef.current = capabilityContract
   const capabilityHostRef = useRef(null)
@@ -1124,7 +1124,7 @@ const AppCanvas = forwardRef(function AppCanvas({
   }
 
   // ── In-shell foreground/background signal ────────────────────────
-  // Forward whether THIS app is the visible canvas. The shell keeps recently-
+  // Forward whether THIS app's frame is visually foreground. The shell keeps recently-
   // used apps mounted and hides the inactive ones with `visibility:hidden` on a
   // shell ancestor — which does NOT change the nested iframe's
   // document.visibilityState (no visibilitychange/blur/pagehide fires). So an
@@ -1139,27 +1139,27 @@ const AppCanvas = forwardRef(function AppCanvas({
   // A buffered incoming frame is invisible by construction, so it gets an
   // explicit `visible:false` at load (handleFrameLoad) — a rebuild that boots
   // in the hidden buffer must not start audio/rAF work before promotion. The
-  // effect below re-sends on every `active` flip AND on promotion
+  // effect below re-sends on every foreground-frame flip AND on promotion
   // (swap.liveVersion change), so a freshly-promoted frame immediately learns
   // whether it is foreground.
   function sendVisibility(v, visible) {
     postToFrame(v, { type: 'moebius:frame-visibility', visible })
   }
 
-  function sendInteractivity(v, enabled, visible = visibleRef.current) {
+  function sendInteractivity(v, enabled, frameIsVisible = frameVisibleRef.current) {
     postToFrame(v, {
       type: 'moebius:frame-interactivity',
       interactive: enabled,
-      suspendScrolling: visible && !enabled,
+      suspendScrolling: frameIsVisible && !enabled,
     })
   }
 
   useEffect(() => {
     if (loadedDocsRef.current.has(swap.liveVersion)) {
-      sendVisibility(swap.liveVersion, visible)
+      sendVisibility(swap.liveVersion, frameVisible)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, swap.liveVersion])
+  }, [frameVisible, swap.liveVersion])
 
   // Layout timing is deliberate. A drawer-open render removes the shell canvas
   // from hit-testing and sends this message before paint; app-frame.html then
@@ -1168,10 +1168,10 @@ const AppCanvas = forwardRef(function AppCanvas({
   // coast visibly beneath the newly-open drawer.
   useLayoutEffect(() => {
     if (loadedDocsRef.current.has(swap.liveVersion)) {
-      sendInteractivity(swap.liveVersion, interactive, visible)
+      sendInteractivity(swap.liveVersion, interactive, frameVisible)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [interactive, visible, swap.liveVersion])
+  }, [interactive, frameVisible, swap.liveVersion])
 
   useEffect(() => {
     for (const v of framesRef.current.keys()) {
@@ -1364,15 +1364,15 @@ const AppCanvas = forwardRef(function AppCanvas({
     // A booting incoming frame is invisible by construction and must not
     // start audio/rAF work before promotion, so it learns `visible:false`
     // here; the live frame gets the real visible verdict. Promotion re-sends
-    // via the [visible, swap.liveVersion] effect above. Interactivity is a
+    // via the [frameVisible, swap.liveVersion] effect above. Interactivity is a
     // separate gate (drawer-open momentum cancel); its "painted" argument tracks
-    // `visible` post active->visible split, its enabled argument tracks
+    // `frameVisible` post active->visible split, its enabled argument tracks
     // `interactive` (focused pane, drawer-aware).
-    sendVisibility(v, v === liveVersionRef.current ? visibleRef.current : false)
+    sendVisibility(v, v === liveVersionRef.current ? frameVisibleRef.current : false)
     sendInteractivity(
       v,
       v === liveVersionRef.current ? interactiveRef.current : false,
-      v === liveVersionRef.current ? visibleRef.current : false,
+      v === liveVersionRef.current ? frameVisibleRef.current : false,
     )
   }
 

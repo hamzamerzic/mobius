@@ -6,9 +6,10 @@ const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8
 const chatInputBar = readFileSync(new URL('../ChatInputBar.jsx', import.meta.url), 'utf8')
 const connectionStatus = readFileSync(new URL('../ConnectionStatus.jsx', import.meta.url), 'utf8')
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
+const scrollMode = readFileSync(new URL('../useScrollMode.js', import.meta.url), 'utf8')
 const shell = readFileSync(new URL('../../Shell/Shell.jsx', import.meta.url), 'utf8')
 
-test('footer stacks notices → rail → connection → queued → composer', () => {
+test('floating actions precede the measured rail → connection → queued → composer stack', () => {
   const footStart = chatView.indexOf('<div ref={footRef} className="chat__foot">')
   const composer = chatView.indexOf('<ChatInputBar', footStart)
   const foot = chatView.slice(footStart, composer)
@@ -23,6 +24,9 @@ test('footer stacks notices → rail → connection → queued → composer', ()
   )
   assert.ok(rail < connection, 'the progress rail stacks above connection/retry')
   assert.ok(connection < queued, 'connection/retry stacks directly above the queued input tray')
+  const floatingActions = foot.indexOf('className="chat__floating-actions"')
+  assert.ok(floatingActions >= 0 && floatingActions < rail,
+    'transient post-turn actions must render in the separate floating layer')
   for (const notice of [
     'className="chat__open-app"',
     'className="chat__question-nudge"',
@@ -31,8 +35,28 @@ test('footer stacks notices → rail → connection → queued → composer', ()
     const noticeIndex = foot.indexOf(notice)
     assert.ok(noticeIndex >= 0, `${notice} must be present in the footer`)
     assert.ok(noticeIndex < rail,
-      `${notice} must stack above the progress rail`)
+      `${notice} must render before the progress rail`)
   }
+  assert.match(
+    chatCss,
+    /\.chat__floating-actions\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?bottom:\s*calc\(100% \+ var\(--chat-foot-card-gap\)\);[\s\S]*?pointer-events:\s*none;/,
+    'open-app and contribution actions must stay outside measured footer flow',
+  )
+  assert.match(
+    chatView,
+    /className="chat__floating-actions"[\s\S]*?<ContributionReviewCard[\s\S]*?className="chat__offscreen-nudges"[\s\S]*?className="chat__open-app"[\s\S]*?<ProgressRail/,
+    'cards and viewport cues should share one ordered overlay before measured footer content',
+  )
+  assert.match(
+    chatCss,
+    /\.chat__open-app\s*\{[\s\S]*?width:\s*min\(100%,\s*720px\);[\s\S]*?align-items:\s*flex-end;/,
+    'Open app keeps its original right edge inside the composer column',
+  )
+  assert.doesNotMatch(
+    scrollMode,
+    /floatingAction|floatingActions/,
+    'floating cards must not add or retain transcript spacer height',
+  )
 })
 
 test('the shell is the one persistent connection owner while send failures stay contextual', () => {

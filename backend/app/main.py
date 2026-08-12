@@ -318,6 +318,10 @@ _SHELL_CSP = shell_csp(os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", ""))
 _APP_FRAME_CSP = app_frame_csp(
   settings.frontend_origin,
   os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", ""),
+  # Only an explicitly configured browser-reachable API origin belongs in a
+  # frame policy. settings.api_base_url defaults to backend-local localhost
+  # for agents and jobs, which must not become the viewer's localhost.
+  os.environ.get("API_BASE_URL", ""),
 )
 
 # Published sites (`/sites/<token>/`) are public snapshots of the owner's own

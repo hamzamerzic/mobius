@@ -48,6 +48,7 @@ if str(BACKEND_DIR) not in sys.path:
   sys.path.insert(0, str(BACKEND_DIR))
 
 from app.chat_notes import extract_cumulative_summary, extract_section
+from app.sqlite_policy import connection_pragmas
 
 # When the configured provider has a demonstrably tool-free text mode we may
 # use it to distill the note.  There is always an extractive local fallback, so
@@ -196,18 +197,7 @@ def _apply_sqlite_policy(con: sqlite3.Connection) -> None:
   from the engine's settings — most visibly `journal_size_limit`, which is a
   per-connection setting: a writer that skips it leaves the WAL's high-water
   allocation in place no matter what the server's connections declare.
-
-  Imported lazily, and tolerant of failure, because publishing a chat note is
-  worth more than a pragma: the script also runs in contexts where the app
-  package is not importable.
   """
-  backend_text = str(Path(__file__).resolve().parents[1])
-  if backend_text not in sys.path:
-    sys.path.insert(0, backend_text)
-  try:
-    from app.sqlite_policy import connection_pragmas
-  except ImportError:
-    return
   for pragma in connection_pragmas():
     con.execute(pragma)
 
@@ -402,10 +392,6 @@ def _run_codex_tool_free(prompt: str) -> str:
   ignored repository rules, and every tool-bearing feature disabled. Reuse it
   here instead of maintaining a second (and inevitably drifting) command.
   """
-  backend_dir = Path(__file__).resolve().parents[1]
-  backend_text = str(backend_dir)
-  if backend_text not in sys.path:
-    sys.path.insert(0, backend_text)
   from app.compaction import _run_codex_summarize_turn
 
   return asyncio.run(_run_codex_summarize_turn(
