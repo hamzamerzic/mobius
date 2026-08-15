@@ -24,9 +24,11 @@
  *                                    position at one viewport size
  *
  * Send pinning has one rule for direct, queued, and steered messages: the
- * first visible user message always pins; every later message pins when the
- * reader is at the real-content tail at submit time. DOM geometry is the
- * authority; ScrollMode is only a fallback when no scroll element exists.
+ * first visible user message always pins; every later message pins only at the
+ * physical bottom/autoscroll tail at submit time. Reserved reply room is real
+ * scroll distance for this decision: once the reader moves upward into it,
+ * their next send must hold the exact reading position. ScrollMode is only a
+ * fallback when no scroll element exists.
  * A live pin leaves FOLLOW_BOTTOM while its dynamic spacer is being consumed,
  * then hands off to FOLLOW_BOTTOM exactly when that reservation reaches zero.
  * A short reply never reaches the handoff and remains pinned after settle.
@@ -87,10 +89,10 @@ const GESTURE_SETTLE_MS = 250
 // cannot run until that same thread is available again.
 const PENDING_GESTURE_CAP_MS = 2000
 
-// Physical-bottom transitions are exact reader intent, not the broader
-// "near real-content tail" send heuristic. Allow only subpixel/browser
-// rounding at the scroll extent. Used for the explicit "swipe/press at the very
-// clamp" follow claims, NOT for retaining follow once engaged.
+// Physical-bottom transitions and later-send pin eligibility use the same
+// exact tail. Allow only subpixel/browser rounding at the scroll extent. This
+// prevents reserved reply room from disguising an upward reader escape as
+// autoscroll intent.
 const PHYSICAL_BOTTOM_EPSILON_PX = 4
 
 // Start the next bounded history read before the loaded-page boundary can
@@ -837,28 +839,25 @@ export function _computeSpacerH(
 }
 
 
-// "Near the bottom" tolerance for the submit-time real-content snapshot.
-const NEAR_BOTTOM_PX = 50
-
 /** The single submit-time rule used by direct, queued, and steered user rows.
  *  A row moves to the top (PIN_USER_MSG) only when it was the first visible
- *  user message, or the reader was at the real-content tail when submitted.
+ *  user message, or the reader was at the physical autoscroll tail when
+ *  submitted.
  *
- *  The dynamic spacer is excluded from that geometry because it is reserved
- *  reply room, not content. This deliberately does not consult ScrollMode when
- *  the DOM exists: mode transitions lag input/layout by a frame, which made an
- *  identical bottom send pin only sometimes. The measured reader position is
- *  the single submit-time authority. ScrollMode is a DOM-less fallback only.
+ *  Dynamic spacer remains part of this geometry. It is reserved reply room,
+ *  but it is also the range through which a reader moves upward after leaving
+ *  autoscroll. Subtracting it made a message sitting mid-screen look like a
+ *  bottom send and yanked the reader back to the top. Exact physical geometry
+ *  remains synchronous even while ScrollMode settlement trails by a frame;
+ *  ScrollMode is a DOM-less fallback only.
  */
 export function shouldPinSend({
   scrollEl,
   mode,
   isFirstUserMsg,
-  wasAtContentBottom = null,
 }) {
   if (isFirstUserMsg) return true
-  if (typeof wasAtContentBottom === 'boolean') return wasAtContentBottom
-  if (scrollEl) return isNearContentBottom(scrollEl)
+  if (scrollEl) return isNearPhysicalBottom(scrollEl)
   return mode?.kind === 'FOLLOW_BOTTOM'
 }
 
@@ -877,13 +876,15 @@ export function delayedSendWillPin({
 }
 
 
-/** Position-based bottom check that treats the dynamic pin spacer as phantom
- *  room, not real content. Send snapshots use the conversation tail because a
- *  new send should not require traversing reserved reply room first. */
-export function isNearContentBottom(scrollEl, threshold = NEAR_BOTTOM_PX) {
+/** Position-based check against the one physical tail. Reserved spacer stays
+ * in the range: scrolling upward through it is an explicit exit from
+ * autoscroll, not a second kind of bottom. */
+export function isNearPhysicalBottom(
+  scrollEl,
+  threshold = PHYSICAL_BOTTOM_EPSILON_PX,
+) {
   if (!scrollEl) return false
-  const spacerH = scrollEl.querySelector('.spacer-dynamic')?.offsetHeight || 0
-  const gap = scrollEl.scrollHeight - spacerH - scrollEl.scrollTop - scrollEl.clientHeight
+  const gap = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
   return gap < threshold
 }
 
@@ -964,6 +965,21 @@ export function readerInputEscapeDirection(
 }
 
 
+/** An end-directed input at the physical tail is meaningful even when the
+ * browser is already clamped and therefore cannot emit a `scroll` event.
+ * Wheel/keyboard and touch all use this predicate before claiming FOLLOW_BOTTOM
+ * so a repeated "keep going" gesture has one semantic meaning on every input
+ * path. */
+export function readerInputClaimsPhysicalTail(
+  escapeDirection,
+  distanceToBottom,
+) {
+  return escapeDirection === 'down'
+    && Number.isFinite(distanceToBottom)
+    && distanceToBottom < PHYSICAL_BOTTOM_EPSILON_PX
+}
+
+
 /** Infer the same escape/re-engage direction from an actual scroll position.
  * Wheel, keyboard, and touch inputs expose direction before scrolling, but a
  * mouse scrollbar drag does not. Comparing consecutive owned positions keeps
@@ -995,8 +1011,7 @@ export function composerTailIntentRequestsFollow(event, scrollEl) {
   if ((!primaryPress && !directEdit)
       || !event?.target?.matches?.('textarea.chat__input')
       || !scrollEl) return false
-  return scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
-    < PHYSICAL_BOTTOM_EPSILON_PX
+  return isNearPhysicalBottom(scrollEl)
 }
 
 
@@ -2466,6 +2481,13 @@ export default function useScrollMode({
         releasePendingGesture(sequence)
       })
     }
+    const claimPhysicalTailFollow = () => {
+      if (modeRef.current?.kind === 'FOLLOW_BOTTOM') return
+      readerIntentVersionRef.current += 1
+      readerLocationExplicitRef.current = true
+      transitionMode({ kind: 'FOLLOW_BOTTOM' }, 'reader:scroll-bottom')
+      persistMode()
+    }
     const onUserInput = (event) => {
       const activatesDisclosure = readerInputActivatesDisclosure(
         event?.type,
@@ -2480,6 +2502,24 @@ export default function useScrollMode({
         // preceding gesture's actual location; otherwise a stale FOLLOW_BOTTOM
         // can be latched before the disclosure changes layout.
         settleReaderScroll()
+      }
+      // Wheel and scroll-key paths need the same geometry again for their
+      // no-scroll release decision. Memoize it inside this one input so the
+      // clamped-tail follow check does not force a second transcript layout.
+      let inputGeometry = null
+      const readInputGeometry = () => {
+        if (inputGeometry) return inputGeometry
+        const scrollTop = scrollEl.scrollTop
+        const scrollHeight = scrollEl.scrollHeight
+        const clientHeight = scrollEl.clientHeight
+        inputGeometry = {
+          deltaY: event?.deltaY,
+          scrollTop,
+          scrollHeight,
+          clientHeight,
+          distanceToBottom: scrollHeight - scrollTop - clientHeight,
+        }
+        return inputGeometry
       }
       const readerAlreadyOwns = !layoutMayOwnScroll(
         gestureWindowUntilRef.current,
@@ -2504,6 +2544,15 @@ export default function useScrollMode({
         })
         if (escapeDir === 'up') readerGestureEscaped = true
         else if (escapeDir === 'down') readerGestureEscaped = false
+        // A downward wheel/key press at the physical clamp cannot produce the
+        // scroll event that normally commits FOLLOW_BOTTOM. Claim the same
+        // semantic tail intent here instead of silently releasing it next frame.
+        if (escapeDir === 'down' && readerInputClaimsPhysicalTail(
+          escapeDir,
+          readInputGeometry().distanceToBottom,
+        )) {
+          claimPhysicalTailFollow()
+        }
       }
       if (!readerAlreadyOwns || activatesDisclosure) {
         recordTrace('events', `reader:input-${event?.type || 'unknown'}`, {
@@ -2545,12 +2594,7 @@ export default function useScrollMode({
       const keyboardDisclosure = activatesDisclosure && event?.type === 'keydown'
       if (keyboardDisclosure || readerInputNeedsFrameRelease(
           event?.type,
-          () => ({
-            deltaY: event?.deltaY,
-            scrollTop: scrollEl.scrollTop,
-            scrollHeight: scrollEl.scrollHeight,
-            clientHeight: scrollEl.clientHeight,
-          }),
+          readInputGeometry,
           event?.key,
           event?.shiftKey,
         )) {
@@ -2598,11 +2642,8 @@ export default function useScrollMode({
         const distanceToBottom = scrollEl.scrollHeight
           - scrollEl.scrollTop
           - scrollEl.clientHeight
-        if (distanceToBottom < PHYSICAL_BOTTOM_EPSILON_PX) {
-          readerIntentVersionRef.current += 1
-          readerLocationExplicitRef.current = true
-          transitionMode({ kind: 'FOLLOW_BOTTOM' }, 'reader:scroll-bottom')
-          persistMode()
+        if (readerInputClaimsPhysicalTail('down', distanceToBottom)) {
+          claimPhysicalTailFollow()
         }
       }
       // Re-arm the safety gate if a deliberately long (>2s) stationary touch

@@ -524,7 +524,7 @@ installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.18 (2026-08-04).** This section is the
+**Owner-authoritative contract — v1.20 (2026-08-15).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -575,14 +575,18 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   mode before a keyboard or other viewport resize is laid out.
 - **R2 — One send rule everywhere.** The first visible user message always pins to
   the viewport top. Every subsequent direct, queued, promoted, or steered message
-  pins when its submit-time DOM snapshot is at the real-content tail. Geometry is
-  authoritative because `ScrollMode` can lag an input/layout frame; requiring both
-  made identical bottom sends behave inconsistently. A real user scroll after
-  submission invalidates an automatic delayed queue promotion (a tap without
-  scrolling does not). Explicit fast-forward reuses that snapshot through tray
-  reflow while its reader generation remains current; after a real scroll it
-  captures current geometry instead. Another scroll during the request invalidates
-  that snapshot. Missing delayed intent degrades to hold, never to an inferred pin.
+  pins only when its submit-time DOM snapshot is at the one physical
+  tail. Reserved reply spacer remains part of that distance: once the reader moves
+  upward through it—even while the latest user message remains visible—the chat is
+  in hold and the next send must leave the viewport untouched. Subtracting spacer
+  from the send decision creates a false second bottom and is forbidden. Physical
+  geometry is authoritative for the send snapshot while `ScrollMode` settlement may
+  trail a gesture or layout by a frame. A real user scroll after submission
+  invalidates an automatic delayed queue promotion (a tap without scrolling does
+  not). Explicit fast-forward reuses that snapshot through tray reflow while its
+  reader generation remains current; after a real scroll it captures current
+  physical geometry instead. Another scroll during the request invalidates that
+  snapshot. Missing delayed intent degrades to hold, never to an inferred pin.
 - **R3 — Pin holds until the reservation is filled.** A legitimate live pin
   transitions to `PIN_USER_MSG`, not immediately to `FOLLOW_BOTTOM`; the response
   first grows below the prompt without moving it. Exactly when the streaming reply
@@ -645,7 +649,10 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   control activation are not reader scroll intent. Pointer/touch release handles taps,
   while scrolling-key input that produces no scroll releases on the next frame. Wheel
   input gets that early release only when its direction is exactly clamped at the
-  matching scroll edge. An elapsed frame is not evidence that an in-range wheel was a
+  matching scroll edge. An end-directed wheel or scroll-key input already clamped at
+  the physical tail claims `FOLLOW_BOTTOM` before that no-scroll release; otherwise
+  the browser's missing `scroll` event would discard explicit follow intent. An
+  elapsed frame is not evidence that an in-range wheel was a
   no-op: renderer/compositor load can update geometry before the main-thread `scroll`
   handler runs. A meaningful touch swipe toward the end may enter `FOLLOW_BOTTOM`
   once even when the browser is already clamped at the physical tail and therefore
@@ -692,11 +699,13 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   viewport intersection alone cannot detect that the absolutely-positioned
   composer is covering the target. The floating jump-to-latest control
   (owner ask, 2026-08-04) is the same explicit one-shot action through the
-  identical controller tail reveal, with the same settled `ANCHOR_AT` outcome.
-  Its visibility is a pure geometry read outside the controller's ownership
-  gates: it renders only while the reader holds a position away from the
-  content tail, where reserved spacer room is phantom per R2's send-snapshot
-  bottom rule — so a fresh live-send reservation never summons it. It yields
+  controller's physical-tail reveal and explicitly resumes `FOLLOW_BOTTOM` so
+  subsequent output remains visible.
+  Its visibility is a pure physical-tail geometry read outside the controller's
+  ownership gates: it renders only while the reader holds a position away from
+  the physical tail, including after an upward move through reserved room. A fresh
+  live-send reservation does not summon it because a correctly pinned row rests at
+  that same physical clamp. It yields
   to a visible attention nudge, which navigates to the same tail with strictly
   more context.
 - **R5b — One keyboard geometry signal; reservation-responsive resize.** Shell alone
@@ -758,7 +767,7 @@ path means routing it through the same entries rather than inventing another rul
 | Event | Before | After | Scroll write |
 |---|---|---|---|
 | First direct/queued/steered user row becomes visible | any | `PIN_USER_MSG` | New row to top |
-| Later send submitted at real-content tail (mode may be one frame stale) | any | `PIN_USER_MSG` | New row to top |
+| Later send submitted at the physical autoscroll tail (mode may be one frame stale) | any | `PIN_USER_MSG` | New row to top |
 | Later send submitted anywhere else | hold or stale follow | `ANCHOR_AT`/existing hold | None |
 | Reader reaches or explicitly swipes toward physical bottom | any | `FOLLOW_BOTTOM` | User-owned; follow the one physical tail, including remaining reservation |
 | Reader scrolls manually away from bottom | any | `ANCHOR_AT` | User-owned |
