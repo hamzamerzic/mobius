@@ -15,6 +15,7 @@ const scrollMode = readFileSync(new URL('../../ChatView/useScrollMode.js', impor
 const detailCache = readFileSync(new URL('../../../lib/chatDetailCache.js', import.meta.url), 'utf8')
 const searchTermHighlight = readFileSync(new URL('../../../lib/searchTermHighlight.js', import.meta.url), 'utf8')
 const apiClient = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
+const navigationSource = readFileSync(new URL('../../../hooks/useNavigation.js', import.meta.url), 'utf8')
 
 function ruleBody(selector, source = shellCss) {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -299,7 +300,7 @@ test('direct chat actions hand focus to the destination composer', () => {
     /function selectChat\(id, \{ focusComposer = true \} = \{\}\) \{([\s\S]*?)\n  \}/,
   )?.[1] || ''
   assert.match(selectChat,
-    /navTo\('chat', \{ chatId: id, preserveDrawerPresentation \}\)[\s\S]*if \(focusComposer\) focusDesktopChatPaneComposer\(id\)/,
+    /navTo\('chat', \{ chatId: id, preserveDrawerPresentation \}\)[\s\S]*if \(focusComposer\) focusSelectedChatComposer\(id\)/,
     'drawer and settings chat selection must focus after requesting navigation')
   assert.match(shell,
     /target\.focusComposer === true[\s\S]*requestComposer\(target\.chatId, \{ focus: true \}\)/,
@@ -311,13 +312,31 @@ test('direct chat actions hand focus to the destination composer', () => {
     /flushSync\(\(\) => restoreDurableDraft\(\)\)[\s\S]*placeCaretAtTextEnd\(inputRef\.current\)/,
     'the destination composer must place the caret after its final draft re-read')
   assert.match(shell,
-    /onActivate=\{\(\) => \{[\s\S]*tabModel\.tabNavTarget\(tab\)[\s\S]*navTo\(view, opts\)[\s\S]*tab\.kind === 'chat'[\s\S]*focusDesktopChatPaneComposer\(tab\.id\)/,
+    /onActivate=\{\(\) => \{[\s\S]*tabModel\.tabNavTarget\(tab\)[\s\S]*navTo\(view, opts\)[\s\S]*tab\.kind === 'chat'[\s\S]*focusSelectedChatComposer\(tab\.id\)/,
     'the single-pane tab strip must focus a selected chat composer')
   const selectedChatHandoffs = workspaceChrome.match(
     /if \(tab\.kind === 'chat'\) onChatPaneSelected\?\.\(tab\.id\)/g,
   ) || []
   assert.equal(selectedChatHandoffs.length, 2,
     'both active-tab and tab-switch paths in a tiled pane must focus chat composers')
+  assert.match(shell,
+    /composerDraftWantsKeyboard\(saved\)[\s\S]*beginTouchComposerFocusLease\([\s\S]*initialValue: saved\.input[\s\S]*requestComposer\(chatId, \{ focus: true, restoreExistingDraft: true \}\)/,
+    'a selected touch chat with an unsent draft must reserve the keyboard until its real composer takes focus')
+  assert.match(shell,
+    /beforeRestoreRouteRef\.current = \(route\) => \{[\s\S]*route\?\.view !== 'chat'[\s\S]*reserveTouchDraftComposer\(route\.chatId\)/,
+    'Back and Forward must use the same draft-only touch focus handoff')
+  assert.match(shell, /const beforeRestoreRouteRef = useRef\(null\)/)
+  assert.match(shell, /beforeRestoreRouteRef,\s*\}\)/)
+  assert.match(
+    navigationSource,
+    /if \(itemRoute\) \{\s*beforeRestoreRouteRef\?\.current\?\.\(itemRoute\)\s*applyModeDestination\(itemRoute\)/,
+    'Back and Forward must reserve the draft keyboard before restoring the destination',
+  )
+  assert.match(
+    navigationSource,
+    /function closeDrawer[\s\S]*beforeRestoreRouteRef\?\.current\?\.\(snapshotRoute\(\)\)[\s\S]*const userBackTraversal = !drawerClosePendingRef\.current[\s\S]*if \(drawerOpenRef\.current && drawerPushedRef\.current\)[\s\S]*beforeRestoreRouteRef\?\.current\?\.\(returnRoute\)/,
+    'both explicit and Back-driven drawer closes must reserve the restored draft keyboard',
+  )
 })
 
 test('the held chat is an opaque layer above staging until the atomic swap', () => {
