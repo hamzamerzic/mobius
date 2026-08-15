@@ -537,13 +537,14 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
 (`tests/send-rule`, `spacer`, `second-send-pin`, `steer-queued`, `stream-reconnect`,
 `backend/tests/test_chats_stream_steer`) encode this:
 
-- **R0 — Two modes; two explicit auto-scroll entrances.** A chat is either in **auto-scroll**
+- **R0 — Two modes; explicit auto-scroll entrances.** A chat is either in **auto-scroll**
   (`FOLLOW_BOTTOM`, following the physical scroll tail as the reply streams) or **hold**
   (`PIN_USER_MSG` or `ANCHOR_AT`, staying at a pinned prompt or frozen reading
-  position). Auto-scroll engages only through (a) the gesture-gated scroll handler
+  position). Auto-scroll engages only through (a) the gesture-gated reader path
   after the user manually reaches or explicitly swipes toward the physical bottom,
-  or (b) the live-send pin handoff when the streaming reply has consumed its exact
-  reserved room. Only a send may create `PIN_USER_MSG`. Reservation does not create
+  (b) a composer press or edit that begins at that physical bottom, or (c) the
+  live-send pin handoff when the streaming reply has consumed its exact reserved
+  room. Only a send may create `PIN_USER_MSG`. Reservation does not create
   a second kind of bottom: when `FOLLOW_BOTTOM` is active, it follows the physical
   tail including any remaining room. Real output first consumes that room without
   advancing the tail; after the room reaches zero, the same tail advances with the
@@ -646,7 +647,10 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   Never replace the input-to-first-scroll handoff with a fixed short window: under
   rendering load the browser may deliver that scroll later. Ownership begins only for
   inputs whose default action can scroll the transcript; ordinary typing, Enter, and
-  control activation are not reader scroll intent. Pointer/touch release handles taps,
+  control activation are not reader scroll intent. Editing controls retain their own
+  navigation keys. A nested vertical surface marked `data-chat-scroll-region` retains
+  wheel and touch input while it can scroll in that direction; only a gesture at its
+  matching edge may chain to the transcript. Pointer/touch release handles taps,
   while scrolling-key input that produces no scroll releases on the next frame. Wheel
   input gets that early release only when its direction is exactly clamped at the
   matching scroll edge. An end-directed wheel or scroll-key input already clamped at
@@ -678,6 +682,9 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   newer gesture is rejected; once that gesture settles, the controller adopts the
   current semantic location and performs one fresh geometry reconciliation. Waiting
   for the timing gate to expire never gives stale work its authority back.
+  An end-directed input already clamped at the tail may enter `FOLLOW_BOTTOM`
+  without advancing that generation: no scroll occurred, so a delayed queued send
+  retains the submit-time pin decision that the generation protects.
   A marked Q&A custom-answer field is the deliberate exception to "ordinary
   typing cannot scroll": changing its value can grow the field and cause the
   browser to move the transcript to keep the native caret visible. Only an
@@ -754,13 +761,6 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   text block in event order, without hiding, duplicating, or reordering them. Only a
   recovered answer whose POST returns `started` creates a new hidden continuation.
   Switching sources preserves the active row's anchor identity and writes no scroll.
-- **R4a — Attention nudges reveal the usable tail.** Tapping an offscreen question or
-  paused-turn nudge lands at the physical tail, including composer-clearance padding,
-  so the real Submit or Resume action is visible above the overlaid composer. This is
-  a settled `ANCHOR_AT` hold, not `FOLLOW_BOTTOM`; one-shot navigation must not create
-  live-follow intent for later content. It routes through the scroll owner rather than
-  `scrollIntoView`, whose viewport intersection cannot detect composer coverage.
-
 The transition table is intentionally exhaustive; adding a new send or lifecycle
 path means routing it through the same entries rather than inventing another rule:
 
@@ -770,6 +770,7 @@ path means routing it through the same entries rather than inventing another rul
 | Later send submitted at the physical autoscroll tail (mode may be one frame stale) | any | `PIN_USER_MSG` | New row to top |
 | Later send submitted anywhere else | hold or stale follow | `ANCHOR_AT`/existing hold | None |
 | Reader reaches or explicitly swipes toward physical bottom | any | `FOLLOW_BOTTOM` | User-owned; follow the one physical tail, including remaining reservation |
+| Composer press or edit begins at physical bottom | any hold | `FOLLOW_BOTTOM` | No immediate write; the next owned layout follows the existing physical tail |
 | Reader scrolls manually away from bottom | any | `ANCHOR_AT` | User-owned |
 | Reply grows while an armed live pin still has reserved room | pin hold | same pin hold | Keep prompt fixed |
 | Streaming reply consumes the armed pin reservation | pin hold | `FOLLOW_BOTTOM` | Follow physical tail |

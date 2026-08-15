@@ -27,6 +27,7 @@ import {
   modeAfterReaderGesture,
   modeAfterSpacerResize,
   modeAfterTerminalLayout,
+  nestedReaderTargetOwnsInput,
   physicalBottomAnchorModeFromScroll,
   readerInputClaimsPhysicalTail,
   readerInputEscapeDirection,
@@ -186,6 +187,44 @@ test('only scrolling keys claim reader ownership', () => {
   assert.equal(readerInputMayScroll('keydown', 'Tab'), true)
   assert.equal(readerInputMayScroll('wheel'), true)
   assert.equal(readerInputMayScroll('touchmove'), true)
+})
+
+test('nested controls keep their own keys and available scroll range', () => {
+  const editor = {
+    closest: selector => selector.startsWith('textarea,') ? editor : null,
+  }
+  const button = {
+    closest: selector => selector.startsWith('button,') ? button : null,
+  }
+  assert.equal(nestedReaderTargetOwnsInput({
+    type: 'keydown', key: 'End', target: editor,
+  }), true, 'caret navigation in a textarea is not transcript intent')
+  assert.equal(nestedReaderTargetOwnsInput({
+    type: 'keydown', key: ' ', target: button,
+  }), true, 'Space activates the focused control instead of scrolling the chat')
+  assert.equal(nestedReaderTargetOwnsInput({
+    type: 'keydown', key: 'End', target: button,
+  }), false, 'an unconsumed scroll key may still belong to the transcript')
+
+  const scrollEl = { contains: node => node === nested }
+  const nested = {
+    scrollTop: 20,
+    scrollHeight: 200,
+    clientHeight: 80,
+    closest: selector => selector === '[data-chat-scroll-region], .chat__scroll'
+      ? nested
+      : null,
+  }
+  assert.equal(nestedReaderTargetOwnsInput({
+    type: 'wheel', target: nested, scrollEl, direction: 'down',
+  }), true)
+  nested.scrollTop = 120
+  assert.equal(nestedReaderTargetOwnsInput({
+    type: 'wheel', target: nested, scrollEl, direction: 'down',
+  }), false, 'a clamped nested surface may chain the gesture to the transcript')
+  assert.equal(nestedReaderTargetOwnsInput({
+    type: 'wheel', target: nested, scrollEl, direction: 'up',
+  }), true)
 })
 
 test('a composer press or direct edit requests follow only at the physical tail', () => {

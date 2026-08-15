@@ -1265,13 +1265,24 @@ test.describe('Scroll edge cases', () => {
       const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (s) s.scrollTop = s.scrollHeight
     })
-    await page.evaluate(() => new Promise(r => requestAnimationFrame(r)))
+    await page.evaluate(() => new Promise(resolve => (
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    )))
     await expect(scroll).toHaveAttribute('data-scroll-mode', 'ANCHOR_AT')
+
+    await page.evaluate(() => {
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      window.__clampedWheelScrollEvents = 0
+      s?.addEventListener('scroll', () => {
+        window.__clampedWheelScrollEvents += 1
+      }, { once: true })
+    })
 
     await page.mouse.wheel(0, 500)
     await expect(scroll).toHaveAttribute('data-scroll-mode', 'FOLLOW_BOTTOM', {
       timeout: 3000,
     })
+    expect(await page.evaluate(() => window.__clampedWheelScrollEvents)).toBe(0)
 
     await injectContent(page, 'Content after the clamped gesture. ', 20)
     await expect.poll(async () => page.evaluate(() => {

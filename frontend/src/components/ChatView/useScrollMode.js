@@ -1145,6 +1145,48 @@ export function readerInputMayScroll(type, key = '') {
 }
 
 
+/** Nested controls keep the keys and scroll range they can consume. Once an
+ * explicitly marked nested scroller reaches its matching edge, native scroll
+ * chaining may hand the same wheel/swipe to the transcript. */
+export function nestedReaderTargetOwnsInput({
+  type,
+  key = '',
+  target = null,
+  scrollEl = null,
+  direction = null,
+} = {}) {
+  if (type === 'keydown') {
+    const editingControl = target?.closest?.(
+      'textarea, input, select, [contenteditable]:not([contenteditable="false"]), '
+      + '[role="textbox"], [role="searchbox"], [role="combobox"], '
+      + '[role="listbox"], [role="spinbutton"], [role="slider"]',
+    )
+    if (editingControl) return true
+    if ([' ', 'Spacebar'].includes(key)) {
+      return !!target?.closest?.(
+        'button, a[href], summary, [role="button"], [role="menuitem"], [role="option"]',
+      )
+    }
+    return false
+  }
+
+  if (!['wheel', 'pointermove', 'touchmove'].includes(type)
+      || !['up', 'down'].includes(direction)) return false
+  const nested = target?.closest?.('[data-chat-scroll-region], .chat__scroll')
+  if (!nested || nested === scrollEl) return false
+
+  const scrollTop = Number(nested.scrollTop)
+  const scrollHeight = Number(nested.scrollHeight)
+  const clientHeight = Number(nested.clientHeight)
+  if (![scrollTop, scrollHeight, clientHeight].every(Number.isFinite)) return false
+  const maxScrollTop = Math.max(0, scrollHeight - clientHeight)
+  if (maxScrollTop <= 0.5) return false
+  return direction === 'up'
+    ? scrollTop > 0.5
+    : scrollTop < maxScrollTop - 0.5
+}
+
+
 /** A disclosure activation is a reading action even when it produces no native
  * scroll event. Snapshotting the current message anchor before its body changes
  * prevents a stale FOLLOW_BOTTOM mode from replaying after pointerup and
@@ -2483,7 +2525,9 @@ export default function useScrollMode({
     }
     const claimPhysicalTailFollow = () => {
       if (modeRef.current?.kind === 'FOLLOW_BOTTOM') return
-      readerIntentVersionRef.current += 1
+      // This gesture expressed tail intent but produced no scroll. Keep the
+      // generation captured by a queued send: only an actual reader scroll may
+      // supersede that send-time decision.
       readerLocationExplicitRef.current = true
       transitionMode({ kind: 'FOLLOW_BOTTOM' }, 'reader:scroll-bottom')
       persistMode()
@@ -2497,6 +2541,18 @@ export default function useScrollMode({
       )
       if (!activatesDisclosure
           && !readerInputMayScroll(event?.type, event?.key)) return
+      const inputDirection = readerInputEscapeDirection(event?.type, {
+        deltaY: event?.deltaY,
+        key: event?.key,
+        shiftKey: event?.shiftKey,
+      })
+      if (!activatesDisclosure && nestedReaderTargetOwnsInput({
+        type: event?.type,
+        key: event?.key,
+        target: event?.target,
+        scrollEl,
+        direction: inputDirection,
+      })) return
       if (activatesDisclosure && readerScrollDirty) {
         // A disclosure is a newer semantic reading action. First commit the
         // preceding gesture's actual location; otherwise a stale FOLLOW_BOTTOM
@@ -2537,18 +2593,13 @@ export default function useScrollMode({
         // scrollbar pointerdown, whose later scroll event is the first place
         // the browser reveals which way the reader moved.
         readerGestureLastScrollTop = scrollEl.scrollTop
-        const escapeDir = readerInputEscapeDirection(event?.type, {
-          deltaY: event?.deltaY,
-          key: event?.key,
-          shiftKey: event?.shiftKey,
-        })
-        if (escapeDir === 'up') readerGestureEscaped = true
-        else if (escapeDir === 'down') readerGestureEscaped = false
+        if (inputDirection === 'up') readerGestureEscaped = true
+        else if (inputDirection === 'down') readerGestureEscaped = false
         // A downward wheel/key press at the physical clamp cannot produce the
         // scroll event that normally commits FOLLOW_BOTTOM. Claim the same
         // semantic tail intent here instead of silently releasing it next frame.
-        if (escapeDir === 'down' && readerInputClaimsPhysicalTail(
-          escapeDir,
+        if (inputDirection === 'down' && readerInputClaimsPhysicalTail(
+          inputDirection,
           readInputGeometry().distanceToBottom,
         )) {
           claimPhysicalTailFollow()
@@ -2614,10 +2665,12 @@ export default function useScrollMode({
     // scroll event, so the recorded value is exactly the gap a reader feels.
     let pendingGestureStart = 0
     let touchStartY = null
+    let touchStartTarget = null
     let touchEndChecked = false
     const onPointerDownInput = (event) => {
       if (event.pointerType === 'touch') {
         touchStartY = Number.isFinite(event.clientY) ? event.clientY : null
+        touchStartTarget = event.target
         touchEndChecked = false
         if (isPerfProbeEnabled()) {
           pendingGestureStart = performance.now()
@@ -2634,10 +2687,20 @@ export default function useScrollMode({
     // follow before the reserved reply room has been consumed.
     const onPointerMoveInput = (event) => {
       if (event.pointerType !== 'touch') return
+      const fingerDelta = touchStartY == null ? 0 : touchStartY - event.clientY
+      const touchDirection = fingerDelta >= 12
+        ? 'down'
+        : fingerDelta <= -12 ? 'up' : null
+      if (touchDirection && nestedReaderTargetOwnsInput({
+        type: 'pointermove',
+        target: touchStartTarget || event.target,
+        scrollEl,
+        direction: touchDirection,
+      })) return
       if (!touchEndChecked
           && !readerScrollDirty
           && touchStartY != null
-          && touchStartY - event.clientY >= 12) {
+          && touchDirection === 'down') {
         touchEndChecked = true
         const distanceToBottom = scrollEl.scrollHeight
           - scrollEl.scrollTop
@@ -2654,15 +2717,13 @@ export default function useScrollMode({
       // that is scrolling DOWN, which re-engages follow; a finger moving down is
       // scrolling UP and escapes. Applied last so the stationary-touch re-arm
       // above (a fresh onUserInput claim) cannot clobber the direction.
-      if (touchStartY != null) {
-        const fingerDelta = touchStartY - event.clientY
-        if (fingerDelta >= 12) readerGestureEscaped = false
-        else if (fingerDelta <= -12) readerGestureEscaped = true
-      }
+      if (touchDirection === 'down') readerGestureEscaped = false
+      else if (touchDirection === 'up') readerGestureEscaped = true
     }
     const onPointerUpInput = () => {
       if (!readerScrollDirty) pendingGestureStart = 0
       touchStartY = null
+      touchStartTarget = null
       touchEndChecked = false
       scheduleNoScrollRelease()
     }

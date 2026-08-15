@@ -64,9 +64,10 @@ export const CHAT_CONTRACT = [
     id: 'follow-at-physical-tail',
     title: 'Re-engage follow at the physical tail',
     summary:
-      'An end-directed wheel, scroll key, or touch gesture at the physical '
-      + 'tail enters FOLLOW_BOTTOM even when the browser is already clamped '
-      + 'and emits no scroll event.',
+      'Nested controls keep input they can consume. Otherwise an end-directed '
+      + 'wheel, scroll key, or touch gesture at the physical tail enters '
+      + 'FOLLOW_BOTTOM even when no scroll event fires, without invalidating '
+      + 'a delayed send decision.',
   },
   {
     id: 'pin-holds-streaming',

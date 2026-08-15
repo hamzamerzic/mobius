@@ -49,9 +49,10 @@ test('follow registry summary keeps clamped input separate from send pinning', (
   const rule = CHAT_CONTRACT.find(entry => entry.id === 'follow-at-physical-tail')
   assert.ok(rule)
   assert.equal(rule.summary,
-    'An end-directed wheel, scroll key, or touch gesture at the physical '
-    + 'tail enters FOLLOW_BOTTOM even when the browser is already clamped '
-    + 'and emits no scroll event.')
+    'Nested controls keep input they can consume. Otherwise an end-directed '
+    + 'wheel, scroll key, or touch gesture at the physical tail enters '
+    + 'FOLLOW_BOTTOM even when no scroll event fires, without invalidating '
+    + 'a delayed send decision.')
 })
 
 test('snapshotChatUX derives the geometry fields from a clean pinned frame', () => {
