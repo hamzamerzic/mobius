@@ -267,6 +267,10 @@ export function shouldShowOpenAppCta(builtApp, turnActive = false) {
   return !turnActive && !builtApp.preview_seen_final
 }
 
+// Start from the first frame in which the shortcut is visible to the owner,
+// rather than from build completion or eventual turn settlement.
+export const OPEN_APP_CTA_AUTO_DISMISS_MS = 5000
+
 export function openAppCtaViewModel(builtApp, turnActive) {
   if (!shouldShowOpenAppCta(builtApp, turnActive)) return null
   const name = builtApp.name || 'app'
