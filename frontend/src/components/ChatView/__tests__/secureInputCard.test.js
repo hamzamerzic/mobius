@@ -1,41 +1,90 @@
-import { readFileSync } from 'node:fs'
-import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 
-const component = readFileSync(new URL('../SecureInputCard.jsx', import.meta.url), 'utf8')
-const stream = readFileSync(new URL('../useStreamConnection.js', import.meta.url), 'utf8')
-const backend = readFileSync(
-  new URL('../../../../../backend/app/routes/secure_inputs.py', import.meta.url),
-  'utf8',
-)
+import SecureInputCard from '../SecureInputCard.jsx'
 
-test('secure inputs are uncontrolled and never use browser persistence', () => {
-  assert.match(component, /const formRef = useRef/)
-  assert.doesNotMatch(component, /value=\{|setFields|localStorage|sessionStorage|indexedDB/)
-  assert.match(component, /form\.reset\(\)/)
-  assert.match(component, /for \(const key of Object\.keys\(fields\)\) fields\[key\] = ''/)
+
+const fields = [
+  {
+    name: 'username',
+    label: 'Username',
+    type: 'text',
+    autocomplete: 'username',
+  },
+  {
+    name: 'password',
+    label: 'Password',
+    type: 'password',
+    autocomplete: 'current-password',
+  },
+]
+
+
+function renderCard(overrides = {}, interactive = false) {
+  const block = {
+    type: 'secure_input',
+    request_id: 'request-1',
+    mode: 'sealed',
+    title: 'Private connection',
+    description: 'Values bypass model context.',
+    fields,
+    status: 'pending',
+    ...overrides,
+  }
+  return renderToStaticMarkup(createElement(SecureInputCard, {
+    block,
+    chatId: 'chat-1',
+    interactive,
+  }))
+}
+
+
+test('pending secure input renders one uncontrolled field per prompt', () => {
+  const html = renderCard({}, true)
+
+  assert.equal((html.match(/<input/g) || []).length, 2)
+  assert.match(html, /name="username"/)
+  assert.match(html, /name="password"/)
+  assert.match(html, /type="password"/)
+  assert.match(html, /data-chat-inline-editor="secure-input"/)
+  assert.match(html, />Enter securely</)
+  assert.match(html, /values bypass the chat and AI/)
+  assert.doesNotMatch(html, /value=/)
 })
 
-test('secure input events contain metadata and status only', () => {
-  assert.match(stream, /event\.type === 'secure_input_request'/)
-  assert.match(stream, /fields: Array\.isArray\(event\.fields\)/)
-  assert.doesNotMatch(stream, /event\.values|event\.secrets/)
-  assert.doesNotMatch(stream, /item\.type !== 'secure_input'/)
-  assert.doesNotMatch(stream, /item\.type === 'secure_input'[\s\S]{0,180}item\.status/)
-  assert.match(component, /secure-card__receipt-lock/)
-  assert.match(component, /Receipt saved · entered values omitted/)
-  assert.doesNotMatch(component, /Memory only/)
+
+test('settled secure input renders locked prompt receipts without fields', () => {
+  const html = renderCard({ status: 'completed' })
+
+  assert.match(html, />Private connection</)
+  assert.match(html, />Username</)
+  assert.match(html, />Password</)
+  assert.equal((html.match(/Provided securely/g) || []).length, 2)
+  assert.equal((html.match(/secure-card__receipt-lock/g) || []).length, 2)
+  assert.match(html, /Receipt saved · entered values omitted/)
+  assert.doesNotMatch(html, /<input/)
 })
 
-test('secret-bearing request parsing avoids schema reflection', () => {
-  assert.match(backend, /await request\.json\(\)/)
-  assert.match(backend, /Invalid secure input submission\./)
-  assert.doesNotMatch(backend, /BaseModel|response_model/)
+
+test('failed and expired receipts use non-success status copy', () => {
+  assert.equal(
+    (renderCard({ status: 'failed' }).match(/Not used/g) || []).length,
+    2,
+  )
+  assert.equal(
+    (renderCard({ status: 'expired' }).match(/Not provided/g) || []).length,
+    2,
+  )
 })
 
-test('reveal is visibly distinct and needs explicit confirmation', () => {
-  assert.match(component, /secure-card--reveal/)
-  assert.match(component, /Reveal for this turn/)
-  assert.match(component, /reveal_confirmed/)
-  assert.match(component, /sent to the AI provider/)
+
+test('reveal mode is visually distinct and requires explicit confirmation', () => {
+  const html = renderCard({ mode: 'reveal' }, true)
+
+  assert.match(html, /secure-card--reveal/)
+  assert.match(html, /name="reveal_confirmed"/)
+  assert.match(html, /sent to the AI provider/)
+  assert.match(html, />Reveal for this turn</)
 })

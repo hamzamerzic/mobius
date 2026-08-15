@@ -4,19 +4,34 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import urllib.error
-import urllib.parse
 import urllib.request
 
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 CONSUMER_TIMEOUT_SECONDS = 120
+OWNER_CREDENTIAL_OUTCOMES = {
+  0: (True, 0, "Credentials changed. Sign in again with the new details."),
+  2: (False, 2, "Credential input was invalid."),
+  3: (False, 1, "Owner account was not found."),
+  4: (False, 1, "This instance uses managed sign-in."),
+  5: (False, 1, "Current password is incorrect."),
+  6: (False, 1, "Username must be 1–64 characters."),
+  7: (False, 1, "Password cannot be blank or longer than 1024 characters."),
+  8: (False, 1, "New passwords do not match."),
+  9: (False, 1, "Credentials could not be changed."),
+  10: (
+    True,
+    0,
+    "Credentials changed. Sign in again, then restart Möbius to refresh "
+    "background access.",
+  ),
+}
 if str(BACKEND_ROOT) not in sys.path:
   sys.path.insert(0, str(BACKEND_ROOT))
 
@@ -117,29 +132,6 @@ def _settle(request_id: str, capability: str, *, ok: bool, message: str) -> None
   )
 
 
-def _secret_variants(value: str) -> set[str]:
-  if not value:
-    return set()
-  raw = value.encode("utf-8")
-  return {
-    value,
-    json.dumps(value, ensure_ascii=False)[1:-1],
-    urllib.parse.quote(value, safe=""),
-    urllib.parse.quote_plus(value),
-    base64.b64encode(raw).decode("ascii"),
-    base64.urlsafe_b64encode(raw).decode("ascii"),
-  }
-
-
-def _redact_output(output: str, values: dict[str, str]) -> str:
-  variants = set()
-  for value in values.values():
-    variants.update(_secret_variants(value))
-  for variant in sorted(variants, key=len, reverse=True):
-    output = output.replace(variant, "[secret]")
-  return output
-
-
 def _run_consumer(command: list[str], values: dict[str, str]) -> int:
   if not command:
     raise RuntimeError("A sealed consumer command is required.")
@@ -148,30 +140,30 @@ def _run_consumer(command: list[str], values: dict[str, str]) -> int:
     completed = subprocess.run(
       command,
       input=payload,
-      stdout=subprocess.PIPE,
-      stderr=subprocess.STDOUT,
+      stdout=subprocess.DEVNULL,
+      stderr=subprocess.DEVNULL,
       check=False,
       timeout=CONSUMER_TIMEOUT_SECONDS,
     )
-  except subprocess.TimeoutExpired as exc:
-    partial = exc.stdout or b""
-    if isinstance(partial, str):
-      partial = partial.encode("utf-8", errors="replace")
-    safe_output = _redact_output(
-      partial.decode("utf-8", errors="replace"), values,
-    )
-    if safe_output:
-      print(
-        safe_output[:128 * 1024],
-        end="" if safe_output.endswith("\n") else "\n",
-      )
-    print("Sealed consumer timed out; submitted values were discarded.")
+  except subprocess.TimeoutExpired:
     return 124
-  output = completed.stdout.decode("utf-8", errors="replace")
-  safe_output = _redact_output(output, values)
-  if safe_output:
-    print(safe_output[:128 * 1024], end="" if safe_output.endswith("\n") else "\n")
   return completed.returncode
+
+
+def _consumer_outcome(action: str, returncode: int) -> tuple[bool, int, str]:
+  """Map process state to trusted copy without reading consumer output."""
+  if action == "owner-credentials":
+    return OWNER_CREDENTIAL_OUTCOMES.get(
+      returncode,
+      (False, 1, "Credentials could not be changed."),
+    )
+  if returncode == 0:
+    return True, 0, "Secure input was consumed without exposing its values."
+  if returncode == 124:
+    return False, 124, "Sealed consumer timed out; submitted values were discarded."
+  return False, returncode or 1, (
+    "The sealed consumer failed; submitted values were discarded."
+  )
 
 
 def _owner_credentials_consumer() -> list[str]:
@@ -239,15 +231,15 @@ def main() -> int:
       from app.secure_inputs import build_reveal_envelope
       print(build_reveal_envelope(json.dumps(values, ensure_ascii=False)))
       rc = 0
+      ok = True
       message = "Secure values were revealed to the model for this turn only."
     else:
-      rc = _run_consumer(args.command, values)
-      message = (
-        "Secure input was consumed without exposing its values."
-        if rc == 0
-        else "The sealed consumer failed; submitted values were discarded."
+      ok, rc, message = _consumer_outcome(
+        args.action,
+        _run_consumer(args.command, values),
       )
-    _settle(request_id, capability, ok=(rc == 0), message=message)
+      print(message)
+    _settle(request_id, capability, ok=ok, message=message)
     return rc
   except (KeyboardInterrupt, EOFError):
     if request_id and capability:

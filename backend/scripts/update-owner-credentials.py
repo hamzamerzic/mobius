@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Consume owner credentials as stdin JSON and print only a safe outcome."""
+"""Consume owner credentials as stdin JSON and return a fixed outcome code."""
 
 from __future__ import annotations
 
@@ -22,38 +22,30 @@ def main() -> int:
   try:
     values = json.load(sys.stdin)
   except Exception:
-    print("Credential input was invalid.")
     return 2
   if not isinstance(values, dict):
-    print("Credential input was invalid.")
     return 2
 
   db = SessionLocal()
   try:
     owner = db.query(models.Owner).one_or_none()
     if owner is None:
-      print("Owner account was not found.")
-      return 1
+      return 3
     if get_settings().mobius_sso_enabled:
-      print("This instance uses managed sign-in.")
-      return 1
+      return 4
 
     current_password = values.get("current_password", "")
     new_username = values.get("new_username", "").strip()
     new_password = values.get("new_password", "")
     confirm_password = values.get("confirm_password", "")
     if not auth.verify_password(current_password, owner.hashed_password):
-      print("Current password is incorrect.")
-      return 1
+      return 5
     if not 1 <= len(new_username) <= 64:
-      print("Username must be 1–64 characters.")
-      return 1
+      return 6
     if not new_password.strip() or len(new_password) > 1024:
-      print("Password cannot be blank or longer than 1024 characters.")
-      return 1
+      return 7
     if new_password != confirm_password:
-      print("New passwords do not match.")
-      return 1
+      return 8
 
     owner.username = new_username
     owner.hashed_password = auth.hash_password(new_password)
@@ -62,8 +54,7 @@ def main() -> int:
     db.commit()
   except Exception:
     db.rollback()
-    print("Credentials could not be changed.")
-    return 1
+    return 9
   finally:
     values.clear()
     db.close()
@@ -71,12 +62,7 @@ def main() -> int:
   try:
     _write_service_token(new_username, epoch)
   except OSError:
-    print(
-      "Credentials changed. Sign in again, then restart Möbius to refresh "
-      "background access."
-    )
-    return 0
-  print("Credentials changed. Sign in again with the new details.")
+    return 10
   return 0
 
 

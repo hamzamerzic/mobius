@@ -16,8 +16,8 @@ python3 /data/platform/backend/scripts/secure-input.py owner-credentials
 That built-in flow requests the current password, new username, new password,
 and confirmation. Möbius holds the submitted strings only in server memory
 until the helper consumes them once. The helper passes them to the credential
-updater as JSON on stdin, captures its output in memory, scrubs exact submitted
-values and common encodings, and returns only a safe outcome. The card's title,
+updater as JSON on stdin, discards its stdout and stderr, and maps only fixed
+outcome codes to trusted messages. The card's title,
 field prompts, and completion state remain as a safe receipt; submitted values
 do not enter chat, tool arguments, environment variables, temporary files, or
 the durable transcript.
@@ -37,11 +37,11 @@ python3 /data/platform/backend/scripts/secure-input.py run \
 
 The consumer reads one JSON object from stdin. Its source may be durable, but it
 must never contain submitted values. It should consume the values immediately
-and must not print, log, persist, cache, shell-expand, or copy them into another
+and must not log, persist, cache, shell-expand, or copy them into another
 command's arguments or environment. Prefer a narrow operation that writes only
-the intended hashed/encrypted destination. The helper scrubs stdout/stderr as
-defense in depth, but no redactor can guarantee removal of arbitrary
-transformations or a consumer that deliberately writes elsewhere.
+the intended hashed/encrypted destination. The helper discards all consumer
+stdout and stderr and reports only a predefined success, failure, or timeout;
+a consumer that deliberately writes elsewhere remains outside this boundary.
 
 Never call the create/consume endpoints with curl or a general HTTP tool. The
 helper keeps the one-use capability and secret response out of model-visible

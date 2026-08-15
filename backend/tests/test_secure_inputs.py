@@ -386,7 +386,7 @@ def test_filled_values_expire_without_another_request(monkeypatch):
   asyncio.run(scenario())
 
 
-def test_sealed_consumer_scrubs_raw_and_encoded_values(capsys):
+def test_sealed_consumer_discards_stdout_and_stderr(capsys):
   script_path = (
     Path(__file__).resolve().parents[1] / "scripts" / "secure-input.py"
   )
@@ -403,15 +403,36 @@ def test_sealed_consumer_scrubs_raw_and_encoded_values(capsys):
       "import base64,json,sys,urllib.parse; "
       "v=json.load(sys.stdin)['password']; "
       "print(v); print(urllib.parse.quote(v,safe='')); "
-      "print(base64.b64encode(v.encode()).decode())"
+      "print(base64.b64encode(v.encode()).decode()); "
+      "print(v, file=sys.stderr)"
     ),
   ]
   assert helper._run_consumer(command, values) == 0
-  output = capsys.readouterr().out
-  assert secret not in output
-  assert "private%20value" not in output
-  assert "cHJpdmF0ZSB2YWx1Z" not in output
-  assert output.count("[secret]") == 3
+  captured = capsys.readouterr()
+  assert captured.out == ""
+  assert captured.err == ""
+
+
+def test_consumer_outcomes_are_predefined():
+  script_path = (
+    Path(__file__).resolve().parents[1] / "scripts" / "secure-input.py"
+  )
+  spec = importlib.util.spec_from_file_location("secure_input_helper", script_path)
+  helper = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(helper)
+
+  assert helper._consumer_outcome("run", 0) == (
+    True, 0, "Secure input was consumed without exposing its values.",
+  )
+  assert helper._consumer_outcome("run", 19) == (
+    False, 19, "The sealed consumer failed; submitted values were discarded.",
+  )
+  assert helper._consumer_outcome("owner-credentials", 5) == (
+    False, 1, "Current password is incorrect.",
+  )
+  assert helper._consumer_outcome("owner-credentials", 73) == (
+    False, 1, "Credentials could not be changed.",
+  )
 
 
 def test_sealed_consumer_exception_settles_without_reflecting_values(
@@ -494,7 +515,7 @@ def test_owner_credentials_consumer_changes_login_without_printing_values(
   output = capsys.readouterr().out
   assert new_username not in output
   assert new_password not in output
-  assert "Credentials changed" in output
+  assert output == ""
 
   db.expire_all()
   owner = db.query(models.Owner).one()
