@@ -37,47 +37,81 @@ function fakeTimers() {
   }
 }
 
+function fakeEventTarget(visibilityState) {
+  const listeners = new Map()
+  return {
+    visibilityState,
+    addEventListener(type, listener) {
+      const current = listeners.get(type) || new Set()
+      current.add(listener)
+      listeners.set(type, current)
+    },
+    removeEventListener(type, listener) {
+      listeners.get(type)?.delete(listener)
+    },
+    emit(type) {
+      for (const listener of listeners.get(type) || []) listener()
+    },
+    listenerCount(type) {
+      return listeners.get(type)?.size || 0
+    },
+  }
+}
+
 function args(overrides = {}) {
   return {
     builtApps: [app()],
     turnActive: true,
-    hidden: false,
+    presented: true,
     onDismissApp() {},
     ...overrides,
   }
 }
 
-test('the clock starts when a visible chat first presents the shortcut', () => {
+test('the clock starts only when the shortcut is presented on a foreground page', () => {
   const timers = fakeTimers()
-  const dismissed = []
-  const hookArgs = args({ onDismissApp: value => dismissed.push(value) })
-  const hook = renderHook(useOpenAppCtaAutoDismiss, hookArgs, timers)
+  const documentTarget = fakeEventTarget('hidden')
+  const windowTarget = fakeEventTarget()
+  const io = { ...timers, documentTarget, windowTarget }
+  const firstDismiss = []
+  const latestDismiss = []
+  const hookArgs = args({
+    presented: false,
+    onDismissApp: value => firstDismiss.push(value),
+  })
+  const hook = renderHook(useOpenAppCtaAutoDismiss, hookArgs, io)
+
+  // Neither a covered surface nor a background page has been observed.
+  assert.equal(timers.scheduled.size, 0)
+  hook.rerender({ ...hookArgs, presented: true }, io)
+  assert.equal(timers.scheduled.size, 0)
+  documentTarget.emit('visibilitychange')
+  assert.equal(timers.scheduled.size, 0)
+
+  documentTarget.visibilityState = 'visible'
+  windowTarget.emit('pageshow')
 
   assert.equal(timers.scheduled.size, 1)
   const [timerId, timer] = [...timers.scheduled.entries()][0]
   assert.equal(timer.delay, 5000)
 
-  // Turn completion changes the label, but the continuously visible shortcut
-  // keeps the clock that started when the owner first saw it.
-  hook.rerender({ ...hookArgs, turnActive: false }, timers)
+  // Turn completion, a later cover, and callback replacement do not restart a
+  // clock whose shortcut the owner already saw.
+  hook.rerender({
+    ...hookArgs,
+    presented: false,
+    turnActive: false,
+    onDismissApp: value => latestDismiss.push(value),
+  }, io)
   assert.equal(timers.scheduled.size, 1)
   assert.deepEqual(timers.cleared, [])
 
   timers.fire(timerId)
-  assert.deepEqual(dismissed, [hookArgs.builtApps[0]])
+  assert.deepEqual(firstDismiss, [])
+  assert.deepEqual(latestDismiss, [hookArgs.builtApps[0]])
 })
 
-test('a hidden chat starts no clock until the owner enters it', () => {
-  const timers = fakeTimers()
-  const hookArgs = args({ hidden: true })
-  const hook = renderHook(useOpenAppCtaAutoDismiss, hookArgs, timers)
-
-  assert.equal(timers.scheduled.size, 0)
-  hook.rerender({ ...hookArgs, hidden: false }, timers)
-  assert.equal(timers.scheduled.size, 1)
-})
-
-test('new previews do not reset shortcuts that are already counting down', () => {
+test('other previews keep their clocks while a replacement build gets a new one', () => {
   const timers = fakeTimers()
   const first = app()
   const hookArgs = args({ builtApps: [first] })
@@ -90,8 +124,16 @@ test('new previews do not reset shortcuts that are already counting down', () =>
   assert.equal(timers.scheduled.size, 2)
   assert.equal(timers.scheduled.has(firstTimerId), true)
   assert.deepEqual(timers.cleared, [])
-  hook.unmount()
-  assert.equal(timers.scheduled.size, 0)
+
+  const secondTimerId = [...timers.scheduled.keys()]
+    .find(timerId => timerId !== firstTimerId)
+  const replacement = app({ updated_at: 'build-3' })
+  hook.rerender({ ...hookArgs, builtApps: [replacement, second] }, timers)
+
+  assert.equal(timers.scheduled.size, 2)
+  assert.equal(timers.scheduled.has(firstTimerId), false)
+  assert.equal(timers.scheduled.has(secondTimerId), true)
+  assert.deepEqual(timers.cleared, [firstTimerId])
 })
 
 test('opening a preview cancels its pending retirement', () => {
@@ -107,4 +149,21 @@ test('opening a preview cancels its pending retirement', () => {
 
   assert.equal(timers.scheduled.size, 0)
   assert.deepEqual(timers.cleared, [timerId])
+})
+
+test('unmount releases the page listeners and every pending clock', () => {
+  const timers = fakeTimers()
+  const documentTarget = fakeEventTarget('visible')
+  const windowTarget = fakeEventTarget()
+  const io = { ...timers, documentTarget, windowTarget }
+  const hook = renderHook(useOpenAppCtaAutoDismiss, args(), io)
+
+  assert.equal(timers.scheduled.size, 1)
+  assert.equal(documentTarget.listenerCount('visibilitychange'), 1)
+  assert.equal(windowTarget.listenerCount('pageshow'), 1)
+
+  hook.unmount()
+  assert.equal(timers.scheduled.size, 0)
+  assert.equal(documentTarget.listenerCount('visibilitychange'), 0)
+  assert.equal(windowTarget.listenerCount('pageshow'), 0)
 })

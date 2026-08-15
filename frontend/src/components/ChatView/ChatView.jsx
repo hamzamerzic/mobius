@@ -293,6 +293,10 @@ export default function ChatView({
   // the scroll controller's paneResized() below. Null for a single-pane chat (today's
   // behavior — the controller's own ResizeObserver owns resize there).
   paneContentHeight = null,
+  // Shell presentation is narrower than runtime activity: overlays and modal
+  // navigation can cover a mounted, active chat. App-preview observation uses
+  // this explicit surface fact so covered shortcuts do not expire unseen.
+  previewPresented = false,
   // True when this mounted chat is hidden behind the full-workspace Settings
   // overlay (design §2). Before path-unification the single ChatView UNMOUNTED on
   // Settings, which aborted the mic; now it stays mounted, so we must stop voice
@@ -3590,7 +3594,7 @@ export default function ChatView({
   useOpenAppCtaAutoDismiss({
     builtApps,
     turnActive,
-    hidden,
+    presented: previewPresented && connectionError !== 'disconnected',
     onDismissApp,
   })
 

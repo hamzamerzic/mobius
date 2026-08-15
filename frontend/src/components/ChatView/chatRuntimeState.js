@@ -5,6 +5,9 @@
 
 import { groupActivityRuns } from './activityGrouping.js'
 import { hasPendingQuestionMessage } from '../../lib/chatDetailCache.js'
+import { shouldShowOpenAppCta } from './openAppCtaState.js'
+
+export { shouldShowOpenAppCta }
 
 export function isContinuationMessage(message) {
   return message?.kind === 'continuation'
@@ -253,23 +256,6 @@ export function coldTranscriptRenderFrames(
   frames[frames.length - 1] = messages
   return frames
 }
-
-export function shouldShowOpenAppCta(builtApp, turnActive = false) {
-  if (!builtApp?.id) return false
-  const seenCurrentBuild = Boolean(
-    builtApp.updated_at
-    && builtApp.preview_seen_updated_at === builtApp.updated_at
-  )
-  if (!seenCurrentBuild) return true
-  // Opening during the live turn acknowledges that preview only. The settled
-  // result surfaces once more even if the last source write happened before
-  // the turn ended; opening it then is the durable final acknowledgement.
-  return !turnActive && !builtApp.preview_seen_final
-}
-
-// Start from the first frame in which the shortcut is visible to the owner,
-// rather than from build completion or eventual turn settlement.
-export const OPEN_APP_CTA_AUTO_DISMISS_MS = 5000
 
 export function openAppCtaViewModel(builtApp, turnActive) {
   if (!shouldShowOpenAppCta(builtApp, turnActive)) return null

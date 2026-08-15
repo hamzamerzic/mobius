@@ -1,10 +1,9 @@
-/* Retire each Open-app shortcut five seconds after this chat first presents it. */
+/* Retire each Open-app shortcut five seconds after the owner first sees it. */
 
 import { useEffect, useRef } from 'react'
-import {
-  OPEN_APP_CTA_AUTO_DISMISS_MS,
-  shouldShowOpenAppCta,
-} from '../chatRuntimeState.js'
+import { shouldShowOpenAppCta } from '../openAppCtaState.js'
+
+const AUTO_DISMISS_MS = 5000
 
 function appBuildKey(app) {
   return `${app?.id ?? ''}:${app?.updated_at ?? ''}`
@@ -13,11 +12,13 @@ function appBuildKey(app) {
 export default function useOpenAppCtaAutoDismiss({
   builtApps,
   turnActive,
-  hidden,
+  presented,
   onDismissApp,
 }, {
   setTimer = setTimeout,
   clearTimer = clearTimeout,
+  documentTarget = typeof document === 'undefined' ? null : document,
+  windowTarget = typeof window === 'undefined' ? null : window,
 } = {}) {
   const timersRef = useRef(new Map())
   const onDismissRef = useRef(onDismissApp)
@@ -25,35 +26,64 @@ export default function useOpenAppCtaAutoDismiss({
 
   useEffect(() => {
     const timers = timersRef.current
-    const eligibleApps = new Map(
-      (Array.isArray(builtApps) ? builtApps : [])
-        .filter(app => shouldShowOpenAppCta(app, turnActive))
-        .map(app => [appBuildKey(app), app]),
-    )
-
-    // A click, acknowledgement, or replacement build retires the old timer.
-    // Merely leaving the chat does not: once the shortcut was actually seen,
-    // its five-second clock keeps its original meaning.
-    for (const [key, entry] of timers) {
-      if (eligibleApps.has(key)) continue
-      clearTimer(entry.timerId)
-      timers.delete(key)
+    function pageIsVisible() {
+      return !documentTarget?.visibilityState
+        || documentTarget.visibilityState === 'visible'
     }
 
-    // Hidden chats must not consume a shortcut the owner has never seen.
-    if (hidden || typeof onDismissApp !== 'function') return
+    function reconcile() {
+      const eligibleApps = new Map(
+        (Array.isArray(builtApps) ? builtApps : [])
+          .filter(app => shouldShowOpenAppCta(app, turnActive))
+          .map(app => [appBuildKey(app), app]),
+      )
 
-    for (const [key, app] of eligibleApps) {
-      if (timers.has(key)) continue
-      const timerId = setTimer(() => {
-        const current = timersRef.current.get(key)
-        if (!current || current.timerId !== timerId) return
-        timersRef.current.delete(key)
-        onDismissRef.current?.(current.app)
-      }, OPEN_APP_CTA_AUTO_DISMISS_MS)
-      timers.set(key, { timerId, app })
+      // A click, acknowledgement, or replacement build retires the old timer.
+      // Covering a shortcut after it was seen does not: its original five-second
+      // clock keeps the meaning the owner already observed.
+      for (const [key, entry] of timers) {
+        if (eligibleApps.has(key)) continue
+        clearTimer(entry.timerId)
+        timers.delete(key)
+      }
+
+      // A retained chat, a shell-covered surface, a disconnected foot, or a
+      // background browser tab has not presented the shortcut to the owner yet.
+      if (!presented || !pageIsVisible() || typeof onDismissApp !== 'function') return
+
+      for (const [key, app] of eligibleApps) {
+        if (timers.has(key)) continue
+        const timerId = setTimer(() => {
+          const current = timersRef.current.get(key)
+          if (!current || current.timerId !== timerId) return
+          timersRef.current.delete(key)
+          onDismissRef.current?.(current.app)
+        }, AUTO_DISMISS_MS)
+        timers.set(key, { timerId, app })
+      }
     }
-  }, [builtApps, turnActive, hidden, onDismissApp, setTimer, clearTimer])
+
+    function reconcileForeground() {
+      if (pageIsVisible()) reconcile()
+    }
+
+    reconcile()
+    documentTarget?.addEventListener?.('visibilitychange', reconcileForeground)
+    windowTarget?.addEventListener?.('pageshow', reconcileForeground)
+    return () => {
+      documentTarget?.removeEventListener?.('visibilitychange', reconcileForeground)
+      windowTarget?.removeEventListener?.('pageshow', reconcileForeground)
+    }
+  }, [
+    builtApps,
+    turnActive,
+    presented,
+    onDismissApp,
+    setTimer,
+    clearTimer,
+    documentTarget,
+    windowTarget,
+  ])
 
   useEffect(() => () => {
     for (const entry of timersRef.current.values()) {

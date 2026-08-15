@@ -26,6 +26,7 @@ function PaneChatView({
   paneId,
   apps,
   runtimeActive = true,
+  previewPresented = false,
   keepTranscriptPainted = false,
   focusedPresentation = false,
   paneContentHeight,
@@ -132,6 +133,7 @@ function PaneChatView({
         key={chatId}
         chatId={chatId}
         hidden={!runtimeActive}
+        previewPresented={previewPresented}
         keepTranscriptPainted={keepTranscriptPainted}
         paneContentHeight={paneContentHeight}
         externalRunSignal={externalRunSignal}
