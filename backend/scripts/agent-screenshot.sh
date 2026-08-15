@@ -601,7 +601,7 @@ sleep 0.3
 # read inside the page and never appears in argv or output.
 BROWSER_PHASE="authentication verification"
 AUTH_OK="$(browser_eval_retry \
-  "(async () => { const token = localStorage.getItem('token'); if (!token || document.querySelector('input[type=password]')) return false; try { const res = await fetch('/api/chats?agent-screenshot-auth=' + Date.now(), { cache: 'no-store', headers: { Authorization: 'Bearer ' + token } }); return res.status === 200 && !!localStorage.getItem('token') && !document.querySelector('input[type=password]'); } catch { return false; } })()" \
+  "(async () => { const token = localStorage.getItem('token'); const login = () => document.querySelector('[data-auth-surface=login]'); if (!token || login()) return false; try { const res = await fetch('/api/chats?agent-screenshot-auth=' + Date.now(), { cache: 'no-store', headers: { Authorization: 'Bearer ' + token } }); return res.status === 200 && !!localStorage.getItem('token') && !login(); } catch { return false; } })()" \
   || true)"
 if [ "$AUTH_OK" != "true" ]; then
   die "authentication failed; the token was rejected or the login page remained visible"

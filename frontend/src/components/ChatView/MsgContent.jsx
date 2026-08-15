@@ -4,6 +4,7 @@ import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.
 import ActivityStretch from './ActivityStretch.jsx'
 import { groupActivityRuns, coalesceThinkingEntries } from './groupBlocks.js'
 import QuestionCard from './QuestionCard.jsx'
+import SecureInputCard from './SecureInputCard.jsx'
 import MessageSources from './MessageSources.jsx'
 import Attachments from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
@@ -240,6 +241,16 @@ function MsgContentInner({
               pendingCardRef={answerable ? pendingQuestionRef : undefined}
             />
           </div>
+        )
+      }
+      if (block.type === 'secure_input') {
+        return (
+          <SecureInputCard
+            key={block.request_id || `secure-input-${i}`}
+            block={block}
+            chatId={chatId}
+            interactive={isActiveAnswer && isStreaming}
+          />
         )
       }
       if (block.type === 'error') {

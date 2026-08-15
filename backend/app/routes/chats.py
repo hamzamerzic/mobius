@@ -1793,6 +1793,8 @@ async def delete_chat(
   # the delete-ABA case — reads `we_own_gen=False` and skips finalizing onto
   # the soft-deleted row. recover_chat restores it with a strictly-newer gen.
   questions.cancel(chat_id)
+  from app import secure_inputs
+  secure_inputs.cancel_chat(chat_id)
   mark_chat_deleted(chat_id)
   # Close the chat's durable run state as part of the delete. A delete with a
   # LIVE handle stops the runner but hands durable closure to run_chat's finally,

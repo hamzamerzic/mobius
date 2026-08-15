@@ -57,6 +57,7 @@ chat_router = _load("chat")
 chat_embed_router = _load("chat_embed")
 chats_router = _load("chats")
 chats_stream_router = _load("chats_stream")
+secure_inputs_router = _load("secure_inputs")
 chat_logs_router = _load("chat_logs")
 connectors_router = _load("connectors")
 try:
@@ -96,6 +97,7 @@ __all__ = [
   "chat_embed_router",
   "chats_router",
   "chats_stream_router",
+  "secure_inputs_router",
   "chat_logs_router",
   "connectors_router",
   "connectors_public_router",

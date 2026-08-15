@@ -39,6 +39,7 @@ export function streamItemToBlock(item, { finalize = true } = {}) {
       ...(item.answers ? { answers: item.answers } : {}),
     }
   }
+  if (item.type === 'secure_input') return { ...item }
   if (item.type === 'error') {
     // Carry the whitelisted extras (resumable drives the one-tap Resume; the
     // single `pause` descriptor — {kind, resets_at?} — drives the calm "Paused"
