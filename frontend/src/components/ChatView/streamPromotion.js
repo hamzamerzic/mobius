@@ -467,3 +467,47 @@ export function promoteAssistantStream(messages, { items, bridgeTs = null }) {
 
   return [...messages, { role: 'assistant', content, blocks }]
 }
+
+/**
+ * Promote one assistant turn and place the user/product rows that start its
+ * continuation immediately after it.
+ *
+ * A restored live turn can bridge an assistant row that is no longer the
+ * mounted transcript tail: newer local rows may already be visible while the
+ * old stream replay catches up. Appending the continuation rows after that
+ * suffix briefly tells the wrong story until the next detail refresh. Keep
+ * the whole turn boundary in one list operation instead.
+ */
+export function promoteAssistantStreamWithFollowingMessages(
+  messages,
+  { items, bridgeTs = null, followingMessages = [] },
+) {
+  const source = Array.isArray(messages) ? messages : []
+  const bridgeIdx = bridgeTs == null
+    ? -1
+    : source.findIndex(m => m?.role === 'assistant' && m.ts === bridgeTs)
+  const promoted = promoteAssistantStream(source, { items, bridgeTs })
+  const batch = Array.isArray(followingMessages)
+    ? followingMessages.filter(Boolean)
+    : []
+  if (batch.length === 0) return promoted
+
+  const seenTs = new Set(promoted.map(m => m?.ts).filter(v => v != null))
+  const unseen = batch.filter(message => {
+    if (message.ts == null) return true
+    if (seenTs.has(message.ts)) return false
+    seenTs.add(message.ts)
+    return true
+  })
+  if (unseen.length === 0) return promoted
+
+  // With no bridge, promoteAssistantStream appends the completed assistant and
+  // it is the boundary. With a bridge, preserve every newer local suffix row
+  // but place the continuation before it.
+  const insertAt = bridgeIdx >= 0 ? bridgeIdx + 1 : promoted.length
+  return [
+    ...promoted.slice(0, insertAt),
+    ...unseen,
+    ...promoted.slice(insertAt),
+  ]
+}

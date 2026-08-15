@@ -8,6 +8,7 @@ import { assistantAnchorKey, messageKey } from '../../../lib/chatDetailCache.js'
 import {
   streamItemsToAssistantPayload,
   promoteAssistantStream,
+  promoteAssistantStreamWithFollowingMessages,
   assistantStreamCoversMessage,
   messageCoversAssistantStream,
   chooseActiveAssistantSurface,
@@ -149,6 +150,57 @@ test('promoteAssistantStream replaces mounted partial even after steered user ro
   assert.equal(next[1].ts, 2)
   assert.equal(next[1].content, 'updated live stream')
   assert.equal(next[2].content, 'fast-forwarded q2')
+})
+
+test('a restored continuation stays beside its bridged assistant, ahead of newer local rows', () => {
+  const messages = [
+    { role: 'user', ts: 1, content: 'original request' },
+    {
+      role: 'assistant',
+      ts: 2,
+      content: 'Paused for restart',
+      blocks: [{ type: 'error', message: 'Paused for restart' }],
+    },
+    { role: 'user', ts: 4, cid: 'later-owner-row', content: 'newer local request' },
+  ]
+  const marker = {
+    role: 'user',
+    ts: 3,
+    cid: 'restart-resume-run-1',
+    kind: 'continuation',
+    continuation_reason: 'restart',
+    content: 'continue',
+  }
+
+  const next = promoteAssistantStreamWithFollowingMessages(messages, {
+    bridgeTs: 2,
+    items: [{ type: 'error', message: 'Paused for restart' }],
+    followingMessages: [marker],
+  })
+
+  assert.deepEqual(next.map(message => message.ts), [1, 2, 3, 4])
+  assert.equal(next[2], marker)
+  assert.equal(next[3].content, 'newer local request')
+})
+
+test('ordinary queued rows remain after the completed assistant despite older send timestamps', () => {
+  const messages = [
+    { role: 'user', ts: 10, content: 'first request' },
+    { role: 'assistant', ts: 30, content: 'completed response' },
+  ]
+  const queued = { role: 'user', ts: 20, cid: 'queued', content: 'follow-up' }
+
+  const next = promoteAssistantStreamWithFollowingMessages(messages, {
+    items: [],
+    bridgeTs: 30,
+    followingMessages: [queued],
+  })
+
+  assert.deepEqual(next.map(message => message.content), [
+    'first request',
+    'completed response',
+    'follow-up',
+  ])
 })
 
 test('promoteAssistantStream carries persisted question answers by identity', () => {
