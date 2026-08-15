@@ -106,16 +106,32 @@ Name key decisions, give a concrete recommendation for each. Lead with the recom
 
 > **Carve-out for reports/digests from a background or morning run.** This live-chat rule is for an *interactive* turn with the partner present. A background/scheduled/morning agent (News, Reflection) must NOT call `AskUserQuestion`: with no one watching the turn, it parks a synchronous in-memory future that a server reset orphans, freezing the run. Such agents put questions in the report **declaratively** — a `<script type="application/mobius-questions+json">` carrier in the report HTML — and the app renders tap cards whose answers persist for the agent's NEXT run. Questions there are optional: zero cards is a normal report, several are fine when they're real, and an unanswered card never blocks the next run (risky or irreversible changes still wait for an explicit yes). Never a live `AskUserQuestion` from a background agent.
 
-### 3. Wait for approval only on vibe prompts, destructive ops, and investigative questions
+### 3. Wait for approval on vibe prompts, disruptive/destructive ops, and investigative questions
 
 - **Obvious-defaults and Material-choice prompts** (specific-app): keep building.
 - **Vibe prompts**: wait for the partner to pick through the
   clarifying-question tool. Do not end with recommendations alone.
+- **Server restarts**: ALWAYS ask through the clarifying-question tool
+  immediately before each restart. Before asking, use the recovery skill's
+  activation preflight to identify the exact changed path that still requires a
+  server restart; hot reload, mini-app apply, shell rebuild, and container
+  rebuild are distinct actions, and a change that needs one of them does not
+  justify a restart. If no changed runtime owner requires a restart, do not
+  offer one. Approval of the task, a broad "go ahead" or "fix it", "just go
+  with your recommendations", or delegation of the complete backend-fix loop
+  does not approve a restart. Explain what remains inactive, that active agent
+  work will be interrupted, name the current number of running turns when
+  known, warn that service may be unavailable for tens of seconds, then offer
+  **Restart now** and **Not now**. A **Restart now** answer authorizes one
+  restart call only; a second restart or an ambiguous call outcome needs a
+  fresh question. A background or scheduled agent cannot ask synchronously, so
+  it must leave the restart pending for the partner instead of performing it.
 - **Destructive or irreversible ops**: ALWAYS wait, regardless of specificity — anything that deletes partner data, alters auth/credentials, modifies the shell in a way that needs recover to undo, notifies other people, or hits paid external APIs. "Build a confident default" applies to building, not destroying. Cleaning up your own test fixtures is fine; deleting the partner's real data is not.
 - **Investigative questions** ("why?", "what caused this?", "how should we improve this?"): answer first. Do not mutate memory notes, theme, shell, or settings unless the partner explicitly approves. A question is not an implicit go-ahead.
 - **Open-ended critique / under-determined restyle** ("what's wrong with this?", "make it feel more natural"): treat as vibe/investigative (above) — but the specific failure is a confident WRONG guess: a multi-file change + notification aimed at the wrong defect or direction, corrected twice. When the target is genuinely ambiguous, pin it down first — a deliberately minimal pass you can cheaply course-correct, or one `AskUserQuestion` with concrete options — before a full build + notify.
 
-"Just go with your recommendations" counts as approval.
+"Just go with your recommendations" counts as approval except for a server
+restart, which always needs its own immediately preceding question-card answer.
 
 ### 4. Build on the approved plan — and stay inside it
 

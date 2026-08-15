@@ -157,6 +157,43 @@ def test_core_prompt_owns_freshness_and_source_policy():
   assert "Cite the supporting link close to the claim" in core
 
 
+def test_restart_guidance_requires_activation_proof_and_fresh_approval():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
+  recovery = (
+    repo / "backend" / "scripts" / "seed-skills" / "recovery.md"
+  ).read_text(encoding="utf-8")
+  normalized_core = " ".join(core.split())
+  normalized_recovery = " ".join(recovery.split())
+
+  assert "**Server restarts**: ALWAYS ask" in core
+  assert "If no changed runtime owner requires a restart, do not offer one" in (
+    normalized_core
+  )
+  assert "immediately before each restart" in normalized_core
+  assert "authorizes one restart call only" in normalized_core
+  assert "## Choose the smallest activation action" in recovery
+  assert "No shell rebuild or server restart" in recovery
+  assert "No server restart" in recovery
+  assert "a server restart is insufficient" in recovery
+  assert "Do not restart between iterations" in recovery
+  assert "For a constitution-only change, default to leaving it pending" in (
+    normalized_recovery
+  )
+  assert (
+    "A **Restart now** answer authorizes exactly one safe restart call"
+    in recovery
+  )
+  assert "A second restart" in recovery
+  assert "service may be unavailable for tens of seconds" in normalized_recovery
+  assert "delegation of the complete backend-fix loop does not approve" in (
+    normalized_recovery
+  )
+  assert "explicitly delegated the restart or the complete backend-fix loop" not in (
+    core + recovery
+  )
+
+
 def test_owned_app_skill_summaries_expose_complete_initial_read_sets():
   repo = Path(__file__).resolve().parents[2]
   seed_dir = repo / "backend" / "scripts" / "seed-skills"

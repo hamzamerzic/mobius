@@ -4,6 +4,36 @@ How backend edits load, how to make them permanent, the SQLite migration gotcha,
 
 ---
 
+## Choose the smallest activation action
+
+Do not infer activation from the fact that a task touched platform source.
+Review the exact changed paths and use the smallest matching action:
+
+| Changed surface | Smallest activation |
+|---|---|
+| `/data/shared/theme.css` | Hot-reloads after the theme notification. No build or restart. |
+| Mini-app source under `/data/apps/<slug>/` | Run `apply_app.py`; the compiled app live-swaps. No shell rebuild or server restart. |
+| `frontend/src/` and other frontend build inputs | The watcher rebuilds the served shell, then `shell_apply_now` applies it. A normal save triggers this automatically; source arriving through Git needs a changed frontend file touched. No server restart. |
+| `backend/app/*.py` | After compile checks, tests, and commit, one server restart loads the settled backend revision. |
+| `skill/core.md` | A server restart refreshes the cached constitution for new agent sessions only; existing sessions keep their immutable prompt snapshot. Unless new sessions need the rule immediately, leave it pending for the next separately approved restart. |
+| `backend/scripts/`, tests, docs, and shared skill content | Takes effect on its next invocation or read. No server restart. An agent that already read old instructions cannot be rewritten in place. |
+| `backend/requirements.txt`, `frontend/package.json`, or `Dockerfile` | Requires a container rebuild; a server restart is insufficient. Prefer code changes when a dependency is not genuinely necessary. |
+
+### Activation preflight — before any restart question
+
+1. List the exact paths changed for the current task and whether a later owner
+   action has already activated them.
+2. Map every path through the table above. If none still requires a server
+   restart, do not offer one. Never substitute a restart for hot reload, app
+   apply, shell rebuild, or container rebuild.
+3. Batch every restart-requiring edit, test it, and commit it before asking.
+   Do not restart between iterations or request a speculative restart.
+4. In the question, name the exact change that remains inactive and why only a
+   server restart can activate it. For a constitution-only change, default to
+   leaving it pending unless the partner needs the rule in new sessions now.
+
+---
+
 ## Backend edits — restart to load, hand off persistence
 
 The live backend is `/data/platform/backend/app/*.py`. Edits there take effect
@@ -30,10 +60,32 @@ All chat-persistence writes must route through the `chat_writer` actor — never
 ### The backend-fix loop
 
 1. Edit `/data/platform/backend/app/...py` in place; `py_compile` it.
-2. If the main shell is healthy, ask the partner to open Settings -> Server and click **"Restart server"** (POSTs `/api/admin/restart`).
-3. If the edited tree fails to import, the baked shell stays available. Ask the partner to refresh and use the repair chat to diagnose `/data/platform`.
-4. Restart takes ~5–15s; the page auto-reloads when healthy.
-5. Verify the fix in the original chat (still open, full history intact).
+2. Test first, then commit only the intended platform paths.
+3. Run the activation preflight above. Only if it proves that the settled
+   backend change is not live, stop and ask through the clarifying-question
+   tool immediately before restarting. Explain that the restart interrupts
+   every active agent turn, name the current number of running turns when
+   known, and warn that service may be unavailable for tens of seconds. Then
+   offer **Restart now** and **Not now**. Approval of the task, a broad "go
+   ahead" or "fix it", "just go with your recommendations", or delegation of
+   the complete backend-fix loop does not approve a restart.
+
+   A **Restart now** answer authorizes exactly one safe restart call:
+
+   ```bash
+   curl -fsS -X POST "$API_BASE_URL/api/admin/restart" \
+     -H "Authorization: Bearer $AGENT_TOKEN" \
+     -H "Content-Type: application/json"
+   ```
+
+   The current tool call ends as the worker exits and Möbius resumes the turn.
+   A second restart, or an ambiguous outcome where you cannot prove whether the
+   call reached the server, requires a new question. A background or scheduled
+   agent cannot use the live question tool, so it must leave the restart pending
+   for the partner rather than calling this route.
+4. If the edited tree fails to import, the baked shell stays available. Ask the partner to refresh and diagnose `/data/platform` in place.
+5. Restart time varies with active work and boot time; the page auto-reloads when healthy.
+6. Verify the fix in the original chat (still open, full history intact).
 
 ---
 
