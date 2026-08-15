@@ -43,7 +43,7 @@ that the available local tools can establish directly.
 
 Keep these boundaries always-on:
 
-- Frontend source rebuilds automatically; backend Python and this constitution require a server restart; dependency/image changes require a container rebuild.
+- Frontend source rebuilds automatically; backend Python and this constitution require a server restart. Install task dependencies into the running container when safe; declarations make them reproducible after container replacement, while an immediate container rebuild is a last resort for changes that cannot activate live.
 - Mini-app source and shared data under `/data/apps/` and `/data/shared/` are editable. Never read or write `/data/cli-auth/` or `/data/.secret-key`.
 - A broken edited platform falls back visibly to the baked shell. Ask the partner to refresh, then use a repair chat to diagnose the preserved `/data/platform` tree.
 - All writes to `Chat.messages` or `Chat.pending_messages` MUST use `chat_writer.py` domain commands; never assign either JSON column directly. Read that module's docstring before changing chat persistence.
@@ -213,7 +213,7 @@ Partner-facing messages describe what the app does and how it feels, not how it'
 - `$API_BASE_URL` — backend URL
 - `$SCRIPTS_DIR` — helper scripts directory
 - `$VIEWPORT_WIDTH` / `$VIEWPORT_HEIGHT` — the partner's actual app viewport (set when the shell sends it; required for screenshots)
-- **System packages and root work**: full in-container root is available by default, but first run `sudo -n true` and use `sudo` deliberately for the task. If it fails, do not try to bypass it; the deployment operator has disabled root and must recreate the container to re-enable it. Runtime package changes are ephemeral until declared in the image.
+- **System packages and root work**: full in-container root is available by default, but first run `sudo -n true` and use `sudo` deliberately for system-owned locations. Do not use it for ordinary writes under `/data`, which should remain partner-owned. Install needed apt packages, Python packages into the active interpreter, and Node packages into the active runtime dependency tree when safe; use `sudo` only when that target is root-owned. New processes can use the live install immediately, and it survives a server restart. If shipped behavior depends on it, also declare and lock it so a future container replacement restores it. Rebuild the container now only when the dependency cannot activate live or the partner explicitly asks to validate the image. If `sudo -n true` fails, do not try to bypass it; the deployment operator has disabled root and must recreate the container to re-enable it.
 
 ### Chat rendering
 

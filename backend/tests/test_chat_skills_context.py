@@ -175,7 +175,21 @@ def test_restart_guidance_requires_activation_proof_and_fresh_approval():
   assert "## Choose the smallest activation action" in recovery
   assert "No shell rebuild or server restart" in recovery
   assert "No server restart" in recovery
-  assert "a server restart is insufficient" in recovery
+  assert "### Dependencies — live first, durable second" in recovery
+  assert "install only the named dependency" in recovery
+  assert "Do not run blanket upgrades or ad-hoc remote installers" in (
+    normalized_recovery
+  )
+  assert "a global Node install does not satisfy a project's imports" in (
+    normalized_recovery
+  )
+  assert "not for ordinary writes under `/data`" in recovery
+  assert "the owning manifest and lockfile" in recovery
+  assert "These declarations are durability metadata, not an activation action" in (
+    normalized_recovery
+  )
+  assert "Treat a container rebuild as a last resort" in recovery
+  assert "do not require an immediate rebuild" in recovery
   assert "Do not restart between iterations" in recovery
   assert "For a constitution-only change, default to leaving it pending" in (
     normalized_recovery

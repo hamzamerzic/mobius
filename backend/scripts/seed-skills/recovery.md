@@ -17,7 +17,31 @@ Review the exact changed paths and use the smallest matching action:
 | `backend/app/*.py` | After compile checks, tests, and commit, one server restart loads the settled backend revision. |
 | `skill/core.md` | A server restart refreshes the cached constitution for new agent sessions only; existing sessions keep their immutable prompt snapshot. Unless new sessions need the rule immediately, leave it pending for the next separately approved restart. |
 | `backend/scripts/`, tests, docs, and shared skill content | Takes effect on its next invocation or read. No server restart. An agent that already read old instructions cannot be rewritten in place. |
-| `backend/requirements.txt`, `frontend/package.json`, or `Dockerfile` | Requires a container rebuild; a server restart is insufficient. Prefer code changes when a dependency is not genuinely necessary. |
+| A package needed by the current task | Install it into the running container first when safe. A new process can use it immediately; restart the server only when the already-running backend must load it. |
+| `backend/requirements.txt`, lockfiles, `frontend/package.json`, or `Dockerfile` | These declarations make a live install reproducible after container replacement; they do not activate it and do not require an immediate rebuild. |
+
+### Dependencies — live first, durable second
+
+1. Run `sudo -n true` once. Use `sudo` for apt or other system/global install
+   locations, not for ordinary writes under `/data`, which must remain
+   partner-owned.
+2. Use the owning package manager to install only the named dependency, pinned
+   to the intended version when possible. Do not run blanket upgrades or
+   ad-hoc remote installers. Put Python packages in the active interpreter and
+   Node packages in the active runtime dependency tree; a global Node install
+   does not satisfy a project's imports. Verify the import, executable, or
+   version. New processes can use the install immediately. A long-running
+   backend needs one approved server restart only when it must load the new
+   package itself.
+3. If shipped behavior depends on the package, record the same resolution in
+   the owning manifest and lockfile, plus the Dockerfile only when image wiring
+   is needed. These declarations are durability metadata, not an activation
+   action: they let a future image/container replacement restore the live
+   install.
+4. Treat a container rebuild as a last resort, not an ordinary closeout step.
+   Require it now only when the change genuinely cannot activate live (for
+   example a base-image/ABI change or an artifact produced only by an image
+   build), or when the partner explicitly asks to validate the image.
 
 ### Activation preflight — before any restart question
 
@@ -25,7 +49,7 @@ Review the exact changed paths and use the smallest matching action:
    action has already activated them.
 2. Map every path through the table above. If none still requires a server
    restart, do not offer one. Never substitute a restart for hot reload, app
-   apply, shell rebuild, or container rebuild.
+   apply, shell rebuild, live dependency install, or container rebuild.
 3. Batch every restart-requiring edit, test it, and commit it before asking.
    Do not restart between iterations or request a speculative restart.
 4. In the question, name the exact change that remains inactive and why only a
