@@ -2428,9 +2428,9 @@
 
 /* Jump-to-latest: a round, mostly-transparent control floating in the same
    slot above the composer, shown once the reader has scrolled away from the
-   content tail (ChatView renders it only then). Tapping routes through the
-   controller's tail reveal — contract R5a's one-shot navigation, never
-   live-follow. Kept quieter than the attention nudges: neutral surface tint
+   physical tail (ChatView renders it only then). Tapping routes through the
+   controller's tail reveal and resumes live follow. Kept quieter than the
+   attention nudges: neutral surface tint
    at low opacity over blur, no accent, because it is a convenience, not an
    attention request. */
 .chat__jump-latest {
