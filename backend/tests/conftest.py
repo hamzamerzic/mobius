@@ -150,11 +150,13 @@ def fresh_db():
   from app import broadcast as bc_mod
   from app import chat_queue as chat_queue_mod
   from app import questions as questions_mod
+  from app import secure_inputs as secure_inputs_mod
   from app.runner_registry import registry
   # ticket 033: pending-question registry lives in app.questions;
   # queue locks live in app.chat_queue. Reset both canonical homes.
   questions_mod._pending.clear()
   questions_mod._cancelled.clear()
+  secure_inputs_mod._requests.clear()
   registry.reset_for_tests()
   # Reset the per-chat queue-lock registry so a lock held by a leaked
   # task from a prior test can't be returned to the next test's caller.

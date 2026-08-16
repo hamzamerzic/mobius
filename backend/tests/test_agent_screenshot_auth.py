@@ -367,6 +367,13 @@ def test_helper_captures_after_authentication_is_confirmed(tmp_path: Path):
   assert all("test-token" not in command for command in commands)
 
 
+def test_auth_check_targets_login_surface_not_unrelated_password_fields():
+  source = SCRIPT.read_text(encoding="utf-8")
+
+  assert "[data-auth-surface=login]" in source
+  assert "input[type=password]" not in source
+
+
 def test_helper_accepts_a_stable_canonical_shell_route(tmp_path: Path):
   result, output, marker, browser_log = _run_helper(
     tmp_path,

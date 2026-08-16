@@ -2207,6 +2207,8 @@ async def stop_chat_for(
         "queue for reconciliation", chat_id, exc_info=True,
       )
   questions.cancel(chat_id)
+  from app import secure_inputs
+  secure_inputs.cancel_chat(chat_id)
   all_stopped = True
   escalated = False
   for handle in handles:

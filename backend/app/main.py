@@ -63,6 +63,7 @@ from app import activity, models
 from app.routes import (
   admin_router, apps_router, auth_router,
   chat_embed_router, chat_logs_router, chat_router, chats_router, chats_stream_router,
+  secure_inputs_router,
   connectors_router, connectors_public_router,
   debug_router, delegations_router, fs_router, github_router, media_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
@@ -614,6 +615,7 @@ app.include_router(chat_router)
 app.include_router(chat_embed_router)
 app.include_router(chats_router)
 app.include_router(chats_stream_router)
+app.include_router(secure_inputs_router)
 app.include_router(delegations_router)
 app.include_router(chat_logs_router)
 app.include_router(connectors_router)

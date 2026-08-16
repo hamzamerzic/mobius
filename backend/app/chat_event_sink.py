@@ -43,6 +43,7 @@ from app.memory_recall import (
   RecallBinding, recall_from_command, settle_recall,
 )
 from app.runtime_types import ChatEvent
+from app.secure_inputs import redact_reveal_markers
 
 
 _active_sinks: dict[str, "ChatEventSink"] = {}
@@ -243,7 +244,7 @@ class ChatEventSink:
   _IMMEDIATE_SAVE_TYPES = frozenset(
     {
       "context_compacted", "tool_start", "tool_end", "task_start",
-      "task_done", "error",
+      "task_done", "secure_input_request", "secure_input_settled", "error",
     }
   )
 
@@ -550,6 +551,10 @@ class ChatEventSink:
     # contains the line that settles a recognized lookup.
     output_reduced = False
     if event_type == "tool_output":
+      # An explicit secure-input reveal reaches the provider as a tool result,
+      # but the marked envelope must not enter Möbius's live UI, transcript, or
+      # chat-side logs. Normal sealed execution never emits these markers.
+      event["content"] = redact_reveal_markers(event.get("content"))
       output_reduced = self._reduce_tool_output(event)
       if not output_reduced and event.get("output_exit_code") is None:
         exit_code = tool_output_exit_code(event.get("content"))

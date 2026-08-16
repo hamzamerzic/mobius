@@ -465,6 +465,12 @@ export const api = {
       'chats', `/chats/${chatId}/recover`, { method: 'POST' },
     ),
   },
+  secureInputs: {
+    submit: (chatId, requestId, payload) => apiFetch(
+      `/secure-inputs/${encodeURIComponent(chatId)}/${encodeURIComponent(requestId)}/submit`,
+      { method: 'POST', body: JSON.stringify(payload) },
+    ),
+  },
   apps: {
     list: () => apiFetch('/apps/'),
     markOpened: (appId) => apiFetch(`/apps/${appId}/opened`, {

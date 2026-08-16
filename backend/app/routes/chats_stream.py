@@ -81,6 +81,10 @@ _SNAPSHOT_REPLAY_EVENT_TYPES = frozenset({
   "queued_turn_starting",
   "steer_delivery_failed",
   "steered_into_turn",
+  "secure_input_request",
+  "secure_input_filled",
+  "secure_input_consuming",
+  "secure_input_settled",
   "theme_updated",
 })
 
