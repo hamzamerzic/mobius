@@ -1177,7 +1177,24 @@ export default function ChatView({
     },
     onStreamEnd: ({ continues, promotedMessage } = {}) => {
       if (embedded && continues === false) setEmbeddedRunActive(false)
-      promoteStreamToMessages()
+      const continuation = continues ? queuedContinuationRef.current : null
+      queuedContinuationRef.current = null
+      const localPromoted = continuation?.rows || null
+      const continuationPinIntent = continuation?.intent || null
+      const promotedRows = continues
+        ? continuationRowsFromPromotedMessage(promotedMessage, localPromoted)
+        : []
+      // Read this before the rows become visible. Continuation markers are not
+      // owner messages, but an ordinary first queued send is.
+      const contIsFirstUser = promotedRows.length > 0
+        ? isFirstVisibleUserMessage()
+        : false
+      const pinCid = promotedRows.length > 0 ? cidOf(promotedRows[0]) : null
+      // The completed assistant and the rows starting its continuation form
+      // one transcript boundary. A restored assistant may be bridged in place
+      // above a newer local row, so committing the following rows separately
+      // at the list tail makes a restart marker flash below that newer row.
+      promoteStreamToMessages({ followingMessages: promotedRows })
       if (continues) {
         // Backend auto-promoted queued follow-ups into the next turn. Newer
         // backend code persists the visible rows separately while sending
@@ -1185,24 +1202,13 @@ export default function ChatView({
         // The local queue was already trimmed when the
         // queued_turn_starting event arrived, so a message queued after
         // that event cannot be accidentally folded into this turn here.
-        const continuation = queuedContinuationRef.current
-        queuedContinuationRef.current = null
-        const localPromoted = continuation?.rows || null
-        const continuationPinIntent = continuation?.intent || null
-        const promotedRows = continuationRowsFromPromotedMessage(
-          promotedMessage,
-          localPromoted,
-        )
         if (promotedRows.length > 0) {
           // A queued continuation is still a user send becoming the active
           // turn, so it follows the same send rule (see shouldPinSend):
           // pin only when first-or-at-physical-tail. Read the first-user check
-          // before the append. When not pinning, leave the reader where
+          // before the boundary commit. When not pinning, leave the reader where
           // the previous turn left them — the continuation just appears
           // below without moving the scroll.
-          const contIsFirstUser = isFirstVisibleUserMessage()
-          const pinCid = cidOf(promotedRows[0])
-          commitMessages(prev => appendMessageBatch(prev, promotedRows))
           promotedRef.current = false
           landSentMessage(pinCid, {
             intent: continuationPinIntent,
@@ -1219,7 +1225,6 @@ export default function ChatView({
         setSending(true)
         setServerRunningState(true)
       } else {
-        queuedContinuationRef.current = null
         setSending(false)
         sendingRef.current = false
         setServerRunningState(false)
@@ -1587,10 +1592,16 @@ export default function ChatView({
   // would duplicate the in-flight content in the final transcript.
   // APPEND otherwise (the normal first-time send path: `prev` ends in
   // a user message, the assistant message hasn't been committed yet).
-  function promoteStreamToMessages({ keepTurnOpen = false } = {}) {
-    if (promotedRef.current && !keepTurnOpen) return
+  function promoteStreamToMessages({
+    keepTurnOpen = false,
+    followingMessages = [],
+  } = {}) {
+    const following = Array.isArray(followingMessages)
+      ? followingMessages.filter(Boolean)
+      : []
+    if (promotedRef.current && !keepTurnOpen && following.length === 0) return
     const items = latestItemsRef.current
-    if (items.length === 0) return
+    if (items.length === 0 && following.length === 0) return
     // A steer can cut over before the assistant emitted any real output — the
     // only buffered item is an empty/whitespace token. Sealing it would leave a
     // stray empty assistant bubble before the steered user row (the card-166
@@ -1632,6 +1643,7 @@ export default function ChatView({
       paintedItems: streamItems,
       promotedItems: items,
       bridgeTs,
+      followingMessages: following,
       commitMessages,
     })
     // force=true bypasses sameMessageList. In the BRIDGE merge path
