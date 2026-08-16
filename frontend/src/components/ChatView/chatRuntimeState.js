@@ -5,6 +5,9 @@
 
 import { groupActivityRuns } from './activityGrouping.js'
 import { hasPendingQuestionMessage } from '../../lib/chatDetailCache.js'
+import { shouldShowOpenAppCta } from './openAppCtaState.js'
+
+export { shouldShowOpenAppCta }
 
 export function isContinuationMessage(message) {
   return message?.kind === 'continuation'
@@ -252,19 +255,6 @@ export function coldTranscriptRenderFrames(
   if (frames.length === 0) return [messages]
   frames[frames.length - 1] = messages
   return frames
-}
-
-export function shouldShowOpenAppCta(builtApp, turnActive = false) {
-  if (!builtApp?.id) return false
-  const seenCurrentBuild = Boolean(
-    builtApp.updated_at
-    && builtApp.preview_seen_updated_at === builtApp.updated_at
-  )
-  if (!seenCurrentBuild) return true
-  // Opening during the live turn acknowledges that preview only. The settled
-  // result surfaces once more even if the last source write happened before
-  // the turn ended; opening it then is the durable final acknowledgement.
-  return !turnActive && !builtApp.preview_seen_final
 }
 
 export function openAppCtaViewModel(builtApp, turnActive) {

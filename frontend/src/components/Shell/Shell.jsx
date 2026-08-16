@@ -3927,6 +3927,7 @@ export default function Shell({ onInitialVisualReady }) {
                 // Runtime activity and painting are independent during a handoff:
                 // staging owns the work while held remains the visual cover.
                 runtimeActive={surfaceVisible && chatPanesVisible && role !== 'held'}
+                previewPresented={chatSurfaceInteractive}
                 keepTranscriptPainted={surfaceVisible && role === 'held'}
                 focusedPresentation={!standardOwner
                   && focusedPaneViewId != null
