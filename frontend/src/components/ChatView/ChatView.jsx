@@ -4416,6 +4416,54 @@ export default function ChatView({
             composer remain in normal footer flow. The shell owns the one persistent
             offline explanation; the composer retains contextual send-failure copy. */}
         <div className="chat__floating-actions">
+          {/* The viewport cues and post-turn cards share one floating stack so
+              they clear each other without entering footer or scroll geometry.
+              Tail controls come first so their disappearance cannot move the
+              persistent contribution action below them. */}
+          {connectionError !== 'disconnected' && offscreenControlsVisible && (
+            <div className="chat__offscreen-nudges">
+              {olderHistoryRetryShown(olderHistoryError, offset) && (
+                <button
+                  type="button"
+                  className="chat__history-retry"
+                  onClick={() => loadOlderMessages()}
+                >
+                  Earlier messages didn’t load — retry
+                </button>
+              )}
+              {questionNudgeShown && (
+                <button
+                  type="button"
+                  className="chat__question-nudge"
+                  onClick={revealConversationTail}
+                >
+                  Möbius asked you something — tap to answer
+                </button>
+              )}
+              {resumeNudgeShown && (
+                <button
+                  type="button"
+                  className="chat__resume-nudge"
+                  onClick={revealConversationTail}
+                >
+                  {pendingResumeBlock?.pause?.resets_at
+                    ? 'Rate limit reached — tap to resume'
+                    : 'Turn paused — tap to resume'}
+                </button>
+              )}
+              {jumpToLatestVisible && (
+                <button
+                  type="button"
+                  className="chat__jump-latest"
+                  aria-label="Jump to the latest message"
+                  title="Jump to latest"
+                  onClick={followLatest}
+                >
+                  <ArrowDown size={18} strokeWidth={2.25} aria-hidden="true" />
+                </button>
+              )}
+            </div>
+          )}
           {/* Contribution staged from THIS chat: approve it where the work
               happened, but keep the transient card out of composer-height
               measurement so confirmation cannot move the transcript. */}
@@ -4426,72 +4474,22 @@ export default function ChatView({
               onOpenApp={onOpenApp}
             />
           )}
-          {/* The viewport cues and post-turn cards share one floating stack so
-              they clear each other without entering footer or scroll geometry. */}
-          {connectionError !== 'disconnected' && (
-            <>
-              {offscreenControlsVisible && (
-                <div className="chat__offscreen-nudges">
-                  {olderHistoryRetryShown(olderHistoryError, offset) && (
-                    <button
-                      type="button"
-                      className="chat__history-retry"
-                      onClick={() => loadOlderMessages()}
-                    >
-                      Earlier messages didn’t load — retry
-                    </button>
-                  )}
-                  {questionNudgeShown && (
-                    <button
-                      type="button"
-                      className="chat__question-nudge"
-                      onClick={revealConversationTail}
-                    >
-                      Möbius asked you something — tap to answer
-                    </button>
-                  )}
-                  {resumeNudgeShown && (
-                    <button
-                      type="button"
-                      className="chat__resume-nudge"
-                      onClick={revealConversationTail}
-                    >
-                      {pendingResumeBlock?.pause?.resets_at
-                        ? 'Rate limit reached — tap to resume'
-                        : 'Turn paused — tap to resume'}
-                    </button>
-                  )}
-                  {jumpToLatestVisible && (
-                    <button
-                      type="button"
-                      className="chat__jump-latest"
-                      aria-label="Jump to the latest message"
-                      title="Jump to latest"
-                      onClick={followLatest}
-                    >
-                      <ArrowDown size={18} strokeWidth={2.25} aria-hidden="true" />
-                    </button>
-                  )}
-                </div>
-              )}
-              {openAppCtas.length > 0 && (
-                <div className="chat__open-app">
-                  {openAppCtas.map(({ app, vm }) => {
-                    const pulsing = pulsedAppId === Number(app.id)
-                    return (
-                      <button
-                        key={app.id}
-                        className={`chat__open-app-btn${pulsing ? ' chat__open-app-btn--pulse' : ''}`}
-                        aria-label={pulsing ? `Preview updated for ${app.name || 'app'}` : vm.ariaLabel}
-                        onClick={() => onOpenApp?.(app, { final: !turnActive })}
-                      >
-                        {pulsing ? 'Preview updated ✓' : `${vm.label} →`}
-                      </button>
-                    )
-                  })}
-                </div>
-              )}
-            </>
+          {connectionError !== 'disconnected' && openAppCtas.length > 0 && (
+            <div className="chat__open-app">
+              {openAppCtas.map(({ app, vm }) => {
+                const pulsing = pulsedAppId === Number(app.id)
+                return (
+                  <button
+                    key={app.id}
+                    className={`chat__open-app-btn${pulsing ? ' chat__open-app-btn--pulse' : ''}`}
+                    aria-label={pulsing ? `Preview updated for ${app.name || 'app'}` : vm.ariaLabel}
+                    onClick={() => onOpenApp?.(app, { final: !turnActive })}
+                  >
+                    {pulsing ? 'Preview updated ✓' : `${vm.label} →`}
+                  </button>
+                )
+              })}
+            </div>
           )}
         </div>        <ProgressRail
           items={progressRail}

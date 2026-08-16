@@ -44,8 +44,8 @@ test('floating actions precede the measured rail → connection → queued → c
   )
   assert.match(
     chatView,
-    /className="chat__floating-actions"[\s\S]*?<ContributionReviewCard[\s\S]*?className="chat__offscreen-nudges"[\s\S]*?className="chat__open-app"[\s\S]*?<ProgressRail/,
-    'cards and viewport cues should share one ordered overlay before measured footer content',
+    /className="chat__floating-actions"[\s\S]*?className="chat__offscreen-nudges"[\s\S]*?<ContributionReviewCard[\s\S]*?className="chat__open-app"[\s\S]*?<ProgressRail/,
+    'tail cues must stack above the contribution card so hiding them does not move it',
   )
   assert.match(
     chatCss,
