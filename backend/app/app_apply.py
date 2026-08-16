@@ -301,7 +301,7 @@ async def apply_source_revision(
         app.jsx_source,
         app.compiled_path,
         app.source_commit,
-        app.share_manifest_url,
+        app.published_manifest_url,
         app.icon_png,
         app.icon_override_png,
       )
@@ -333,7 +333,9 @@ async def apply_source_revision(
         if "offline_capable" in runtime_fields:
           app.offline_capable = runtime_fields["offline_capable"]
         app.capability_contract = contract_from_app_state(
-          app, capabilities=runtime_fields["capabilities"],
+          app,
+          capabilities=runtime_fields["capabilities"],
+          public_access=runtime_fields["public_access"],
         )
       if chat_id is not None:
         app.chat_id = chat_id
@@ -354,10 +356,10 @@ async def apply_source_revision(
         app.manifest_url is None
         and app.source_commit != previous_state[7]
       ):
-        # A share URL is a statement about one exact accepted package. Once
+        # A distribution manifest is a statement about one exact accepted package. Once
         # local source advances, require publication verification again rather
         # than silently offering a stale repository to other people.
-        app.share_manifest_url = None
+        app.published_manifest_url = None
       published = publish_staged_bundle(app.id, staged)
       staged = None
 
@@ -373,7 +375,7 @@ async def apply_source_revision(
           source,
           str(published),
           app.source_commit,
-          app.share_manifest_url,
+          app.published_manifest_url,
           app.icon_png,
           app.icon_override_png,
         )

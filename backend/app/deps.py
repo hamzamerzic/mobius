@@ -97,6 +97,23 @@ class Principal:
   operations: frozenset[str] = frozenset()
 
 
+@dataclass(frozen=True)
+class PublicAppAccess:
+  """One live, anonymous, exact-app capability."""
+
+  app: models.App
+
+  @property
+  def app_id(self) -> int:
+    return self.app.id
+
+  @property
+  def network(self) -> list[dict]:
+    contract = self.app.public_access_contract
+    rules = contract.get("network") if isinstance(contract, dict) else None
+    return rules if isinstance(rules, list) else []
+
+
 def chat_embed_grant_is_latest_consumed(
   db: Session,
   grant: models.ChatEmbedGrant | None,
@@ -408,6 +425,47 @@ def resolve_owner_or_app(token: str, db: Session) -> models.Owner:
     raise HTTPException(status_code=403, detail="Token scope is not valid here.")
   _enforce_app_scope(payload, db)
   return owner
+
+
+def resolve_public_app_token(
+  token: str,
+  db: Session,
+  *,
+  expected_app_id: int | None = None,
+) -> PublicAppAccess:
+  """Resolve a low-privilege public token against current app state."""
+  payload = auth.decode_access_token(token)
+  if not payload or payload.get("scope") != "public_app":
+    raise HTTPException(status_code=401, detail="Valid public app token required.")
+  app_id = payload.get("app_id")
+  nonce = payload.get("publication_nonce")
+  if (
+    not isinstance(app_id, int)
+    or not isinstance(nonce, str)
+    or (expected_app_id is not None and app_id != expected_app_id)
+  ):
+    raise HTTPException(status_code=401, detail="Malformed public app token.")
+  app = (
+    db.query(models.App)
+    .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+    .first()
+  )
+  if (
+    app is None
+    or not app.public_bundle_path
+    or not app.public_token_nonce
+    or nonce != app.public_token_nonce
+  ):
+    raise HTTPException(status_code=401, detail="Public app session is no longer valid.")
+  return PublicAppAccess(app=app)
+
+
+def authorize_app_module_token(
+  token: str,
+  db: Session,
+) -> None:
+  """Authorize owner/app module reads; public snapshots use their own route."""
+  resolve_owner_or_app(token, db)
 
 
 def get_current_owner_or_app(
