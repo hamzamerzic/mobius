@@ -350,6 +350,10 @@
   align-items: flex-start;
 }
 
+/* Event-only owner for Markdown-aware native selection copy. `contents` keeps
+   every prose/tool child in the message row's existing flex and gap geometry. */
+.chat__assistant-copy-surface { display: contents; }
+
 /* A search jump is a one-shot held position, not a new scrolling mode. The
    restrained row wash and text highlight make the destination legible without
    competing with ordinary user/assistant surfaces. */
@@ -2066,23 +2070,29 @@
 .chat__foot .composer-plus { pointer-events: auto; }
 
 /* One geometry-neutral stack for every control that floats above the measured
-   footer. Transient controls grow upward; the contribution card remains the
-   bottom anchor without changing --composer-h or the transcript scroll tail. */
+   footer. The safe default keeps transient-only controls clear of the composer.
+   When a contribution card actually renders, it becomes the lower anchor and
+   the transient lane grows upward from it without changing --composer-h or the
+   transcript scroll tail. */
 .chat__floating-actions {
   position: absolute;
   left: 12px;
   right: 12px;
-  /* Match the goal rail's close dock without putting floating actions back
-     into composer-height measurement. The second padding subtraction accounts
-     for the transparent gutter above the visible composer surface. */
-  bottom: calc(
-    100% - var(--chat-foot-pad-block) - var(--chat-foot-pad-block)
-    + var(--chat-foot-card-gap)
-  );
+  bottom: calc(100% + var(--chat-foot-card-gap));
   display: flex;
   flex-direction: column;
   gap: var(--chat-foot-card-gap);
   pointer-events: none;
+}
+
+/* Only the contribution card gets the goal-rail-like close dock. Using the
+   rendered child as the state owner avoids lowering jump/resume/open-app
+   controls when the async contribution query has nothing to show. */
+.chat__floating-actions:has(> .contrib-card-stack) {
+  bottom: calc(
+    100% - var(--chat-foot-pad-block) - var(--chat-foot-pad-block)
+    + var(--chat-foot-card-gap)
+  );
 }
 
 .chat__floating-transients {

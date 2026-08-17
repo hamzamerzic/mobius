@@ -42,8 +42,13 @@ test('floating actions precede the measured rail → connection → queued → c
     'the contribution anchor must stay outside measured footer flow')
   assert.match(
     chatCss,
-    /\.chat__floating-actions\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?bottom:\s*calc\([\s\S]*?100% - var\(--chat-foot-pad-block\) - var\(--chat-foot-pad-block\)[\s\S]*?\+ var\(--chat-foot-card-gap\)[\s\S]*?\);[\s\S]*?pointer-events:\s*none;/,
-    'open-app and contribution actions must stay outside measured footer flow',
+    /\.chat__floating-actions\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?bottom:\s*calc\(100% \+ var\(--chat-foot-card-gap\)\);[\s\S]*?pointer-events:\s*none;/,
+    'transient-only actions must stay clear of the composer and outside measured footer flow',
+  )
+  assert.match(
+    chatCss,
+    /\.chat__floating-actions:has\(> \.contrib-card-stack\)\s*\{[\s\S]*?bottom:\s*calc\([\s\S]*?100% - var\(--chat-foot-pad-block\) - var\(--chat-foot-pad-block\)[\s\S]*?\+ var\(--chat-foot-card-gap\)[\s\S]*?\);/,
+    'only a rendered contribution card may activate the closer goal-rail-like dock',
   )
   assert.match(
     chatCss,
