@@ -350,6 +350,10 @@
   align-items: flex-start;
 }
 
+/* Event-only owner for Markdown-aware native selection copy. `contents` keeps
+   every prose/tool child in the message row's existing flex and gap geometry. */
+.chat__assistant-copy-surface { display: contents; }
+
 /* A search jump is a one-shot held position, not a new scrolling mode. The
    restrained row wash and text highlight make the destination legible without
    competing with ordinary user/assistant surfaces. */

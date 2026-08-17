@@ -91,7 +91,10 @@ import {
   composerHistoryProbeReachedBoundary,
   resolveComposerHistoryMove,
 } from './composerHistory.js'
-import { resolveComposerEnterAction } from './composerShortcuts.js'
+import {
+  isPlainTextPasteShortcut,
+  resolveComposerEnterAction,
+} from './composerShortcuts.js'
 import SlashMenu from './SlashMenu.jsx'
 import {
   applySlashCommand,
@@ -103,6 +106,10 @@ import {
 } from './slashCommands.js'
 import { filePasteNeedsDefaultPrevented, pastedFiles } from './pasteUpload.js'
 import { hasSendablePayload } from './composerSubmission.js'
+import {
+  assistantClipboardText,
+  insertClipboardText,
+} from './markdownClipboard.js'
 import {
   textareaUsesNativeSizing,
   syncComposerTallClass,
@@ -518,8 +525,9 @@ export default function ChatInputBar({
   const fileInputRef = useRef(null)
   const historyIndexRef = useRef(null)
   const historyDraftRef = useRef('')
-  const historyCaretRef = useRef(null)
+  const pendingComposerCaretRef = useRef(null)
   const historyProbeVersionRef = useRef(0)
+  const pasteAsPlainTextRef = useRef(false)
   // Captures whether the textarea was focused at the moment the file
   // picker opened. Read by `handleFileSelect` to decide whether to
   // refocus the textarea after the picker closes — refocusing
@@ -584,7 +592,7 @@ export default function ChatInputBar({
     historyProbeVersionRef.current += 1
     historyIndexRef.current = null
     historyDraftRef.current = ''
-    historyCaretRef.current = null
+    pendingComposerCaretRef.current = null
   }
 
   // Never carry a traversal or its saved draft into another chat. History
@@ -595,14 +603,14 @@ export default function ChatInputBar({
     resetMessageHistory()
   }, [chatId])
 
-  // History values arrive through the controlled composer boundary. Restore
-  // the caret after React commits that value without changing focus or scroll.
+  // Programmatic composer edits arrive through the controlled value boundary.
+  // Restore their caret after React commits without changing focus or scroll.
   useLayoutEffect(() => {
-    const pending = historyCaretRef.current
+    const pending = pendingComposerCaretRef.current
     const textarea = inputRef?.current
     if (!pending || pending.value !== input || !textarea) return
     try { textarea.setSelectionRange(pending.caret, pending.caret) } catch {}
-    historyCaretRef.current = null
+    pendingComposerCaretRef.current = null
   }, [input, inputRef])
 
   // Modern browsers size the textarea from CSS (`field-sizing: content`).
@@ -660,13 +668,35 @@ export default function ChatInputBar({
   }
 
   function handlePaste(e) {
-    if (attachmentsDisabled) return
-    const files = pastedFiles(e.clipboardData)
-    if (files.length === 0) return
-    if (filePasteNeedsDefaultPrevented(e.clipboardData, files)) {
-      e.preventDefault()
+    const preferPlainText = pasteAsPlainTextRef.current
+    pasteAsPlainTextRef.current = false
+    const files = attachmentsDisabled ? [] : pastedFiles(e.clipboardData)
+    if (files.length > 0) {
+      if (filePasteNeedsDefaultPrevented(e.clipboardData, files)) {
+        e.preventDefault()
+      }
+      onAddFiles?.(files)
+      return
     }
-    onAddFiles?.(files)
+
+    const pastedText = assistantClipboardText(
+      e.clipboardData,
+      preferPlainText,
+    )
+    if (pastedText === null) return
+
+    e.preventDefault()
+    const next = insertClipboardText(
+      input,
+      e.currentTarget.selectionStart,
+      e.currentTarget.selectionEnd,
+      pastedText,
+    )
+    resetMessageHistory()
+    pendingComposerCaretRef.current = next
+    if (listeningRef?.current) onManualVoiceEdit?.(next.value)
+    onInputChange(next.value)
+    onInputIntent?.(e.nativeEvent)
   }
 
   function acceptSlashCommand(command) {
@@ -684,6 +714,7 @@ export default function ChatInputBar({
   const canSubmit = !submissionBlocked && !questionBlocked
 
   function handleKeyDown(e) {
+    pasteAsPlainTextRef.current = isPlainTextPasteShortcut(e)
     // The menu claims Enter and the arrows while it is open — the same keys
     // that otherwise send and walk sent-message history — so it resolves
     // BEFORE both. Keys it doesn't claim fall through untouched.
@@ -704,7 +735,7 @@ export default function ChatInputBar({
     function applyHistoryMove(historyMove) {
       historyIndexRef.current = historyMove.index
       historyDraftRef.current = historyMove.draft
-      historyCaretRef.current = {
+      pendingComposerCaretRef.current = {
         value: historyMove.value,
         caret: historyMove.value.length,
       }
@@ -721,7 +752,7 @@ export default function ChatInputBar({
             historyMove.value.length,
           )
         } catch {}
-        historyCaretRef.current = null
+        pendingComposerCaretRef.current = null
       }
     }
 
@@ -854,6 +885,7 @@ export default function ChatInputBar({
               onChange={handleTextareaChange}
               onPaste={handlePaste}
               onKeyDown={handleKeyDown}
+              onKeyUp={() => { pasteAsPlainTextRef.current = false }}
               onFocus={(event) => {
                 placeCaretAtTextEnd(event.currentTarget)
                 setSlashInputFocused(true)

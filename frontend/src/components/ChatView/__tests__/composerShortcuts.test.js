@@ -1,7 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { resolveComposerEnterAction } from '../composerShortcuts.js'
+import {
+  isPlainTextPasteShortcut,
+  resolveComposerEnterAction,
+} from '../composerShortcuts.js'
 
 const enter = (overrides = {}) => ({ key: 'Enter', ...overrides })
 
@@ -134,4 +137,11 @@ test('non-Enter keys do not trigger composer shortcuts', () => {
     }),
     null,
   )
+})
+
+test('Cmd/Ctrl+Shift+V requests paste without Markdown formatting', () => {
+  assert.equal(isPlainTextPasteShortcut({ key: 'v', metaKey: true, shiftKey: true }), true)
+  assert.equal(isPlainTextPasteShortcut({ key: 'V', ctrlKey: true, shiftKey: true }), true)
+  assert.equal(isPlainTextPasteShortcut({ key: 'v', metaKey: true, shiftKey: false }), false)
+  assert.equal(isPlainTextPasteShortcut({ key: 'v', shiftKey: true }), false)
 })

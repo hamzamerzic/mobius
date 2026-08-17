@@ -17,3 +17,14 @@ export function resolveComposerEnterAction(event, {
   if (canRequestSteer) return 'steer'
   return 'noop'
 }
+
+/** Paste-without-formatting chord. ClipboardEvent does not reliably retain
+ * keyboard modifiers, so the composer snapshots this during keydown and lets
+ * the subsequent paste event consume it. */
+export function isPlainTextPasteShortcut(event) {
+  return !!(
+    String(event?.key || '').toLowerCase() === 'v'
+    && event?.shiftKey
+    && (event?.metaKey || event?.ctrlKey)
+  )
+}
