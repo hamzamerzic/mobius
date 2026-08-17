@@ -1996,6 +1996,7 @@
   /* Opaque footer cards need a wider physical gap to read as equally
      separated from the composer as the translucent progress rail. */
   --chat-foot-card-gap: 6px;
+  --chat-foot-pad-block: 8px;
   position: absolute;
   /* Interactive controls must stay wholly inside the device safe rectangle.
      Android Chrome paints the shell's gesture backdrop in the unsafe band;
@@ -2005,7 +2006,7 @@
   bottom: env(safe-area-inset-bottom, 0px);
   left: 0;
   right: 0;
-  padding: 8px 12px;
+  padding: var(--chat-foot-pad-block) 12px;
   background: transparent;
   pointer-events: none;
   z-index: 5;
@@ -2059,6 +2060,7 @@
 .chat__foot .queued,
 .chat__foot .connection-status,
 .chat__foot .chat__attach-tray,
+.chat__foot .chat__history-retry,
 .chat__foot .chat__question-nudge,
 .chat__foot .chat__resume-nudge,
 .chat__foot .chat__jump-latest,
@@ -2068,8 +2070,10 @@
 .chat__foot .composer-plus { pointer-events: auto; }
 
 /* One geometry-neutral stack for every control that floats above the measured
-   footer. Keeping cards and viewport cues in this same lane makes them clear
-   one another without changing --composer-h or the transcript scroll tail. */
+   footer. The safe default keeps transient-only controls clear of the composer.
+   When a contribution card actually renders, it becomes the lower anchor and
+   the transient lane grows upward from it without changing --composer-h or the
+   transcript scroll tail. */
 .chat__floating-actions {
   position: absolute;
   left: 12px;
@@ -2079,6 +2083,22 @@
   flex-direction: column;
   gap: var(--chat-foot-card-gap);
   pointer-events: none;
+}
+
+/* Only the contribution card gets the goal-rail-like close dock. Using the
+   rendered child as the state owner avoids lowering jump/resume/open-app
+   controls when the async contribution query has nothing to show. */
+.chat__floating-actions:has(> .contrib-card-stack) {
+  bottom: calc(
+    100% - var(--chat-foot-pad-block) - var(--chat-foot-pad-block)
+    + var(--chat-foot-card-gap)
+  );
+}
+
+.chat__floating-transients {
+  display: flex;
+  flex-direction: column;
+  gap: var(--chat-foot-card-gap);
 }
 
 /* Embedded composer: the app sheet (not the chat) owns the device

@@ -4416,20 +4416,12 @@ export default function ChatView({
             composer remain in normal footer flow. The shell owns the one persistent
             offline explanation; the composer retains contextual send-failure copy. */}
         <div className="chat__floating-actions">
-          {/* Contribution staged from THIS chat: approve it where the work
-              happened, but keep the transient card out of composer-height
-              measurement so confirmation cannot move the transcript. */}
-          {!embedded && (
-            <ContributionReviewCard
-              chatId={chatId}
-              turnActive={turnActive}
-              onOpenApp={onOpenApp}
-            />
-          )}
-          {/* The viewport cues and post-turn cards share one floating stack so
-              they clear each other without entering footer or scroll geometry. */}
-          {connectionError !== 'disconnected' && (
-            <>
+          {/* Short-lived controls share one lane above the stable contribution
+              anchor. Adding or dismissing any transient can only grow this
+              lane upward; it cannot move the action below it. */}
+          {connectionError !== 'disconnected'
+            && (offscreenControlsVisible || openAppCtas.length > 0) && (
+            <div className="chat__floating-transients">
               {offscreenControlsVisible && (
                 <div className="chat__offscreen-nudges">
                   {olderHistoryRetryShown(olderHistoryError, offset) && (
@@ -4491,9 +4483,20 @@ export default function ChatView({
                   })}
                 </div>
               )}
-            </>
+            </div>
           )}
-        </div>        <ProgressRail
+          {/* Contribution staged from THIS chat: approve it where the work
+              happened, but keep the transient card out of composer-height
+              measurement so confirmation cannot move the transcript. */}
+          {!embedded && (
+            <ContributionReviewCard
+              chatId={chatId}
+              turnActive={turnActive}
+              onOpenApp={onOpenApp}
+            />
+          )}
+        </div>
+        <ProgressRail
           items={progressRail}
           ariaLabel={visibleGoalObjective ? 'Goal progress' : 'Build progress'}
         />
