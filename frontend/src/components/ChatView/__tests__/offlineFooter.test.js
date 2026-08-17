@@ -27,25 +27,33 @@ test('floating actions precede the measured rail → connection → queued → c
   const floatingActions = foot.indexOf('className="chat__floating-actions"')
   assert.ok(floatingActions >= 0 && floatingActions < rail,
     'transient post-turn actions must render in the separate floating layer')
-  for (const notice of [
-    'className="chat__open-app"',
-    'className="chat__question-nudge"',
-    'className="chat__resume-nudge"',
-  ]) {
-    const noticeIndex = foot.indexOf(notice)
-    assert.ok(noticeIndex >= 0, `${notice} must be present in the footer`)
-    assert.ok(noticeIndex < rail,
-      `${notice} must render before the progress rail`)
-  }
+  const transientLane = foot.indexOf('className="chat__floating-transients"')
+  const offscreenNudges = foot.indexOf('className="chat__offscreen-nudges"')
+  const openApp = foot.indexOf('className="chat__open-app"')
+  const contribution = foot.indexOf('<ContributionReviewCard')
+  assert.ok(
+    transientLane > floatingActions
+      && offscreenNudges > transientLane
+      && openApp > transientLane
+      && contribution > openApp,
+    'every transient footer action must render above the stable contribution anchor',
+  )
+  assert.ok(contribution < rail,
+    'the contribution anchor must stay outside measured footer flow')
   assert.match(
     chatCss,
-    /\.chat__floating-actions\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?bottom:\s*calc\(100% \+ var\(--chat-foot-card-gap\)\);[\s\S]*?pointer-events:\s*none;/,
+    /\.chat__floating-actions\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?bottom:\s*calc\([\s\S]*?100% - var\(--chat-foot-pad-block\) - var\(--chat-foot-pad-block\)[\s\S]*?\+ var\(--chat-foot-card-gap\)[\s\S]*?\);[\s\S]*?pointer-events:\s*none;/,
     'open-app and contribution actions must stay outside measured footer flow',
   )
   assert.match(
-    chatView,
-    /className="chat__floating-actions"[\s\S]*?className="chat__offscreen-nudges"[\s\S]*?<ContributionReviewCard[\s\S]*?className="chat__open-app"[\s\S]*?<ProgressRail/,
-    'tail cues must stack above the contribution card so hiding them does not move it',
+    chatCss,
+    /\.chat__foot\s*\{[\s\S]*?--chat-foot-pad-block:\s*8px;[\s\S]*?padding:\s*var\(--chat-foot-pad-block\) 12px;/,
+    'floating and measured footer surfaces must share the same top-padding owner',
+  )
+  assert.match(
+    chatCss,
+    /\.chat__floating-transients\s*\{[\s\S]*?display:\s*flex;[\s\S]*?flex-direction:\s*column;[\s\S]*?gap:\s*var\(--chat-foot-card-gap\);/,
+    'transient footer actions must share one explicit stack',
   )
   assert.match(
     chatCss,
