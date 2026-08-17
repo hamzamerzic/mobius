@@ -345,6 +345,33 @@ def test_list_apps_does_not_hydrate_source_or_icon_payloads(client, auth, db):
   assert "apps.icon_override_png AS apps_icon_override_png" not in projection
 
 
+def test_list_apps_exposes_one_fetchable_source_manifest_contract(
+  client, auth, db,
+):
+  app = models.App(
+    source_dir="/tmp/mobius-tests/source-manifest-contract",
+    name="Published app",
+    description="Installed from a published manifest",
+    jsx_source="export default function App() { return null }",
+    slug="published-app",
+    manifest_url=(
+      "https://raw.githubusercontent.com/example/app/main"
+      "#manifest-id=published-app"
+    ),
+  )
+  db.add(app)
+  db.commit()
+
+  response = client.get("/api/apps/", headers=auth)
+
+  assert response.status_code == 200
+  payload = next(item for item in response.json() if item["id"] == app.id)
+  assert payload["source_manifest"] == {
+    "id": "published-app",
+    "url": "https://raw.githubusercontent.com/example/app/main/mobius.json",
+  }
+
+
 def test_delete_then_purge_removes_non_slug_source_dir(client, auth, db):
   """Delete is soft (the source tree survives for recovery); the TTL purge
   removes it, using the stored source_dir rather than the display-name slug.

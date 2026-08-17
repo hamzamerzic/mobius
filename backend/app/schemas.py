@@ -42,6 +42,13 @@ class TokenResponse(BaseModel):
   token_type: str = "bearer"
 
 
+class AppSourceManifest(BaseModel):
+  """Fetchable manifest identity for a Store-managed installed app."""
+
+  id: str
+  url: str
+
+
 # A one-time sign-in pass handed to a mini-app being installed to the iOS home
 # screen, where the new web app gets its own empty storage container.
 class InstallPassRequest(BaseModel):
@@ -236,6 +243,20 @@ class AppOut(BaseModel):
       return None
     version = quote(self.updated_at.isoformat(), safe="")
     return f"/api/apps/{self.id}/icon?v={version}"
+
+  @computed_field
+  @property
+  def source_manifest(self) -> AppSourceManifest | None:
+    """Return the public source contract without exposing identity parsing."""
+    if not self.manifest_url:
+      return None
+    base, marker, manifest_id = self.manifest_url.rpartition("#manifest-id=")
+    if not marker or not base or not manifest_id:
+      return None
+    return AppSourceManifest(
+      id=manifest_id,
+      url=f"{base.rstrip('/')}/mobius.json",
+    )
 
   model_config = {"from_attributes": True}
 
