@@ -116,6 +116,23 @@ fork and manually dispatches `.github/workflows/test.yml`; it does not open a
 pull request. From another checkout whose branch is already on GitHub, the
 equivalent manual command is:
 
+Forks inherit every workflow file from upstream even though Contribute enables
+only `test.yml`. Therefore `test.yml` is the sole fork-runnable workflow: every
+job in every other workflow must carry
+`if: github.repository == 'mobius-os/mobius'`. The focused pre-PR contract test
+enforces this safe default. A future workflow may run in forks only through an
+explicit allowlist change with corresponding review; never rely on missing
+secrets, package permissions, or repository variables to fail after allocating
+a runner.
+
+Contribute has one GitHub permission contract: device flow always requests
+public-repository and workflow access together. Do not add a second
+limited-scope publication path or adapt reviewed commits onto stale fork bases;
+sync a proven-behind fork when the Tests workflow needs its current default
+branch, then push the exact reviewed commit. Existing partial credentials are
+rejected before any GitHub write so the owner can reconnect once through the
+same path.
+
 ```bash
 gh workflow run test.yml -R <your-login>/mobius --ref <branch>
 ```

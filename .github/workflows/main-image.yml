@@ -15,6 +15,9 @@ env:
 
 jobs:
   publish:
+    # Forks inherit workflow files. Never allocate a runner or attempt a
+    # package write outside the one repository that owns this image channel.
+    if: github.repository == 'mobius-os/mobius'
     runs-on: ubuntu-latest
     outputs:
       digest: ${{ steps.publish.outputs.digest }}
@@ -87,6 +90,7 @@ jobs:
           fi
 
   promote-main:
+    if: github.repository == 'mobius-os/mobius'
     needs: publish
     runs-on: ubuntu-latest
     concurrency:
