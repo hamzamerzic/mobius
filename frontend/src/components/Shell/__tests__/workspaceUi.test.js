@@ -1260,8 +1260,8 @@ test('round4-3: the New Chat landing renders for a null slot and reuses ChatView
   assert.doesNotMatch(newChatLanding, /attachTriggerRef/,
     'the pre-allocation surface must not expose server-bound attachment behavior')
   assert.match(chatInputBar,
-    /function handlePaste\(e\) \{\s*if \(attachmentsDisabled\) return/,
-    'disabled attachments must leave clipboard paste to the browser')
+    /const files = attachmentsDisabled \? \[\] : pastedFiles\(e\.clipboardData\)/,
+    'disabled attachments must suppress only pasted files, not text handling')
   assert.match(chatInputBar, /\{!attachmentsDisabled && \(\s*<input/,
     'disabled attachments must not mount a hidden file picker')
   // Seamless swap: the landing reuses ChatView's exact empty treatment.
