@@ -10,6 +10,7 @@ this module.
 import json
 import logging
 import os
+import secrets
 import threading
 import time
 import uuid
@@ -199,7 +200,7 @@ def _agent_lifecycle_width_migrations(
 
 
 def _upgrade_app_capability_contract(value):
-  """Drop the retired job-authority fields from known contract versions."""
+  """Advance known contracts and drop retired job-authority fields."""
   if isinstance(value, str):
     try:
       value = json.loads(value)
@@ -208,11 +209,11 @@ def _upgrade_app_capability_contract(value):
   if not isinstance(value, dict):
     return None
   schema = value.get("schema")
-  if type(schema) is not int or schema not in (1, 2, 3, 4):
+  if type(schema) is not int or schema not in (1, 2, 3, 4, 5):
     return None
 
   upgraded = dict(value)
-  changed = schema != 4
+  changed = schema != 5
   background = value.get("background")
   if isinstance(background, dict):
     next_background = {
@@ -222,9 +223,12 @@ def _upgrade_app_capability_contract(value):
     if next_background != background:
       upgraded["background"] = next_background
       changed = True
+  if not isinstance(value.get("public"), dict):
+    upgraded["public"] = {"network": []}
+    changed = True
   if not changed:
     return None
-  upgraded["schema"] = 4
+  upgraded["schema"] = 5
   return upgraded
 
 
@@ -1629,6 +1633,108 @@ def _add_delegation_parent_wake(eng) -> None:
       ))
 
 
+def _add_app_hosted_publication(eng) -> None:
+  """Replace the live public flag with an immutable hosted snapshot."""
+  from sqlalchemy import JSON as SAJSON, bindparam, inspect as sa_inspect, text
+  from app.app_capabilities import (
+    capability_digest,
+    public_access_declaration_from_contract,
+  )
+  from app.compiler import publish_public_bundle
+
+  inspector = sa_inspect(eng)
+  if "apps" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("apps")}
+  with eng.begin() as conn:
+    additions = {
+      "published_manifest_url": "VARCHAR(1024) NULL",
+      "public_name": "VARCHAR(255) NULL",
+      "public_bundle_path": "VARCHAR(512) NULL",
+      "public_bundle_digest": "VARCHAR(64) NULL",
+      "public_source_commit": "VARCHAR(64) NULL",
+      "public_access_contract": "JSON NULL",
+      "public_access_digest": "VARCHAR(64) NULL",
+      "public_token_nonce": "VARCHAR(32) NULL",
+      "public_published_at": "DATETIME NULL",
+    }
+    for name, declaration in additions.items():
+      if name not in columns:
+        conn.execute(text(f"ALTER TABLE apps ADD COLUMN {name} {declaration}"))
+        columns.add(name)
+
+    # The outbound distribution field was renamed before the hosted feature
+    # merged. Preserve local developer-instance data, then retire the old name;
+    # no runtime reads both shapes.
+    if "share_manifest_url" in columns:
+      conn.execute(text(
+        "UPDATE apps SET published_manifest_url = share_manifest_url "
+        "WHERE published_manifest_url IS NULL"
+      ))
+
+    if "capability_contract" in columns:
+      rows = conn.execute(text(
+        "SELECT id, capability_contract FROM apps "
+        "WHERE capability_contract IS NOT NULL"
+      )).fetchall()
+      update_contract = text(
+        "UPDATE apps SET capability_contract = :contract WHERE id = :app_id"
+      ).bindparams(bindparam("contract", type_=SAJSON))
+      for app_id, contract in rows:
+        upgraded = _upgrade_app_capability_contract(contract)
+        if upgraded is not None:
+          conn.execute(update_contract, {"contract": upgraded, "app_id": app_id})
+
+    # Owners who tried the unmerged boolean version keep one exact snapshot of
+    # what was live at migration time. Missing/legacy bundles fail private: a
+    # publication without executable bytes is not durable state.
+    required = {
+      "public_enabled", "compiled_path", "source_commit", "capability_contract",
+    }
+    if required.issubset(columns):
+      active = conn.execute(text(
+        "SELECT id, name, compiled_path, source_commit, capability_contract "
+        "FROM apps WHERE public_enabled = TRUE"
+      )).fetchall()
+      publish_row = text(
+        "UPDATE apps SET public_name = :public_name, "
+        "public_bundle_path = :bundle_path, "
+        "public_bundle_digest = :bundle_digest, "
+        "public_source_commit = :source_commit, "
+        "public_access_contract = :contract, "
+        "public_access_digest = :contract_digest, "
+        "public_token_nonce = :token_nonce, "
+        "public_published_at = :published_at WHERE id = :app_id"
+      ).bindparams(bindparam("contract", type_=SAJSON))
+      for app_id, name, compiled_path, source_commit, contract in active:
+        if isinstance(contract, str):
+          try:
+            contract = json.loads(contract)
+          except json.JSONDecodeError:
+            contract = {}
+        contract = contract if isinstance(contract, dict) else {}
+        try:
+          bundle_path, bundle_digest = publish_public_bundle(app_id, compiled_path)
+        except (OSError, ValueError):
+          continue
+        public_access = public_access_declaration_from_contract(contract)
+        conn.execute(publish_row, {
+          "public_name": name,
+          "bundle_path": str(bundle_path),
+          "bundle_digest": bundle_digest,
+          "source_commit": source_commit,
+          "contract": public_access,
+          "contract_digest": capability_digest(public_access),
+          "token_nonce": secrets.token_hex(16),
+          "published_at": datetime.now(UTC).replace(tzinfo=None),
+          "app_id": app_id,
+        })
+
+    for retired in ("share_manifest_url", "public_enabled"):
+      if retired in columns:
+        conn.execute(text(f"ALTER TABLE apps DROP COLUMN {retired}"))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -1642,6 +1748,7 @@ _SCHEMA_MIGRATIONS = (
   ("0010_chat_pending_question_id", _add_chat_pending_question_id),
   ("0011_delegation_parent_wake", _add_delegation_parent_wake),
   ("0012_connector_oauth_gcloud", _add_connector_oauth_gcloud_fields),
+  ("0013_app_hosted_publication", _add_app_hosted_publication),
 )
 
 

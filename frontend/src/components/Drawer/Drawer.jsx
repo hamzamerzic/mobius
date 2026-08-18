@@ -518,6 +518,38 @@ export default function Drawer({
     if (res.ok) refreshApps()
   }
 
+  async function publishHostedApp(id) {
+    const res = await api.apps.publishHosted(id)
+    if (!res.ok) {
+      let message = 'Could not update public access.'
+      try {
+        const payload = await res.json()
+        if (typeof payload?.detail === 'string') message = payload.detail
+      } catch {}
+      throw new Error(message)
+    }
+    const updated = await res.json()
+    setSharingApp(updated)
+    refreshApps()
+    return updated
+  }
+
+  async function stopHostedApp(id) {
+    const res = await api.apps.stopHosted(id)
+    if (!res.ok) {
+      let message = 'Could not stop public access.'
+      try {
+        const payload = await res.json()
+        if (typeof payload?.detail === 'string') message = payload.detail
+      } catch {}
+      throw new Error(message)
+    }
+    const updated = await res.json()
+    setSharingApp(updated)
+    refreshApps()
+    return updated
+  }
+
   async function pinChat(id, pinned) {
     // Optimistic: stamp/clear pinned_at locally so the row reorders the
     // instant you tap — the sort and the row's pin badge both key off
@@ -1243,6 +1275,8 @@ export default function Drawer({
           app={sharingApp}
           apps={apps}
           onOpenApp={onApp}
+          onPublish={publishHostedApp}
+          onStop={stopHostedApp}
           onClose={() => setSharingApp(null)}
         />
       )}
