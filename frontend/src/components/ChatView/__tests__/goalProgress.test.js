@@ -6,8 +6,11 @@ import {
   goalObjectiveAtRunStart,
   goalObjectiveFromText,
   goalObjectiveFromRuntime,
+  goalMessageObjectiveFromText,
   latestGoalObjective,
+  newestGoalPlan,
   progressRailViewModel,
+  visibleGoalTasks,
 } from '../goalProgress.js'
 
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
@@ -16,6 +19,7 @@ const streamConnection = readFileSync(
   'utf8',
 )
 const progressRail = readFileSync(new URL('../ProgressRail.jsx', import.meta.url), 'utf8')
+const msgContent = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 
 test('goalObjectiveFromText follows the backend command boundary', () => {
@@ -27,6 +31,7 @@ test('goalObjectiveFromText follows the backend command boundary', () => {
   assert.equal(goalObjectiveFromText('please /goal later'), '')
   assert.equal(goalObjectiveFromText(' /goal indented is prose'), '')
   assert.equal(goalObjectiveFromText('/data/apps/x'), '')
+  assert.equal(goalObjectiveFromText('/goal\nShip after review'), 'Ship after review')
 })
 
 test('goalObjectiveFromText does not present clear or an empty command as active', () => {
@@ -34,6 +39,35 @@ test('goalObjectiveFromText does not present clear or an empty command as active
   assert.equal(goalObjectiveFromText('/goal   '), '')
   assert.equal(goalObjectiveFromText('/goal clear'), '')
   assert.equal(goalObjectiveFromText('/goal CLEAR'), '')
+})
+
+test('goal owner messages hide only a real command token and preserve objective formatting', () => {
+  assert.equal(
+    goalMessageObjectiveFromText('/goal Build the first slice\nthen verify it'),
+    'Build the first slice\nthen verify it',
+  )
+  assert.equal(goalMessageObjectiveFromText('please /goal later'), '')
+  assert.equal(goalMessageObjectiveFromText('/goal clear'), '')
+  assert.match(msgContent, /<UserMessageText text=\{text\} \/>/)
+  assert.match(msgContent, /className="chat__goal-message-tag" aria-hidden="true">Goal<\/span>/)
+  assert.match(msgContent, /className="chat__sr-only">Goal: <\/span>/)
+  assert.match(chatCss, /\.chat__goal-message\s*\{[\s\S]*?display: inline;/)
+  assert.match(chatCss, /\.chat__goal-message-tag\s*\{[\s\S]*?display: inline-block;/)
+})
+
+test('newestGoalPlan rejects a stale fetch without hiding a new logical goal', () => {
+  const current = { root_run_id: 'root-a', revision: 3 }
+  assert.equal(newestGoalPlan(current, null), current)
+  assert.equal(
+    newestGoalPlan(current, { root_run_id: 'root-a', revision: 2 }),
+    current,
+  )
+
+  const newer = { root_run_id: 'root-a', revision: 4 }
+  assert.equal(newestGoalPlan(current, newer), newer)
+
+  const newGoal = { root_run_id: 'root-b', revision: 1 }
+  assert.equal(newestGoalPlan(current, newGoal), newGoal)
 })
 
 test('latestGoalObjective recovers only the current visible owner turn', () => {
@@ -137,6 +171,66 @@ test('the goal reuses the progress rail and stays as context for build phases', 
   )
 })
 
+test('stale plan data cannot show tasks after the active goal has ended', () => {
+  const plan = {
+    tasks: [{ id: 'old', title: 'Old work', status: 'running' }],
+  }
+  assert.deepEqual(progressRailViewModel('', [], plan), [])
+})
+
+test('a planned goal shows every running branch and dependency progress', () => {
+  const plan = {
+    summary: { completed: 1, total: 4 },
+    tasks: [
+      { id: 'done', title: 'Inspect', status: 'completed' },
+      { id: 'a', title: 'Run A', status: 'running', progress: { current: 2, total: 3 } },
+      { id: 'b', title: 'Run B', status: 'running' },
+      { id: 'c', title: 'Run C', status: 'pending', ready: false },
+    ],
+  }
+  assert.deepEqual(visibleGoalTasks(plan).map(task => task.id), ['a', 'b'])
+  assert.deepEqual(progressRailViewModel('Ship it', [], plan), [
+    {
+      key: 'goal',
+      label: 'Goal plan · 1 of 4',
+      expandable: true,
+      hasDetails: true,
+      title: 'Goal: Ship it',
+      ariaLabel: 'Goal plan for Ship it; 1 of 4 tasks complete',
+      actionLabel: 'View tasks',
+      expandedActionLabel: 'Hide tasks',
+      current: false,
+    },
+    {
+      key: 'goal-task-a',
+      label: 'Now · Run A · 2/3',
+      goalTask: true,
+      current: true,
+    },
+    {
+      key: 'goal-task-b',
+      label: 'Now · Run B',
+      goalTask: true,
+      current: true,
+    },
+  ])
+})
+
+test('a plan with no running work presents every independent ready task', () => {
+  const plan = {
+    summary: { completed: 0, total: 3 },
+    tasks: [
+      { id: 'a', title: 'A', status: 'pending', ready: true },
+      { id: 'b', title: 'B', status: 'pending', ready: true },
+      { id: 'c', title: 'C', status: 'pending', ready: false },
+    ],
+  }
+  assert.deepEqual(
+    visibleGoalTasks(plan).map(task => [task.id, task.activity]),
+    [['a', 'Next'], ['b', 'Next']],
+  )
+})
+
 test('ChatView binds goal state to explicit run boundaries, not transport liveness', () => {
   const runtimePoll = chatView.match(
     /const reconcileRuntimeState = useCallback[\s\S]*?const handleCompactionStored/,
@@ -212,6 +306,8 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
   )
   assert.match(progressRail, /chat__progress-rail/)
   assert.match(progressRail, /aria-expanded=\{expanded\}/)
+  assert.match(progressRail, /chat__progress-step-action/)
+  assert.match(progressRail, /expandedActionLabel/)
   assert.match(progressRail, /label\.scrollWidth > step\.clientWidth/)
   assert.match(
     chatCss,
