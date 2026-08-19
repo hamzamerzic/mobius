@@ -5,9 +5,9 @@
  * or blanks a live turn. These cases exercise the SYNTHESIZED client mechanism
  * end to end (route-mocked SSE, no agent tokens):
  *
- *   1. shell_rebuilt DURING a streaming turn does NOT reload; the reload is held
- *      QUIETLY (shellReloadPolicy.shouldDeferShellReload) until idle — no toast,
- *      no popup — and the live turn keeps rendering.
+ *   1. shell_rebuilt DURING an unfinished turn does NOT reload, including after
+ *      the page is hidden and the turn parks on an owner question; the reload
+ *      is held QUIETLY until the turn settles and visible progress stays intact.
  *   2. passive shell_rebuilt generations stay coalesced while an idle chat is
  *      visible, so source-save bursts cannot interrupt a reader.
  *   3. a deliberate shell_apply_now that lands mid-turn reloads exactly ONCE
@@ -168,17 +168,29 @@ async function sendMessage(page, text) {
 }
 
 test.describe('shell update — apply on idle, SW on a leash', () => {
-  test('shell_rebuilt during a streaming turn does not reload; holds quietly', async ({ page }) => {
-    // The chat stream never sends `done`, so the turn stays live and the chat
-    // stays in the streaming set. shell_rebuilt arrives on the GLOBAL system
-    // stream — its only channel — while the turn is streaming; the gate must
-    // DEFER (quiet hold). The arm resolves only after the turn is visibly
-    // streaming, so the delivery is deterministically mid-turn.
+  test('an unfinished question turn survives a hidden-page shell update', async ({ page }) => {
+    // The chat stream parks on a question without `done`, so the active turn
+    // remains unfinished. shell_rebuilt arrives on the GLOBAL system stream,
+    // then the page is hidden — the exact boundary that previously treated the
+    // turn as disposable and reloaded away its visible activity.
     let armRebuilt
     const armed = new Promise(resolve => { armRebuilt = resolve })
     const streamingBody = sse([
       { type: 'catch_up_done' },
       { type: 'text', content: 'building the shell...' },
+      {
+        type: 'question',
+        question_id: 'q-shell-update-progress',
+        questions: [{
+          question: 'Continue with the update?',
+          header: 'Continue',
+          multiSelect: false,
+          options: [
+            { label: 'Continue', description: 'Resume the same turn.' },
+            { label: 'Not now', description: 'Keep it parked.' },
+          ],
+        }],
+      },
     ])
     await setup(page, {
       streamRoute: route => route.fulfill(fulfillStream(streamingBody)),
@@ -189,15 +201,25 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
 
     await sendMessage(page, 'rebuild the shell')
 
-    // The live turn is rendering — NOW deliver shell_rebuilt mid-turn.
+    // The accumulated progress and its question are both visible before the
+    // update arrives.
     await expect(page.locator('[data-chat-surface="painted"]').getByText('building the shell...')).toBeVisible({ timeout: 8000 })
+    await expect(page.getByText('Continue with the update?')).toBeVisible({ timeout: 8000 })
     armRebuilt()
 
-    // Wait PAST the hold-until-idle recheck interval (6s): the recheck fires,
-    // sees a still-streaming turn, and reschedules — it must NOT reload. This is
-    // the sacred-streaming-view invariant against the timer mechanism.
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        value: 'hidden',
+      })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+
+    // Wait past the recheck interval: hidden + question-paused is still an
+    // unfinished active turn, so there is no reload and no lost activity.
     await page.waitForTimeout(7000)
     expect(await loadCount(page)).toBe(0)
+    await expect(page.locator('[data-chat-surface="painted"]').getByText('building the shell...')).toBeVisible()
   })
 
   test('a deliberate mid-turn shell_apply_now applies exactly once at the turn-end idle boundary', async ({ page }) => {
@@ -386,10 +408,9 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     expect(await loadCount(page)).toBe(after)
   })
 
-  test('an idle apply lands the page on the new SW generation, not the outgoing one', async ({ page }) => {
-    // This case drives FOUR real service-worker generation steps (install gen A,
-    // a second gen-A keeper client, install-and-wait gen B, then the mount-time
-    // handoff) plus TWO full page reloads. Those sequential real-SW waits are
+  test('desktop return and ordinary refresh adopt new SW generations without a hard refresh', async ({ page }) => {
+    // This case drives two real service-worker update cycles after gen A plus
+    // the focus-time and mount-time handoffs. Those sequential real-SW waits are
     // legitimately slow and, under parallel-CI load, their cumulative time
     // (~86s worst case) can exceed Playwright's default 60s per-test budget —
     // the classic pass-when-fast, time-out-when-slow flake. The behaviour under
@@ -436,11 +457,15 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     await keeper.goto(BASE, { waitUntil: 'domcontentloaded' })
     await keeper.waitForFunction(() => !!navigator.serviceWorker?.controller, { timeout: 15000 })
 
+    // Reproduce the owner's desktop lifecycle: the browser window loses focus
+    // while the deploy happens, but the document remains `visible`. That means
+    // no visibilitychange is available to discover the new generation.
+
     // Publish gen B; wait until it is installed and WAITING (leashed — the SW
     // never skipWaiting()s on its own).
     swMarker = 'e2e gen B'
-    await page.evaluate(async () => { await (await navigator.serviceWorker.getRegistration()).update() })
-    await page.waitForFunction(
+    await keeper.evaluate(async () => { await (await navigator.serviceWorker.getRegistration()).update() })
+    await keeper.waitForFunction(
       async () => !!(await navigator.serviceWorker.getRegistration())?.waiting,
       { timeout: 15000 },
     )
@@ -462,26 +487,18 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
       })
     })
 
-    // The synthetic gen B changes only a trailing sw.js comment, so its
-    // advertised page bundle is intentionally identical to gen A. A real shell
-    // publish changes that bundle hash and the boot check sets this recovery
-    // flag; seed the same public signal so this case exercises the resulting
-    // new-document handoff rather than an indistinguishable no-op generation.
-    await page.evaluate(() => sessionStorage.setItem('sw-stale-precache-pending', '1'))
     await resetLoadCount(page)
-    // Re-mount the shell so its once-per-mount pickup finds the waiting worker and
-    // re-arms the idle apply — the recovery path a client hits when a newer
-    // generation is installed but the page has not adopted it.
-    await page.reload({ waitUntil: 'domcontentloaded' })
-
-    // Controller identity can flip to gen B while this document is still
-    // executing gen A's precached bundle. The explicit reload above is load 1;
-    // mount-time pickup must remember the pre-fetch stale-generation signal,
-    // hand off the worker, and perform load 2. Requiring that navigation proves
-    // the document generation changed instead of accepting controller takeover
-    // alone as a false positive.
+    // Return to the still-mounted chat through the focus-only lifecycle the
+    // owner actually exercised. This used to have no update-check trigger at
+    // all, so only a hard refresh escaped gen A. Resume is now the deliberate
+    // apply boundary; one ordinary shell reload must follow without another
+    // gesture.
+    await page.evaluate(() => {
+      window.dispatchEvent(new Event('focus'))
+    })
     await page.waitForFunction(
-      () => Number(sessionStorage.getItem('__load_count') || '0') >= 2,
+      () => Number(sessionStorage.getItem('__load_count') || '0') >= 1,
+      undefined,
       { timeout: 20000 },
     )
 
@@ -500,6 +517,101 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
       return !reg.waiting && navigator.serviceWorker.controller === reg.active
     })
     expect(stable).toBe(true)
+
+    // Publish another generation, then exercise the owner's second exact
+    // symptom: Cmd+R. The first navigation is served by the current worker;
+    // mount-time discovery must then hand off gen C and perform one controlled
+    // reload. A hard-refresh bypass is neither used nor needed.
+    swMarker = 'e2e gen C'
+    await keeper.evaluate(async () => { await (await navigator.serviceWorker.getRegistration()).update() })
+    await keeper.waitForFunction(
+      async () => !!(await navigator.serviceWorker.getRegistration())?.waiting,
+      { timeout: 15000 },
+    )
+    await resetLoadCount(page)
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await page.waitForFunction(
+      () => Number(sessionStorage.getItem('__load_count') || '0') >= 2,
+      { timeout: 20000 },
+    )
+    await page.waitForFunction(async () => {
+      const reg = await navigator.serviceWorker.getRegistration()
+      return !!reg && !reg.waiting && !!reg.active
+        && navigator.serviceWorker.controller === reg.active
+    }, { timeout: 20000 })
+    await page.waitForTimeout(1500)
+    expect(await loadCount(page)).toBe(2)
     await keeper.close()
+  })
+
+  test('a legacy cache-first worker bootstraps the current document through an ordinary reload', async ({ page }) => {
+    test.slow()
+    let serveCurrentWorker = false
+    let documentGeneration = 'A'
+    let currentWorker = null
+
+    // Generation A models the exact historical failure: every navigation is
+    // answered from one revisioned document entry. Generation B is the real
+    // built worker under test, so its install event must refresh that outgoing
+    // key while remaining WAITING rather than taking over the open page.
+    const legacyWorker = `
+      const KEY = '/index.html?__WB_REVISION__=legacy'
+      self.addEventListener('install', event => event.waitUntil((async () => {
+        const cache = await caches.open('legacy-precache')
+        await cache.put(KEY, await fetch('/index.html?legacy=A'))
+        await self.skipWaiting()
+      })()))
+      self.addEventListener('activate', event => event.waitUntil(self.clients.claim()))
+      self.addEventListener('fetch', event => {
+        if (event.request.mode === 'navigate') {
+          event.respondWith(caches.open('legacy-precache').then(cache => cache.match(KEY)))
+        }
+      })
+    `
+
+    await page.route('**/sw.js', async route => {
+      if (!serveCurrentWorker) {
+        await route.fulfill({ contentType: 'text/javascript', body: legacyWorker })
+        return
+      }
+      if (!currentWorker) {
+        const response = await route.fetch()
+        currentWorker = {
+          status: response.status(),
+          headers: response.headers(),
+          body: await response.text(),
+        }
+      }
+      await route.fulfill(currentWorker)
+    })
+    await page.route(/\/index\.html(?:\?.*)?$/, async route => {
+      const response = await route.fetch()
+      const html = (await response.text()).replace(
+        '</head>',
+        `<meta name="test-shell-generation" content="${documentGeneration}"></head>`,
+      )
+      await route.fulfill({ status: response.status(), contentType: 'text/html', body: html })
+    })
+
+    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    await page.waitForFunction(() => !!navigator.serviceWorker?.controller, { timeout: 15000 })
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await expect(page.locator('meta[name="test-shell-generation"]')).toHaveAttribute('content', 'A')
+
+    documentGeneration = 'B'
+    serveCurrentWorker = true
+    await page.evaluate(async () => {
+      await (await navigator.serviceWorker.getRegistration()).update()
+    })
+    await page.waitForFunction(
+      async () => !!(await navigator.serviceWorker.getRegistration())?.waiting,
+      { timeout: 15000 },
+    )
+
+    // No skipWaiting, controllerchange, cache bypass, or hard-refresh gesture:
+    // the outgoing worker serves its same key, whose response the waiting
+    // worker refreshed during install.
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await expect(page.locator('meta[name="test-shell-generation"]')).toHaveAttribute('content', 'B')
   })
 })
