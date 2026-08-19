@@ -60,6 +60,42 @@ docker compose -p mobius-test -f docker-compose.test.yml build   # image must ex
 docker compose -p mobius-test -f docker-compose.test.yml run --rm pytest
 ```
 
+### Database changes
+
+`Base.metadata.create_all()` creates missing tables but never adds a column to
+an existing installation. Every new ORM column therefore needs a new,
+append-only function in `backend/app/schema_migrations.py`; never edit a
+function already registered in `_SCHEMA_MIGRATIONS`, because upgraded
+installations have recorded that exact history and will not run it again.
+Migration numbers strictly increase: after rebasing, renumber concurrent work
+rather than creating two entries with the same numeric prefix.
+
+Test both a fresh database and an upgrade whose ledger already contains every
+earlier migration. `backend/tests/fixtures/schema_0013.sql` is deliberately
+frozen previous-release input; never regenerate it from current metadata,
+which would make a missing `ALTER TABLE` invisible. Advance that fixture only
+as an explicit release-baseline change. The upgrade contract runs production's
+`create_all` → migrations order twice, requires an idempotent ledger, and then
+requires `orm_schema_gaps()` to be empty.
+
+The semantic-history manifest freezes every published migration function. A
+new migration appends its version and hash; a changed existing hash means the
+old function must be restored and the correction expressed as another
+migration. Before sharing any schema change, run the dependency-free history
+gate and the fast contracts; before landing it, run the full backend suite:
+
+```bash
+python3 backend/scripts/check-schema-migrations.py
+scripts/test.sh --fast
+scripts/wt-pytest.sh backend/tests/test_db_migrations.py -q
+```
+
+A boot that still finds an ORM/schema gap deliberately starts no writer,
+reconciliation, scheduled work, or database supervisors. It serves only the
+shell and bounded diagnostic/restart APIs with `/api/ready` at 503. Recovery
+repairs the database externally; a clean restart is then required to run the
+skipped startup phase as one coherent transition.
+
 CI runs the equivalent natively: install `frontend/package-lock.json`, put its
 locked `node_modules/.bin` on `PATH`, install the hashed
 `backend/requirements.lock` plus `backend/requirements-static.txt`, run Ruff,
