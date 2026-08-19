@@ -4,6 +4,10 @@ import {
   clearToken, clearQueryCache,
 } from '../api/client.js'
 import * as setupSession from '../lib/setupSession.js'
+import {
+  reportNetworkReachable,
+  verifyConnectivity,
+} from '../lib/connectivityStore.js'
 
 /**
  * Persistent SSE subscription to /api/events/system. Lives on the
@@ -60,6 +64,7 @@ export default function useSystemEventStream(
           headers: getAuthHeaders(),
           signal: controller.signal,
         })
+        reportNetworkReachable()
         if (res.status === 401) {
           if (isEphemeralAuth()) {
             window.dispatchEvent(new CustomEvent('mobius:chat-embed-auth-expired'))
@@ -113,6 +118,7 @@ export default function useSystemEventStream(
         }
       } catch (err) {
         if (cancelled || err.name === 'AbortError') return
+        void verifyConnectivity()
       } finally {
         controller = null
       }
