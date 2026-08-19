@@ -118,14 +118,17 @@ export default function useSystemEventStream(
         }
       } catch (err) {
         if (cancelled || err.name === 'AbortError') return
-        void verifyConnectivity()
       } finally {
         controller = null
       }
       // Reconnect with capped exponential backoff. The shell-level
       // stream is supposed to live as long as the Shell — any drop
-      // (network blip, server restart) should self-heal.
+      // (network blip, server restart) should self-heal. Feed the drop into
+      // the shared reachability owner before retrying: its Checking/Offline
+      // phase drives the one shell-wide dot, and its later recovery generation
+      // wakes chat streams whose own bounded retries exhausted during a restart.
       if (!cancelled) {
+        void verifyConnectivity()
         await new Promise(r => setTimeout(r, backoffMs))
         backoffMs = Math.min(backoffMs * 2, 30_000)
         connect()

@@ -248,7 +248,11 @@ test('the durable system stream wakes visible chat runtime reconciliation', () =
     'utf8',
   )
   assert.match(systemStream, /await fetch\([\s\S]*?reportNetworkReachable\(\)/)
-  assert.match(systemStream, /catch \(err\) \{[\s\S]*?void verifyConnectivity\(\)/)
+  assert.match(
+    systemStream,
+    /if \(!cancelled\) \{[\s\S]*?void verifyConnectivity\(\)[\s\S]*?setTimeout/,
+    'an unexpected system-stream close must enter shared reachability recovery',
+  )
   assert.match(
     chatView,
     /reconcileRuntimeState\(\)\.then\(runtime => \{[\s\S]*?subscribeRecovery\([\s\S]*?getRecoverySnapshot\(\)[\s\S]*?run\(\)/,
