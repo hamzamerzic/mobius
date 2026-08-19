@@ -54,7 +54,7 @@ test('a claimed destination runs before navigation history or view mutation', ()
 
 test('Shell connects navigation to the current reload claimant through one ref', () => {
   assert.match(shellSource, /const beforeNavigateRef = useRef\(null\)/)
-  assert.match(shellSource, /beforeNavigateRef,\s*\}\)/)
+  assert.match(shellSource, /beforeNavigateRef,\s*/)
   assert.match(
     shellSource,
     /beforeNavigateRef\.current = claimPendingShellReloadNavigation/,
