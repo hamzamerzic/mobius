@@ -5,6 +5,7 @@ static files.  API routes are registered first; the frontend SPA is
 mounted last as a catch-all so that client-side routing works.
 """
 
+import json
 import logging
 import mimetypes
 import os
@@ -37,9 +38,9 @@ from app.database import (
   SessionLocal,
   engine,
   reset_database_request_label,
-  run_migrations,
   set_database_request_label,
 )
+from app.schema_migrations import orm_schema_gaps, run_migrations
 from app.http_caching import strip_range
 from app.frontend_assets import (
   baked_frontend_dir,
@@ -97,7 +98,7 @@ def _install_pm_commit_launcher(source: Path, target: Path) -> bool:
   return True
 
 
-def _init_db():
+def _init_db() -> list[str]:
   """Create missing tables, then migrate existing ones, with retries.
 
   Creating tables first lets a migration move legacy data into a newly
@@ -109,18 +110,17 @@ def _init_db():
     try:
       Base.metadata.create_all(bind=engine)
       run_migrations(engine)
-      from app.database import orm_schema_gaps
       gaps = orm_schema_gaps(engine)
+      _SCHEMA_GAPS[:] = gaps
       if gaps:
         # A mapped column with no migration fails at first query, not at
         # boot. Surface it loudly here and through /api/health(+/strict)
         # instead of letting turns fail one by one.
-        _SCHEMA_GAPS[:] = gaps
         print(
           "CRITICAL: database is missing ORM-declared schema: "
           + ", ".join(gaps)
         )
-      return
+      return list(gaps)
     except OperationalError as e:
       if attempt < 9:
         delay = min(2 ** attempt, 10)
@@ -151,9 +151,8 @@ async def lifespan(app):
   _log = logging.getLogger(__name__)
   record_memory_checkpoint("lifespan_start")
   from app.startup import (
-    STARTUP_TASKS,
     StartupContext,
-    run_startup_tasks,
+    run_startup_plan,
   )
   startup_context = StartupContext(
     app=app,
@@ -164,7 +163,7 @@ async def lifespan(app):
     assert_provider_defaults=_assert_provider_defaults,
     logger=_log,
   )
-  await run_startup_tasks(startup_context, STARTUP_TASKS)
+  database_serviceable = await run_startup_plan(startup_context)
   from app.runtime_supervisors import RuntimeSupervisors
   supervisors = RuntimeSupervisors(
     settings=settings,
@@ -172,9 +171,11 @@ async def lifespan(app):
     restart_authorization=startup_context.restart_authorization,
     restart_fallback_chats=startup_context.restart_fallback_chats,
   )
-  await supervisors.start()
+  await supervisors.start_process_services()
   record_memory_checkpoint("startup_frontend_watcher_started")
-  record_memory_checkpoint("startup_ready")
+  if database_serviceable:
+    await supervisors.start_database_services()
+    record_memory_checkpoint("startup_ready")
   try:
     yield
   finally:
@@ -517,6 +518,57 @@ class _ServiceSurfaceHostMiddleware:
     return await self.app(scope, receive, send)
 
 
+_SCHEMA_DEGRADED_API_PATHS = frozenset({
+  "/api/health",
+  "/api/health/strict",
+  "/api/ready",
+  "/api/version",
+  "/api/browser-bootstrap",
+  "/api/admin/restart",
+})
+
+
+class _SchemaServiceabilityMiddleware:
+  """Reject ordinary API work after a schema-incompatible boot.
+
+  Readiness keeps a new deployment out of rotation, but an already-running
+  reverse proxy can still reach an unhealthy replacement directly. Centralize
+  the degraded boundary here so requests receive one deterministic 503 instead
+  of executing arbitrary ORM queries and surfacing whichever missing column
+  they happen to touch first. Static shell assets and the bounded diagnostic /
+  restart endpoints remain available; Recovery repairs the database externally
+  and a normal restart performs the skipped startup phase.
+  """
+
+  def __init__(self, app):
+    self.app = app
+
+  async def __call__(self, scope, receive, send):
+    path = scope.get("path", "")
+    if (
+      scope["type"] == "http"
+      and _SCHEMA_GAPS
+      and path.startswith("/api/")
+      and path not in _SCHEMA_DEGRADED_API_PATHS
+    ):
+      body = json.dumps({
+        "detail": "database schema mismatch; restart after Recovery",
+        "schema_gaps": list(_SCHEMA_GAPS),
+      }, separators=(",", ":")).encode()
+      await send({
+        "type": "http.response.start",
+        "status": 503,
+        "headers": [
+          (b"content-type", b"application/json"),
+          (b"cache-control", b"no-store"),
+          (b"content-length", str(len(body)).encode()),
+        ],
+      })
+      await send({"type": "http.response.body", "body": body})
+      return
+    return await self.app(scope, receive, send)
+
+
 app.add_middleware(_BodySizeLimitMiddleware, max_bytes=_MAX_REQUEST_BODY_BYTES)
 
 app.add_middleware(
@@ -608,6 +660,7 @@ app.add_middleware(_OpaqueOriginCorsMiddleware)
 # before routing so it can never serve the shell, APIs, or another
 # service prefix.
 app.add_middleware(_ServiceSurfaceHostMiddleware)
+app.add_middleware(_SchemaServiceabilityMiddleware)
 app.add_middleware(_SecurityHeadersMiddleware)
 app.add_middleware(_DatabaseRequestContextMiddleware)
 app.add_middleware(_RequestErrorTelemetryMiddleware)
@@ -697,19 +750,19 @@ def health(response: Response):
 
 @app.get("/api/health/strict")
 def health_strict(response: Response):
-  """Serviceability probe for the container healthcheck.
+  """Schema-focused serviceability probe retained for diagnostics.
 
   Distinct from `/api/health` (reachability — must stay 200 whenever the
   process answers, or the shell would flip devices to offline UI): this
-  variant fails when the process is up but cannot serve turns, e.g. the
-  database is missing ORM-declared schema. Docker's HEALTHCHECK uses
-  `curl -f`, so the 503 marks the container unhealthy instead of silently
-  healthy while every turn dies.
+  variant fails when the database is missing ORM-declared schema. Deployment
+  healthchecks use `/api/ready`, which includes this schema contract plus the
+  chat-persistence writer contract.
   """
   response.headers["Cache-Control"] = "no-store"
-  if _SCHEMA_GAPS:
+  gaps = list(_SCHEMA_GAPS)
+  if gaps:
     response.status_code = 503
-    return {"status": "schema_mismatch", "schema_gaps": _SCHEMA_GAPS}
+    return {"status": "schema_mismatch", "schema_gaps": gaps}
   return {"status": "ok", "boot_id": _BOOT_ID}
 
 
@@ -729,16 +782,15 @@ def browser_bootstrap():
 
 @app.get("/api/ready")
 def ready(response: Response):
-  """Readiness probe: 200 only when chat persistence can actually serve.
+  """Readiness probe: 200 only when chats can actually be served.
 
-  Distinct from `/api/health` (liveness — the process is up and answering
-  HTTP). The single-writer chat-persistence actor can fail to start, go
-  fatal, or be stopping while the process still answers `/api/health` 200;
-  in that window every chat write fails. A deploy (and `deploy-prod.sh`'s
-  health gate) must NOT green on a process that can't persist a chat, so
-  this route returns 503 until the writer is genuinely ready.
+  Distinct from `/api/health` (reachability — the process is answering HTTP),
+  this route also requires an ORM-compatible database and a usable
+  single-writer chat-persistence actor. A deploy must not green while a mapped
+  column is absent or every chat write will fail, even though the process can
+  still answer ordinary HTTP requests.
 
-  `is_writer_ready()` (via `writer_readiness`) owns the predicate: the
+  After the schema gate, `writer_readiness()` owns the writer predicate: the
   writer singleton exists, its worker thread is alive, and the actor is
   neither fatal nor stopping. The route only maps the verdict to a status
   code and surfaces the reason. Startup ordering is fine — the lifespan
@@ -746,6 +798,14 @@ def ready(response: Response):
   window where this false-fails.
   """
   response.headers["Cache-Control"] = "no-store"
+  gaps = list(_SCHEMA_GAPS)
+  if gaps:
+    response.status_code = 503
+    return {
+      "ready": False,
+      "reason": "schema_mismatch",
+      "schema_gaps": gaps,
+    }
   from app.chat_writer import writer_readiness
   is_ready, reason = writer_readiness()
   if is_ready:
