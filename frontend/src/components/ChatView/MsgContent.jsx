@@ -241,7 +241,6 @@ function MsgContentInner({
         return (
           <ContextCompactionMarker
             key={assistantBlockKey(block, i)}
-            block={block}
           />
         )
       }
