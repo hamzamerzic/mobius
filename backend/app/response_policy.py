@@ -67,7 +67,14 @@ def app_frame_csp(
     "allow-popups-to-escape-sandbox "
     "allow-top-navigation-by-user-activation; "
     f"default-src {origin}; "
-    f"script-src {origin} 'unsafe-inline' 'wasm-unsafe-eval' "
+    # `'wasm-unsafe-eval'` is the narrow modern source for WebAssembly, but older
+    # WebKit-based installed apps (older iOS Safari / installed-PWA engines)
+    # ignore it and still gate WebAssembly compilation on `'unsafe-eval'`.
+    # On-device Pocket TTS runs as Wasm inside these opaque, sandboxed mini-app
+    # frames, so both sources are required for it to start on those browsers.
+    # The permission stays confined to the isolated app-frame policy; the shell
+    # and other documents keep only the narrow modern source.
+    f"script-src {origin} 'unsafe-inline' 'wasm-unsafe-eval' 'unsafe-eval' "
     "blob: https://esm.sh; "
     f"style-src {origin} 'unsafe-inline' https://fonts.googleapis.com; "
     f"font-src {origin} https://fonts.gstatic.com https://cdn.openai.com; "
@@ -79,14 +86,22 @@ def app_frame_csp(
 
 
 def shell_csp(gateway_origin: str = "") -> str:
-  """Policy for ordinary shell/API documents, independent of proxy syntax."""
+  """Policy for ordinary shell/API documents, independent of proxy syntax.
+
+  ``'wasm-unsafe-eval'`` permits WebAssembly and nothing else, rather than the
+  general ``'unsafe-eval'``. On-device Pocket TTS runs as Wasm in a same-origin
+  shell-owned worker, which cannot compile without it. ``worker-src 'self'``
+  keeps that worker restricted to the real same-origin asset rather than a
+  generated or third-party worker.
+  """
   frame_sources = ["'self'"]
   gateway = absolute_csp_origin(gateway_origin)
   if gateway is not None:
     frame_sources.append(gateway)
   return (
     "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline' https://esm.sh; "
+    "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://esm.sh; "
+    "worker-src 'self'; "
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
     "font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; "
     "connect-src 'self'; "
