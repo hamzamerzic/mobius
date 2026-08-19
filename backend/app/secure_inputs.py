@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.broadcast import get_broadcast
+from app.owner_input import publish_owner_input_changed
 
 
 REQUEST_TTL_SECONDS = 15 * 60
@@ -211,13 +212,18 @@ def _capability_matches(request: SecureInputRequest, capability: str) -> bool:
 
 
 def _publish(request: SecureInputRequest, event_type: str) -> None:
-  bc = get_broadcast(request.chat_id)
-  if bc is not None and bc.running:
-    event = {
+  event = (
+    request.public_event()
+    if event_type == "secure_input_request"
+    else {
       "type": event_type,
       "request_id": request.request_id,
       "status": request.status,
     }
+  )
+  bc = get_broadcast(request.chat_id)
+  chat_event_published = False
+  if bc is not None and bc.running:
     # The live sink owns both broadcast and chat persistence. Import lazily to
     # avoid the module cycle: ChatEventSink imports this module's reveal scrub.
     from app.chat_event_sink import get_active_sink
@@ -228,6 +234,9 @@ def _publish(request: SecureInputRequest, event_type: str) -> None:
       # Defensive fallback for synthetic/tests or a teardown race. Values are
       # still absent; the active production path always has the owning sink.
       bc.publish(event)
+    chat_event_published = True
+  if event_type == "secure_input_request" and not chat_event_published:
+    raise RuntimeError("This chat is not running.")
 
 
 def _clear_values(request: SecureInputRequest) -> None:
@@ -244,12 +253,15 @@ def _settle(
 ) -> None:
   if request.status in {"completed", "failed", "cancelled", "expired"}:
     return
+  was_waiting_for_owner = request.status == "pending"
   _clear_values(request)
   request.status = status
   request.result = result
   request.settled_at = time.monotonic()
   request.event.set()
   _publish(request, "secure_input_settled")
+  if was_waiting_for_owner:
+    publish_owner_input_changed(request.chat_id, None)
 
 
 def _cleanup() -> None:
@@ -320,6 +332,31 @@ def get_request(request_id: str) -> SecureInputRequest | None:
   return _requests.get(request_id)
 
 
+def pending_chat_ids() -> frozenset[str]:
+  """Snapshot chats whose secure-input card still needs owner involvement."""
+  _cleanup()
+  return frozenset(
+    request.chat_id
+    for request in _requests.values()
+    if request.status == "pending"
+  )
+
+
+def publish_request(request: SecureInputRequest) -> None:
+  """Publish one newly registered prompt through both of its safe channels."""
+  if request.status != "pending":
+    raise ValueError("Secure input request is no longer open.")
+  try:
+    _publish(request, "secure_input_request")
+    publish_owner_input_changed(request.chat_id, "secure_input")
+  except Exception:
+    # No value has been submitted yet. Remove an unpresented request so a
+    # failed/racing publish cannot strand the chat behind an invisible card.
+    if _requests.get(request.request_id) is request:
+      _requests.pop(request.request_id, None)
+    raise
+
+
 def authorize(
   request_id: str, capability: str,
 ) -> SecureInputRequest | None:
@@ -336,6 +373,7 @@ def fill_request(request: SecureInputRequest, values: dict[str, str]) -> None:
   request.status = "filled"
   request.event.set()
   _publish(request, "secure_input_filled")
+  publish_owner_input_changed(request.chat_id, None)
 
 
 def consume_request(request: SecureInputRequest) -> dict[str, str]:
