@@ -3551,7 +3551,7 @@ export default function Shell({ onInitialVisualReady }) {
         ref={composerFocusLeaseRef}
         className="shell__composer-focus-lease"
         tabIndex={-1}
-        aria-label="Message Möbius…"
+        aria-label="Restoring message draft"
         autoComplete="off"
         onInput={(event) => {
           const draftId = composerFocusLeaseDraftIdRef.current
