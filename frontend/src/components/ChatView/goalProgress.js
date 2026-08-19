@@ -8,14 +8,39 @@
  * instead of lighting up for ordinary prose that happens to mention `/goal`.
  * Whitespace is collapsed because the footer is a one-line status surface.
  */
-export function goalObjectiveFromText(text) {
+function goalCommandObjective(text) {
   if (typeof text !== 'string') return ''
   const normalized = text.replace(/^\n+/, '')
-  const match = normalized.match(/^\/goal(?:[ \t]+([\s\S]*))?$/)
+  const match = normalized.match(/^\/goal(?:\s+([\s\S]*))?$/)
   if (!match) return ''
-  const objective = (match[1] || '').trim().replace(/\s+/g, ' ')
-  if (!objective || objective.toLowerCase() === 'clear') return ''
+  const objective = (match[1] || '').trim()
+  const compactObjective = objective.replace(/\s+/g, ' ')
+  if (!compactObjective || compactObjective.toLowerCase() === 'clear') return ''
   return objective
+}
+
+export function goalObjectiveFromText(text) {
+  return goalCommandObjective(text).replace(/\s+/g, ' ')
+}
+
+/** Keep the owner's formatting while hiding the command token in the bubble. */
+export function goalMessageObjectiveFromText(text) {
+  return goalCommandObjective(text)
+}
+
+/** Keep a live event from being regressed by an older initial fetch. */
+export function newestGoalPlan(current, incoming) {
+  if (!incoming) return current || null
+  if (!current) return incoming
+  if (
+    current.root_run_id === incoming.root_run_id
+    && Number.isInteger(current.revision)
+    && Number.isInteger(incoming.revision)
+    && current.revision > incoming.revision
+  ) {
+    return current
+  }
+  return incoming
 }
 
 function isContinue(text) {
@@ -98,25 +123,69 @@ export function goalObjectiveFromRuntime(runtime, fallbackObjective = '') {
  * itself; afterwards the goal remains as quiet context while the newest phase
  * carries emphasis.
  */
-export function progressRailViewModel(goalObjective, buildPhases) {
+function progressLabel(task) {
+  const progress = task?.progress
+  if (Number.isInteger(progress?.current) && Number.isInteger(progress?.total)) {
+    return `${task.title} · ${progress.current}/${progress.total}`
+  }
+  return task?.title || ''
+}
+
+/** Active work first; when nothing is running, expose every newly ready task. */
+export function visibleGoalTasks(goalPlan) {
+  const tasks = Array.isArray(goalPlan?.tasks) ? goalPlan.tasks : []
+  const running = tasks.filter(task => task?.status === 'running')
+  if (running.length) return running.map(task => ({ ...task, activity: 'Now' }))
+  return tasks
+    .filter(task => task?.ready === true)
+    .map(task => ({ ...task, activity: 'Next' }))
+}
+
+export function progressRailViewModel(goalObjective, buildPhases, goalPlan = null) {
   const items = []
   if (goalObjective) {
+    const completed = goalPlan?.summary?.completed
+    const total = goalPlan?.summary?.total
+    const planned = Number.isInteger(completed) && Number.isInteger(total)
     items.push({
       key: 'goal',
-      label: `Goal · ${goalObjective}`,
+      label: planned
+        ? `Goal plan · ${completed} of ${total}`
+        : `Goal · ${goalObjective}`,
       expandable: true,
+      ...(goalPlan ? {
+        hasDetails: true,
+        title: `Goal: ${goalObjective}`,
+        ariaLabel: `Goal plan for ${goalObjective}; ${completed} of ${total} tasks complete`,
+        actionLabel: 'View tasks',
+        expandedActionLabel: 'Hide tasks',
+      } : {}),
     })
   }
-  for (const phase of Array.isArray(buildPhases) ? buildPhases : []) {
+  const activeTasks = goalObjective ? visibleGoalTasks(goalPlan) : []
+  for (const task of activeTasks) {
+    items.push({
+      key: `goal-task-${task.id}`,
+      label: `${task.activity} · ${progressLabel(task)}`,
+      goalTask: true,
+    })
+  }
+  const phases = Array.isArray(buildPhases) ? buildPhases : []
+  for (const phase of phases) {
     if (!phase?.label) continue
     items.push({
       key: `phase-${phase.ts}`,
       label: phase.label,
     })
   }
-  const lastIndex = items.length - 1
+  const hasPhases = phases.some(phase => phase?.label)
+  const hasActiveTasks = activeTasks.length > 0
   return items.map((item, index) => ({
     ...item,
-    current: index === lastIndex,
+    current: hasPhases
+      ? index === items.length - 1
+      : hasActiveTasks
+        ? item.goalTask === true
+        : index === items.length - 1,
   }))
 }
