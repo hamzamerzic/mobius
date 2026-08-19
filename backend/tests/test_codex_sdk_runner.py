@@ -319,6 +319,7 @@ def _fake_sdk(async_codex_cls):
     "CommandExecutionOutputDeltaNotification": _Dummy,
     "CommandExecutionThreadItem": _Dummy,
     "ContextCompactedNotification": _Dummy,
+    "ContextCompactionThreadItem": _Dummy,
     "DynamicToolCallThreadItem": _Dummy,
     "ErrorNotification": _FakeErrorNotification,
     "FileChangePatchUpdatedNotification": _Dummy,
@@ -2011,16 +2012,37 @@ def test_run_codex_sdk_turn_cleans_up_active_session_on_stream_exception(
   assert mark_finished_calls == [True]
 
 
-def test_run_codex_sdk_turn_publishes_context_compaction_marker(monkeypatch):
+@pytest.mark.parametrize(
+  "event_kind",
+  ["context_compaction_item", "legacy_notification"],
+)
+def test_run_codex_sdk_turn_publishes_marker_from_current_and_legacy_events(
+  monkeypatch, event_kind,
+):
+  class ContextCompactionThreadItem:
+    pass
+
   class ContextCompactedNotification:
     pass
 
-  completed_turn = SimpleNamespace(id="turn-1", usage=None, error=None)
-  turn_handle = _FakeTurnHandle([
-    SimpleNamespace(
+  class ItemCompletedNotification:
+    def __init__(self, item):
+      self.item = SimpleNamespace(root=item)
+
+  if event_kind == "context_compaction_item":
+    event = SimpleNamespace(
+      method="item/completed",
+      payload=ItemCompletedNotification(ContextCompactionThreadItem()),
+    )
+  else:
+    event = SimpleNamespace(
       method="thread/compacted",
       payload=ContextCompactedNotification(),
-    ),
+    )
+
+  completed_turn = SimpleNamespace(id="turn-1", usage=None, error=None)
+  turn_handle = _FakeTurnHandle([
+    event,
     SimpleNamespace(
       method="turn/completed",
       payload=_FakeTurnCompletedNotification(completed_turn),
@@ -2043,6 +2065,8 @@ def test_run_codex_sdk_turn_publishes_context_compaction_marker(monkeypatch):
 
   sdk = _fake_sdk(FakeAsyncCodex)
   sdk["ContextCompactedNotification"] = ContextCompactedNotification
+  sdk["ContextCompactionThreadItem"] = ContextCompactionThreadItem
+  sdk["ItemCompletedNotification"] = ItemCompletedNotification
   monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
 
   bc = _FakeBroadcast()
@@ -2058,10 +2082,14 @@ def test_run_codex_sdk_turn_publishes_context_compaction_marker(monkeypatch):
   ))
 
   assert result["error"] is None
-  assert {
+  markers = [
+    event for event in bc.events
+    if event.get("type") == "context_compacted"
+  ]
+  assert markers == [{
     "type": "context_compacted",
     "provider": "codex",
-  } in bc.events
+  }]
 
 
 class _KilledTransportError(_SdkTransportClosedError):
