@@ -1059,6 +1059,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0012_connector_oauth_gcloud",
     "0013_app_hosted_publication",
     "0014_chat_run_goal_plan",
+    "0015_chat_run_goal_identity",
   ]
   assert second == first
 
@@ -1693,6 +1694,53 @@ def test_goal_plan_migration_adds_snapshot_and_revision_to_existing_runs(
       "SELECT COUNT(*) FROM schema_migrations "
       "WHERE version = '0014_chat_run_goal_plan'"
     )).scalar_one() == 1
+
+
+def test_goal_identity_migration_preserves_distinct_historical_roots_and_index(
+  tmp_path,
+):
+  eng = create_engine(f"sqlite:///{tmp_path / 'goal-identity.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as session:
+    session.add(models.Chat(id="goal-chat", title="Goal", messages=[]))
+    session.add_all([
+      models.ChatRun(
+        id="planned", root_run_id="planned", chat_id="goal-chat",
+        status="interrupted", provider="codex", goal_objective="Ship",
+        goal_plan_json={"version": 1, "tasks": []},
+        started_at=datetime(2026, 8, 18, 10),
+      ),
+      models.ChatRun(
+        id="recovered", root_run_id="recovered", chat_id="goal-chat",
+        status="running", provider="codex", goal_objective="Ship",
+        started_at=datetime(2026, 8, 18, 11),
+      ),
+    ])
+    session.commit()
+  with eng.begin() as conn:
+    conn.execute(text("DROP INDEX ix_chat_runs_goal_id"))
+    conn.execute(text("ALTER TABLE chat_runs DROP COLUMN goal_id"))
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version, _migration in migrations._SCHEMA_MIGRATIONS[:-1]:
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) "
+        "VALUES (:version, :at)"
+      ), {"version": version, "at": datetime(2026, 8, 18)})
+
+  run_migrations(eng)
+
+  with eng.connect() as conn:
+    rows = conn.execute(text(
+      "SELECT id, goal_id FROM chat_runs ORDER BY started_at"
+    )).all()
+  assert rows == [("planned", "planned"), ("recovered", "recovered")]
+  assert any(
+    index["name"] == "ix_chat_runs_goal_id"
+    for index in inspect(eng).get_indexes("chat_runs")
+  )
 
 
 def test_published_schema_migration_history_is_unique_ordered_and_immutable():

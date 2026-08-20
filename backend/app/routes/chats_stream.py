@@ -57,6 +57,14 @@ router = APIRouter(prefix="/api/chats", tags=["chats"])
 
 log = logging.getLogger(__name__)
 
+
+def _delegation_manages_chat(db: Session, chat_id: str) -> bool:
+  """Whether a parent delegation owns this chat's send lifecycle."""
+  return db.query(models.Delegation.id).filter(
+    models.Delegation.child_chat_id == chat_id,
+  ).first() is not None
+
+
 def _pending_question_open_conflict() -> HTTPException:
   return HTTPException(
     status_code=409,
@@ -540,6 +548,14 @@ async def send_message(
   """
   require_chat_embed_operation(principal, "chat:send")
   chat = get_active_chat_for_principal(db, chat_id, principal)
+  if _delegation_manages_chat(db, chat_id):
+    raise HTTPException(
+      status_code=409,
+      detail={
+        "code": "delegation_managed",
+        "message": "This evaluator chat is managed by its parent workflow.",
+      },
+    )
 
   # AskUserQuestion answer delivery. If a live SDK turn is blocked waiting for
   # the answer (held in `questions._pending[chat_id]`), persist through the
@@ -788,6 +804,16 @@ async def _send_message_locked(
   duplicate = _duplicate_send_response(chat_id, chat, body.cid)
   if duplicate is not None:
     return duplicate
+  # Re-check after acquiring the transition lock: creation may have attached
+  # this chat to a delegation after the request's initial admission read.
+  if _delegation_manages_chat(db, chat_id):
+    raise HTTPException(
+      status_code=409,
+      detail={
+        "code": "delegation_managed",
+        "message": "This evaluator chat is managed by its parent workflow.",
+      },
+    )
   if body.continuation == "manual" and principal.app_id is not None:
     raise HTTPException(
       status_code=403,

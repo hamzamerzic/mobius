@@ -4118,10 +4118,9 @@ async def _run_chat_impl_with_db(
 
   # A planned restart can replace the parent provider process while durable
   # child tasks keep running. Re-attach their immutable ids/statuses to every
-  # ordinary parent turn so a resumed agent waits on the existing child rather
-  # than launching a duplicate. Delegated children never receive this block,
-  # which also enforces the depth-one boundary.
-  if run_policy is None and chat_id and run_token:
+  # parent turn so both the root agent and a nested delegated owner wait on
+  # their existing direct children rather than launching duplicates.
+  if chat_id and run_token:
     from app.delegations import active_parent_context
     delegation_context = active_parent_context(db, chat_id, run_token)
     if delegation_context:
@@ -4174,8 +4173,8 @@ async def _run_chat_impl_with_db(
     return disposition
 
   if run_policy is not None:
-    from app.delegations import mint_app_token
-    agent_token = mint_app_token(db, run_policy)
+    from app.delegations import delegation_execution_token
+    agent_token = delegation_execution_token(db, run_policy, run_token or "")
   else:
     agent_token = auth.create_agent_token(
       chat_id, run_token, owner.username, owner.token_epoch,
@@ -4201,10 +4200,14 @@ async def _run_chat_impl_with_db(
     base_env["MOBIUS_RUN_TOKEN"] = run_token
   else:
     base_env.update({
-      "MOBIUS_SUBAGENT_DEPTH": "1",
+      "MOBIUS_SUBAGENT_DEPTH": str(run_policy.depth),
       "MOBIUS_DELEGATION_ID": run_policy.delegation_id,
       "MOBIUS_SUBAGENT_PROVIDER": run_policy.provider,
     })
+    if run_policy.provider == "claude":
+      base_env["MOBIUS_SUBAGENT_HELPER"] = (
+        "/data/apps/subagents/subagents.py"
+      )
   # Overrides any inherited TMPDIR from _safe_keys: agent scratch belongs on
   # the bounded data volume, never the container's unbounded overlay. TMP and
   # TEMP travel with it so a tool reading either does not escape back to /tmp.

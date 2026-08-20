@@ -511,9 +511,7 @@ def _chat_detail_response(
 
   provider = chat.provider or "claude"
   settings_obj = _coerce_agent_settings(chat.agent_settings_json) or None
-  active_goal_objective = (
-    running_goal_objective(db, chat.id) if running else None
-  )
+  active_goal_objective = running_goal_objective(db, chat.id)
   response = {
     "id": chat.id,
     "title": chat.title,
@@ -1772,6 +1770,14 @@ async def delete_chat(
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
+  """Soft-deletes a chat under its send/delegation admission gate."""
+  from app.chat_queue import get_transition_lock
+
+  async with get_transition_lock(chat_id):
+    await _delete_chat_locked(chat_id, db)
+
+
+async def _delete_chat_locked(chat_id: str, db: Session) -> None:
   """Soft-deletes a chat and stops any running agent for it."""
   # Only attempt to stop if the chat is actually running. An idle chat
   # has no proc/SDK client/session to interrupt, so calling
@@ -1791,6 +1797,17 @@ async def delete_chat(
         status_code=409,
         detail="Could not stop active agent; retry",
       )
+  from app.delegations import (
+    active_delegation_ids_for_chat,
+    cancel_delegation_execution,
+  )
+  for delegation_id in active_delegation_ids_for_chat(db, chat_id):
+    if not await cancel_delegation_execution(delegation_id):
+      raise HTTPException(
+        status_code=409,
+        detail="Could not stop active delegated work; retry",
+      )
+  db.rollback()
   # Bump generation BEFORE the soft-delete commit so that any run
   # that started in the TOCTOU window between the is_chat_running
   # check above and now sees `we_own_gen == False` on its next gen

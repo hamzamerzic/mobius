@@ -58,12 +58,16 @@ class GoalTaskUpdate(BaseModel):
   expected_revision: int = Field(ge=0)
   status: str | None = None
   note: str | None = None
+  result: str | None = None
   progress: dict[str, Any] | None = None
 
   @model_validator(mode="after")
   def require_change(self) -> "GoalTaskUpdate":
-    if self.status is None and self.note is None and self.progress is None:
-      raise ValueError("provide status, note, or progress")
+    if (
+      self.status is None and self.note is None and self.result is None
+      and self.progress is None
+    ):
+      raise ValueError("provide status, note, result, or progress")
     return self
 
 
@@ -99,7 +103,7 @@ def get_goal_plan(
   require_chat_embed_operation(principal, "chat:read")
   get_active_chat_for_principal(db, chat_id, principal)
   rows = active_goal_rows(db, chat_id)
-  return {"plan": serialize_plan(*rows) if rows is not None else None}
+  return {"plan": serialize_plan(db, *rows) if rows is not None else None}
 
 
 @router.post(
@@ -206,6 +210,7 @@ async def patch_goal_task(
         changes={
           "status": body.status,
           "note": body.note,
+          "result": body.result,
           "progress": body.progress,
         },
       )

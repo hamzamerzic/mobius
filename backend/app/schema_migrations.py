@@ -837,6 +837,39 @@ def _add_chat_run_goal_plan(eng) -> None:
       ))
 
 
+def _add_chat_run_goal_identity(eng) -> None:
+  """Give a native Goal identity that survives logical-run recovery."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chat_runs" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chat_runs")}
+  with eng.begin() as conn:
+    if "goal_id" not in columns:
+      conn.execute(text("ALTER TABLE chat_runs ADD COLUMN goal_id VARCHAR(64) NULL"))
+    required = {"id", "root_run_id", "goal_objective"}
+    if not required.issubset(columns):
+      return
+    rows = conn.execute(text(
+      "SELECT id, root_run_id FROM chat_runs "
+      "WHERE goal_objective IS NOT NULL"
+    )).mappings().all()
+    for row in rows:
+      # Historical logical roots are the only identity the old schema proves.
+      # Never merge two Goals merely because their objective text matches: an
+      # owner may deliberately start the same Goal again. Future recovery rows
+      # inherit the stable id through goal_identity_for_run_start.
+      identity = str(row["root_run_id"] or row["id"])
+      conn.execute(text(
+        "UPDATE chat_runs SET goal_id = :goal_id WHERE id = :run_id "
+        "AND goal_id IS NULL"
+      ), {"goal_id": identity, "run_id": row["id"]})
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_chat_runs_goal_id ON chat_runs (goal_id)"
+    ))
+
+
 def _add_chat_run_root_identity(eng) -> None:
   """Give every physical run a stable logical identity across continuations."""
   from sqlalchemy import inspect as sa_inspect, text
@@ -1609,6 +1642,7 @@ _SCHEMA_MIGRATIONS = (
   ("0012_connector_oauth_gcloud", _add_connector_oauth_gcloud_fields),
   ("0013_app_hosted_publication", _add_app_hosted_publication),
   ("0014_chat_run_goal_plan", _add_chat_run_goal_plan),
+  ("0015_chat_run_goal_identity", _add_chat_run_goal_identity),
 )
 
 
