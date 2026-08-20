@@ -923,7 +923,9 @@ export default function useStreamConnection(chatId, {
           if (it.type !== 'question') return it
           const itKey = questionKey(it)
           if (key ? itKey === key : true) {
-            if (!matchedKey) matchedKey = itKey
+            // Last matching question wins for an id-less answer, matching the
+            // live patch path and ChatView's last-question submitted key.
+            if (!key) matchedKey = itKey
             if (!key) answersByQuestionKeyRef.current.set(itKey, answers)
             return { ...it, answers }
           }
@@ -1833,15 +1835,19 @@ export default function useStreamConnection(chatId, {
       : lastGoodItemsRef.current
     let matchedKey = key
     if (!matchedKey) {
-      const matchedQuestion = baselineItems.find(it => it.type === 'question')
+      // For an id-less (text-keyed) answer, key on the LAST question item so
+      // this matches ChatView's submitted questionKey (which also selects the
+      // last question). Keying on the first would diverge for a turn with two
+      // or more live question cards, dropping the response-activity handoff.
+      const matchedQuestion = [...baselineItems].reverse().find(it => it.type === 'question')
       if (matchedQuestion) matchedKey = questionKey(matchedQuestion)
     }
     if (matchedKey) armQuestionResponse(matchedKey, baselineItems)
     setStreamItems(prev => {
       return prev.map(it => {
         if (it.type !== 'question') return it
-        // When we have a questionId, match by id; otherwise patch the
-        // first question item (mirrors the single-question-per-turn norm).
+        // When we have a questionId, match by id; otherwise patch every
+        // question item and let the last one win the arming key above.
         const itKey = questionKey(it)
         if (key ? itKey === key : true) {
           if (!matchedKey) matchedKey = itKey
