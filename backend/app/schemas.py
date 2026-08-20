@@ -739,6 +739,13 @@ class SendMessage(BaseModel):
     return self
 
 
+class PendingMessageUpdate(BaseModel):
+  # New text for one already-queued message. Only the content is client-
+  # supplied; the row's stable `cid`, ordering `ts`, attachments, and queue
+  # position are preserved server-side and never taken from the request.
+  content: str
+
+
 class PushKeys(BaseModel):
   p256dh: str
   auth: str
