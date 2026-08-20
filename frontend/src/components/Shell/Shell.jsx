@@ -3999,6 +3999,7 @@ export default function Shell({ onInitialVisualReady }) {
                 onDisplayReady={role === 'held' || !surfaceVisible
                   ? null
                   : handlePaneChatDisplayReady}
+                onChatBoundaryError={markInitialVisualReady}
               />
             </div>
           )
