@@ -421,6 +421,22 @@ class StartTurn(_Command):
   initiated_by_app_id: int | None = None
 
 
+@dataclass(frozen=True)
+class GoalPromotionRejected:
+  """Expected refusal when a run cannot accept the requested Goal."""
+
+  reason: str
+
+
+@dataclass
+class PromoteRunToGoal(_Command):
+  """Attach the exact currently-running physical turn to a visible Goal."""
+
+  chat_id: str = ""
+  run_token: str = ""
+  objective: str = ""
+
+
 @dataclass
 class AppendPending(_Command):
   """Queue a send behind an active turn (or stale pending).
@@ -1511,6 +1527,8 @@ class ChatWriterActor:
       return self._reconcile_startup_chat(db, cmd)
     if isinstance(cmd, StartTurn):
       return self._start_turn(db, cmd)
+    if isinstance(cmd, PromoteRunToGoal):
+      return self._promote_run_to_goal(db, cmd)
     if isinstance(cmd, AppendPending):
       return self._append_pending(db, cmd)
     if isinstance(cmd, AppendSteeredUserMessage):
@@ -2207,6 +2225,54 @@ class ChatWriterActor:
       "history": history,
       "session_id": chat.session_id,
       "provider": chat.provider,
+    }
+
+  def _promote_run_to_goal(
+    self, db, cmd: PromoteRunToGoal,
+  ) -> dict | GoalPromotionRejected:
+    """Atomically bind one exact live turn and its logical root to a Goal."""
+    run = db.query(models.ChatRun).filter(
+      models.ChatRun.id == cmd.run_token,
+      models.ChatRun.chat_id == cmd.chat_id,
+    ).first()
+    if run is None or run.status != "running":
+      db.rollback()
+      return GoalPromotionRejected("run_not_active")
+
+    from app.run_state import latest_run
+
+    latest = latest_run(db, cmd.chat_id)
+    if latest is None or latest.id != run.id:
+      db.rollback()
+      return GoalPromotionRejected("run_not_current")
+    if run.goal_objective not in (None, cmd.objective):
+      db.rollback()
+      return GoalPromotionRejected("different_goal_active")
+
+    root_id = run.root_run_id or run.id
+    root = db.query(models.ChatRun).filter(
+      models.ChatRun.id == root_id,
+      models.ChatRun.chat_id == cmd.chat_id,
+    ).first()
+    if root is None:
+      db.rollback()
+      return GoalPromotionRejected("logical_root_missing")
+    if root.goal_objective not in (None, cmd.objective):
+      db.rollback()
+      return GoalPromotionRejected("different_goal_active")
+
+    changed = run.goal_objective is None or root.goal_objective is None
+    run.goal_objective = cmd.objective
+    root.goal_objective = cmd.objective
+    if changed and not _commit_or_rollback(db):
+      raise _PersistFailed("PromoteRunToGoal did not persist")
+    if not changed:
+      db.rollback()
+    return {
+      "objective": cmd.objective,
+      "root_run_id": root_id,
+      "run_id": run.id,
+      "state": "promoted" if changed else "active",
     }
 
   def _append_pending(self, db, cmd: AppendPending) -> dict:

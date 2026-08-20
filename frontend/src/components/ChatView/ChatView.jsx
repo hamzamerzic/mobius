@@ -1305,6 +1305,11 @@ export default function ChatView({
       onStreamEnd?.({ continues })
     },
     onSystemEvent: event => {
+      if (event?.type === 'goal_activated') {
+        setActiveGoalPlan(null)
+        setActiveGoalState(event.objective || '')
+        return
+      }
       if (event?.type === 'goal_plan_updated') {
         setActiveGoalPlan(current => newestGoalPlan(current, event.plan || null))
         return

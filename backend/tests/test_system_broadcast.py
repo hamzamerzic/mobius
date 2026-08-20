@@ -618,6 +618,13 @@ async def test_notify_catch_up_unsafe_event_is_system_bus_only(
     bc_mod.remove_broadcast("live-chat-2")
 
 
+def test_notify_rejects_server_owned_goal_activation(client, auth):
+  response = client.post(
+    "/api/notify", headers=auth, json={"type": "goal_activated"},
+  )
+  assert response.status_code == 422
+
+
 # --- Chat-scoped build_phase milestone rail (feature 212) --------------
 
 

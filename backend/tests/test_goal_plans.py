@@ -1,9 +1,13 @@
 """Durable Goal-plan validation, ordering, progress, and route contracts."""
 
+from datetime import timedelta
 import importlib.util
 from pathlib import Path
 
-from app import models
+import pytest
+
+from app import auth as auth_mod, models
+from app import broadcast as broadcast_mod
 
 
 def _goal_plan_script():
@@ -29,6 +33,205 @@ def _active_goal(client, owner_token, db):
   ))
   db.commit()
   return auth, chat_id
+
+
+def _agent_run_auth(db, chat_id, run_id):
+  owner = db.query(models.Owner).first()
+  token = auth_mod.create_agent_token(
+    chat_id,
+    run_id,
+    owner.username,
+    owner.token_epoch,
+    expires_delta=timedelta(minutes=5),
+  )
+  return {"Authorization": f"Bearer {token}"}
+
+
+def test_current_turn_promotes_atomically_without_a_goal_message(
+  client, owner_token, db,
+):
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  created = client.post("/api/chats", json={"title": "Ordinary"}, headers=owner_auth)
+  chat_id = created.json()["id"]
+  db.add(models.ChatRun(
+    id="ordinary-run",
+    root_run_id="ordinary-run",
+    chat_id=chat_id,
+    status="running",
+    provider="codex",
+  ))
+  db.commit()
+  agent_auth = _agent_run_auth(db, chat_id, "ordinary-run")
+
+  broadcast = broadcast_mod.create_broadcast(chat_id)
+  try:
+    promoted = client.post(
+      f"/api/chats/{chat_id}/goal",
+      json={"objective": "Repair every defect and verify the suite"},
+      headers=agent_auth,
+    )
+    assert promoted.status_code == 200, promoted.text
+    assert promoted.json() == {
+      "objective": "Repair every defect and verify the suite",
+      "root_run_id": "ordinary-run",
+      "run_id": "ordinary-run",
+      "state": "promoted",
+    }
+    assert [
+      event["type"] for event in broadcast.event_log
+    ] == ["goal_activated"]
+    db.expire_all()
+    run = db.query(models.ChatRun).filter(models.ChatRun.id == "ordinary-run").one()
+    assert run.goal_objective == "Repair every defect and verify the suite"
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+    assert all(
+      "/goal" not in str(message.get("content", ""))
+      for message in chat.messages
+    )
+
+    retry = client.post(
+      f"/api/chats/{chat_id}/goal",
+      json={"objective": "Repair every defect and verify the suite"},
+      headers=agent_auth,
+    )
+    assert retry.status_code == 200
+    assert retry.json()["state"] == "active"
+    assert [
+      event["type"] for event in broadcast.event_log
+    ] == ["goal_activated"]
+    conflict = client.post(
+      f"/api/chats/{chat_id}/goal",
+      json={"objective": "Do something else"},
+      headers=agent_auth,
+    )
+    assert conflict.status_code == 409
+
+    plan = client.put(
+      f"/api/chats/{chat_id}/goal-plan",
+      json={
+        "expected_revision": 0,
+        "tasks": [{"id": "repair", "title": "Repair every defect"}],
+      },
+      headers=agent_auth,
+    )
+    assert plan.status_code == 200, plan.text
+    assert (
+      plan.json()["plan"]["objective"]
+      == "Repair every defect and verify the suite"
+    )
+  finally:
+    broadcast_mod.remove_broadcast(chat_id)
+
+
+def test_goal_promotion_rejects_browser_wrong_chat_and_terminal_run_tokens(
+  client, owner_token, db,
+):
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  first = client.post("/api/chats", json={"title": "First"}, headers=owner_auth).json()
+  second = client.post("/api/chats", json={"title": "Second"}, headers=owner_auth).json()
+  db.add_all([
+    models.ChatRun(
+      id="live-run", root_run_id="live-run", chat_id=first["id"],
+      status="running", provider="claude",
+    ),
+    models.ChatRun(
+      id="settled-run", root_run_id="settled-run", chat_id=first["id"],
+      status="completed", provider="claude",
+    ),
+  ])
+  db.commit()
+  agent_auth = _agent_run_auth(db, first["id"], "live-run")
+  settled_auth = _agent_run_auth(db, first["id"], "settled-run")
+
+  browser = client.post(
+    f"/api/chats/{first['id']}/goal",
+    json={"objective": "Not allowed"}, headers=owner_auth,
+  )
+  assert browser.status_code == 403
+  wrong_chat = client.post(
+    f"/api/chats/{second['id']}/goal",
+    json={"objective": "Not allowed"}, headers=agent_auth,
+  )
+  assert wrong_chat.status_code == 403
+  terminal = client.post(
+    f"/api/chats/{first['id']}/goal",
+    json={"objective": "Too late"}, headers=settled_auth,
+  )
+  assert terminal.status_code == 401
+  assert "no longer active" in terminal.json()["detail"]
+
+
+def test_promotion_of_a_continuation_stamps_its_logical_root(
+  client, owner_token, db,
+):
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  chat_id = client.post(
+    "/api/chats", json={"title": "Continued"}, headers=owner_auth,
+  ).json()["id"]
+  db.add_all([
+    models.ChatRun(
+      id="logical-root", root_run_id="logical-root", chat_id=chat_id,
+      status="interrupted", provider="claude",
+    ),
+    models.ChatRun(
+      id="physical-resume", root_run_id="logical-root", chat_id=chat_id,
+      status="running", provider="claude",
+    ),
+  ])
+  db.commit()
+
+  promoted = client.post(
+    f"/api/chats/{chat_id}/goal",
+    json={"objective": "Finish the resumed migration"},
+    headers=_agent_run_auth(db, chat_id, "physical-resume"),
+  )
+
+  assert promoted.status_code == 200, promoted.text
+  assert promoted.json()["root_run_id"] == "logical-root"
+  db.expire_all()
+  roots = {
+    row.id: row.goal_objective
+    for row in db.query(models.ChatRun).filter(models.ChatRun.chat_id == chat_id)
+  }
+  assert roots == {
+    "logical-root": "Finish the resumed migration",
+    "physical-resume": "Finish the resumed migration",
+  }
+
+
+def test_goal_promotion_commit_failure_is_loud_and_atomic(
+  client, owner_token, db, monkeypatch,
+):
+  from app import chat_writer
+
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  chat_id = client.post(
+    "/api/chats", json={"title": "Atomic failure"}, headers=owner_auth,
+  ).json()["id"]
+  db.add(models.ChatRun(
+    id="failing-run", root_run_id="failing-run", chat_id=chat_id,
+    status="running", provider="codex",
+  ))
+  db.commit()
+
+  def fail_commit(session):
+    session.rollback()
+    return False
+
+  monkeypatch.setattr(chat_writer, "_commit_or_rollback", fail_commit)
+  with pytest.raises(chat_writer._PersistFailed, match="PromoteRunToGoal"):
+    chat_writer.get_writer()._promote_run_to_goal(
+      db,
+      chat_writer.PromoteRunToGoal(
+        chat_id=chat_id,
+        run_token="failing-run",
+        objective="Persist all-or-nothing",
+      ),
+    )
+
+  db.expire_all()
+  run = db.query(models.ChatRun).filter(models.ChatRun.id == "failing-run").one()
+  assert run.goal_objective is None
 
 
 def test_parallel_roots_release_dependent_task_only_after_all_complete(

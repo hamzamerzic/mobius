@@ -66,6 +66,8 @@ _UNMODIFIED_MIGRATIONS = {
     # so existing instances learn the completion preflight without clobbering
     # any owner-authored planning guidance.
     "2adb39457e0ec2ee9d9a3596cb96e5a6240bae23d725e6459ba0f6e77d5474c4",
+    # Dependency-aware plan seed before provider-neutral automatic promotion.
+    "a3edc5fcc453a5305102e144c2d58ae16b828612ac93a6a7442be7e267779f59",
   },
   "reflection.md": {
     "c0f57c227f61cd8539a56b70eadfbbe2212125c23b7137472dd173a578baacd8",

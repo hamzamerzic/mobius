@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from app import chat, chat_queue
+from app import chat, chat_queue, models
 
 
 def _settings(on=True):
@@ -70,6 +70,35 @@ def test_skips_on_non_settled_dispositions(tmp_path):
     assert not chat._should_ensure_chat_note(
       _settings(on=True), "c1", d, str(tmp_path), 0.0
     ), d
+
+
+def test_active_goal_checkpoint_reads_the_exact_current_run(
+  client, owner_token, db,
+):
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  chat_id = client.post(
+    "/api/chats", json={"title": "Dynamic Goal"}, headers=owner_auth,
+  ).json()["id"]
+  run = models.ChatRun(
+    id="dynamic-goal-run", root_run_id="dynamic-goal-run", chat_id=chat_id,
+    status="running", provider="claude",
+  )
+  db.add(run)
+  db.commit()
+
+  assert not chat._run_owns_active_goal(
+    db, chat_id=chat_id, run_token=run.id,
+  )
+  run.goal_objective = "Discover and repair every represented defect"
+  db.commit()
+  assert chat._run_owns_active_goal(
+    db, chat_id=chat_id, run_token=run.id,
+  )
+  run.status = "completed"
+  db.commit()
+  assert not chat._run_owns_active_goal(
+    db, chat_id=chat_id, run_token=run.id,
+  )
 
 
 def test_fires_on_limit_parked(tmp_path):

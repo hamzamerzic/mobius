@@ -91,6 +91,7 @@ class Principal:
   app_instance_id: str | None = None
   scope: str = "owner"
   chat_id: str | None = None
+  run_id: str | None = None
   embed_instance_id: str | None = None
   embed_session_id: str | None = None
   embed_role: str | None = None
@@ -170,6 +171,18 @@ def _resolve_owner(
     raise HTTPException(status_code=401, detail="Owner not found.")
   if payload.get("epoch", 0) != owner.token_epoch:
     raise HTTPException(status_code=401, detail="Token revoked.")
+  agent_chat = payload.get("agent_chat")
+  agent_run = payload.get("agent_run")
+  if agent_chat is not None or agent_run is not None:
+    if not isinstance(agent_chat, str) or not isinstance(agent_run, str):
+      raise HTTPException(status_code=401, detail="Invalid agent token.")
+    live_run = db.query(models.ChatRun.id).filter(
+      models.ChatRun.id == agent_run,
+      models.ChatRun.chat_id == agent_chat,
+      models.ChatRun.status == "running",
+    ).first()
+    if live_run is None:
+      raise HTTPException(status_code=401, detail="Agent run is no longer active.")
   return owner, payload
 
 
@@ -521,7 +534,28 @@ def get_principal(
     app_id=app_id,
     app_instance_id=payload.get("app_nonce") if app_id is not None else None,
     scope="app" if app_id is not None else "owner",
+    chat_id=payload.get("agent_chat"),
+    run_id=payload.get("agent_run"),
   )
+
+
+def get_agent_run_principal(
+  token: str = Depends(_oauth2),
+  db: Session = Depends(get_db),
+) -> Principal:
+  """Resolve the short-lived owner bearer minted for one physical agent run."""
+  principal = get_principal(token, db)
+  if (
+    principal.scope != "owner"
+    or principal.app_id is not None
+    or not isinstance(principal.chat_id, str)
+    or not isinstance(principal.run_id, str)
+  ):
+    raise HTTPException(
+      status_code=403,
+      detail="This operation requires the current agent run.",
+    )
+  return principal
 
 
 def get_chat_view_principal(

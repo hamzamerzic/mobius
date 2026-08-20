@@ -11,6 +11,11 @@ from jwt.exceptions import InvalidTokenError
 from app.config import get_settings
 
 
+# Covers the platform's at-most-24-hour turn capabilities with clock skew.
+# deps._resolve_owner also rejects it as soon as the exact run stops running.
+AGENT_RUN_TOKEN_TTL = timedelta(hours=26)
+
+
 # bcrypt ignores bytes after the first 72. Pre-hashing new passwords makes the
 # full UTF-8 input significant while retaining bcrypt's salt and work factor.
 # The prefix makes the format self-describing so hashes created by older Mobius
@@ -76,6 +81,26 @@ def create_access_token(
     payload["epoch"] = token_epoch
   return jwt.encode(
     payload, settings.secret_key, algorithm="HS256"
+  )
+
+
+def create_agent_token(
+  chat_id: str,
+  run_id: str,
+  owner_username: str,
+  token_epoch: int,
+  *,
+  expires_delta: timedelta = AGENT_RUN_TOKEN_TTL,
+) -> str:
+  """Create the owner bearer bound to one ordinary interactive agent run."""
+  return create_access_token(
+    {
+      "sub": owner_username,
+      "agent_chat": chat_id,
+      "agent_run": run_id,
+    },
+    expires_delta=expires_delta,
+    token_epoch=token_epoch,
   )
 
 
