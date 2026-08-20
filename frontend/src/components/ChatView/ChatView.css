@@ -3615,7 +3615,8 @@
   background: var(--surface);
   color: var(--text);
   font: inherit;
-  font-size: 14px;
+  /* Keep at 16px: iOS Safari zooms focused inputs below 16px (see contract above). */
+  font-size: 16px;
   line-height: 1.4;
 }
 
