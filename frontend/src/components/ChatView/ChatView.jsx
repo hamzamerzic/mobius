@@ -2301,6 +2301,11 @@ export default function ChatView({
   useLayoutEffect(() => {
     const el = scrollRef.current
     if (!el || loadingOlder.current || loading || offset <= 0) return
+    // A failed page must hand control to the manual retry button, not auto-fill
+    // again: the failed fetch added no rows, so the surface is still
+    // non-scrollable and this dependency-less effect would otherwise re-fire and
+    // re-fetch on every render — an unbounded, backoff-free request storm.
+    if (olderHistoryError) return
     if (olderHistoryShouldLoad(el)) loadOlderMessages()
   })
 
@@ -2322,7 +2327,7 @@ export default function ChatView({
   function handleScroll() {
     updateJumpToLatest()
     const el = scrollRef.current
-    if (!el || loadingOlder.current || loading) return
+    if (!el || loadingOlder.current || loading || olderHistoryError) return
     // Programmatic scrolls can land near the top, so the shared gesture window
     // still owns intent. Prefetch before the loaded-page boundary can become a
     // visible interruption instead of waiting for the absolute top.
