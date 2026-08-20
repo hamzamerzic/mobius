@@ -131,7 +131,8 @@ CHAT_EMBED_CSP = (
 def static_embed_csp(frontend_origin: str) -> str:
   origin = _validated_frontend_origin(frontend_origin)
   return (
-    "sandbox allow-scripts allow-forms allow-pointer-lock; "
+    "sandbox allow-scripts allow-forms allow-pointer-lock allow-popups "
+    "allow-popups-to-escape-sandbox; "
     f"default-src {origin}; "
     f"script-src {origin} 'unsafe-inline'; "
     f"style-src {origin} 'unsafe-inline'; "
