@@ -65,6 +65,18 @@ function fulfillStream(body) {
   }
 }
 
+async function decodedResponse(response) {
+  const headers = response.headers()
+  // APIRequestContext decodes the body. Replaying those bytes with the
+  // original transport headers makes Chromium decode them a second time (or
+  // treat them as an incomplete chunk stream), so keep only representation
+  // headers when a service-worker script is fulfilled from the captured body.
+  for (const name of ['content-encoding', 'content-length', 'transfer-encoding']) {
+    delete headers[name]
+  }
+  return { status: response.status(), headers, body: await response.text() }
+}
+
 // One-shot system-stream mock, faithful to the real SystemBroadcast contract:
 // hold the connection until `armed` resolves, then deliver shell_rebuilt on
 // exactly ONE successful connection — every other connection (before the arm,
@@ -429,14 +441,7 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     // each update request is deterministic and cannot recursively depend on its
     // own route handler.
     const swResponse = await page.request.get(`${BASE}/sw.js`)
-    const swHeaders = swResponse.headers()
-    delete swHeaders['content-encoding']
-    delete swHeaders['content-length']
-    const swBase = {
-      status: swResponse.status(),
-      headers: swHeaders,
-      body: await swResponse.text(),
-    }
+    const swBase = await decodedResponse(swResponse)
     await page.route('**/sw.js', async (route) => {
       // A STABLE byte-append once armed → the browser installs ONE genuinely new,
       // leashed worker; later re-fetches stay byte-identical so it does not
@@ -551,14 +556,7 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     test.slow()
     let serveCurrentWorker = false
     const workerResponse = await page.request.get(`${BASE}/sw.js`)
-    const workerHeaders = workerResponse.headers()
-    delete workerHeaders['content-encoding']
-    delete workerHeaders['content-length']
-    const currentWorker = {
-      status: workerResponse.status(),
-      headers: workerHeaders,
-      body: await workerResponse.text(),
-    }
+    const currentWorker = await decodedResponse(workerResponse)
 
     // Generation A models the exact historical failure: every navigation is
     // answered from one revisioned document entry. Generation B is the real
