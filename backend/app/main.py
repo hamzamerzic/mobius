@@ -335,9 +335,17 @@ _APP_FRAME_CSP = app_frame_csp(
 )
 
 def _loopback_delivery_origin(scope) -> str | None:
-  """Return the exact loopback origin serving this request, if any."""
+  """Return the exact loopback origin serving a loopback request, if any."""
   headers = dict(scope.get("headers") or ())
   try:
+    client = scope.get("client")
+    peer = client[0] if isinstance(client, (list, tuple)) and client else None
+    peer_is_loopback = (
+      peer == "localhost"
+      or (isinstance(peer, str) and ipaddress.ip_address(peer).is_loopback)
+    )
+    if not peer_is_loopback:
+      return None
     authority = headers.get(b"host", b"").decode("ascii")
     scheme = str(scope.get("scheme") or "http")
     origin = absolute_csp_origin(f"{scheme}://{authority}")
