@@ -5,13 +5,14 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy.orm import Session
 
 from app.broadcast import get_broadcast
 from app.database import get_db
 from app.deps import (
   Principal,
+  get_agent_run_principal,
   get_owner_or_chat_embed_principal,
   reject_cross_site,
   require_chat_embed_operation,
@@ -35,6 +36,20 @@ class GoalPlanReplace(BaseModel):
 
   expected_revision: int = Field(ge=0)
   tasks: list[dict[str, Any]]
+
+
+class GoalPromotionRequest(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+
+  objective: str = Field(min_length=1, max_length=1000)
+
+  @field_validator("objective")
+  @classmethod
+  def clean_objective(cls, value: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+      raise ValueError("objective must not be empty")
+    return cleaned
 
 
 class GoalTaskUpdate(BaseModel):
@@ -85,6 +100,56 @@ def get_goal_plan(
   get_active_chat_for_principal(db, chat_id, principal)
   rows = active_goal_rows(db, chat_id)
   return {"plan": serialize_plan(*rows) if rows is not None else None}
+
+
+@router.post(
+  "/{chat_id}/goal",
+  dependencies=[Depends(reject_cross_site)],
+)
+async def promote_current_run_to_goal(
+  chat_id: str,
+  body: GoalPromotionRequest,
+  principal: Principal = Depends(get_agent_run_principal),
+  db: Session = Depends(get_db),
+):
+  """Attach the caller's exact running turn to a platform-owned Goal."""
+  if principal.chat_id != chat_id:
+    raise HTTPException(status_code=403, detail="Agent run belongs to another chat.")
+  get_active_chat_for_principal(db, chat_id, principal)
+  from app import chat_queue
+  from app.chat_writer import (
+    GoalPromotionRejected,
+    PromoteRunToGoal,
+    await_ack,
+    get_writer,
+  )
+  async with chat_queue.get_transition_lock(chat_id):
+    result = await await_ack(get_writer().submit(PromoteRunToGoal(
+      chat_id=chat_id,
+      run_token=principal.run_id or "",
+      objective=body.objective,
+    )))
+  if isinstance(result, GoalPromotionRejected):
+    messages = {
+      "run_not_active": "The initiating agent turn is no longer active.",
+      "run_not_current": "A newer agent turn now owns this chat.",
+      "different_goal_active": "This turn already owns a different Goal.",
+      "logical_root_missing": "The running turn has no durable logical root.",
+    }
+    raise HTTPException(
+      status_code=409,
+      detail=messages.get(result.reason, "This turn cannot become a Goal."),
+    )
+  if result["state"] == "promoted":
+    broadcast = get_broadcast(chat_id)
+    if broadcast is not None and broadcast.running:
+      broadcast.publish({
+        "type": "goal_activated",
+        "objective": result["objective"],
+        "root_run_id": result["root_run_id"],
+        "run_id": result["run_id"],
+      })
+  return result
 
 
 @router.put(

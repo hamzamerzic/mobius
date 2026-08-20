@@ -78,6 +78,7 @@ _SNAPSHOT_REPLAY_EVENT_TYPES = frozenset({
   "app_updated",
   "build_phase",
   "goal_plan_updated",
+  "goal_activated",
   "chat_run_finished",
   "chat_run_started",
   "queued_turn_starting",
