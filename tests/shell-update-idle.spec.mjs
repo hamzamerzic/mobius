@@ -66,14 +66,19 @@ function fulfillStream(body) {
 }
 
 async function decodedResponse(response) {
-  const headers = response.headers()
   // APIRequestContext decodes the body. Replaying those bytes with the
   // original transport headers makes Chromium decode them a second time (or
   // treat them as an incomplete chunk stream), so keep only representation
   // headers when a service-worker script is fulfilled from the captured body.
-  for (const name of ['content-encoding', 'content-length', 'transfer-encoding']) {
-    delete headers[name]
-  }
+  const transportHeaders = new Set([
+    'content-encoding',
+    'content-length',
+    'transfer-encoding',
+  ])
+  const headers = Object.fromEntries(
+    Object.entries(response.headers())
+      .filter(([name]) => !transportHeaders.has(name.toLowerCase())),
+  )
   return { status: response.status(), headers, body: await response.text() }
 }
 
