@@ -63,6 +63,8 @@ import logging
 import os
 import signal
 import shutil
+import shlex
+import re
 from collections import deque
 from contextlib import ExitStack
 from typing import Any
@@ -103,6 +105,72 @@ log = logging.getLogger(__name__)
 
 _CLAUDE_CLI = "/usr/local/bin/claude"
 _ISOLATED_CLAUDE_CLI = "/app/scripts/claude-isolated"
+
+
+def _guarded_subagent_bash(
+  input_data: dict[str, Any],
+) -> dict[str, Any] | None:
+  """Return one canonical shell-safe durable-child invocation, or deny it."""
+  command = input_data.get("command")
+  if not isinstance(command, str) or len(command) > 24_000:
+    return None
+  try:
+    args = shlex.split(command, posix=True)
+  except ValueError:
+    return None
+  if len(args) < 9 or args[0] not in {"python", "python3"}:
+    return None
+  if args[1:3] != ["/data/apps/subagents/subagents.py", "run"]:
+    return None
+  valued = {
+    "--provider", "--name", "--scope", "--model", "--effort", "--cwd",
+    "--prompt",
+  }
+  # A delegated owner may choose blocking vs durable background execution,
+  # but it cannot claim the owner's explicit-provider override. A provider
+  # paused in Subagents remains paused for every descendant.
+  flags = {"--background"}
+  parsed: dict[str, str] = {}
+  index = 3
+  while index < len(args):
+    option = args[index]
+    if option in flags:
+      if option in parsed:
+        return None
+      parsed[option] = "true"
+      index += 1
+      continue
+    if option not in valued or option in parsed or index + 1 >= len(args):
+      return None
+    parsed[option] = args[index + 1]
+    index += 2
+  valid = bool(
+    parsed.get("--provider") in {"claude", "codex"}
+    and parsed.get("--scope") == "read"
+    and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", parsed.get("--name", ""))
+    and 0 < len(parsed.get("--prompt", "")) <= 20_000
+    and "\x00" not in parsed.get("--prompt", "")
+    and (
+      "--cwd" not in parsed
+      or (
+        (
+          parsed["--cwd"] == "/data"
+          or parsed["--cwd"].startswith("/data/")
+        )
+        and "\x00" not in parsed["--cwd"]
+      )
+    )
+    and all(
+      re.fullmatch(r"[A-Za-z0-9._:/+-]{1,256}", parsed[option])
+      for option in ("--model", "--effort") if option in parsed
+    )
+  )
+  if not valid:
+    return None
+  # Never execute the model-authored quoting. Rebuild the already-validated
+  # argv so command substitutions, redirects, and separators can only remain
+  # literal prompt/cwd text passed to the helper.
+  return {**input_data, "command": shlex.join(args)}
 
 
 def _claude_cli_path() -> str:
@@ -863,6 +931,11 @@ async def run_claude_sdk_turn(
       if run_policy.scope == "read" and tool_name in {
         "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
       }:
+        guarded = (
+          _guarded_subagent_bash(input_data) if tool_name == "Bash" else None
+        )
+        if guarded is not None:
+          return PermissionResultAllow(updated_input=guarded)
         return PermissionResultDeny(
           message="This delegated task is read-only."
         )

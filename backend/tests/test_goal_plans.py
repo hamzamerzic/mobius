@@ -2,6 +2,8 @@
 
 from datetime import timedelta
 import importlib.util
+import hashlib
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -30,6 +32,7 @@ def _active_goal(client, owner_token, db):
     status="running",
     provider="codex",
     goal_objective="Ship the release",
+    goal_id="goal-1",
   ))
   db.commit()
   return auth, chat_id
@@ -369,6 +372,270 @@ def test_cancelled_work_is_removed_from_the_completion_route(
   assert summary["completion_blockers"] == []
 
 
+def test_nested_children_settle_before_parent_becomes_ready_to_verify(
+  client, owner_token, db,
+):
+  auth, chat_id = _active_goal(client, owner_token, db)
+  created = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": 0, "tasks": [
+      {"id": "b", "title": "Deliver B", "status": "running"},
+      {"id": "x", "title": "Do X", "parent_id": "b"},
+      {"id": "y", "title": "Do Y", "parent_id": "b"},
+    ]}, headers=auth,
+  )
+  assert created.status_code == 200, created.text
+  initial_tasks = {
+    task["id"]: task for task in created.json()["plan"]["tasks"]
+  }
+  assert initial_tasks["b"]["ready"] is False
+  assert initial_tasks["b"]["ready_to_verify"] is False
+  assert initial_tasks["x"]["ready"] is True
+  assert initial_tasks["y"]["ready"] is True
+  revision = 1
+  for task_id, status in (("x", "completed"), ("y", "completed")):
+    response = client.patch(
+      f"/api/chats/{chat_id}/goal-plan/tasks/{task_id}",
+      json={"expected_revision": revision, "status": status}, headers=auth,
+    )
+    assert response.status_code == 200, response.text
+    revision += 1
+  tasks = {task["id"]: task for task in response.json()["plan"]["tasks"]}
+  assert tasks["b"]["children"] == ["x", "y"]
+  assert tasks["b"]["ready"] is False
+  assert tasks["b"]["ready_to_verify"] is True
+
+  incomplete_parent = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": revision, "tasks": [
+      {"id": "b", "title": "Deliver B", "status": "completed"},
+      {"id": "x", "title": "Do X", "parent_id": "b"},
+    ]}, headers=auth,
+  )
+  assert incomplete_parent.status_code == 422
+  assert "children settle" in incomplete_parent.json()["detail"]
+
+
+def test_mixed_parent_dependency_cycle_is_rejected_before_it_can_deadlock(
+  client, owner_token, db,
+):
+  auth, chat_id = _active_goal(client, owner_token, db)
+  response = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": 0, "tasks": [
+      {"id": "parent", "title": "Parent", "status": "running"},
+      {
+        "id": "child", "title": "Child", "parent_id": "parent",
+        "depends_on": ["parent"],
+      },
+    ]}, headers=auth,
+  )
+  assert response.status_code == 422
+  assert "completion cycle" in response.json()["detail"]
+
+
+def test_failed_parent_never_masquerades_as_ready_to_verify(
+  client, owner_token, db,
+):
+  auth, chat_id = _active_goal(client, owner_token, db)
+  response = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": 0, "tasks": [
+      {"id": "parent", "title": "Parent", "status": "failed"},
+      {
+        "id": "child", "title": "Child", "parent_id": "parent",
+        "status": "completed",
+      },
+    ]}, headers=auth,
+  )
+  assert response.status_code == 200, response.text
+  tasks = {task["id"]: task for task in response.json()["plan"]["tasks"]}
+  assert tasks["parent"]["ready_to_verify"] is False
+
+
+def test_plan_follows_stable_goal_identity_across_a_new_logical_run(
+  client, owner_token, db,
+):
+  auth, chat_id = _active_goal(client, owner_token, db)
+  created = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": 0, "tasks": [{"id": "a", "title": "A"}]},
+    headers=auth,
+  )
+  assert created.status_code == 200, created.text
+  db.query(models.ChatRun).filter(models.ChatRun.id == "goal-root").update({
+    models.ChatRun.status: "interrupted",
+  })
+  db.add(models.ChatRun(
+    id="recovered-root", root_run_id="recovered-root", chat_id=chat_id,
+    status="running", provider="codex", goal_objective="Ship the release",
+    goal_id="goal-1",
+  ))
+  db.commit()
+  recovered = client.get(f"/api/chats/{chat_id}/goal-plan", headers=auth)
+  assert recovered.status_code == 200, recovered.text
+  assert recovered.json()["plan"]["revision"] == 1
+  assert recovered.json()["plan"]["goal_id"] == "goal-1"
+
+
+def test_plan_projects_recursive_delegation_ownership_without_transcripts(
+  client, owner_token, db,
+):
+  auth, chat_id = _active_goal(client, owner_token, db)
+  created = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": 0, "tasks": [{
+      "id": "b", "title": "Do B", "status": "completed",
+    }]},
+    headers=auth,
+  )
+  assert created.status_code == 200, created.text
+  app = models.App(
+    slug="goal-tree-subagents", source_dir="/tmp/goal-tree-subagents",
+    name="Subagents", description="", jsx_source="",
+  )
+  db.add(app)
+  db.flush()
+  child_b = models.Chat(
+    id="child-b", title="B", messages=[], created_by_app_id=app.id,
+  )
+  child_x = models.Chat(
+    id="child-x", title="X", messages=[], created_by_app_id=app.id,
+  )
+  db.add_all([child_b, child_x])
+  db.flush()
+  common = {
+    "app_id": app.id, "provider": "codex", "model": None,
+    "effort": None, "scope": "read", "cwd": "/data",
+    "prompt_sha256": hashlib.sha256(b"").hexdigest(),
+  }
+  db.add_all([
+    models.Delegation(
+      id="delegation-b", parent_chat_id=chat_id,
+      parent_root_run_id="goal-root", task_key="b", child_chat_id="child-b",
+      **common,
+    ),
+    models.Delegation(
+      id="delegation-x", parent_chat_id="child-b",
+      parent_root_run_id="child-b-run", task_key="x", child_chat_id="child-x",
+      **common,
+    ),
+    models.ChatRun(
+      id="child-b-run", root_run_id="child-b-run", chat_id="child-b",
+      status="running", provider="codex",
+    ),
+    models.ChatRun(
+      id="child-x-run", root_run_id="child-x-run", chat_id="child-x",
+      status="running", provider="codex",
+    ),
+  ])
+  db.commit()
+
+  plan = client.get(f"/api/chats/{chat_id}/goal-plan", headers=auth).json()["plan"]
+  assert plan["delegations"] == [{
+    "id": "delegation-b", "task_key": "b", "provider": "codex",
+    "status": "running", "children": [{
+      "id": "delegation-x", "task_key": "x", "provider": "codex",
+      "status": "running", "children": [],
+    }],
+  }]
+  assert plan["summary"]["completed"] == 0
+  assert plan["summary"]["can_complete"] is False
+  assert plan["summary"]["completion_blockers"] == ["b", "x"]
+
+  db.query(models.ChatRun).filter(models.ChatRun.id.in_([
+    "goal-root", "child-b-run",
+  ])).update({"status": "completed"}, synchronize_session=False)
+  db.commit()
+  descendant_plan = client.get(
+    f"/api/chats/{chat_id}/goal-plan", headers=auth,
+  ).json()["plan"]
+  assert descendant_plan["delegations"][0]["status"] == "completed"
+  assert descendant_plan["delegations"][0]["children"][0]["status"] == "running"
+  assert descendant_plan["summary"]["completed"] == 0
+  assert descendant_plan["summary"]["completion_blockers"] == ["b", "x"]
+  runtime = client.get(f"/api/chats/{chat_id}/runtime", headers=auth).json()
+  assert runtime["running"] is False
+  assert runtime["active_goal_objective"] == "Ship the release"
+
+  db.query(models.ChatRun).filter(models.ChatRun.id == "child-x-run").update({
+    "status": "completed",
+  })
+  db.commit()
+  assert client.get(
+    f"/api/chats/{chat_id}/goal-plan", headers=auth,
+  ).json()["plan"] is None
+  assert client.get(
+    f"/api/chats/{chat_id}/runtime", headers=auth,
+  ).json()["active_goal_objective"] is None
+
+
+def test_resumed_goal_projects_only_latest_delegation_attempt_per_task(
+  client, owner_token, db,
+):
+  auth, chat_id = _active_goal(client, owner_token, db)
+  created = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": 0, "tasks": [{
+      "id": "audit", "title": "Audit", "status": "completed",
+    }]}, headers=auth,
+  )
+  assert created.status_code == 200, created.text
+  app = models.App(
+    slug="goal-retry-subagents", source_dir="/tmp/goal-retry-subagents",
+    name="Subagents", description="", jsx_source="",
+  )
+  db.add(app)
+  db.flush()
+  old_child = models.Chat(
+    id="goal-old-child", title="Old", messages=[], created_by_app_id=app.id,
+  )
+  new_child = models.Chat(
+    id="goal-new-child", title="New", messages=[], created_by_app_id=app.id,
+  )
+  db.add_all([old_child, new_child])
+  db.flush()
+  common = {
+    "app_id": app.id, "provider": "codex", "model": None,
+    "effort": None, "scope": "read", "cwd": "/data",
+    "prompt_sha256": hashlib.sha256(b"").hexdigest(),
+  }
+  now = datetime.now(UTC).replace(tzinfo=None)
+  db.add_all([
+    models.ChatRun(
+      id="resumed-goal-run", root_run_id="resumed-goal-run", chat_id=chat_id,
+      status="interrupted", provider="codex", goal_objective="Ship the release",
+      goal_id="goal-1",
+    ),
+    models.Delegation(
+      id="old-attempt", parent_chat_id=chat_id,
+      parent_root_run_id="goal-root", task_key="audit",
+      child_chat_id=old_child.id, created_at=now - timedelta(minutes=1),
+      **common,
+    ),
+    models.Delegation(
+      id="new-attempt", parent_chat_id=chat_id,
+      parent_root_run_id="resumed-goal-run", task_key="audit",
+      child_chat_id=new_child.id, created_at=now,
+      **common,
+    ),
+    models.ChatRun(
+      id="old-attempt-run", root_run_id="old-attempt-run",
+      chat_id=old_child.id, status="completed", provider="codex",
+    ),
+    models.ChatRun(
+      id="new-attempt-run", root_run_id="new-attempt-run",
+      chat_id=new_child.id, status="running", provider="codex",
+    ),
+  ])
+  db.commit()
+
+  plan = client.get(f"/api/chats/{chat_id}/goal-plan", headers=auth).json()["plan"]
+  assert [node["id"] for node in plan["delegations"]] == ["new-attempt"]
+  assert plan["summary"]["completed"] == 0
+  assert plan["summary"]["completion_blockers"] == ["audit"]
+
+
 def test_completion_preflight_names_only_unfinished_required_work():
   helper = _goal_plan_script()
   plan = {
@@ -382,6 +649,10 @@ def test_completion_preflight_names_only_unfinished_required_work():
   assert helper._completion_blockers(None) == []
   assert helper._completion_blockers(plan) == [
     "Run final audit", "Resolve blocker",
+  ]
+  plan["summary"] = {"completion_blockers": ["next", "live-child"]}
+  assert helper._completion_blockers(plan) == [
+    "Run final audit", "live-child",
   ]
 
 

@@ -2205,8 +2205,8 @@ class ChatWriterActor:
     # so any still-running row is a prior run whose clear was dropped — mark it
     # interrupted before opening this one (at most one run is ever live).
     from app.models import ChatRun
-    from app.run_state import goal_objective_for_run_start
-    goal_objective = goal_objective_for_run_start(
+    from app.run_state import goal_identity_for_run_start
+    goal_objective, goal_id = goal_identity_for_run_start(
       db, cmd.chat_id, cmd.user_msg,
     )
     self._close_nonterminal_runs(db, cmd.chat_id, "interrupted")
@@ -2216,6 +2216,7 @@ class ChatWriterActor:
       provider=chat.provider, started_at=started_at,
       initiated_by_app_id=cmd.initiated_by_app_id,
       goal_objective=goal_objective,
+      goal_id=goal_id,
     ))
     if not _commit_or_rollback(db):
       raise _PersistFailed("StartTurn did not persist")
@@ -2670,10 +2671,15 @@ class ChatWriterActor:
     # SAME commit as the queue handoff.
     from app.models import ChatRun
     from app.continuations import is_continuation_message
-    from app.run_state import goal_objective_for_run_start
-    goal_objective = goal_objective_for_run_start(
+    from app.run_state import goal_identity_for_run_start
+    goal_objective, goal_id = goal_identity_for_run_start(
       db, cmd.chat_id, agent_pending,
     )
+    # This event-only metadata lets the mounted UI cross the physical-turn
+    # boundary without briefly clearing a Goal while the runtime refetch lands.
+    # It is not written into the transcript row.
+    returned_promoted["_goal_objective"] = goal_objective
+    returned_promoted["_goal_id"] = goal_id
     prior_run = (
       db.query(ChatRun)
       .filter(
@@ -2697,6 +2703,7 @@ class ChatWriterActor:
       provider=chat.provider, started_at=started_at,
       initiated_by_app_id=initiated_by_app_id,
       goal_objective=goal_objective,
+      goal_id=goal_id,
     ))
     if not _commit_or_rollback(db):
       raise _PersistFailed("PromotePending did not persist")
