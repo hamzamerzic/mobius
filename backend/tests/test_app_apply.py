@@ -114,6 +114,58 @@ def test_apply_updates_multifile_revision_once(client, auth, db):
   ]
 
 
+def test_apply_refreshes_manifest_declared_skill_on_create_and_update(
+  client, auth,
+):
+  source = _source()
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["skills"] = ["guide.md"]
+  manifest["source_files"] = ["guide.md"]
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  (source / "guide.md").write_text("# First guidance\n")
+
+  created = _apply(client, auth, source)
+
+  assert created.status_code == 200, created.text
+  shared = Path(get_settings().data_dir) / "shared" / "skills" / "guide.md"
+  assert shared.read_text() == "# First guidance\n"
+  assert created.json()["warnings"] == []
+
+  (source / "guide.md").write_text("# Revised guidance\n")
+  updated = _apply(client, auth, source)
+
+  assert updated.status_code == 200, updated.text
+  assert shared.read_text() == "# Revised guidance\n"
+  assert updated.json()["warnings"] == []
+
+
+def test_store_managed_apply_refreshes_only_previously_approved_skills(
+  client, auth, db,
+):
+  source = _source()
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["skills"] = ["guide.md"]
+  manifest["source_files"] = ["guide.md"]
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  (source / "guide.md").write_text("# Installed guidance\n")
+  created = _apply(client, auth, source)
+  app_id = created.json()["app"]["id"]
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  row.manifest_url = "https://example.test/demo/mobius.json"
+  contract = dict(row.capability_contract or {})
+  contract["agent"] = {**(contract.get("agent") or {}), "skills": ["guide.md"]}
+  row.capability_contract = contract
+  db.commit()
+  (source / "guide.md").write_text("# Locally revised guidance\n")
+
+  updated = _apply(client, auth, source)
+
+  assert updated.status_code == 200, updated.text
+  shared = Path(get_settings().data_dir) / "shared" / "skills" / "guide.md"
+  assert shared.read_text() == "# Locally revised guidance\n"
+  assert updated.json()["warnings"] == []
+
+
 def test_startup_retires_integrated_app_provenance(client, auth, db):
   source = _source()
   created = _apply(client, auth, source)

@@ -339,6 +339,7 @@ class AppOut(BaseModel):
 class AppApplyOut(BaseModel):
   mode: Literal["created", "updated", "unchanged"]
   app: AppOut
+  warnings: list[str] = Field(default_factory=list)
 
 
 class AppInstall(BaseModel):
