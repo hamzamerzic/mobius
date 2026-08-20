@@ -47,7 +47,11 @@ def promote_goal(objective: str) -> dict:
   )
   try:
     with urlopen(request, timeout=30) as response:
-      payload = json.loads(response.read())
+      raw = response.read()
+    try:
+      payload = json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+      raise SystemExit("goal promotion failed: malformed response")
   except HTTPError as exc:
     raw = exc.read().decode("utf-8", errors="replace")
     try:

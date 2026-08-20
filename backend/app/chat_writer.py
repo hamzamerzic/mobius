@@ -2220,13 +2220,10 @@ class ChatWriterActor:
       db.rollback()
       return GoalPromotionRejected("run_not_active")
 
-    latest = (
-      db.query(models.ChatRun.id)
-      .filter(models.ChatRun.chat_id == cmd.chat_id)
-      .order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc())
-      .first()
-    )
-    if latest is None or latest[0] != run.id:
+    from app.run_state import latest_run
+
+    latest = latest_run(db, cmd.chat_id)
+    if latest is None or latest.id != run.id:
       db.rollback()
       return GoalPromotionRejected("run_not_current")
     if run.goal_objective not in (None, cmd.objective):

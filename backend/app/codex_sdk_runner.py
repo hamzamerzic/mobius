@@ -215,13 +215,12 @@ def _needs_native_goal_control(
   goal_mode: bool,
   goal_objective: str | None,
   goal_clear: bool,
-  goal_continue: bool,
   fallback_goal_objective: str | None,
 ) -> bool:
   """Whether this turn already belongs to Codex's explicit Goal lifecycle."""
   return bool(
     goal_mode or goal_objective is not None or goal_clear
-    or (goal_mode and goal_continue) or fallback_goal_objective is not None
+    or fallback_goal_objective is not None
   )
 
 
@@ -1599,7 +1598,6 @@ async def run_codex_sdk_turn(
     goal_mode=goal_mode,
     goal_objective=goal_objective,
     goal_clear=goal_clear,
-    goal_continue=goal_continue,
     fallback_goal_objective=fallback_goal_objective,
   )
   config_overrides = _codex_config_overrides(
