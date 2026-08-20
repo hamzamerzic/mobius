@@ -589,28 +589,18 @@ def get_delegation_principal(
   db: Session = Depends(get_db),
 ) -> Principal:
   """Resolve owner/app plus the route-confined delegated-child bearer."""
-  owner, payload = _resolve_owner(token, db)
+  _owner, payload = _resolve_owner(token, db)
   if payload.get("scope") == "delegation":
     app_id = payload.get("app_id")
     delegation_id, chat_id = _enforce_delegation_claims(
       payload, db, app_id,
     )
     return Principal(
-      owner=owner, app_id=int(app_id), scope="delegation",
+      owner=_owner, app_id=int(app_id), scope="delegation",
       chat_id=str(chat_id), delegation_id=str(delegation_id),
     )
-  if payload.get("scope") not in (None, "app"):
-    raise HTTPException(status_code=403, detail="Token scope is not valid here.")
-  app_id = _enforce_app_scope(payload, db)
-  delegation_id = payload.get("delegation_id")
-  delegation_chat = payload.get("delegation_chat")
-  return Principal(
-    owner=owner, app_id=app_id,
-    app_instance_id=payload.get("app_nonce") if app_id is not None else None,
-    scope="app" if app_id is not None else "owner",
-    chat_id=delegation_chat,
-    delegation_id=delegation_id,
-  )
+  # Any non-delegation token resolves through the generic principal path.
+  return get_principal(token, db)
 
 
 def get_agent_run_principal(

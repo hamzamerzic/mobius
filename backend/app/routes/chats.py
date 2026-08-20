@@ -1802,7 +1802,11 @@ async def _delete_chat_locked(chat_id: str, db: Session) -> None:
     cancel_delegation_execution,
   )
   for delegation_id in active_delegation_ids_for_chat(db, chat_id):
-    if not await cancel_delegation_execution(delegation_id):
+    # This runs under get_transition_lock(chat_id); a delegation whose child
+    # chat IS this chat must not try to re-acquire that same non-reentrant lock.
+    if not await cancel_delegation_execution(
+      delegation_id, held_chat_locks=frozenset({chat_id}),
+    ):
       raise HTTPException(
         status_code=409,
         detail="Could not stop active delegated work; retry",

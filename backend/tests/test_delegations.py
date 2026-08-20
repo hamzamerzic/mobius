@@ -959,6 +959,30 @@ def test_app_delete_settles_owned_delegations(client, owner_token, db):
   assert run.status == "stopped"
 
 
+def test_child_chat_delete_settles_its_own_delegation(client, owner_token, db):
+  # Deleting the delegated CHILD chat runs under get_transition_lock(child_id).
+  # active_delegation_ids_for_chat returns the delegation whose child IS this
+  # chat, so the cancellation path must settle it WITHOUT re-acquiring that same
+  # non-reentrant lock — otherwise the delete deadlocks and wedges the chat.
+  _parent_id, child_id, delegation_id = _seed_delegation(
+    db, suffix="delete-child", child_status="running",
+  )
+
+  response = client.delete(
+    f"/api/chats/{child_id}",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+
+  assert response.status_code == 204, response.text
+  db.expire_all()
+  assert db.get(models.Chat, child_id).deleted_at is not None
+  assert db.get(models.Delegation, delegation_id).cancelled_at is not None
+  run = db.query(models.ChatRun).filter(
+    models.ChatRun.chat_id == child_id,
+  ).first()
+  assert run.status == "stopped"
+
+
 def test_interrupted_child_does_not_wake_it_resumes(db, monkeypatch):
   _, child_id, delegation_id = _seed_delegation(
     db, suffix="intr", child_status="interrupted",

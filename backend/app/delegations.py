@@ -605,8 +605,16 @@ def active_delegation_ids_for_chat(db: Session, chat_id: str) -> list[str]:
 
 async def cancel_delegation_execution(
   delegation_id: str, *, _seen: frozenset[str] = frozenset(),
+  held_chat_locks: frozenset[str] = frozenset(),
 ) -> bool:
-  """Serialize cancellation against new direct-child admission."""
+  """Serialize cancellation against new direct-child admission.
+
+  ``held_chat_locks`` names chats whose transition lock the caller already
+  holds (e.g. delete_chat locks the chat it is deleting). The per-chat
+  transition lock is not reentrant, so re-acquiring it for a delegation whose
+  child chat is the one already locked would deadlock; those are entered
+  directly under the caller's lock instead.
+  """
   from app import chat_queue
   from app.database import SessionLocal
 
@@ -619,14 +627,19 @@ async def cancel_delegation_execution(
     if row is None:
       return True
     child_id = row.child_chat_id
+  if child_id in held_chat_locks:
+    return await _cancel_delegation_execution_locked(
+      delegation_id, _seen=_seen, held_chat_locks=held_chat_locks,
+    )
   async with chat_queue.get_transition_lock(child_id):
     return await _cancel_delegation_execution_locked(
-      delegation_id, _seen=_seen,
+      delegation_id, _seen=_seen, held_chat_locks=held_chat_locks | {child_id},
     )
 
 
 async def _cancel_delegation_execution_locked(
   delegation_id: str, *, _seen: frozenset[str],
+  held_chat_locks: frozenset[str] = frozenset(),
 ) -> bool:
   """Stop one child and latch cancellation only after it is quiescent.
 
@@ -655,7 +668,9 @@ async def _cancel_delegation_execution_locked(
   # A parent cannot be quiescent while one of its locally-owned branches is
   # still spending or writing. Settle leaves first, then their owner.
   for descendant_id in descendants:
-    if not await cancel_delegation_execution(descendant_id, _seen=seen):
+    if not await cancel_delegation_execution(
+      descendant_id, _seen=seen, held_chat_locks=held_chat_locks,
+    ):
       return False
   if not active:
     return True
