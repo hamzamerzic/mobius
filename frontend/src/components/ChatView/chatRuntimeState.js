@@ -133,6 +133,27 @@ export function shouldAttachRunningStream({
   return !!running && !pendingQuestionId
 }
 
+/**
+ * A fresh runtime verdict may repair a mounted pane whose stream exhausted.
+ * The stream hook keeps sole ownership while its bounded retry loop is active;
+ * after exhaustion, restart that owner rather than creating a parallel loop.
+ */
+export function runtimeStreamAttachAction({
+  running,
+  pendingQuestionId,
+  isStreaming = false,
+  connectionError = null,
+  hidden = false,
+} = {}) {
+  if (
+    hidden
+    || isStreaming
+    || !shouldAttachRunningStream({ running, pendingQuestionId })
+  ) return 'none'
+  if (connectionError === 'retrying') return 'none'
+  return connectionError === 'disconnected' ? 'retry' : 'connect'
+}
+
 /** Retire only a cold restored prefix proven older than the durable card. */
 export function shouldRetireRestoredQuestionSnapshot({
   isStreaming = false,

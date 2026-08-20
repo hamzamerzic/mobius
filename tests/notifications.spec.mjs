@@ -187,7 +187,7 @@ test('phone header preserves the 44px bell and widest badge without collisions',
 
   await context.setOffline(true)
   await page.evaluate(() => window.dispatchEvent(new Event('offline')))
-  const pill = page.locator('.shell__offline')
+  const pill = page.locator('.shell__connection-status')
   await expect(pill).toBeVisible({ timeout: 15000 })
 
   const box = locator => locator.boundingBox()

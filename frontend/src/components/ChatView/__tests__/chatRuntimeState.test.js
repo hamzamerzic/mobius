@@ -15,6 +15,7 @@ import {
   openAppCtaViewModel,
   previewReadyAnnouncement,
   previewUpdatedAnnouncement,
+  runtimeStreamAttachAction,
   serverSnapshotBehindLocal,
   shouldAttachRunningStream,
   shouldRetireRestoredQuestionSnapshot,
@@ -175,6 +176,35 @@ test('a known server run settling recovers a live stream that missed its termina
     streamStillActive: true,
     localStartInFlight: true,
   }), false, 'an unacknowledged local start owns the idle-snapshot race')
+})
+
+test('a fresh running verdict repairs only an exhausted visible stream', () => {
+  assert.equal(runtimeStreamAttachAction({
+    running: true,
+    connectionError: 'disconnected',
+  }), 'retry')
+  assert.equal(runtimeStreamAttachAction({
+    running: true,
+    connectionError: null,
+  }), 'connect')
+  assert.equal(runtimeStreamAttachAction({
+    running: true,
+    connectionError: 'retrying',
+  }), 'none', 'the bounded retry loop keeps sole ownership while active')
+  assert.equal(runtimeStreamAttachAction({
+    running: true,
+    pendingQuestionId: 'question-1',
+    connectionError: 'disconnected',
+  }), 'none', 'a parked question has no live output to attach to')
+  assert.equal(runtimeStreamAttachAction({
+    running: true,
+    connectionError: 'disconnected',
+    hidden: true,
+  }), 'none', 'only the visible pane owns transport recovery')
+  assert.equal(runtimeStreamAttachAction({
+    running: false,
+    connectionError: 'disconnected',
+  }), 'none', 'an idle server verdict must not resurrect a stream')
 })
 
 test('only a cold stream prefix missing the durable question is retired', () => {
