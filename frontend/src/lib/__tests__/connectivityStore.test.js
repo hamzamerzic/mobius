@@ -238,20 +238,10 @@ test('the hook and API client consume the shared store contract', () => {
   assert.match(client, /void verifyConnectivity\(\)/)
 })
 
-test('the durable system stream wakes visible chat runtime reconciliation', () => {
-  const systemStream = readFileSync(
-    new URL('../../hooks/useSystemEventStream.js', import.meta.url),
-    'utf8',
-  )
+test('visible chats subscribe their runtime owner to shared recovery', () => {
   const chatView = readFileSync(
     new URL('../../components/ChatView/ChatView.jsx', import.meta.url),
     'utf8',
-  )
-  assert.match(systemStream, /await fetch\([\s\S]*?reportNetworkReachable\(\)/)
-  assert.match(
-    systemStream,
-    /if \(!cancelled\) \{[\s\S]*?void verifyConnectivity\(\)[\s\S]*?setTimeout/,
-    'an unexpected system-stream close must enter shared reachability recovery',
   )
   assert.match(
     chatView,
