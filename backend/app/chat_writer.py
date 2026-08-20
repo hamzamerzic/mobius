@@ -384,12 +384,12 @@ class ReconcileStartupChat(_Command):
 # These own the read-modify-write of the chat's `messages` /
 # `pending_messages` blobs: initial-send (`StartTurn`, from
 # routes/chats_stream.py), append (`AppendPending`), cancel
-# (`CancelPending`), promote (`PromotePending`, from chat_queue.py), and
-# clear / run markers (`ClearPending`, from chat.py).  The routes/queue
-# submit these instead of mutating the row directly, so every mutation is
-# serialized on the actor thread.  Each is must-persist (commit-before-ack,
-# non-coalescing) and fences any pending coalescible snapshot for its
-# (chat_id, run_token) key on submit.
+# (`CancelPending`), edit (`UpdatePending`), promote (`PromotePending`, from
+# chat_queue.py), and clear / run markers (`ClearPending`, from chat.py).  The
+# routes/queue submit these instead of mutating the row directly, so every
+# mutation is serialized on the actor thread.  Each is must-persist (commit-
+# before-ack, non-coalescing) and fences any pending coalescible snapshot for
+# its (chat_id, run_token) key on submit.
 
 
 @dataclass(frozen=True)
@@ -516,6 +516,22 @@ class CancelPending(_Command):
   chat_id: str = ""
   run_token: str = ""
   cid: str = ""
+
+
+@dataclass
+class UpdatePending(_Command):
+  """Replace one still-queued message's text without changing its identity.
+
+  The stable `cid`, ordering `ts`, attachments, and queue position stay
+  untouched. Returns `{"updated", "pending"}`; `updated` is False when a
+  racing promotion or cancellation already pulled the row from the queue, so
+  the caller can tell a real edit from a no-op instead of assuming success.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  cid: str = ""
+  content: str = ""
 
 
 @dataclass
@@ -771,6 +787,7 @@ _FENCE_COMMANDS = (
   AppendSteeredUserMessage,
   PromotePending,
   CancelPending,
+  UpdatePending,
   ClearPending,
   ReplaceTranscript,
   FinishRun,
@@ -1506,6 +1523,8 @@ class ChatWriterActor:
       return self._promote_pending(db, cmd)
     if isinstance(cmd, CancelPending):
       return self._cancel_pending(db, cmd)
+    if isinstance(cmd, UpdatePending):
+      return self._update_pending(db, cmd)
     if isinstance(cmd, ClearPending):
       return self._clear_pending(db, cmd)
     if isinstance(cmd, ReplaceTranscript):
@@ -2645,6 +2664,37 @@ class ChatWriterActor:
       if not _commit_or_rollback(db):
         raise _PersistFailed("CancelPending did not persist")
     return {"pending": remaining}
+
+  def _update_pending(self, db, cmd: UpdatePending) -> dict:
+    """Replace one still-queued message's text, preserving every other field.
+
+    Matches on `cid_of` like `_cancel_pending`; stamps `updated_at` and commits
+    only when the row is still queued. Returns `{"updated", "pending"}` —
+    `updated` is False when a racing promote or cancel already removed the row,
+    so the caller can distinguish a real edit from a no-op.
+    """
+    from datetime import UTC, datetime
+
+    from app.models import Chat
+
+    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+    if chat is None:
+      raise _PersistFailed("UpdatePending: chat not found")
+    pending = list(chat.pending_messages or [])
+    updated = False
+    next_pending = []
+    for message in pending:
+      if not updated and cid_of(message) == cmd.cid:
+        next_pending.append({**message, "content": cmd.content})
+        updated = True
+      else:
+        next_pending.append(message)
+    if updated:
+      chat.pending_messages = next_pending
+      chat.updated_at = datetime.now(UTC)
+      if not _commit_or_rollback(db):
+        raise _PersistFailed("UpdatePending did not persist")
+    return {"updated": updated, "pending": next_pending}
 
   def _clear_pending(self, db, cmd: ClearPending) -> dict:
     """Empty the pending queue; return the count + the cleared cids.

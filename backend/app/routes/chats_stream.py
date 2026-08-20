@@ -29,6 +29,7 @@ from app.chat_writer import (
   CancelPending,
   StartTurn,
   StartTurnBlockedByPendingQuestion,
+  UpdatePending,
   alloc_run_token,
   await_ack,
   cid_of,
@@ -1190,6 +1191,42 @@ async def cancel_pending_message(
   )
   result = await await_ack(ack)
   return {"pending_messages": result["pending"]}
+
+
+@router.patch(
+  "/{chat_id}/pending/{cid}",
+  status_code=200,
+  dependencies=[Depends(reject_cross_site)],
+)
+async def update_pending_message(
+  chat_id: str,
+  cid: str,
+  body: schemas.PendingMessageUpdate,
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  db: Session = Depends(get_db),
+):
+  """Edits one queued (not-yet-started) user message in place, identified by
+  its stable `cid`. Only the text changes; the actor's UpdatePending preserves
+  the row's identity, ordering, attachments, and queue position.
+
+  Returns `updated` plus the current pending queue so the client can reconcile
+  drift: `updated` is False when a racing promotion or cancellation pulled the
+  message into the active turn between the owner saving and the PATCH landing.
+  """
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:send")
+  require_active_chat_access(db, chat_id, principal)
+  content = body.content.strip()
+  if not content:
+    raise HTTPException(status_code=422, detail="Queued message cannot be empty.")
+  # The actor's UpdatePending is the SOLE runtime mutator of pending_messages,
+  # so an edit racing a concurrent promote/cancel can't lost-update.
+  ack = get_writer().submit(
+    UpdatePending(chat_id=chat_id, run_token="", cid=cid, content=content)
+  )
+  result = await await_ack(ack)
+  return {"updated": result["updated"], "pending_messages": result["pending"]}
 
 
 @router.get("/{chat_id}/stream")
