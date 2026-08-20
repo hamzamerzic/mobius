@@ -1521,7 +1521,9 @@ async def apply_app_source(
         "appId": str(result.app.id),
         "chatId": str(body.chat_id),
       })
-  return schemas.AppApplyOut(mode=result.mode, app=result.app)
+  return schemas.AppApplyOut(
+    mode=result.mode, app=result.app, warnings=list(result.warnings)
+  )
 
 
 def _pending_store_update_app(

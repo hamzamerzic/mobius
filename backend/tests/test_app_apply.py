@@ -166,6 +166,26 @@ def test_store_managed_apply_refreshes_only_previously_approved_skills(
   assert updated.json()["warnings"] == []
 
 
+def test_apply_route_forwards_skill_sync_warnings(client, auth, monkeypatch):
+  # A partial skill sync (oversize skill, snapshot failure, ownership conflict)
+  # is non-fatal but must reach the apply receipt, not be silently dropped at
+  # the HTTP boundary — that silent staleness is exactly what this path fixes.
+  from app import install
+
+  async def _warn(_db, _app, _manifest, warnings):
+    warnings.append("skill guide.md: exceeds 262144 bytes — skipped")
+
+  monkeypatch.setattr(install, "_sync_app_skills", _warn)
+
+  created = _apply(client, auth, _source())
+
+  assert created.status_code == 200, created.text
+  assert (
+    "skill guide.md: exceeds 262144 bytes — skipped"
+    in created.json()["warnings"]
+  )
+
+
 def test_startup_retires_integrated_app_provenance(client, auth, db):
   source = _source()
   created = _apply(client, auth, source)
