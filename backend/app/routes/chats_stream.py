@@ -27,6 +27,7 @@ from app.chat_writer import (
   AnswerQuestion,
   AppendPending,
   CancelPending,
+  SESSION_FILE_MANIFEST_MARKER,
   StartTurn,
   StartTurnBlockedByPendingQuestion,
   UpdatePending,
@@ -149,7 +150,7 @@ def _content_with_uploads(chat: models.Chat, body: schemas.SendMessage) -> str:
   # steered multi-message turns look duplicated/newline-heavy in the client and
   # changes what the provider sees. If the body already carries the manifest,
   # leave it as-is.
-  if "[Files in this session:" in content:
+  if SESSION_FILE_MANIFEST_MARKER in content:
     return content
   if chat.uploads:
     safe_entries = []
@@ -162,7 +163,7 @@ def _content_with_uploads(chat: models.Chat, body: schemas.SendMessage) -> str:
         )
     if safe_entries:
       lines = "\n".join(safe_entries)
-      content += f"\n\n[Files in this session:\n{lines}]"
+      content += f"\n\n{SESSION_FILE_MANIFEST_MARKER}\n{lines}]"
   return content
 
 

@@ -291,6 +291,26 @@ export default function usePendingQueue(initialServerList = []) {
     releaseSteerReservation([cid])
   }, [apply, releaseSteerReservation])
 
+  // Apply a single edited row's server-canonical content WITHOUT rebuilding the
+  // queue from a whole-list snapshot. The edit PATCH returns its own view of the
+  // queue, which can predate a sibling promote/cancel/enqueue the client already
+  // applied locally; hydrating that snapshot would resurrect or drop those rows.
+  // Touch only the edited row, and only if it is still queued locally — a no-op
+  // when a race has already removed it (never re-add it).
+  const updateContentByCid = useCallback((cid, content) => {
+    apply(prev => {
+      let hit = false
+      const next = prev.map(m => {
+        if (!hit && cidOf(m) === cid) {
+          hit = true
+          return { ...m, content }
+        }
+        return m
+      })
+      return hit ? next : prev
+    })
+  }, [apply])
+
   // Restore one optimistically-cancelled row after both the DELETE and its
   // authoritative fallback read fail. Reinsert into the CURRENT queue rather
   // than hydrating a stale full snapshot: other rows may have been promoted,
@@ -397,6 +417,7 @@ export default function usePendingQueue(initialServerList = []) {
     promoteAll,
     promoteManyByCid,
     cancelByCid,
+    updateContentByCid,
     restoreByCid,
     hydrate,
     clear,

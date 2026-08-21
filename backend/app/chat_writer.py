@@ -2739,12 +2739,18 @@ class ChatWriterActor:
     return {"pending": remaining}
 
   def _update_pending(self, db, cmd: UpdatePending) -> dict:
-    """Replace one still-queued message's text, preserving every other field.
+    """Replace one still-queued message's visible text, preserving every other
+    field — including the row's hidden session-file manifest.
 
-    Matches on `cid_of` like `_cancel_pending`; stamps `updated_at` and commits
-    only when the row is still queued. Returns `{"updated", "pending"}` —
-    `updated` is False when a racing promote or cancel already removed the row,
-    so the caller can distinguish a real edit from a no-op.
+    Matches on `cid_of` like `_cancel_pending`. `cmd.content` is the owner's
+    visible text only; the row's frozen manifest suffix is re-attached here so a
+    text edit can never blank the row or change which files it references, and
+    the browser never round-trips that hidden content. `updated` reports whether
+    the row is still queued (True even for a no-op edit to identical text); the
+    commit and `updated_at` bump happen only when the content actually changed,
+    mirroring `_cancel_pending`. `updated` is False only when a racing promote or
+    cancel already removed the row, so the caller can distinguish a real edit
+    from a message that has already left the queue.
     """
     from datetime import UTC, datetime
 
@@ -2755,14 +2761,21 @@ class ChatWriterActor:
       raise _PersistFailed("UpdatePending: chat not found")
     pending = list(chat.pending_messages or [])
     updated = False
+    changed = False
     next_pending = []
     for message in pending:
       if not updated and cid_of(message) == cmd.cid:
-        next_pending.append({**message, "content": cmd.content})
         updated = True
+        original = message.get("content") or ""
+        new_content = cmd.content + pending_manifest_suffix(original)
+        if original == new_content:
+          next_pending.append(message)
+        else:
+          next_pending.append({**message, "content": new_content})
+          changed = True
       else:
         next_pending.append(message)
-    if updated:
+    if changed:
       chat.pending_messages = next_pending
       chat.updated_at = datetime.now(UTC)
       if not _commit_or_rollback(db):
@@ -3362,6 +3375,26 @@ class _PersistFailed(Exception):
 # `alloc_run_token` from this module — the reverse import would cycle).
 # `chat.py` re-imports the few it still needs BACK from here, so the
 # dependency runs one way (chat.py -> chat_writer).
+
+
+# Hidden session-file manifest that routes/chats_stream._content_with_uploads
+# appends to a queued message at compose time. Editing replaces only the
+# visible text and must keep this trailing block, so both the builder and the
+# editor (UpdatePending) key off this exact marker.
+SESSION_FILE_MANIFEST_MARKER = "[Files in this session:"
+
+
+def pending_manifest_suffix(content: str) -> str:
+  """Return the trailing ``\\n\\n[Files in this session: ...]`` block a queued
+  message carries, or ``""`` when it has none.
+
+  Used to preserve a queued row's file references across a text-only edit
+  without re-deriving them from the live upload set (which would drift) or
+  trusting the browser to round-trip them.
+  """
+  marker = "\n\n" + SESSION_FILE_MANIFEST_MARKER
+  idx = content.find(marker)
+  return content[idx:] if idx != -1 else ""
 
 
 def cid_of(msg: dict) -> str | None:

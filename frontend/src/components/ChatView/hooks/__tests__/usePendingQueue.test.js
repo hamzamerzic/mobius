@@ -528,3 +528,23 @@ test('confirming one cid leaves a concurrently-queued row alone', () => {
     'both rows are server-confirmed, so fast-forward stays available on both',
   )
 })
+
+test('updateContentByCid edits only the matched row and never re-adds a gone row', () => {
+  const { result } = renderHook(usePendingQueue)
+  result.current.add(fixtureMsg({ cid: 'a', ts: 100 }))
+  result.current.add(fixtureMsg({ cid: 'b', ts: 200 }))
+
+  // Edits the matched row's content in place; siblings are untouched.
+  result.current.updateContentByCid('a', 'edited-a')
+  const rows = result.current.pendingMessagesRef.current
+  assert.equal(rows.length, 2)
+  assert.equal(rows[0].content, 'edited-a')
+  assert.equal(rows[1].content, 'hi')
+
+  // A cid no longer queued is a no-op — it must NOT resurrect a promoted row
+  // (the guard against the edit-vs-promote hydrate race).
+  result.current.updateContentByCid('gone', 'late')
+  assert.deepEqual(
+    result.current.pendingMessagesRef.current.map(m => m.cid), ['a', 'b'],
+  )
+})

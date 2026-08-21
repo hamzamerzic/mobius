@@ -6,7 +6,7 @@ import {
   Pencil,
   X,
 } from '@openai/apps-sdk-ui/components/Icon'
-import { augmentationSuffix, stripAugmentation } from './msgText.js'
+import { stripAugmentation } from './msgText.js'
 import { cidOf } from './messageIdentity.js'
 import {
   pointerSelectionChangedWithin,
@@ -65,6 +65,7 @@ export default function QueuedMessages({
   }
 
   function beginEdit(msg) {
+    if (editSaving) return
     const cid = cidOf(msg)
     setEditingCid(cid)
     setEditDraft(stripAugmentation(msg.content || ''))
@@ -91,14 +92,13 @@ export default function QueuedMessages({
       cancelEdit()
       return
     }
-    // Replace only the visible text; keep the hidden session-file manifest so
-    // an edited message still points the agent at its uploads.
-    const content = visible + augmentationSuffix(msg.content || '')
     setEditSaving(true)
     setEditError('')
-    // onEdit reports an explicit outcome so a race can't read as success:
-    // 'saved' applied, 'gone' already promoted/cancelled, 'error' transport.
-    const outcome = await onEdit?.(cidOf(msg), content)
+    // Send only the owner's visible text; the server keeps the row's hidden
+    // session-file manifest, so the browser never round-trips it. onEdit
+    // reports an explicit outcome so a race can't read as success: 'saved'
+    // applied, 'gone' already promoted/cancelled, 'error' transport.
+    const outcome = await onEdit?.(cidOf(msg), visible)
     setEditSaving(false)
     if (outcome === 'saved') {
       setEditingCid(null)
@@ -270,6 +270,7 @@ export default function QueuedMessages({
                       onClick={() => beginEdit(msg)}
                       aria-label="Edit queued message"
                       title="Edit"
+                      disabled={editSaving}
                     >
                       <Pencil width={16} height={16} aria-hidden="true" />
                     </button>

@@ -3232,9 +3232,16 @@ export default function ChatView({
         },
       )
       const data = await jsonOrThrow(res, 'Queued-message edit failed')
-      if (data.updated && Array.isArray(data.pending_messages)) {
-        // Reconcile the edited text from server truth.
-        pendingQueue.hydrate(data.pending_messages)
+      if (data.updated) {
+        // Apply ONLY this row's server-canonical content (the visible text plus
+        // its preserved manifest). A whole-queue hydrate here would trust a
+        // snapshot that can predate a sibling promote/cancel/enqueue and
+        // resurrect or drop those rows; update exactly the row we edited, and
+        // only while it is still locally queued (a no-op if a race removed it).
+        const row = Array.isArray(data.pending_messages)
+          ? data.pending_messages.find(m => cidOf(m) === cid)
+          : null
+        if (row) pendingQueue.updateContentByCid(cid, row.content)
         return 'saved'
       }
       // updated:false — a racing promotion or cancel already pulled this row

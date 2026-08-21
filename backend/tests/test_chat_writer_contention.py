@@ -552,6 +552,35 @@ def test_update_pending_missing_cid_is_a_noop(actor):
   ]
 
 
+def test_update_pending_preserves_manifest_suffix(actor):
+  """The visible text is replaced but the row's hidden session-file manifest
+  suffix is re-attached verbatim, so an edit can't drop its file references."""
+  suffix = "\n\n[Files in this session:\n- a.txt → /data/x/a.txt (text/plain, 1 KB)]"
+  _seed_chat(pending=[
+    {"role": "user", "content": "before" + suffix, "ts": 10, "cid": "c-m"},
+  ])
+  result = _await(actor.submit(UpdatePending(
+    chat_id="c1", run_token="", cid="c-m", content="after",
+  )))
+  assert result["updated"] is True
+  assert result["pending"][0]["content"] == "after" + suffix
+
+
+def test_update_pending_same_text_reports_present_without_change(actor):
+  """Editing a queued row to its current text still reports it present
+  (updated:True) and returns the row byte-for-byte unchanged, so an idempotent
+  retry is a no-op rather than a phantom 'gone'."""
+  seeded = {
+    "role": "user", "content": "same", "ts": 10, "cid": "c-same", "position": 1,
+  }
+  _seed_chat(pending=[dict(seeded)])
+  result = _await(actor.submit(UpdatePending(
+    chat_id="c1", run_token="", cid="c-same", content="same",
+  )))
+  assert result["updated"] is True
+  assert result["pending"] == [seeded]
+
+
 # -- cid identity: dedup + idempotency ------------------------------------
 def test_append_pending_duplicate_cid_is_idempotent(actor):
   """A retried queue POST carries the SAME cid; the writer returns the

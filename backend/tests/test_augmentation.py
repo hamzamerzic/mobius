@@ -960,6 +960,67 @@ def test_update_pending_message_rejects_empty_content(client, db, auth):
   assert c.pending_messages[0]["content"] == "keep"
 
 
+_MANIFEST = (
+  "\n\n[Files in this session:\n"
+  "- report.pdf → /data/x/report.pdf (application/pdf, 1 KB)]"
+)
+
+
+def test_update_pending_message_preserves_file_manifest(client, db, auth):
+  """A text-only edit keeps the row's frozen session-file manifest verbatim and
+  never re-derives it from the live upload set (so it can't gain or drop files)."""
+  from app import models
+
+  c = models.Chat(
+    id="edit-manifest", title="t", messages=[],
+    pending_messages=[
+      {"role": "user", "content": "summarize the report" + _MANIFEST,
+       "ts": 100, "cid": "c-m"},
+    ],
+    # A different, later upload must NOT leak into the edited row.
+    uploads=[{"name": "other.png", "path": "/data/x/other.png",
+              "mime_type": "image/png", "size": 2048}],
+  )
+  db.add(c)
+  db.commit()
+
+  resp = client.patch(
+    "/api/chats/edit-manifest/pending/c-m",
+    headers=auth,
+    json={"content": "summarize it briefly"},
+  )
+  assert resp.status_code == 200, resp.text
+  stored = resp.json()["pending_messages"][0]["content"]
+  assert stored == "summarize it briefly" + _MANIFEST
+  assert "other.png" not in stored
+
+
+def test_update_pending_message_keeps_manifest_when_edit_text_contains_marker(
+  client, db, auth,
+):
+  """Editing to text that itself contains the manifest marker still keeps the
+  row's real manifest — the server never parses or trusts the visible text."""
+  from app import models
+
+  c = models.Chat(
+    id="edit-marker", title="t", messages=[],
+    pending_messages=[
+      {"role": "user", "content": "hello" + _MANIFEST, "ts": 100, "cid": "c-k"},
+    ],
+  )
+  db.add(c)
+  db.commit()
+
+  resp = client.patch(
+    "/api/chats/edit-marker/pending/c-k",
+    headers=auth,
+    json={"content": "what does [Files in this session: even mean?"},
+  )
+  assert resp.status_code == 200, resp.text
+  stored = resp.json()["pending_messages"][0]["content"]
+  assert stored == "what does [Files in this session: even mean?" + _MANIFEST
+
+
 def test_cancel_pending_row_by_backfilled_legacy_cid(client, db, auth):
   """A card-221-backfilled row carries an explicit `legacy-<ts>` cid; cancelling
   by that value removes it (the value is stored now, not derived at read time)."""
