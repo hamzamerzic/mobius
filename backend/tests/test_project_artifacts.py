@@ -401,3 +401,27 @@ def test_malformed_artifacts_json_never_500s(client, auth, db):
   ).json()["artifacts"]
   assert [a["id"] for a in artifacts] == ["ok-one"]
   assert artifacts[0]["source_missing"] is True
+
+
+def test_artifacts_dir_is_hidden_from_the_root_finder_listing(client, auth):
+  project = _make_project(client, auth)
+  _write_file(client, auth, project, "index.html", "<h1>ok</h1>")
+  client.post(
+    f"/api/projects/{project['id']}/artifacts", headers=auth,
+    json={"name": "Website", "builder": "website", "source": "index.html"},
+  )
+  asyncio.run(project_builders.run_build(project["id"], "website"))
+
+  # The build created artifacts/ on disk; it must NOT show in the root finder
+  # listing (it is surfaced in the Artifacts zone instead), while real source
+  # files stay listed.
+  root = client.get(f"/api/projects/{project['id']}/files", headers=auth).json()
+  names = {e["name"] for e in root["entries"]}
+  assert "artifacts" not in names
+  assert "index.html" in names
+
+  # It stays reachable on disk (listing inside it still works).
+  inside = client.get(
+    f"/api/projects/{project['id']}/files?path=artifacts", headers=auth,
+  ).json()
+  assert inside["entries"], "artifacts/ should still be browsable when navigated into"

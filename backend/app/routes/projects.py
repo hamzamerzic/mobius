@@ -944,11 +944,17 @@ def list_project_files(
     return {"path": path, "entries": []}
   if not directory.is_dir():
     raise HTTPException(400, "Path is not a directory.")
+  at_root = directory.resolve() == root.resolve()
   entries = []
   for child in sorted(directory.iterdir(), key=lambda value: (not value.is_dir(), value.name.lower())):
     if len(entries) >= _LIST_LIMIT:
       break
     if child.is_symlink():
+      continue
+    # `artifacts/` at the root is managed build output surfaced in the Artifacts
+    # zone, not source the owner edits — keep it out of the finder to avoid
+    # clutter. It stays on disk and reachable via the artifact-output endpoint.
+    if at_root and child.is_dir() and child.name == "artifacts":
       continue
     rel = child.relative_to(root).as_posix()
     stat = child.stat()
