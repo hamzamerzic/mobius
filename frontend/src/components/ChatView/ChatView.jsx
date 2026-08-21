@@ -67,7 +67,7 @@ import {
 import {
   isProviderSwitchBlocking,
 } from './providerSwitch.js'
-import { questionKey } from './questionKey.js'
+import { questionKey, lastQuestionKey } from './questionKey.js'
 import {
   questionAnswerHandoffReady,
   questionAnswerHandoffReducer,
@@ -3060,13 +3060,10 @@ export default function ChatView({
     const questionSubmission = resolvedAnswers
       ? freezeQuestionSubmission()
       : null
-    const questionItem = resolvedAnswers && !questionId
-      ? [...latestItemsRef.current].reverse().find(item => item?.type === 'question')
-      : null
     const responseQuestionKey = resolvedAnswers
       ? (questionId
           ? `question_id:${questionId}`
-          : (questionItem ? questionKey(questionItem) : null))
+          : lastQuestionKey(latestItemsRef.current))
       : null
     if (resolvedAnswers) {
       dispatchQuestionFollowHandoff({

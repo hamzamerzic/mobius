@@ -4,10 +4,10 @@ import {
   isChatStreamSystemEvent,
   shouldForwardChatStreamSystemEvent,
 } from './chatSystemEvents.js'
-import { questionKey } from './questionKey.js'
+import { questionKey, lastQuestionKey } from './questionKey.js'
 import {
   questionResponseActivityChanged,
-  questionResponseActivitySnapshot,
+  questionResponseBaselineSnapshot,
 } from './questionResponseActivity.js'
 import {
   upsertQuestionItem,
@@ -317,7 +317,7 @@ export default function useStreamConnection(chatId, {
           : lastGoodItemsRef.current)
     pendingQuestionResponseRef.current = {
       questionKey: questionResponseKey,
-      baseline: questionResponseActivitySnapshot(baselineItems),
+      baseline: questionResponseBaselineSnapshot(baselineItems, questionResponseKey),
     }
   }, [])
 
@@ -918,19 +918,18 @@ export default function useStreamConnection(chatId, {
       const patchCatchUpQuestionAnswers = (questionId, answers) => {
         const key = questionId ? `question_id:${questionId}` : null
         if (key) answersByQuestionKeyRef.current.set(key, answers)
-        let matchedKey = key
         catchUpItems = catchUpItems.map(it => {
           if (it.type !== 'question') return it
           const itKey = questionKey(it)
           if (key ? itKey === key : true) {
-            // Last matching question wins for an id-less answer, matching the
-            // live patch path and ChatView's last-question submitted key.
-            if (!key) matchedKey = itKey
+            // An id-less answer patches every live card and records its answer;
+            // arming keys on the last one, matching the live and submitted paths.
             if (!key) answersByQuestionKeyRef.current.set(itKey, answers)
             return { ...it, answers }
           }
           return it
         })
+        const matchedKey = key || lastQuestionKey(catchUpItems)
         if (matchedKey) armQuestionResponse(matchedKey, catchUpItems)
       }
 
@@ -1833,15 +1832,11 @@ export default function useStreamConnection(chatId, {
     const baselineItems = latestItemsRef.current.length > 0
       ? latestItemsRef.current
       : lastGoodItemsRef.current
-    let matchedKey = key
-    if (!matchedKey) {
-      // For an id-less (text-keyed) answer, key on the LAST question item so
-      // this matches ChatView's submitted questionKey (which also selects the
-      // last question). Keying on the first would diverge for a turn with two
-      // or more live question cards, dropping the response-activity handoff.
-      const matchedQuestion = [...baselineItems].reverse().find(it => it.type === 'question')
-      if (matchedQuestion) matchedKey = questionKey(matchedQuestion)
-    }
+    // For an id-less (text-keyed) answer, key on the LAST question item so this
+    // matches ChatView's submitted questionKey and the catch-up path (all three
+    // route through lastQuestionKey). Keying on the first would diverge for a
+    // turn with two or more live cards, dropping the response-activity handoff.
+    let matchedKey = key || lastQuestionKey(baselineItems)
     if (matchedKey) armQuestionResponse(matchedKey, baselineItems)
     setStreamItems(prev => {
       return prev.map(it => {

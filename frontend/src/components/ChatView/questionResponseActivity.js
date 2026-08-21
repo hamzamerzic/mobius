@@ -1,5 +1,7 @@
 /** Canonical render snapshots for detecting the first visible post-answer change. */
 
+import { lastQuestionIndex } from './questionKey.js'
+
 function stableSerialize(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value)
   if (Array.isArray(value)) {
@@ -34,4 +36,19 @@ export function questionResponseActivitySnapshot(items) {
 export function questionResponseActivityChanged(snapshot, items) {
   return typeof snapshot === 'string'
     && snapshot !== questionResponseActivitySnapshot(items)
+}
+
+/** Baseline snapshot for an answered question: the surface up to and INCLUDING
+ * that question. Everything after it is the agent's continuation, so a later
+ * commit that carries such content reads as response activity. Capturing the
+ * baseline this way (rather than the whole current surface) is what lets a
+ * reconnect snapshot that already contains post-answer text still be detected
+ * — otherwise the baseline would include the continuation and the change would
+ * never fire. Falls back to the full surface when the question is not found. */
+export function questionResponseBaselineSnapshot(items, key) {
+  const index = lastQuestionIndex(items, key)
+  const baseline = index >= 0 && Array.isArray(items)
+    ? items.slice(0, index + 1)
+    : items
+  return questionResponseActivitySnapshot(baseline)
 }
