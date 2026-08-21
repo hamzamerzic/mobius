@@ -267,6 +267,18 @@ test('finding 13: reduced motion bypasses capture; the brand has no perpetual rA
   assert.match(scene, /!prefersReducedMotion\(\)/)
   assert.match(scene, /if \(!supported\) \{\s*\n\s*flushSync\(update\)/)
   assert.doesNotMatch(brand, /requestAnimationFrame|useLivingHalo|logo-halo/)
+  assert.deepEqual(softStripKeyframes('enter', 34), [
+    { opacity: 1, transform: 'translate3d(0, -34px, 0)' },
+    { opacity: 1, transform: 'translate3d(0, 0, 0)' },
+  ])
+  assert.deepEqual(softStripKeyframes('exit', 34), [
+    { opacity: 1, transform: 'translate3d(0, 0, 0)' },
+    { opacity: 1, transform: 'translate3d(0, -34px, 0)' },
+  ])
+  assert.deepEqual(softStripKeyframes('enter', 0), [
+    { opacity: 1, transform: 'translate3d(0, -1px, 0)' },
+    { opacity: 1, transform: 'translate3d(0, 0, 0)' },
+  ])
 })
 
 test('single-pane Builder strip enters from above using its rendered height', () => {

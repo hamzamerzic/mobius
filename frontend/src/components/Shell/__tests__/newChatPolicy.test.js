@@ -8,11 +8,19 @@ import {
   currentReusableEmptyChat,
   detailIsUntouchedEmptyChat,
   enteredEmptySingleScreen,
+  clearNewChatIntent,
   mergeChatListWithCreatedGuards,
+  mintNewChatIntentId,
+  newChatPresentationCoversSurface,
   newChatPresentationIsCurrent,
+  readNewChatIntent,
   reconcileCreatedChatGuard,
+  reconcileNewChatIntentCreate,
   rememberCreatedChat,
+  resolveNewChatIntentId,
   reusableChatDetailVerdict,
+  validNewChatIntentId,
+  writeNewChatIntent,
 } from '../newChatPolicy.js'
 import { chatQueries } from '../../../hooks/queries.js'
 
@@ -27,9 +35,168 @@ const empty = (id, extra = {}) => ({
   ...extra,
 })
 
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+test('New Chat intent id: valid UUID, unique, injectable, fail-safe', () => {
+  const a = mintNewChatIntentId()
+  const b = mintNewChatIntentId()
+  assert.match(a, UUID_RE)
+  assert.match(b, UUID_RE)
+  assert.notEqual(a, b)
+  // A valid injected source is used verbatim (client id == future chat id).
+  assert.equal(
+    mintNewChatIntentId({ randomUUID: () => '11111111-1111-4111-8111-111111111111' }),
+    '11111111-1111-4111-8111-111111111111',
+  )
+  // A throwing or malformed source falls back to a valid manual v4 mint.
+  assert.match(mintNewChatIntentId({ randomUUID: () => { throw new Error('nope') } }), UUID_RE)
+  assert.match(mintNewChatIntentId({ randomUUID: () => 'not-a-uuid' }), UUID_RE)
+})
+
+test('resolveNewChatIntentId resumes every open intent, else mints fresh', () => {
+  const mint = () => 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  const pending = { chatId: '99999999-9999-4999-8999-999999999999', status: 'allocating' }
+  // The pointer is independent of Web Storage: keep the id even when the
+  // synchronous draft mirror is unavailable so IndexedDB can hydrate it.
+  assert.equal(
+    resolveNewChatIntentId(pending, { randomUUID: mint }),
+    '99999999-9999-4999-8999-999999999999',
+  )
+  // Server allocation is not completion: away/back must still find the draft.
+  assert.equal(
+    resolveNewChatIntentId({ ...pending, status: 'materialized' }, { randomUUID: mint }),
+    '99999999-9999-4999-8999-999999999999',
+  )
+  assert.equal(
+    resolveNewChatIntentId({ ...pending, status: 'retired' }, { randomUUID: mint }),
+    mint(),
+  )
+  // No pending intent -> fresh id.
+  assert.equal(resolveNewChatIntentId(null, { randomUUID: mint }), mint())
+})
+
+test('reconcileNewChatIntentCreate rotates only on authoritative conflicts', () => {
+  const mint = () => 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+  const id = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+  assert.deepEqual(
+    reconcileNewChatIntentCreate(id, 'empty', { randomUUID: mint }),
+    { action: 'accept', chatId: id },
+  )
+  for (const verdict of ['occupied', 'tombstoned']) {
+    assert.deepEqual(
+      reconcileNewChatIntentCreate(id, verdict, { randomUUID: mint }),
+      { action: 'rotate', chatId: mint() },
+    )
+  }
+  for (const verdict of ['missing', 'uncertain', 'error']) {
+    assert.deepEqual(
+      reconcileNewChatIntentCreate(id, verdict, { randomUUID: mint }),
+      { action: 'retry', chatId: id },
+    )
+  }
+})
+
+test('a superseded create waiter cannot rotate the reopened New Chat draft', () => {
+  const settle = shellSource.match(
+    /async function settleDraftFirstNewChat\(presentation\) \{([\s\S]*?)\n  \}\n\n  function retryDraftFirstNewChat/,
+  )?.[1] || ''
+  const rotate = settle.match(
+    /if \(decision\.action === 'rotate'\) \{([\s\S]*?)\n    \}\n\n    if \(decision\.action !== 'accept'\)/,
+  )?.[1] || ''
+
+  const ownerCheck = rotate.indexOf(
+    'if (!draftFirstPresentationIsCurrent(presentation)) return',
+  )
+  const intentCheck = rotate.indexOf(
+    "if (String(newChatIntentRef.current?.chatId ?? '') !== intentId) return",
+  )
+  const draftRead = rotate.indexOf('readComposerDraft(intentId)')
+  const durableDraftRead = rotate.indexOf('await readComposerDraftAsync(intentId)')
+  const draftCopy = rotate.indexOf('persistComposerDraft(')
+  const pointerMove = rotate.indexOf(
+    "rememberOpenNewChatIntent({ chatId: decision.chatId, status: 'allocating' })",
+  )
+
+  assert.ok(ownerCheck >= 0, 'rotation must claim the live presentation')
+  for (const [name, position] of [
+    ['intent ownership check', intentCheck],
+    ['durable draft read', durableDraftRead],
+    ['draft copy', draftCopy],
+    ['intent pointer move', pointerMove],
+  ]) {
+    assert.ok(position > ownerCheck,
+      `${name} must happen only after the waiter claims the live presentation`)
+  }
+  assert.ok(draftRead < 0, 'conflict rotation must not trust only the synchronous mirror')
+  const checksBeforeRead = rotate.slice(0, durableDraftRead)
+    .match(/draftFirstPresentationIsCurrent\(presentation\)/g)?.length || 0
+  const checksAfterRead = rotate.slice(durableDraftRead, draftCopy)
+    .match(/draftFirstPresentationIsCurrent\(presentation\)/g)?.length || 0
+  assert.equal(checksBeforeRead, 1)
+  assert.equal(checksAfterRead, 1,
+    'rotation must reclaim presentation ownership after durable hydration')
+})
+
+test('an accepted allocation hydrates durable draft ownership before handoff', () => {
+  const settle = shellSource.match(
+    /async function settleDraftFirstNewChat\(presentation\) \{([\s\S]*?)\n  \}\n\n  function retryDraftFirstNewChat/,
+  )?.[1] || ''
+  const accepted = settle.slice(settle.indexOf("if (decision.action !== 'accept')"))
+  const hydrate = accepted.indexOf('await readComposerDraftAsync(intentId)')
+  const currentAgain = accepted.indexOf(
+    'if (!draftFirstPresentationIsCurrent(presentation)) return', hydrate,
+  )
+  const route = accepted.indexOf("if (changesRoute) navTo('chat', { chatId: intentId })")
+  assert.ok(hydrate >= 0 && currentAgain > hydrate && route > currentAgain,
+    'destination navigation must wait for durable hydration and reclaimed ownership')
+})
+
+class MemoryStorage {
+  constructor(values = {}) { this.values = new Map(Object.entries(values)) }
+  getItem(key) { return this.values.get(key) ?? null }
+  setItem(key, value) { this.values.set(key, String(value)) }
+  removeItem(key) { this.values.delete(key) }
+}
+
+test('the open New Chat pointer is valid, tab-scoped, and owner-checked on clear', () => {
+  const storage = new MemoryStorage()
+  const id = '99999999-9999-4999-8999-999999999999'
+  assert.equal(validNewChatIntentId(id), true)
+  assert.equal(validNewChatIntentId('not-a-chat'), false)
+  assert.equal(writeNewChatIntent({ chatId: id, status: 'materialized' }, storage), true)
+  assert.deepEqual(readNewChatIntent(storage), { chatId: id, status: 'materialized' })
+  assert.equal(clearNewChatIntent('other', storage), false)
+  assert.deepEqual(readNewChatIntent(storage), { chatId: id, status: 'materialized' })
+  assert.equal(clearNewChatIntent(id, storage), true)
+  assert.equal(readNewChatIntent(storage), null)
+
+  storage.setItem('new-chat-intent', JSON.stringify({ chatId: 'bad', status: 'allocating' }))
+  assert.equal(readNewChatIntent(storage), null)
+})
+
+test('New Chat intent ids are canonicalized before storage and allocation', () => {
+  const storage = new MemoryStorage()
+  const upper = 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA'
+  const lower = upper.toLowerCase()
+
+  assert.equal(mintNewChatIntentId({ randomUUID: () => upper }), lower)
+  assert.equal(resolveNewChatIntentId({
+    chatId: upper,
+    status: 'failed',
+  }), lower)
+  assert.equal(writeNewChatIntent({ chatId: upper, status: 'allocating' }, storage), true)
+  assert.deepEqual(readNewChatIntent(storage), {
+    chatId: lower,
+    status: 'allocating',
+  })
+  assert.equal(clearNewChatIntent(upper, storage), true)
+})
+
 test('New Chat presentation ownership follows allocation context then destination', () => {
   const presentation = {
     chatId: null,
+    materialized: false,
     navigationEpoch: 4,
     viewMode: 'single',
     drawerEntryOpen: true,
@@ -55,12 +222,42 @@ test('New Chat presentation ownership follows allocation context then destinatio
   assert.equal(newChatPresentationIsCurrent({
     ...presentation, drawerEntryOpen: false,
   }, current), false)
+  // A provisional client UUID is still allocation-owned until the server row
+  // has been accepted; merely having an id must not adopt route semantics.
+  assert.equal(newChatPresentationIsCurrent({
+    ...presentation, chatId: 'client-owned',
+  }, current), true)
+  assert.equal(newChatPresentationIsCurrent({
+    ...presentation, chatId: 'client-owned',
+  }, { ...current, navigationEpoch: 5 }), false)
+
+  const builderPresentation = {
+    ...presentation,
+    chatId: 'client-owned',
+    viewMode: 'panes',
+    paneId: 'left',
+    paneActiveKey: 'chat:old',
+  }
+  const builderCurrent = {
+    ...current,
+    viewMode: 'panes',
+    focusedPaneId: 'left',
+    paneActiveKey: 'chat:old',
+  }
+  assert.equal(newChatPresentationIsCurrent(builderPresentation, builderCurrent), true)
+  assert.equal(newChatPresentationIsCurrent(builderPresentation, {
+    ...builderCurrent, focusedPaneId: 'right',
+  }), false, 'focusing another pane supersedes its provisional composer')
+  assert.equal(newChatPresentationIsCurrent(builderPresentation, {
+    ...builderCurrent, paneActiveKey: 'app:42',
+  }), false, 'selecting another tab in the origin pane supersedes it')
 
   const resolvedPresentation = {
     chatId: 'new',
+    materialized: true,
     navigationEpoch: 4,
     viewMode: 'single',
-    drawerEntryOpen: true,
+    drawerEntryOpen: false,
   }
   const resolvedCurrent = {
     navigationEpoch: 9,
@@ -71,6 +268,9 @@ test('New Chat presentation ownership follows allocation context then destinatio
   }
 
   assert.equal(newChatPresentationIsCurrent(resolvedPresentation, resolvedCurrent), true)
+  assert.equal(newChatPresentationIsCurrent(resolvedPresentation, {
+    ...resolvedCurrent, drawerEntryOpen: true,
+  }), false, 'reopening navigation supersedes a materialized cover')
   assert.equal(newChatPresentationIsCurrent(resolvedPresentation, {
     ...resolvedCurrent, activeView: 'canvas', activeChatId: null,
   }), false)
@@ -90,6 +290,43 @@ test('New Chat presentation ownership follows allocation context then destinatio
   assert.equal(newChatPresentationIsCurrent(resolvedPresentation, {
     ...resolvedCurrent, navigationEpoch: 5, activeChatId: 'old',
   }), false)
+})
+
+test('New Chat cover gates only its owned surface and destination handoff', () => {
+  const standard = {
+    chatId: 'new',
+    materialized: false,
+    viewMode: 'single',
+    paneId: null,
+  }
+  assert.equal(newChatPresentationCoversSurface(null, {
+    viewMode: 'single', paneId: 'single', chatId: 'old',
+  }), false)
+  assert.equal(newChatPresentationCoversSurface(standard, {
+    viewMode: 'single', paneId: 'single', chatId: 'old',
+  }), true)
+  assert.equal(newChatPresentationCoversSurface({ ...standard, materialized: true }, {
+    viewMode: 'single', paneId: 'single', chatId: 'new',
+  }), false, 'the matching destination becomes interactive for handoff')
+  assert.equal(newChatPresentationCoversSurface({ ...standard, materialized: true }, {
+    viewMode: 'single', paneId: 'single', chatId: 'old',
+  }), true)
+
+  const builder = {
+    chatId: 'new',
+    materialized: false,
+    viewMode: 'panes',
+    paneId: 'left',
+  }
+  assert.equal(newChatPresentationCoversSurface(builder, {
+    viewMode: 'panes', paneId: 'left', chatId: 'old',
+  }), true)
+  assert.equal(newChatPresentationCoversSurface(builder, {
+    viewMode: 'panes', paneId: 'right', chatId: 'sibling',
+  }), false, 'Builder sibling panes remain usable')
+  assert.equal(newChatPresentationCoversSurface(builder, {
+    viewMode: 'single', paneId: 'single', chatId: 'old',
+  }), true, 'a stale world stays blocked until layout-effect retirement')
 })
 
 test('empty-single policy fires only on the transition edge', () => {
@@ -124,23 +361,10 @@ test('only the active empty chat is eligible for client-side reuse', () => {
   }), null)
 })
 
-test('drafts and force-new callers always require a fresh chat', () => {
-  const active = empty('active')
-  assert.equal(currentReusableEmptyChat([active], {
-    activeChatId: 'active', draft: true,
-  }), null)
-  assert.equal(currentReusableEmptyChat([active], {
-    activeChatId: 'active', forceNew: true,
-  }), null)
-})
-
-test('running, excluded, recovered, and populated active chats are rejected', () => {
+test('running, recovered, streaming, and populated active chats are rejected', () => {
   const options = { activeChatId: 'active' }
   assert.equal(currentReusableEmptyChat([empty('active', { running: true })], options), null)
   assert.equal(currentReusableEmptyChat([empty('active', { has_messages: true })], options), null)
-  assert.equal(currentReusableEmptyChat([empty('active')], {
-    ...options, exclude: 'active',
-  }), null)
   assert.equal(currentReusableEmptyChat([empty('active')], {
     ...options, recoveredChatIds: new Set(['active']),
   }), null)
@@ -164,6 +388,7 @@ function untouchedDetail(extra = {}) {
     running: false,
     pending_question_id: null,
     session_id: null,
+    created_by_app_id: null,
     ...extra,
   }
 }
@@ -176,12 +401,15 @@ test('fresh detail accepts only a fully untouched empty chat', () => {
   assert.equal(detailIsUntouchedEmptyChat(untouchedDetail({ running: true })), false)
   assert.equal(detailIsUntouchedEmptyChat(untouchedDetail({ pending_question_id: 'q' })), false)
   assert.equal(detailIsUntouchedEmptyChat(untouchedDetail({ session_id: 'session' })), false)
+  assert.equal(detailIsUntouchedEmptyChat(untouchedDetail({ created_by_app_id: 7 })), false)
 })
 
 test('fresh detail fails closed on partial or malformed responses', () => {
   assert.equal(detailIsUntouchedEmptyChat(null), false)
   assert.equal(detailIsUntouchedEmptyChat({ messages: [], pending_messages: [] }), false)
   assert.equal(detailIsUntouchedEmptyChat(untouchedDetail({ total: '0' })), false)
+  const { created_by_app_id: _owner, ...missingOwner } = untouchedDetail()
+  assert.equal(detailIsUntouchedEmptyChat(missingOwner), false)
 })
 
 test('fresh detail probe separates occupied, missing, and uncertain rows', () => {

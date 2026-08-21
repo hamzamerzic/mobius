@@ -6,9 +6,10 @@ function normalizedId(value) {
  * Whether an immediate New Chat surface still owns what the user is seeing.
  *
  * Allocation is allowed to finish only while the route generation, layout
- * world, and drawer-history ownership captured by the tap are unchanged. Once
- * the destination exists, the concrete chat route is the simpler authority:
- * it owns the cover until that ChatView reports a painted frame.
+ * world, and drawer-history ownership captured by the tap are unchanged. A
+ * provisional client UUID is still allocation-owned. Once the server row is
+ * accepted, the concrete chat route is the simpler authority: it owns the
+ * cover until that ChatView reports a painted frame.
  */
 export function newChatPresentationIsCurrent(presentation, {
   navigationEpoch,
@@ -16,10 +17,16 @@ export function newChatPresentationIsCurrent(presentation, {
   drawerEntryOpen,
   activeView,
   activeChatId,
+  focusedPaneId,
+  paneActiveKey,
 } = {}) {
   if (!presentation || presentation.viewMode !== viewMode) return false
-  if (presentation.chatId != null) {
+  if (presentation.materialized && presentation.chatId != null) {
     if (activeView !== 'chat') return false
+    // The temporary cover owns the exact drawer state captured by the
+    // destination handoff. Reopening navigation is an explicit superseding
+    // action, even while the destination ChatView is still becoming ready.
+    if (presentation.drawerEntryOpen !== !!drawerEntryOpen) return false
     // The concrete chat route owns the cover once it exists — but navTo bumps
     // the epoch and commits `activeChatId` a render later, so the route is still
     // catching up to the resolved chat for one commit. Treat that in-flight
@@ -32,8 +39,45 @@ export function newChatPresentationIsCurrent(presentation, {
     return normalizedId(activeChatId) === normalizedId(presentation.chatId)
       || presentation.navigationEpoch === navigationEpoch
   }
-  return presentation.navigationEpoch === navigationEpoch
+  const allocationContextCurrent = presentation.navigationEpoch === navigationEpoch
     && presentation.drawerEntryOpen === !!drawerEntryOpen
+  if (!allocationContextCurrent || presentation.viewMode !== 'panes') {
+    return allocationContextCurrent
+  }
+  // Builder's immediate draft surface temporarily covers exactly the pane and
+  // tab that owned the New Chat tap. Focusing another pane or selecting another
+  // tab is a newer intent even if it does not change the browser route.
+  return normalizedId(presentation.paneId) === normalizedId(focusedPaneId)
+    && normalizedId(presentation.paneActiveKey) === normalizedId(paneActiveKey)
+}
+
+/**
+ * Whether the immediate New Chat cover owns a rendered workspace surface.
+ *
+ * Standard covers the whole content world. Builder covers only the pane that
+ * received the New Chat action, leaving sibling panes available to supersede
+ * it. Once allocation succeeds, the matching destination ChatView is the sole
+ * covered surface allowed to become interactive so it can accept the durable
+ * draft/focus handoff. A mode-mismatched cover blocks the current world for its
+ * final pre-retirement commit; otherwise the newly exposed surface could steal
+ * focus through the stale cover.
+ */
+export function newChatPresentationCoversSurface(presentation, {
+  viewMode,
+  paneId = null,
+  chatId = null,
+} = {}) {
+  if (!presentation) return false
+  if (presentation.viewMode !== viewMode) return true
+
+  const coversWholeWorld = presentation.viewMode !== 'panes'
+    || presentation.paneId == null
+  if (!coversWholeWorld
+      && normalizedId(presentation.paneId) !== normalizedId(paneId)) {
+    return false
+  }
+  return !presentation.materialized
+    || normalizedId(presentation.chatId) !== normalizedId(chatId)
 }
 
 /**
@@ -54,92 +98,32 @@ export function enteredEmptySingleScreen(previous, next) {
 }
 
 /**
- * Return the only client-side chat that is safe to consider for reuse.
+ * Return the only client-side chat that can still be treated as the visible
+ * untouched compose surface.
  *
  * An off-screen empty row may belong to another browser that has just sent a
  * message while this tab's list cache is stale. Reusing it makes an explicit
  * "New chat" tap open that running conversation. The current chat is
  * different: keeping an already-open blank open is the intended no-op that
- * prevents repeated taps from manufacturing duplicate blanks. The caller
- * still verifies this candidate against the detail endpoint while online.
+ * prevents repeated taps from manufacturing duplicate blanks. Deferred
+ * navigation may also capture this identity, but validates it before routing.
  */
 export function currentReusableEmptyChat(chats, {
   activeChatId,
-  draft = false,
-  exclude = null,
-  forceNew = false,
   recoveredChatIds = new Set(),
   streamingChatIds = new Set(),
 } = {}) {
-  if (forceNew || draft || activeChatId == null) return null
+  if (activeChatId == null) return null
 
   const activeId = normalizedId(activeChatId)
-  const excludedId = normalizedId(exclude)
   const recoveredIds = new Set([...recoveredChatIds].map(normalizedId))
   const streamingIds = new Set([...streamingChatIds].map(normalizedId))
 
   const chat = (chats || []).find(row => normalizedId(row?.id) === activeId)
   if (!chat || chat.has_messages) return null
-  if (excludedId != null && activeId === excludedId) return null
   if (recoveredIds.has(activeId) || streamingIds.has(activeId)) return null
   if (chat.running) return null
   return chat
-}
-
-/**
- * Choose the Standard compose surface without applying Builder's add-new rule.
- * Only the currently open untouched blank is eligible. Saved drafts belong to
- * their original chats and must never turn New chat into history navigation.
- */
-export function standardNewChatCandidate(chats, draft, {
-  activeChatId,
-  exclude = null,
-  recoveredChatIds = new Set(),
-  streamingChatIds = new Set(),
-} = {}) {
-  const reuseOptions = {
-    exclude,
-    recoveredChatIds,
-    streamingChatIds,
-  }
-  const active = currentReusableEmptyChat(chats, {
-    ...reuseOptions,
-    activeChatId,
-  })
-  if (!active) return null
-
-  const activeDraft = draft
-    && normalizedId(draft.chatId) === normalizedId(active.id)
-    && (draft.input || draft.attachments?.length)
-    ? draft
-    : null
-  return {
-    chatId: active.id,
-    source: activeDraft ? 'draft' : 'active',
-    draft: activeDraft || null,
-  }
-}
-
-/** Decide whether candidate provenance is enough without a server round-trip. */
-export function newChatCandidateResolution(candidate, { online } = {}) {
-  if (!candidate) return 'reject'
-  if (candidate.source === 'draft') return 'reuse'
-  if (candidate.source !== 'active') return 'reject'
-  return online ? 'probe' : 'reuse'
-}
-
-/** Keep an early fresh edit separate when durable discovery arrives late. */
-export function reconcileHydratedNewChatCandidate(
-  currentCandidate,
-  hydratedCandidate,
-  { leaseWasEdited = false } = {},
-) {
-  if (!hydratedCandidate) return { candidate: currentCandidate, primeLease: false }
-  if (!leaseWasEdited) return { candidate: hydratedCandidate, primeLease: true }
-  if (hydratedCandidate.source === 'draft' && !currentCandidate?.draft) {
-    return { candidate: null, primeLease: false }
-  }
-  return { candidate: currentCandidate, primeLease: false }
 }
 
 /**
@@ -156,6 +140,8 @@ export function detailIsUntouchedEmptyChat(detail) {
   if (detail.running) return false
   if (detail.pending_question_id != null) return false
   if (detail.session_id != null) return false
+  if (!Object.hasOwn(detail, 'created_by_app_id')) return false
+  if (detail.created_by_app_id != null) return false
   return true
 }
 
@@ -174,6 +160,7 @@ export function reusableChatDetailVerdict({ ok, status, detail }) {
   if (typeof detail.running !== 'boolean') return 'uncertain'
   if (!Object.hasOwn(detail, 'pending_question_id')) return 'uncertain'
   if (!Object.hasOwn(detail, 'session_id')) return 'uncertain'
+  if (!Object.hasOwn(detail, 'created_by_app_id')) return 'uncertain'
   return 'occupied'
 }
 
@@ -309,4 +296,139 @@ export function mergeChatListWithCreatedGuards(incoming, guards, {
     merged = addCreatedChatToList(merged, guard.row)
   }
   return merged
+}
+
+// ── Client-minted New Chat intent id ─────────────────────────────────────────
+// One id owns a New Chat from the first keystroke: it is BOTH the pre-chat draft
+// key (`draft:<id>`) AND the eventual real chat id. POST /chats accepts a
+// client-minted UUID idempotently (backend chats.py), so the composer can render
+// and persist before the server row exists — no pre-id -> real-id migration, and
+// returning to New Chat resumes the same draft under the same id.
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const NEW_CHAT_INTENT_KEY = 'new-chat-intent'
+
+function sessionStore(storage) {
+  if (storage !== undefined) return storage
+  try { return globalThis.sessionStorage ?? null } catch { return null }
+}
+
+export function validNewChatIntentId(value) {
+  return typeof value === 'string' && UUID_RE.test(value)
+}
+
+/**
+ * Mint the client id for a New Chat intent. Prefer the platform UUID; fall back
+ * to a manual v4 for older/embedded runtimes without `crypto.randomUUID`, or if
+ * it throws. `randomUUID` is injectable for tests.
+ */
+export function mintNewChatIntentId({ randomUUID } = {}) {
+  const mint =
+    randomUUID || globalThis.crypto?.randomUUID?.bind(globalThis.crypto)
+  if (mint) {
+    try {
+      const id = mint()
+      if (typeof id === 'string' && UUID_RE.test(id)) return id.toLowerCase()
+    } catch { /* fall through to the manual mint */ }
+  }
+  const bytes = new Uint8Array(16)
+  let secure = false
+  try {
+    if (typeof globalThis.crypto?.getRandomValues === 'function') {
+      globalThis.crypto.getRandomValues(bytes)
+      secure = true
+    }
+  } catch { /* the manual fallback below remains valid */ }
+  if (!secure) {
+    for (let i = 0; i < bytes.length; i += 1) {
+      bytes[i] = (Math.random() * 256) | 0
+    }
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = [...bytes].map(value => value.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}`
+    + `-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+/**
+ * The id a New Chat surface should own right now. A still-open intent keeps its
+ * id even when the synchronous Web Storage mirror is empty: the independent
+ * durable draft may hydrate asynchronously under that same key. Server
+ * materialization is not completion; the intent retires only when its first
+ * message is accepted (or the chat is explicitly removed). An authoritative
+ * occupied/tombstoned create verdict rotates the id before any row is adopted.
+ */
+export function resolveNewChatIntentId(pending, { randomUUID } = {}) {
+  if (pending
+      && pending.chatId != null
+      && pending.status !== 'retired'
+      && validNewChatIntentId(String(pending.chatId))) {
+    return String(pending.chatId).toLowerCase()
+  }
+  return mintNewChatIntentId({ randomUUID })
+}
+
+/**
+ * Reconcile an idempotent create response against the intent's id. Only a
+ * verified-untouched ('empty') row is adopted. Confirmed occupancy (or a
+ * tombstoned id) rotates after the caller copies the local draft. Missing,
+ * uncertain, and transport-failed outcomes keep the SAME id for an idempotent
+ * retry: manufacturing a second id after a lost create response would strand the
+ * row that may already have committed and detach its draft.
+ */
+export function reconcileNewChatIntentCreate(intentId, verdict, { randomUUID } = {}) {
+  const id = String(intentId).toLowerCase()
+  if (verdict === 'empty') return { action: 'accept', chatId: id }
+  if (verdict === 'occupied' || verdict === 'tombstoned') {
+    return { action: 'rotate', chatId: mintNewChatIntentId({ randomUUID }) }
+  }
+  return { action: 'retry', chatId: id }
+}
+
+/** One tab-scoped pointer makes an unmounted draft discoverable after Back or reload. */
+export function readNewChatIntent(storage) {
+  const target = sessionStore(storage)
+  if (!target) return null
+  try {
+    const parsed = JSON.parse(target.getItem(NEW_CHAT_INTENT_KEY) || 'null')
+    if (!validNewChatIntentId(parsed?.chatId)) return null
+    if (!['allocating', 'failed', 'materialized'].includes(parsed?.status)) return null
+    return { chatId: String(parsed.chatId).toLowerCase(), status: parsed.status }
+  } catch {
+    return null
+  }
+}
+
+export function writeNewChatIntent(intent, storage) {
+  const target = sessionStore(storage)
+  if (!target || !validNewChatIntentId(intent?.chatId)) return false
+  const status = ['allocating', 'failed', 'materialized'].includes(intent.status)
+    ? intent.status
+    : 'allocating'
+  try {
+    target.setItem(NEW_CHAT_INTENT_KEY, JSON.stringify({
+      chatId: String(intent.chatId).toLowerCase(),
+      status,
+    }))
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Clear only the pointer still owned by this chat; a newer intent always wins. */
+export function clearNewChatIntent(chatId, storage) {
+  const target = sessionStore(storage)
+  if (!target) return false
+  try {
+    const current = readNewChatIntent(target)
+    if (chatId != null
+        && String(current?.chatId ?? '') !== String(chatId).toLowerCase()) return false
+    target.removeItem(NEW_CHAT_INTENT_KEY)
+    return true
+  } catch {
+    return false
+  }
 }

@@ -16,8 +16,13 @@ async function sourceForReference(reference) {
 
   const tokenParam = await mediaTokenParam(reference.chatId)
   if (!tokenParam) return ''
-  const path = `/api/chats/${encodeURIComponent(reference.chatId)}/${reference.collection}/`
-    + encodeURIComponent(reference.filename)
+  const encodedFilename = reference.filename
+    .split('/')
+    .map(encodeURIComponent)
+    .join('/')
+  const path = reference.kind === 'tmp'
+    ? `/api/chats/${encodeURIComponent(reference.chatId)}/tmp-images/${encodedFilename}`
+    : `/api/chats/${encodeURIComponent(reference.chatId)}/${reference.collection}/${encodedFilename}`
   return `${BASE}${path}${tokenParam}`
 }
 

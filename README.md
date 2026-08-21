@@ -5,7 +5,7 @@
 <h1 align="center">Möbius</h1>
 
 <p align="center">
-  An open-source AGI app platform. Build the apps you need, shape the workspace around your life, and help useful work improve productivity for everyone.
+  The front page for agentic work. Build apps, run agents, and keep the memory that makes the next run better.
 </p>
 
 <p align="center">
@@ -16,16 +16,71 @@
 
 <p align="center">
   <a href="https://mobius.you/"><strong>Launch Möbius</strong></a> ·
-  <a href="https://mobius-os.github.io/apps/">Browse apps</a> ·
-  <a href="#ask-for-what-you-need">Ask your agent</a> ·
+  <a href="#start-with-the-app-store">Browse apps</a> ·
+  <a href="#build-apps-and-run-agents">Build with agents</a> ·
   <a href="#contribute-to-the-platform">Contribute</a>
 </p>
 
+## The front page for agentic work
+
+Möbius is a self-hosted workspace where apps, agents, memory, skills, files, and source live together. Run several agents side by side, start with what exists, build what is missing, and keep the result where you use it.
+
+Agents can work with you in chat, inside apps, or through scheduled background work. Memory grows with useful context from the work. Reflection reviews repeated friction and prepares improvements that you can inspect and choose to keep.
+
+![Current Möbius workspace with its compact rail, pane strips, separate composers, and two agent chats in view](assets/product/app-building-showcase.png)
+
+The [live app-building story](https://mobius.you/#build) re-renders the current shell as working web elements rather than playing a screenshot. Hold the top-left Möbius mark to deal the workspace into panes, watch a phone build Field Notes one layer at a time, add it to the home screen, and open it standalone.
+
+## Start with the App Store
+
+The App Store includes everyday tools and the parts that help Möbius run itself. Browse apps for writing, planning, learning, health, creation, memory, connected tools, background work, and development. Its collections, summaries, state, and artwork come from the published apps. The [live App Store explorer](https://mobius.you/#apps) renders the current catalog as searchable, selectable interface elements.
+
+![The current Möbius App Store with its Browse and From URL tabs, filters, collections, and vertical app cards](assets/product/app-store.png)
+
+<table>
+  <tr>
+    <td align="center" width="25%"><img src="assets/product/app-icons/voice.png" width="64" alt="Voice icon"><br><strong>Voice</strong></td>
+    <td align="center" width="25%"><img src="assets/product/app-icons/tasks.png" width="64" alt="Tasks icon"><br><strong>Tasks</strong></td>
+    <td align="center" width="25%"><img src="assets/product/app-icons/notes.png" width="64" alt="Notes icon"><br><strong>Notes</strong></td>
+    <td align="center" width="25%"><img src="assets/product/app-icons/news.png" width="64" alt="News icon"><br><strong>News</strong></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="assets/product/app-icons/workout.png" width="64" alt="Workout icon"><br><strong>Workout</strong></td>
+    <td align="center"><img src="assets/product/app-icons/habits.png" width="64" alt="Habits icon"><br><strong>Habits</strong></td>
+    <td align="center"><img src="assets/product/app-icons/artifacts.png" width="64" alt="Artifacts icon"><br><strong>Artifacts</strong></td>
+    <td align="center"><img src="assets/product/app-icons/webstudio.png" width="64" alt="Web Studio icon"><br><strong>Web Studio</strong></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="assets/product/app-icons/latex.png" width="64" alt="LaTeX icon"><br><strong>LaTeX</strong></td>
+    <td align="center"><img src="assets/product/app-icons/maps.png" width="64" alt="Maps icon"><br><strong>Maps</strong></td>
+    <td align="center"><img src="assets/product/app-icons/atlas.png" width="64" alt="Atlas icon"><br><strong>Atlas</strong></td>
+    <td align="center"><img src="assets/product/app-icons/tandem.png" width="64" alt="Tandem icon"><br><strong>Tandem</strong></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="assets/product/app-icons/beat-machine.png" width="64" alt="Beat Machine icon"><br><strong>Beat Machine</strong></td>
+    <td align="center"><img src="assets/product/app-icons/cuberun.png" width="64" alt="CubeRun icon"><br><strong>CubeRun</strong></td>
+    <td align="center"><img src="assets/product/app-icons/memory.png" width="64" alt="Memory icon"><br><strong>Memory</strong></td>
+    <td align="center"><img src="assets/product/app-icons/connections.png" width="64" alt="Connections icon"><br><strong>Connections</strong></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="assets/product/app-icons/reflection.png" width="64" alt="Reflection icon"><br><strong>Reflection</strong></td>
+    <td align="center"><img src="assets/product/app-icons/subagents.png" width="64" alt="Subagents icon"><br><strong>Subagents</strong></td>
+    <td align="center"><img src="assets/product/app-icons/workflows.png" width="64" alt="Workflows icon"><br><strong>Workflows</strong></td>
+    <td align="center"><img src="assets/product/app-icons/skills.png" width="64" alt="Skills icon"><br><strong>Skills</strong></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="assets/product/app-icons/store.png" width="64" alt="App Store icon"><br><strong>App Store</strong></td>
+    <td align="center"><img src="assets/product/app-icons/contribute.png" width="64" alt="Contribute icon"><br><strong>Contribute</strong></td>
+    <td align="center"><img src="assets/product/app-icons/editor.png" width="64" alt="Editor icon"><br><strong>Editor</strong></td>
+    <td></td>
+  </tr>
+</table>
+
+Each community app is a public repository under the [Möbius OS GitHub organization](https://github.com/mobius-os). Install a reviewed app from the catalog or bring a public manifest URL, then ask your agent to make it yours. Updates preserve the app's data and local changes.
+
 ## Build apps around the way you work
 
-Möbius is a self-hosted workspace where your agent builds apps beside the conversation. Describe what you need, inspect the result, and keep the app in the same place where you use it.
-
-You do not need to know how Möbius apps are built. Start with a community app or tell your agent what would make your work easier. It can create the missing piece, adapt an existing app, and keep refining it from your feedback.
+You do not need to know how Möbius apps are built. Tell your agent what would make your work easier, inspect the working result beside the conversation, and keep refining it from your feedback.
 
 <table>
   <tr>
@@ -40,40 +95,78 @@ You do not need to know how Möbius apps are built. Start with a community app o
 
 Other apps can be as personal as the trip they support. Brazil 2026 keeps an itinerary, local phrases, weather, packing, and a journal together. News prepares a daily digest around the topics you care about.
 
-## Ask for what you need
+CubeRun shows that an app does not have to be another work utility. An agent can build a game, render its world live, and leave it beside the chats and tools that created it.
+
+![CubeRun rendering its current neon tunnel, star field, and ship](assets/product/cuberun-current.png)
+
+## Build apps and run agents
 
 Open a chat and describe the outcome you want in your own words. For example:
 
-- “Build me a simple meal planner that remembers our favourite recipes.”
+- “Build me a meal planner that remembers our favourite recipes.”
 - “Add a weekly view and quicker task entry to my planner.”
-- “Make the whole workspace calmer and easier to read on my phone.”
+- “Run this check every morning and tell me when something changes.”
 
-Your agent takes care of building it, opens a working version beside the conversation, and checks it as it works. You can react to what you see and keep asking for changes. The result can stay private to your Möbius or, when it could help others, be prepared for review as a community contribution.
+Your agent can build or adapt the app, work with real files, use connected tools, and set up recurring work. The Skills app keeps the playbooks behind that work visible and searchable.
+
+![Skills showing the playbooks available to Möbius agents](assets/product/skills.png)
+
+No autonomous rewrite ships without a person in the loop. Agents can prepare changes, run tests, and explain their reasoning. People still decide what becomes part of their Möbius or the shared platform.
 
 ## Use the same workspace on phone and web
 
-Möbius runs as a progressive web app (PWA). Your apps, files, chat, memory, and settings stay together across a computer and phone.
-
-![Editor showing the same app project across web and iPhone](assets/product/editor-continuity.png)
-
-## Personalize the whole platform
-
-The workspace can change with you. Themes reshape the shell, Memory keeps durable context available, and Reflection reviews completed work for improvements worth carrying forward.
+Möbius runs as a progressive web app (PWA). On the web, hold the top-left Möbius mark or press Shift + Enter to open panes beside the conversation. On mobile, press + and describe the app you want. The agent says it will build a draft, opens a tab, and adds the surface, identity, and content in order. Different devices can build different apps; they do not have to be mirrored views of the same example.
 
 <table>
   <tr>
-    <td width="36%"><img src="assets/product/memory-graph-iphone.png" alt="Memory showing connected notes on an iPhone"></td>
-    <td width="64%"><img src="assets/product/themes.png" alt="Möbius in its default theme and a custom expressive theme"></td>
+    <td width="72%"><img src="assets/product/workspace-multiple-panes.png" alt="The current Möbius runtime at a desktop viewport with its compact rail and two empty chat panes"></td>
+    <td width="28%"><img src="assets/product/mobile-plus.png" alt="Möbius on mobile with the plus menu open above the composer"></td>
   </tr>
   <tr>
-    <td><strong>Memory:</strong> connect facts, decisions, preferences, and projects.</td>
-    <td><strong>Themes:</strong> change the full workspace, not one isolated app.</td>
+    <td><strong>Web:</strong> keep several working panes and their separate composers visible together.</td>
+    <td><strong>Mobile:</strong> press + for files, continuation, summary, and agent context.</td>
   </tr>
 </table>
 
-## Grow an open-source AGI
+An installed app can also become its own home-screen entry. The [interactive mobile sequence](https://mobius.you/#build) shows Field Notes appearing on the home screen, a cursor opening the exact new icon, and the app running without Möbius chrome.
 
-Möbius is an open-source AGI app platform that grows with the needs of its users. Anyone can build an app or platform change for their own work. When an idea helps beyond one person, Contribute gives it a path back to the community. Shared apps and platform improvements can raise productivity for everyone.
+<table>
+  <tr>
+    <td width="33%"><img src="assets/product/mobile-field-notes-home.png" alt="Field Notes installed among the current Möbius app icons on a mobile home screen"></td>
+    <td width="33%"><img src="assets/product/mobile-field-notes-opening.png" alt="A cursor pressing the Field Notes icon on the mobile home screen"></td>
+    <td width="33%"><img src="assets/product/mobile-field-notes-standalone.png" alt="Field Notes open as a standalone mobile app without Möbius chrome"></td>
+  </tr>
+  <tr>
+    <td><strong>Install:</strong> the created app joins the home screen.</td>
+    <td><strong>Open:</strong> the same icon launches the app.</td>
+    <td><strong>Standalone:</strong> the finished app owns the screen.</td>
+  </tr>
+</table>
+
+## Memory and self-improvement are built in
+
+Memory connects facts, decisions, preferences, and projects so useful context can survive the conversation where it first appeared. Reflection runs on a schedule, reviews completed work, and turns recurring friction into a better setting, skill, app change, or proposal.
+
+<table>
+  <tr>
+    <td width="34%"><img src="assets/product/memory-graph.png" alt="Memory showing connected notes about the user, Möbius apps, and the platform"></td>
+    <td width="66%"><img src="assets/product/reflection-settings.png" alt="Reflection settings for its morning brief and background agents"></td>
+  </tr>
+  <tr>
+    <td><strong>Memory:</strong> durable context shared across apps and agents.</td>
+    <td><strong>Reflection:</strong> scheduled review with explicit background-agent settings.</td>
+  </tr>
+</table>
+
+Themes can still reshape the full workspace, while Git history keeps agent-made source changes inspectable and recoverable.
+
+## Improve an open-source system
+
+Möbius grows with the needs of the people using it. Anyone can build an app or platform change for their own work. When an idea helps beyond one person, Contribute gives it a path back to the community. Shared apps and platform improvements can raise the starting point for everyone.
+
+Contribute keeps that path inspectable. A private review agent can refresh a proposal before it is sent. A security audit can trace permission-bearing paths. GitHub checks and labels stay visible, and nothing is published automatically. Try the [live review and security-check controls](https://mobius.you/#agents).
+
+![The current Contribute app showing an agent follow-up, a security review, and passing GitHub checks](assets/product/contribute-agent-review.png)
 
 <table>
   <tr>
@@ -94,16 +187,6 @@ Build for a real need, make it yours, improve what gets in the way, then share w
 
 Möbius deliberately supports coding agents that can work across a real repository. Today, that means OpenAI Codex and Claude Code. The owner chat agent can edit the frontend and backend, while git history keeps those changes reversible.
 
-No autonomous rewrite ships without a person in the loop. Agents can prepare changes, run tests, and explain their reasoning. People still decide what becomes part of the shared platform.
-
-## Start with the community catalog
-
-The App Store includes tools for notes, tasks, skills, memory, reflection, development, news, health, and learning. Each app is a public repository under the [Möbius OS GitHub organization](https://github.com/mobius-os).
-
-![The Möbius App Store](assets/product/app-store.png)
-
-Install a community app from the catalog, then ask your agent to make it yours. Updates preserve the app's data and your local changes.
-
 ## Bring agent access
 
 Möbius uses an agent account you already control. Connect one of these providers during setup:
@@ -111,7 +194,7 @@ Möbius uses an agent account you already control. Connect one of these provider
 - **OpenAI Codex**: sign in with a ChatGPT plan that includes Codex access. Usage limits depend on the plan.
 - **Claude Code**: sign in with a supported Claude Code plan
 
-Möbius uses provider sign-in, so the default setup does not require a separate API key. Reflection is its adaptive overnight meta-loop: it learns from recent work, anticipates likely needs, improves recurring workflows, and evolves its own operating model over time.
+Möbius uses provider sign-in, so setup does not require a separate application programming interface (API) key. Reflection is its adaptive overnight loop: it learns from recent work, anticipates likely needs, and improves recurring workflows.
 
 ## Launch your Möbius
 

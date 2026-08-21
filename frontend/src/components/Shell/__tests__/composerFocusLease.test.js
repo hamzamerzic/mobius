@@ -3,17 +3,22 @@ import assert from 'node:assert/strict'
 
 import {
   beginTouchComposerFocusLease,
-  composerFocusLeaseHandoff,
+  composerDraftWantsKeyboard,
   releaseComposerFocusLease,
 } from '../composerFocusLease.js'
 
-test('touch focus lease starts synchronously at the end of its draft snapshot', () => {
+test('only a real unsent draft asks to reopen the touch keyboard', () => {
+  assert.equal(composerDraftWantsKeyboard(null), false)
+  assert.equal(composerDraftWantsKeyboard({ input: '', attachments: [] }), false)
+  assert.equal(composerDraftWantsKeyboard({ input: 'unfinished', attachments: [] }), true)
+  assert.equal(composerDraftWantsKeyboard({ input: '', attachments: [{ id: '1' }] }), true)
+})
+
+test('touch focus lease starts synchronously with a clean buffer', () => {
   const calls = []
-  const selections = []
   const el = {
     value: 'stale',
     focus: (...args) => calls.push(args),
-    setSelectionRange: (...args) => selections.push(args),
   }
   const touchMedia = query => ({
     matches: query === '(hover: none) and (pointer: coarse)',
@@ -22,11 +27,50 @@ test('touch focus lease starts synchronously at the end of its draft snapshot', 
   assert.equal(beginTouchComposerFocusLease(el, {
     matchMediaImpl: touchMedia,
     activeElement: null,
-    initialValue: 'unfinished',
   }), true)
-  assert.equal(el.value, 'unfinished')
+  assert.equal(el.value, '')
   assert.deepEqual(calls, [[{ preventScroll: true }]])
-  assert.deepEqual(selections, [[10, 10]])
+})
+
+test('touch focus lease resumes a durable draft with the caret at its end', () => {
+  const selections = []
+  const el = {
+    value: '',
+    focus() {},
+    setSelectionRange: (...args) => selections.push(args),
+  }
+
+  assert.equal(beginTouchComposerFocusLease(el, {
+    matchMediaImpl: () => ({ matches: true }),
+    activeElement: null,
+    initialValue: 'draft survives',
+  }), true)
+  assert.equal(el.value, 'draft survives')
+  assert.deepEqual(selections, [[14, 14]])
+})
+
+test('an active touch lease retargets without blurring or refocusing the keyboard', () => {
+  const calls = []
+  const selections = []
+  const older = {}
+  const newer = {}
+  const el = {
+    value: 'older',
+    focus: (...args) => calls.push(args),
+    setSelectionRange: (...args) => selections.push(args),
+  }
+
+  assert.equal(beginTouchComposerFocusLease(el, {
+    matchMediaImpl: () => ({ matches: true }),
+    activeElement: el,
+    owner: newer,
+    initialValue: 'new destination',
+  }), true)
+  assert.equal(el.value, 'new destination')
+  assert.deepEqual(calls, [])
+  assert.deepEqual(selections, [[15, 15]])
+  assert.equal(releaseComposerFocusLease(el, { activeElement: el, owner: older }), false)
+  assert.equal(releaseComposerFocusLease(el, { activeElement: null, owner: newer }), true)
 })
 
 test('touch focus lease stays inert on desktop and releases failed handoffs', () => {
@@ -47,63 +91,41 @@ test('touch focus lease stays inert on desktop and releases failed handoffs', ()
   assert.equal(el.value, '')
 })
 
-test('early typing extends a resumed draft without dropping its attachments', () => {
-  const attachment = {
-    name: 'reference.png', size: 12, mime_type: 'image/png', status: 'done',
+test('a stale New chat cannot release the focus lease owned by a newer one', () => {
+  let blurred = 0
+  const el = {
+    value: '',
+    focus() {},
+    blur() { blurred += 1 },
   }
-  assert.deepEqual(composerFocusLeaseHandoff({
-    initialValue: 'unfinished',
-    leaseCandidate: {
-      chatId: 'draft-chat',
-      source: 'draft',
-      draft: { input: 'unfinished', attachments: [attachment] },
-    },
-    leaseValue: 'unfinished thought',
-    leased: true,
-    resolvedChatId: 'draft-chat',
-  }), {
-    attachments: [attachment],
-    autoSend: false,
-    shouldStage: true,
-    text: 'unfinished thought',
-  })
-})
+  const touchMedia = () => ({ matches: true })
+  const older = {}
+  const newer = {}
 
-test('an untouched resumed lease leaves the durable draft owner unchanged', () => {
-  assert.deepEqual(composerFocusLeaseHandoff({
-    initialValue: 'unfinished',
-    leaseCandidate: {
-      chatId: 'draft-chat',
-      source: 'draft',
-      draft: { input: 'unfinished', attachments: [] },
-    },
-    leaseValue: 'unfinished',
-    leased: true,
-    resolvedChatId: 'draft-chat',
-  }), {
-    attachments: [],
-    autoSend: false,
-    shouldStage: false,
-    text: 'unfinished',
-  })
-})
+  assert.equal(beginTouchComposerFocusLease(el, {
+    matchMediaImpl: touchMedia,
+    activeElement: null,
+    owner: older,
+  }), true)
+  assert.equal(releaseComposerFocusLease(el, { activeElement: el }), true)
+  assert.equal(beginTouchComposerFocusLease(el, {
+    matchMediaImpl: touchMedia,
+    activeElement: null,
+    owner: newer,
+  }), true)
+  el.value = 'newer draft'
 
-test('clearing resumed text keeps its completed attachment snapshot', () => {
-  const attachment = { name: 'reference.png', status: 'done' }
-  assert.deepEqual(composerFocusLeaseHandoff({
-    initialValue: 'remove this text',
-    leaseCandidate: {
-      chatId: 'draft-chat',
-      source: 'draft',
-      draft: { input: 'remove this text', attachments: [attachment] },
-    },
-    leaseValue: '',
-    leased: true,
-    resolvedChatId: 'draft-chat',
-  }), {
-    attachments: [attachment],
-    autoSend: false,
-    shouldStage: true,
-    text: '',
-  })
+  assert.equal(releaseComposerFocusLease(el, {
+    activeElement: el,
+    owner: older,
+  }), false)
+  assert.equal(el.value, 'newer draft')
+  assert.equal(blurred, 1)
+
+  assert.equal(releaseComposerFocusLease(el, {
+    activeElement: el,
+    owner: newer,
+  }), true)
+  assert.equal(el.value, '')
+  assert.equal(blurred, 2)
 })

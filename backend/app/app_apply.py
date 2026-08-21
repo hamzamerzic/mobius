@@ -55,6 +55,32 @@ log = logging.getLogger("mobius.app_apply")
 class ApplyResult:
   app: models.App
   mode: Literal["created", "updated", "unchanged"]
+  warnings: tuple[str, ...] = ()
+
+
+async def _sync_accepted_app_skills(
+  db: Session, app: models.App, manifest: dict | None,
+) -> tuple[str, ...]:
+  """Refresh declared skills at the same acceptance boundary as app source."""
+  from app import install
+
+  if manifest is None:
+    contract = app.capability_contract or {}
+    agent = contract.get("agent") if isinstance(contract, dict) else None
+    skills = agent.get("skills") if isinstance(agent, dict) else None
+    manifest = {
+      # Store metadata remains authoritative for WHICH skills are approved;
+      # the accepted local source revision owns their current bytes.
+      "skills": skills if isinstance(skills, list) else [],
+      "version": "accepted-local-revision",
+    }
+  warnings: list[str] = []
+  try:
+    await install._sync_app_skills(db, app, manifest, warnings)
+  except Exception as exc:
+    log.exception("app apply: skill sync failed post-commit")
+    warnings.append(f"skills: sync failed — {exc!r}")
+  return tuple(warnings)
 
 
 async def _git_operation(label: str, fn, *args):
@@ -245,14 +271,20 @@ def _apply_local_manifest_runtime(
   app.github_connect = bool(permissions.get("github_connect", False))
   app.filesystem_access = bool(permissions.get("filesystem_access", False))
   app.connections_manage = bool(permissions.get("connections_manage", False))
-  app.offline_capable = bool(runtime_fields.get("offline_capable", False))
+  # Only override offline_capable when the manifest declares it, so a manifest
+  # that omits the field does not silently disable an already-offline app
+  # (upstream's hosted-publication refinement).
+  if "offline_capable" in runtime_fields:
+    app.offline_capable = runtime_fields["offline_capable"]
   app.embeds_agent = bool(manifest.get("embeds_agent", False))
   app.offline_contract = manifest.get("offline") or None
   app.system_prompt_file = manifest.get("system_prompt") or None
   app.system_app = bool(manifest.get("system_app", False))
   app.project_templates_json = manifest.get("project_templates") or None
   app.capability_contract = contract_from_app_state(
-    app, capabilities=runtime_fields["capabilities"],
+    app,
+    capabilities=runtime_fields["capabilities"],
+    public_access=runtime_fields["public_access"],
   )
 
 
@@ -287,6 +319,7 @@ def _live_runtime_state(app: models.App) -> tuple:
     app.source_commit,
     app.icon_png,
     app.icon_override_png,
+    app.published_manifest_url,
   )
 
 
@@ -371,6 +404,10 @@ async def apply_source_revision(
         db.flush()
       assert app is not None
       previous_state = _live_runtime_state(app)
+      # Captured explicitly so the published-manifest reset below is decoupled
+      # from the runtime-state tuple's field order (the helper carries more
+      # fields than upstream's inline tuple did).
+      previous_source_commit = app.source_commit
 
       staged = _compiled_dir() / f"app-{app.id}.js.staging"
       await compile_jsx(
@@ -410,6 +447,14 @@ async def apply_source_revision(
       # the accepted-ahead retry, ``committed`` is None and the candidate
       # parent is the already-accepted tip.
       app.source_commit = committed or candidate.parent_sha
+      if (
+        app.manifest_url is None
+        and app.source_commit != previous_source_commit
+      ):
+        # A distribution manifest is a statement about one exact accepted package. Once
+        # local source advances, require publication verification again rather
+        # than silently offering a stale repository to other people.
+        app.published_manifest_url = None
       published = publish_staged_bundle(app.id, staged)
       staged = None
 
@@ -420,7 +465,8 @@ async def apply_source_revision(
       )
       if not changed:
         db.rollback()
-        return ApplyResult(app=app, mode="unchanged")
+        warnings = await _sync_accepted_app_skills(db, app, manifest)
+        return ApplyResult(app=app, mode="unchanged", warnings=warnings)
 
       app.jsx_source = source
       app.compiled_path = str(published)
@@ -435,7 +481,12 @@ async def apply_source_revision(
       if previous_bundle != published:
         unlink_app_bundle(app.id, previous_bundle)
       db.refresh(app)
-      return ApplyResult(app=app, mode="created" if created else "updated")
+      warnings = await _sync_accepted_app_skills(db, app, manifest)
+      return ApplyResult(
+        app=app,
+        mode="created" if created else "updated",
+        warnings=warnings,
+      )
   except Exception:
     db.rollback()
     if staged is not None:

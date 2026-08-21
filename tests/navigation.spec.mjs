@@ -39,6 +39,79 @@ function navChatDetail(id, assistantContent = 'Fixture response') {
   }
 }
 
+function emptyChatDetail() {
+  return {
+    messages: [],
+    total: 0,
+    offset: 0,
+    running: false,
+    pending_messages: [],
+    pending_question_id: null,
+    session_id: null,
+    provider: 'codex',
+    created_by_app_id: null,
+    agent_settings_json: null,
+    effective_agent_settings: { model: 'gpt-current', effort: 'medium' },
+    has_assistant_turns: false,
+    auto_resume_on_limit: false,
+    auto_resume_on_restart: true,
+    updated_at: '2026-01-01T00:02:00Z',
+  }
+}
+
+function createdChat(id, timestamp = '2026-01-01T00:02:00Z') {
+  return {
+    id,
+    title: 'New chat',
+    created_at: timestamp,
+    updated_at: timestamp,
+    activity_at: timestamp,
+    pinned_at: null,
+    created_by_app_id: null,
+    has_messages: false,
+    running: false,
+    messages: [],
+    detail: emptyChatDetail(),
+  }
+}
+
+async function seedDurableNewChatDraft(page, { chatId, input, status = 'failed' }) {
+  // Seed the independent store to completion on this origin before the app
+  // boots. The later NewChatLanding read must not race the fixture's put.
+  await page.goto(`${BASE}/manifest.webmanifest`, { waitUntil: 'domcontentloaded' })
+  await page.evaluate(async ({ id, draftInput, intentStatus }) => {
+    sessionStorage.setItem('new-chat-intent', JSON.stringify({
+      chatId: id,
+      status: intentStatus,
+    }))
+    // Deliberately omit sessionStorage draft:<id>. This models a quota or
+    // privacy-mode write failure where the independent durable write won.
+    const raw = JSON.stringify({
+      type: 'mobius-composer-draft',
+      version: 2,
+      updated_at: Date.now(),
+      input: draftInput,
+      attachments: [],
+    })
+    await new Promise((resolve, reject) => {
+      const request = indexedDB.open('mobius-owner-drafts', 1)
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains('drafts-v1')) {
+          request.result.createObjectStore('drafts-v1')
+        }
+      }
+      request.onerror = () => reject(request.error)
+      request.onsuccess = () => {
+        const transaction = request.result.transaction('drafts-v1', 'readwrite')
+        transaction.objectStore('drafts-v1').put(raw, id)
+        transaction.oncomplete = resolve
+        transaction.onerror = () => reject(transaction.error)
+        transaction.onabort = () => reject(transaction.error)
+      }
+    })
+  }, { id: chatId, draftInput: input, intentStatus: status })
+}
+
 /** Click the Settings entry in the drawer; assumes drawer is open. */
 async function navigateToSettings(page) {
   const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
@@ -53,7 +126,12 @@ async function navigateToSettings(page) {
 async function setup(
   page,
   viewport = { width: 412, height: 915 },
-  { assistantContent = 'Fixture response', chatDetailGate = null } = {},
+  {
+    assistantContent = 'Fixture response',
+    chatDetailGate = null,
+    chats = NAV_CHATS,
+    detailForChat = null,
+  } = {},
 ) {
   await page.setViewportSize(viewport)
 
@@ -62,13 +140,13 @@ async function setup(
   // rows from any backend database.
   await page.addInitScript(chatId => {
     localStorage.setItem('moebius_active_chat', chatId)
-  }, NAV_CHATS[0].id)
+  }, chats[0].id)
   await page.route(/\/api\/chats(?:\?.*)?$/, route => {
     if (route.request().method() !== 'GET') return route.fallback()
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(NAV_CHATS),
+      body: JSON.stringify(chats),
     })
   })
   await page.route(/\/api\/chats\/([0-9a-f-]+)(?:\?.*)?$/, route => {
@@ -77,7 +155,9 @@ async function setup(
     const fulfill = () => route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(navChatDetail(id, assistantContent)),
+      body: JSON.stringify(
+        detailForChat ? detailForChat(id) : navChatDetail(id, assistantContent),
+      ),
     })
     return chatDetailGate?.id === id
       ? chatDetailGate.wait.then(fulfill)
@@ -96,6 +176,20 @@ async function setup(
   await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route =>
     route.fulfill({ status: 204, body: '' })
   )
+  await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime(?:\?.*)?$/, route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        running: false,
+        active_goal_objective: null,
+        pending_messages: [],
+        pending_question_id: null,
+        updated_at: null,
+      }),
+    })
+  })
   await page.route('**/api/chat/stop', route =>
     route.fulfill({ status: 200, body: '{}' })
   )
@@ -257,11 +351,94 @@ async function goForward(page) {
 test.use({ serviceWorkers: 'block' })
 
 test.describe('Navigation basics', () => {
+  test('a first send retires the cold activation gate it supersedes', async ({ page }) => {
+    let releaseChatDetail
+    const wait = new Promise(resolve => { releaseChatDetail = resolve })
+    const blank = {
+      ...NAV_CHATS[0],
+      title: 'Cold empty chat',
+      has_messages: false,
+    }
+
+    await setup(page, undefined, {
+      chats: [blank],
+      detailForChat: emptyChatDetail,
+      chatDetailGate: { id: blank.id, wait },
+    })
+
+    let releaseStream
+    const streamWait = new Promise(resolve => { releaseStream = resolve })
+    let sendRequests = 0
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
+      sendRequests += 1
+      return route.fulfill({ status: 202, body: '{}' })
+    })
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
+      await streamWait
+      return route.fulfill({ status: 204, body: '' })
+    })
+
+    try {
+      const composer = page.locator('#main-content')
+        .getByRole('textbox', { name: 'Message Möbius…' })
+      await expect(composer).toBeVisible()
+      await composer.fill('Visible after superseding the cold read')
+      await composer.press('Enter')
+
+      await expect.poll(() => sendRequests).toBe(1)
+      releaseChatDetail()
+
+      const painted = page.locator(
+        `[data-chat-surface="painted"][data-chat-id="${blank.id}"]`,
+      )
+      const userRow = painted.locator('.chat__msg--user')
+      await expect(userRow).toContainText('Visible after superseding the cold read')
+      await expect(userRow).toBeVisible()
+
+      const position = await userRow.evaluate((row) => {
+        const scroll = row.closest('.chat__scroll')
+        return Math.round(row.getBoundingClientRect().top - scroll.getBoundingClientRect().top)
+      })
+      expect(position).toBeGreaterThanOrEqual(-2)
+      expect(position).toBeLessThanOrEqual(10)
+    } finally {
+      releaseChatDetail()
+      releaseStream()
+    }
+  })
+
   test('1. Initial state — chat view, URL is /shell/', async ({ page }) => {
     await setup(page)
     const state = await getNavState(page)
     expect(state.hasChat).toBe(true)
     expect(state.url).toBe('/shell/')
+  })
+
+  test('owner-input status is named and outranks the active-work dot', async ({ page }) => {
+    const chats = NAV_CHATS.map((chat, index) => ({
+      ...chat,
+      running: index < 2,
+      owner_input_kind: index === 0 ? 'secure_input' : null,
+      pending_question_id: null,
+    }))
+    await setup(page, { width: 1512, height: 861 }, { chats })
+
+    const navigation = page.getByRole('navigation', {
+      name: 'Primary navigation',
+    })
+    const waiting = navigation.getByRole('button', {
+      name: `Your input is needed ${chats[0].title}`,
+      exact: true,
+    })
+    await expect(waiting.locator('.drawer__owner-input-dot')).toBeVisible()
+    await expect(waiting.locator('.drawer__streaming-dot')).toHaveCount(0)
+
+    const working = navigation.getByRole('button', {
+      name: `Currently streaming ${chats[1].title}`,
+      exact: true,
+    })
+    await expect(working.locator('.drawer__streaming-dot')).toBeVisible()
+    await expect(working.locator('.drawer__owner-input-dot')).toHaveCount(0)
   })
 
   test('2. Navigate between two chats — back returns to first', async ({ page }) => {
@@ -381,8 +558,416 @@ test.describe('Touch navigation', () => {
     await expect(drawer).not.toHaveClass(/drawer--locked/)
   })
 
-  test('New chat preserves phone focus and early typing through allocation', async ({ page }) => {
-    const newChatId = '10000000-0000-4000-8000-000000000099'
+  test('New chat keeps the visible blank and its complete draft', async ({ page }) => {
+    const blank = {
+      ...NAV_CHATS[0],
+      id: '10000000-0000-4000-8000-000000000098',
+      title: 'Visible blank',
+      has_messages: false,
+    }
+    await page.addInitScript(chatId => {
+      sessionStorage.setItem('new-chat-intent', JSON.stringify({
+        chatId,
+        status: 'materialized',
+      }))
+      sessionStorage.setItem(`draft:${chatId}`, JSON.stringify({
+        type: 'mobius-composer-draft',
+        version: 2,
+        updated_at: Date.now(),
+        input: 'Keep this unfinished thought',
+        attachments: [{
+          name: 'reference.txt', size: 12, mime_type: 'text/plain',
+        }],
+      }))
+    }, blank.id)
+    await setup(page, undefined, {
+      chats: [blank],
+      detailForChat: emptyChatDetail,
+    })
+
+    const painted = page.locator('[data-chat-surface="painted"]')
+    const composer = painted.getByRole('textbox', { name: 'Message Möbius…' })
+    await expect(composer).toHaveValue('Keep this unfinished thought')
+    await expect(painted.getByRole('button', { name: 'Remove reference.txt' })).toBeVisible()
+
+    let createRequests = 0
+    await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
+      if (route.request().method() !== 'POST') return route.fallback()
+      createRequests += 1
+      return route.fulfill({ status: 500, body: '{}' })
+    })
+    await openDrawer(page)
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    await expect(navigation).toBeFocused()
+    await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
+
+    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
+      .toHaveAttribute('aria-expanded', 'false')
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
+      .toBe(blank.id)
+    expect(createRequests).toBe(0)
+    await expect(composer).toBeFocused()
+    await expect(composer).toHaveValue('Keep this unfinished thought')
+    await expect(painted.getByRole('button', { name: 'Remove reference.txt' })).toBeVisible()
+  })
+
+  test('a saved New Chat draft outranks a different visible blank', async ({ page }) => {
+    const blank = {
+      ...NAV_CHATS[0],
+      id: '10000000-0000-4000-8000-000000000094',
+      title: 'Different blank',
+      has_messages: false,
+    }
+    const intentId = '10000000-0000-4000-8000-000000000095'
+    await page.addInitScript(({ chatId, input }) => {
+      sessionStorage.setItem('new-chat-intent', JSON.stringify({
+        chatId,
+        status: 'failed',
+      }))
+      sessionStorage.setItem(`draft:${chatId}`, JSON.stringify({
+        type: 'mobius-composer-draft',
+        version: 2,
+        updated_at: Date.now(),
+        input,
+        attachments: [],
+      }))
+    }, { chatId: intentId, input: 'Resume this saved thought' })
+    await setup(page, undefined, {
+      chats: [blank],
+      detailForChat: emptyChatDetail,
+    })
+
+    let releaseCreation
+    const creationGate = new Promise(resolve => { releaseCreation = resolve })
+    let requestedId = null
+    await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
+      if (route.request().method() !== 'POST') return route.fallback()
+      requestedId = route.request().postDataJSON().id
+      await creationGate
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(createdChat(requestedId)),
+      })
+    })
+
+    await openDrawer(page)
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    await expect(navigation).toBeFocused()
+    await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
+
+    const presentation = page.locator('[data-new-chat-presentation]')
+    const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
+    await expect.poll(() => requestedId).toBe(intentId)
+    await expect(composer).toBeFocused()
+    await expect(composer).toHaveValue('Resume this saved thought')
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
+      .toBe(blank.id)
+
+    releaseCreation()
+    const paintedComposer = page.locator('[data-chat-surface="painted"] textarea')
+    await expect(paintedComposer).toBeFocused()
+    await expect(paintedComposer).toHaveValue('Resume this saved thought')
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
+      .toBe(intentId)
+  })
+
+  test('an IndexedDB-only New Chat draft keeps its intent id and hydrates', async ({ page }) => {
+    const intentId = '10000000-0000-4000-8000-000000000096'
+    const durableInput = 'Recovered from the independent durable draft'
+    await seedDurableNewChatDraft(page, {
+      chatId: intentId,
+      input: durableInput,
+    })
+    await setup(page, undefined, { detailForChat: emptyChatDetail })
+
+    await expect.poll(() => page.evaluate(id => new Promise((resolve, reject) => {
+      const request = indexedDB.open('mobius-owner-drafts', 1)
+      request.onerror = () => reject(request.error)
+      request.onsuccess = () => {
+        const transaction = request.result.transaction('drafts-v1', 'readonly')
+        const read = transaction.objectStore('drafts-v1').get(id)
+        read.onsuccess = () => resolve(read.result || null)
+        read.onerror = () => reject(read.error)
+      }
+    }), intentId)).toContain(durableInput)
+    await expect.poll(() => page.evaluate(id => (
+      sessionStorage.getItem(`draft:${id}`)
+    ), intentId)).toBeNull()
+    let releaseCreation
+    const creationGate = new Promise(resolve => { releaseCreation = resolve })
+    let requestedId = null
+    await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
+      if (route.request().method() !== 'POST') return route.fallback()
+      requestedId = route.request().postDataJSON().id
+      await creationGate
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(createdChat(requestedId)),
+      })
+    })
+
+    await openDrawer(page)
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
+    const presentation = page.locator('[data-new-chat-presentation]')
+    const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
+    await expect.poll(() => requestedId).toBe(intentId)
+    await expect(composer).toBeFocused()
+    await expect(composer).toHaveValue(durableInput)
+    await expect.poll(() => page.evaluate(id => (
+      sessionStorage.getItem(`draft:${id}`)
+    ), intentId)).toBeNull()
+
+    releaseCreation()
+    const painted = page.locator(
+      `[data-chat-surface="painted"][data-chat-id="${intentId}"] textarea`,
+    )
+    await expect(painted).toBeFocused()
+    await expect(painted).toHaveValue(durableInput)
+  })
+
+  test('an IDB-only draft survives authoritative intent-id rotation', async ({ page }) => {
+    const intentId = '10000000-0000-4000-8000-000000000097'
+    const durableInput = 'Carry this durable thought across the conflict'
+    await seedDurableNewChatDraft(page, {
+      chatId: intentId,
+      input: durableInput,
+    })
+    await setup(page, undefined, { detailForChat: emptyChatDetail })
+
+    let replacementId = null
+    let releaseReplacement
+    const replacementGate = new Promise(resolve => { releaseReplacement = resolve })
+    const requestedIds = []
+    await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
+      if (route.request().method() !== 'POST') return route.fallback()
+      const id = route.request().postDataJSON().id
+      requestedIds.push(id)
+      if (id === intentId) {
+        return route.fulfill({
+          status: 409,
+          contentType: 'application/json',
+          body: JSON.stringify({ detail: 'Chat id is no longer available' }),
+        })
+      }
+      replacementId = id
+      await replacementGate
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(createdChat(id)),
+      })
+    })
+
+    await openDrawer(page)
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
+    await expect.poll(() => requestedIds.length).toBe(2)
+    expect(requestedIds[0]).toBe(intentId)
+    expect(replacementId).not.toBe(intentId)
+    expect(replacementId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    )
+
+    const presentation = page.locator('[data-new-chat-presentation]')
+    await expect(presentation).toHaveAttribute('data-new-chat-presentation', replacementId)
+    const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
+    await expect(composer).toBeFocused()
+    await expect(composer).toHaveValue(durableInput)
+    await expect.poll(() => page.evaluate(id => ({
+      intent: JSON.parse(sessionStorage.getItem('new-chat-intent')),
+      replacementDraft: JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input,
+    }), replacementId)).toEqual({
+      intent: { chatId: replacementId, status: 'allocating' },
+      replacementDraft: durableInput,
+    })
+
+    releaseReplacement()
+    const painted = page.locator(
+      `[data-chat-surface="painted"][data-chat-id="${replacementId}"] textarea`,
+    )
+    await expect(painted).toBeFocused()
+    await expect(painted).toHaveValue(durableInput)
+  })
+
+  test('a fast allocation waits for its IDB-only draft before handoff', async ({ page }) => {
+    const intentId = '10000000-0000-4000-8000-000000000098'
+    const durableInput = 'Hydrate this before the fast destination takes focus'
+    await seedDurableNewChatDraft(page, {
+      chatId: intentId,
+      input: durableInput,
+    })
+    await setup(page, undefined, { detailForChat: emptyChatDetail })
+
+    let requestedId = null
+    await page.route(/\/api\/chats(?:\?.*)?$/, route => {
+      if (route.request().method() !== 'POST') return route.fallback()
+      requestedId = route.request().postDataJSON().id
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(createdChat(requestedId)),
+      })
+    })
+
+    await openDrawer(page)
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
+    await expect.poll(() => requestedId).toBe(intentId)
+    const painted = page.locator(
+      `[data-chat-surface="painted"][data-chat-id="${intentId}"] textarea`,
+    )
+    await expect(painted).toBeFocused()
+    await expect(painted).toHaveValue(durableInput)
+  })
+
+  test('the immediate New Chat cover keeps a queued old-chat focus inert', async ({ page }) => {
+    const oldId = NAV_CHATS[0].id
+    await setup(page, { width: 1280, height: 900 }, {
+      detailForChat: emptyChatDetail,
+    })
+
+    let releaseCreation
+    const creationGate = new Promise(resolve => { releaseCreation = resolve })
+    let requestedId = null
+    await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
+      if (route.request().method() !== 'POST') return route.fallback()
+      requestedId = route.request().postDataJSON().id
+      await creationGate
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(createdChat(requestedId)),
+      })
+    })
+
+    await openDrawer(page)
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
+    const presentation = page.locator('[data-new-chat-presentation]')
+    const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
+    await expect.poll(() => requestedId).not.toBeNull()
+    await expect(composer).toBeFocused()
+
+    const coveredOldChat = page.locator(
+      `[data-chat-surface="painted"][data-chat-id="${oldId}"]`,
+    )
+    await expect(coveredOldChat).toHaveAttribute('inert', '')
+    await expect(coveredOldChat).toHaveAttribute('aria-hidden', 'true')
+    // Model a focus callback that was queued by the outgoing ChatView before
+    // the presentation committed. Native inertness must reject it even if the
+    // callback itself has escaped React's request cleanup.
+    await coveredOldChat.locator('textarea')
+      .evaluate(textarea => textarea.focus({ preventScroll: true }))
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => (
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    ))))
+    await expect(composer).toBeFocused()
+    await composer.fill('The cover owns this draft')
+
+    releaseCreation()
+    const painted = page.locator(
+      `[data-chat-surface="painted"][data-chat-id="${requestedId}"] textarea`,
+    )
+    await expect(painted).toBeFocused()
+    await expect(painted).toHaveValue('The cover owns this draft')
+  })
+
+  test('reopening navigation retires a materialized cover and can resume its draft', async ({ page }) => {
+    const oldId = NAV_CHATS[0].id
+    await page.addInitScript(chatId => {
+      const nativeFocus = HTMLElement.prototype.focus
+      window.__allowDestinationComposerFocus = false
+      window.__blockedDestinationFocusCount = 0
+      HTMLElement.prototype.focus = function patchedFocus(...args) {
+        const owner = this.closest?.('[data-chat-surface="painted"][data-chat-id]')
+        if (owner && owner.dataset.chatId !== chatId
+            && !window.__allowDestinationComposerFocus) {
+          window.__blockedDestinationFocusCount += 1
+          return
+        }
+        return nativeFocus.apply(this, args)
+      }
+    }, oldId)
+    await setup(page, undefined, { detailForChat: emptyChatDetail })
+
+    await page.route(/\/api\/chats(?:\?.*)?$/, route => {
+      if (route.request().method() !== 'POST') return route.fallback()
+      const id = route.request().postDataJSON().id
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(createdChat(id)),
+      })
+    })
+
+    await openDrawer(page)
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
+    const presentation = page.locator('[data-new-chat-presentation]')
+    const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
+    await expect(composer).toBeFocused()
+    await composer.fill('Navigation can recover this')
+    await expect.poll(() => page.evaluate(() => window.__blockedDestinationFocusCount))
+      .toBeGreaterThanOrEqual(2)
+    await expect(presentation).toBeVisible()
+
+    const toggle = page.getByRole('button', { name: 'Toggle navigation' })
+    await toggle.click()
+    await expect(presentation).toHaveCount(0)
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    await expect(navigation).toBeVisible()
+
+    await page.evaluate(() => { window.__allowDestinationComposerFocus = true })
+    await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
+    const resumed = page.locator('[data-chat-surface="painted"] textarea')
+    await expect(resumed).toBeFocused()
+    await expect(resumed).toHaveValue('Navigation can recover this')
+  })
+
+  test('New chat does not reuse a blank hidden behind Settings', async ({ page }) => {
+    const blank = {
+      ...NAV_CHATS[0],
+      id: '10000000-0000-4000-8000-000000000097',
+      title: 'Hidden blank',
+      has_messages: false,
+    }
+    let newChatId = null
+    await setup(page, undefined, {
+      chats: [blank],
+      detailForChat: emptyChatDetail,
+    })
+    await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
+      if (route.request().method() !== 'POST') return route.fallback()
+      newChatId = route.request().postDataJSON().id
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(createdChat(newChatId)),
+      })
+    })
+
+    await openDrawer(page)
+    await navigateToSettings(page)
+    await openDrawer(page)
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    await expect(navigation).toBeFocused()
+    await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
+
+    await expect(page.locator('.settings')).toHaveCount(0)
+    await expect.poll(() => newChatId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    )
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
+      .toBe(newChatId)
+    await expect(page.locator('[data-chat-surface="painted"]'))
+      .toHaveAttribute('data-chat-id', newChatId)
+    await expect(page.locator('[data-chat-surface="painted"] textarea')).toBeFocused()
+  })
+
+  test('New chat keeps options geometry, phone focus, and early typing through allocation', async ({ page }) => {
     await setup(page)
     await expect.poll(() => page.evaluate(() => (
       matchMedia('(hover: none) and (pointer: coarse)').matches
@@ -390,40 +975,17 @@ test.describe('Touch navigation', () => {
 
     let releaseCreation
     const creationGate = new Promise(resolve => { releaseCreation = resolve })
+    let requestedId = null
     await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
       if (route.request().method() !== 'POST') return route.fallback()
+      requestedId = route.request().postDataJSON().id
       await creationGate
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({
-          id: newChatId,
-          title: 'New chat',
-          created_at: '2026-01-01T00:01:00Z',
-          updated_at: '2026-01-01T00:01:00Z',
-          activity_at: '2026-01-01T00:01:00Z',
-          pinned_at: null,
-          created_by_app_id: null,
-          has_messages: false,
-          running: false,
-        }),
+        body: JSON.stringify(createdChat(requestedId)),
       })
     })
-    await page.route(new RegExp(`/api/chats/${newChatId}(?:\\?.*)?$`), route => (
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          messages: [],
-          total: 0,
-          offset: 0,
-          running: false,
-          pending_messages: [],
-          pending_question_id: null,
-          session_id: null,
-        }),
-      })
-    ))
 
     await openDrawer(page)
     const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
@@ -435,18 +997,134 @@ test.describe('Touch navigation', () => {
       .getByRole('button', { name: 'New chat', exact: true })
       .click()
 
-    const focusLease = page.getByRole('textbox', { name: 'New chat message' })
     const presentation = page.locator('[data-new-chat-presentation]')
+    const immediateComposer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
+    const pendingOptions = presentation.getByRole('button', {
+      name: 'Chat options unavailable until this chat is ready',
+    })
     await expect(presentation).toBeVisible()
     await expect(presentation.getByText("What's on your mind?", { exact: true })).toBeVisible()
-    await expect(focusLease).toBeFocused()
+    await expect(pendingOptions).toBeVisible()
+    await expect(pendingOptions).toBeDisabled()
+    const pendingOptionsBox = await pendingOptions.boundingBox()
+    await expect(immediateComposer).toBeFocused()
     await page.keyboard.type('Typed while opening')
+    await expect.poll(() => requestedId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    )
+    await expect.poll(() => page.evaluate(id => (
+      JSON.parse(sessionStorage.getItem('new-chat-intent'))?.chatId === id
+    ), requestedId)).toBe(true)
+    await expect.poll(() => page.evaluate(id => (
+      JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input
+    ), requestedId)).toBe('Typed while opening')
+
     releaseCreation()
 
     const composer = page.locator('[data-chat-surface="painted"] textarea')
     await expect(composer).toBeFocused()
     await expect(composer).toHaveValue('Typed while opening')
     await expect(presentation).toHaveCount(0)
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
+      .toBe(requestedId)
+    await expect.poll(() => page.evaluate(id => (
+      JSON.parse(sessionStorage.getItem('new-chat-intent'))
+    ), requestedId)).toEqual({ chatId: requestedId, status: 'materialized' })
+    await expect.poll(() => composer.evaluate(element => ({
+      start: element.selectionStart,
+      end: element.selectionEnd,
+      length: element.value.length,
+    }))).toEqual({ start: 19, end: 19, length: 19 })
+    const readyOptions = page.locator('[data-chat-surface="painted"]')
+      .getByRole('button', { name: 'Attach or change model' })
+    await expect(readyOptions).toBeVisible()
+    await expect(readyOptions).toBeEnabled()
+    const readyOptionsBox = await readyOptions.boundingBox()
+    expect(pendingOptionsBox).not.toBeNull()
+    expect(readyOptionsBox).not.toBeNull()
+    expect(readyOptionsBox.width).toBe(pendingOptionsBox.width)
+    expect(readyOptionsBox.height).toBe(pendingOptionsBox.height)
+    expect(Math.abs(readyOptionsBox.x - pendingOptionsBox.x)).toBeLessThanOrEqual(1)
+    expect(Math.abs(readyOptionsBox.y - pendingOptionsBox.y)).toBeLessThanOrEqual(1)
+    await page.keyboard.type(' after allocation')
+    await expect(composer).toHaveValue('Typed while opening after allocation')
+  })
+
+  test('failed New chat allocation survives reload and retries the same id', async ({ page }) => {
+    await setup(page)
+    let createCount = 0
+    let requestedId = null
+    let releaseRetry
+    const retryGate = new Promise(resolve => { releaseRetry = resolve })
+    await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
+      if (route.request().method() !== 'POST') return route.fallback()
+      createCount += 1
+      const body = route.request().postDataJSON()
+      requestedId ||= body.id
+      expect(body.id).toBe(requestedId)
+      if (createCount === 1) {
+        return route.fulfill({
+          status: 503,
+          contentType: 'application/json',
+          body: JSON.stringify({ detail: 'temporarily unavailable' }),
+        })
+      }
+      await retryGate
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(createdChat(requestedId)),
+      })
+    })
+
+    await openDrawer(page)
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    await expect(navigation).toBeFocused()
+    await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
+
+    const presentation = page.locator('[data-new-chat-presentation]')
+    const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
+    await expect(presentation).toBeVisible()
+    await expect(composer).toBeFocused()
+    await composer.fill('Survives retry and reload')
+    await expect(page.getByText('Couldn’t start a new chat — your draft is safe.'))
+      .toBeVisible()
+    await expect(presentation.getByRole('button', { name: 'Retry' })).toBeVisible()
+    await expect.poll(() => page.evaluate(id => ({
+      intent: JSON.parse(sessionStorage.getItem('new-chat-intent')),
+      draft: JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input,
+    }), requestedId)).toEqual({
+      intent: { chatId: requestedId, status: 'failed' },
+      draft: 'Survives retry and reload',
+    })
+
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await page.waitForSelector('.shell', { timeout: 10000 })
+    await openDrawer(page)
+    const reloadedNavigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    await expect(reloadedNavigation).toBeFocused()
+    await reloadedNavigation.getByRole('button', { name: 'New chat', exact: true }).click()
+
+    const restored = page.locator('[data-new-chat-presentation]')
+      .getByRole('textbox', { name: 'Message Möbius…' })
+    await expect.poll(() => createCount).toBe(2)
+    await expect(restored).toBeFocused()
+    await expect(restored).toHaveValue('Survives retry and reload')
+    await expect.poll(() => page.evaluate(id => ({
+      intent: JSON.parse(sessionStorage.getItem('new-chat-intent')),
+      draft: JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input,
+    }), requestedId)).toEqual({
+      intent: { chatId: requestedId, status: 'allocating' },
+      draft: 'Survives retry and reload',
+    })
+
+    releaseRetry()
+    const paintedComposer = page.locator('[data-chat-surface="painted"] textarea')
+    await expect(paintedComposer).toBeFocused()
+    await expect(paintedComposer).toHaveValue('Survives retry and reload')
+    await expect(page.locator('[data-new-chat-presentation]')).toHaveCount(0)
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
+      .toBe(requestedId)
   })
 })
 
@@ -1589,25 +2267,37 @@ test.describe('Drawer close paths converge through handleBack', () => {
         layout: element.offsetWidth,
       }
     })
-    const box = await handle.boundingBox()
-    expect(box).not.toBeNull()
-
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await handle.evaluate((element) => {
+      element.addEventListener('pointerdown', (event) => {
+        element.dataset.testPointerId = String(event.pointerId)
+        element.dataset.testPointerX = String(event.clientX)
+        element.dataset.testPointerY = String(event.clientY)
+      }, { once: true })
+    })
+    // Ask Playwright to resolve and hit-test the live handle after moving the
+    // drawer. A cached bounding box can lag that style change under CI load.
+    await handle.hover()
     await page.mouse.down()
-    await page.mouse.move(box.x + box.width / 2 + 48, box.y + box.height / 2)
+    const pointer = await handle.evaluate((element) => ({
+      id: Number(element.dataset.testPointerId),
+      x: Number(element.dataset.testPointerX),
+      y: Number(element.dataset.testPointerY),
+    }))
+    expect(Number.isInteger(pointer.id)).toBe(true)
+    expect(Number.isFinite(pointer.x)).toBe(true)
+    expect(Number.isFinite(pointer.y)).toBe(true)
+    await page.mouse.move(pointer.x + 48, pointer.y)
     const released = await handle.evaluate((element) => {
-      for (let pointerId = 1; pointerId <= 5; pointerId += 1) {
-        if (!element.hasPointerCapture(pointerId)) continue
-        // A programmatic releasePointerCapture() only flushes lostpointercapture
-        // on the next pointer-event dispatch, so dispatch the capture-loss event
-        // the browser itself delivers when a drag's capture is interrupted.
-        element.dispatchEvent(new PointerEvent('lostpointercapture', {
-          pointerId,
-          bubbles: true,
-        }))
-        return true
-      }
-      return false
+      const pointerId = Number(element.dataset.testPointerId)
+      if (!Number.isInteger(pointerId) || !element.hasPointerCapture(pointerId)) return false
+      // A programmatic releasePointerCapture() only flushes lostpointercapture
+      // on the next pointer-event dispatch, so dispatch the capture-loss event
+      // the browser itself delivers when a drag's capture is interrupted.
+      element.dispatchEvent(new PointerEvent('lostpointercapture', {
+        pointerId,
+        bubbles: true,
+      }))
+      return true
     })
     expect(released).toBe(true)
 

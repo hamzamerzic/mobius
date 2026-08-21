@@ -15,6 +15,7 @@ const scrollMode = readFileSync(new URL('../../ChatView/useScrollMode.js', impor
 const detailCache = readFileSync(new URL('../../../lib/chatDetailCache.js', import.meta.url), 'utf8')
 const searchTermHighlight = readFileSync(new URL('../../../lib/searchTermHighlight.js', import.meta.url), 'utf8')
 const apiClient = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
+const navigationSource = readFileSync(new URL('../../../hooks/useNavigation.js', import.meta.url), 'utf8')
 
 function ruleBody(selector, source = shellCss) {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -167,14 +168,6 @@ test('each pane holds one outgoing chat over one staging chat', () => {
     /paneModel\.activeKeyForOwner\(workspaceStateRef\.current\.ws, paneKey\) !== `chat:\$\{id\}`/,
     'late readiness must be validated against either a real pane or the synthetic single owner',
   )
-  // A held/staging chat is inert (the takeover is PAINTING OR not the active role);
-  // the condition now also folds in a leaving pane during the exit beat (INV 9), so
-  // match the leading clause rather than the exact full expression. The takeover
-  // gate is the EFFECTIVE-mode `settingsOverlay` (finding F3), not the committed one.
-  assert.match(shell, /inert=\{!surfaceVisible \|\| settingsOverlay \|\| role !== 'active'/,
-    'neither the held nor staging chat may accept interaction')
-  assert.match(shell, /composerRequest=\{role === 'active' && surfaceVisible \? composerRequest : null\}/,
-    'an inert staging composer must not consume a one-shot composer request')
   assert.match(
     shell,
     /runtimeActive=\{surfaceVisible && chatPanesVisible && role !== 'held'\}[\s\S]*keepTranscriptPainted=\{surfaceVisible && role === 'held'\}/,
@@ -215,12 +208,12 @@ test('only the painted workspace world can expose its handoff layers', () => {
   )
   assert.match(
     shell,
-    /inert=\{!surfaceVisible \|\| settingsOverlay \|\| role !== 'active'/,
+    /const chatSurfaceInteractive = surfaceVisible[\s\S]*?inert=\{!chatSurfaceInteractive \|\| undefined\}/,
     'a retained chat in the parked workspace world must remain inert',
   )
   assert.match(
     shell,
-    /aria-hidden=\{!surfaceVisible \|\| settingsOverlay \|\| role !== 'active'/,
+    /aria-hidden=\{!chatSurfaceInteractive[\s\S]*?'true' : undefined\}/,
     'a retained chat in the parked workspace world must leave the accessibility tree',
   )
   assert.match(
@@ -260,32 +253,54 @@ test('direct chat actions hand focus to the destination composer', () => {
     /const forceNew = workspaceStateRef\.current\.ws\.viewMode === 'panes'/,
     'only Builder makes the owner-facing New chat action additive')
   assert.match(startUserChat,
-    /newChat\(\{ forceNew, focusComposer: true, recordHistory: true \}\)/,
-    'the mode-scoped action must still focus the destination composer')
+    /return startUserNewChatPresentation\(\{ forceNew \}\)/,
+    'both modes must enter the same immediate draft-owned composer')
+  const programmaticNewChat = shell.match(
+    /async function newChat\([\s\S]*?\n  \}/,
+  )?.[0] || ''
+  assert.match(programmaticNewChat, /resolution = await resolveNewChatId\(\)/)
+  assert.doesNotMatch(programmaticNewChat,
+    /focusComposer|beginTouchComposerFocusLease|newChatPresentationRef|requestComposer/,
+    'programmatic creation cannot revive the former ID-less composer path')
+  const startUserNewChatPresentation = shell.match(
+    /function startUserNewChatPresentation\(\{ forceNew = false \} = \{\}\) \{([\s\S]*?)\n  \}\n\n  \/\/ Materialize/,
+  )?.[1] || ''
+  assert.match(startUserNewChatPresentation,
+    /if \(pendingNewChatRef\.current\) \{[\s\S]*newChatRequestSeqRef\.current \+= 1[\s\S]*pendingNewChatRef\.current = null[\s\S]*setPendingNewChatToken\(0\)/,
+    'an explicit New Chat must invalidate an older deferred null-slot result')
+  assert.match(shell,
+    /const requestEmptySingleNewChat = useCallback\(\(\) => \{[\s\S]*?if \(newChatPresentationRef\.current\) return/,
+    'a stale list refresh must not restart automatic allocation over the explicit presentation')
+  assert.match(shell,
+    /const hadNewChatPresentationRef = useRef\(false\)[\s\S]*hadPresentation = hadNewChatPresentationRef\.current[\s\S]*if \(!hadPresentation \|\| newChatPresentation != null\) return[\s\S]*ws\.viewMode !== 'single' \|\| ws\.singleScreen != null[\s\S]*requestEmptySingleNewChat\(\)/,
+    'retiring an explicit presentation must return an otherwise-empty Standard slot to automatic repair')
+  assert.match(startUserNewChatPresentation,
+    /const openIntent = newChatIntentRef\.current[\s\S]*const openIntentDraft = openIntent \? readComposerDraft\(openIntent\.chatId\) : null[\s\S]*const visibleSingleChatId = ws\.viewMode === 'single'[\s\S]*const savedIntentIsElsewhere = openIntent != null[\s\S]*visibleSingleChatId !== String\(openIntent\.chatId\)[\s\S]*!savedIntentIsElsewhere[\s\S]*visibleSingleChatId === String\(activeChatIdRef\.current\)/,
+    'only the chat in the actual Standard slot can be reused, and never over a durable New Chat intent')
+  assert.match(startUserNewChatPresentation,
+    /const visibleBlank = !forceNew[\s\S]*resolveNewChatIntentId\([\s\S]*paneId: forceNew \? ws\.focusedPaneId : null[\s\S]*flushSync\([\s\S]*settleDraftFirstNewChat\(presentation\)/,
+    'Builder stays additive while mounting the UUID-backed presentation synchronously')
+  assert.match(shell,
+    /const resolved = \{[\s\S]*navigationEpoch: navigationEpochRef\.current,[\s\S]*drawerEntryOpen: false/,
+    'route materialization transfers drawer-entry ownership before the focus handoff')
+  assert.match(shell,
+    /const newChatCoversSurface =[\s\S]*newChatPresentationCoversSurface\(newChatPresentation[\s\S]*const coveredByNewChat = newChatCoversSurface\(layoutPaneId, chatId\)[\s\S]*!coveredByNewChat[\s\S]*composerRequest=\{chatSurfaceInteractive/,
+    'the immediate composer owns covered surfaces until its matching ChatView can accept handoff')
+  assert.match(shell,
+    /const builderPresentation = presentingNewChat[\s\S]*newChatPresentation\.viewMode === 'panes'[\s\S]*projection\.rects\[newChatPresentation\.paneId\][\s\S]*shell__view--paned/,
+    'a tiled Builder presentation covers only the pane that owns the tap')
+  assert.match(shell,
+    /className="shell__composer-focus-lease"[\s\S]*onInput=\{\(event\) => \{[\s\S]*composerFocusLeaseDirtyRef\.current = true[\s\S]*persistComposerDraft\([\s\S]*onBlur=\{\(event\) => \{[\s\S]*draftId != null && composerFocusLeaseDirtyRef\.current[\s\S]*persistComposerDraft\(/,
+    'the temporary touch lease persists real edits without erasing an untouched durable fallback')
   assert.match(shell, /onClick=\{startUserChat\}/,
     'the desktop rail must use the shared mode-scoped action')
   assert.match(shell, /onNewChat=\{startUserChat\}/,
     'the mobile drawer must use the shared mode-scoped action')
-  assert.match(shell,
-    /beginTouchComposerFocusLease\([\s\S]*?await resolveNewChatId/,
-    'New chat must reserve phone keyboard focus before its first async boundary')
-  assert.match(shell,
-    /composerFocusLeaseRef\.current\?\.value[\s\S]*?composerFocusLeaseHandoff\(\{[\s\S]*?stageComposerHandoff\(chatId, handoff\.text/,
-    'New chat must carry early lease typing into the destination composer')
-  assert.match(shell,
-    /String\(presentation\?\.chatId \?\? ''\) === id[\s\S]*?requestComposer\(id, \{ focus: true \}\)/,
-    'an immediate New chat presentation must hand focus over at display readiness')
-  assert.match(shell,
-    /if \(focusComposer && \(!presentation \|\| alreadyPresented\)\) \{[\s\S]*?requestComposer\(chatId/,
-    'allocation must not consume the focus request before the presentation is ready')
-  assert.match(shell,
-    /className="shell__composer-focus-lease"[\s\S]*?aria-label="New chat message"/,
-    'the keyboard lease must remain a named, programmatically focused text control')
   const selectChat = shell.match(
     /function selectChat\(id, \{ focusComposer = true \} = \{\}\) \{([\s\S]*?)\n  \}/,
   )?.[1] || ''
   assert.match(selectChat,
-    /navTo\('chat', \{ chatId: id, preserveDrawerPresentation \}\)[\s\S]*if \(focusComposer\) focusDesktopChatPaneComposer\(id\)/,
+    /navTo\('chat', \{ chatId: id, preserveDrawerPresentation \}\)[\s\S]*if \(focusComposer\) focusSelectedChatComposer\(id\)/,
     'drawer and settings chat selection must focus after requesting navigation')
   assert.match(shell,
     /target\.focusComposer === true[\s\S]*requestComposer\(target\.chatId, \{ focus: true \}\)/,
@@ -293,14 +308,37 @@ test('direct chat actions hand focus to the destination composer', () => {
   assert.match(chatView,
     /className=\{`chat__msg[\s\S]*tabIndex=\{-1\}/,
     'message rows must accept the programmatic search focus without joining tab order')
+  assert.match(chatView,
+    /flushSync\(\(\) => restoreDurableDraft\(\)\)[\s\S]*placeCaretAtTextEnd\(inputRef\.current\)/,
+    'the destination composer must place the caret after its final draft re-read')
   assert.match(shell,
-    /onActivate=\{\(\) => \{[\s\S]*tabModel\.tabNavTarget\(tab\)[\s\S]*navTo\(view, opts\)[\s\S]*tab\.kind === 'chat'[\s\S]*focusDesktopChatPaneComposer\(tab\.id\)/,
+    /onActivate=\{\(\) => \{[\s\S]*tabModel\.tabNavTarget\(tab\)[\s\S]*navTo\(view, opts\)[\s\S]*tab\.kind === 'chat'[\s\S]*focusSelectedChatComposer\(tab\.id\)/,
     'the single-pane tab strip must focus a selected chat composer')
   const selectedChatHandoffs = workspaceChrome.match(
     /if \(tab\.kind === 'chat'\) onChatPaneSelected\?\.\(tab\.id\)/g,
   ) || []
   assert.equal(selectedChatHandoffs.length, 2,
     'both active-tab and tab-switch paths in a tiled pane must focus chat composers')
+  assert.match(shell,
+    /composerDraftWantsKeyboard\(saved\)[\s\S]*beginTouchComposerFocusLease\([\s\S]*initialValue: saved\.input[\s\S]*requestComposer\(chatId, \{ focus: true, restoreExistingDraft: true \}\)/,
+    'a selected touch chat with an unsent draft must reserve the keyboard until its real composer takes focus')
+  assert.match(shell, /className="shell__composer-focus-lease"[\s\S]*aria-label="Restoring message draft"/,
+    'the hidden lease must not impersonate the visible Message Möbius composer in the accessibility tree')
+  assert.match(shell,
+    /beforeRestoreRouteRef\.current = \(route\) => \{[\s\S]*route\?\.view !== 'chat'[\s\S]*reserveTouchDraftComposer\(route\.chatId\)/,
+    'Back and Forward must use the same draft-only touch focus handoff')
+  assert.match(shell, /const beforeRestoreRouteRef = useRef\(null\)/)
+  assert.match(shell, /beforeRestoreRouteRef,\s*\}\)/)
+  assert.match(
+    navigationSource,
+    /if \(itemRoute\) \{\s*beforeRestoreRouteRef\?\.current\?\.\(itemRoute\)\s*applyModeDestination\(itemRoute\)/,
+    'Back and Forward must reserve the draft keyboard before restoring the destination',
+  )
+  assert.match(
+    navigationSource,
+    /function closeDrawer[\s\S]*beforeRestoreRouteRef\?\.current\?\.\(snapshotRoute\(\)\)[\s\S]*const userBackTraversal = !drawerClosePendingRef\.current[\s\S]*if \(drawerOpenRef\.current && drawerPushedRef\.current\)[\s\S]*beforeRestoreRouteRef\?\.current\?\.\(returnRoute\)/,
+    'both explicit and Back-driven drawer closes must reserve the restored draft keyboard',
+  )
 })
 
 test('the held chat is an opaque layer above staging until the atomic swap', () => {

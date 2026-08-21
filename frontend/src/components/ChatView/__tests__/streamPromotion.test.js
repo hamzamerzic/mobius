@@ -8,6 +8,7 @@ import { assistantAnchorKey, messageKey } from '../../../lib/chatDetailCache.js'
 import {
   streamItemsToAssistantPayload,
   promoteAssistantStream,
+  promoteAssistantStreamWithFollowingMessages,
   assistantStreamCoversMessage,
   messageCoversAssistantStream,
   chooseActiveAssistantSurface,
@@ -149,6 +150,57 @@ test('promoteAssistantStream replaces mounted partial even after steered user ro
   assert.equal(next[1].ts, 2)
   assert.equal(next[1].content, 'updated live stream')
   assert.equal(next[2].content, 'fast-forwarded q2')
+})
+
+test('a restored continuation stays beside its bridged assistant, ahead of newer local rows', () => {
+  const messages = [
+    { role: 'user', ts: 1, content: 'original request' },
+    {
+      role: 'assistant',
+      ts: 2,
+      content: 'Paused for restart',
+      blocks: [{ type: 'error', message: 'Paused for restart' }],
+    },
+    { role: 'user', ts: 4, cid: 'later-owner-row', content: 'newer local request' },
+  ]
+  const marker = {
+    role: 'user',
+    ts: 3,
+    cid: 'restart-resume-run-1',
+    kind: 'continuation',
+    continuation_reason: 'restart',
+    content: 'continue',
+  }
+
+  const next = promoteAssistantStreamWithFollowingMessages(messages, {
+    bridgeTs: 2,
+    items: [{ type: 'error', message: 'Paused for restart' }],
+    followingMessages: [marker],
+  })
+
+  assert.deepEqual(next.map(message => message.ts), [1, 2, 3, 4])
+  assert.equal(next[2], marker)
+  assert.equal(next[3].content, 'newer local request')
+})
+
+test('ordinary queued rows remain after the completed assistant despite older send timestamps', () => {
+  const messages = [
+    { role: 'user', ts: 10, content: 'first request' },
+    { role: 'assistant', ts: 30, content: 'completed response' },
+  ]
+  const queued = { role: 'user', ts: 20, cid: 'queued', content: 'follow-up' }
+
+  const next = promoteAssistantStreamWithFollowingMessages(messages, {
+    items: [],
+    bridgeTs: 30,
+    followingMessages: [queued],
+  })
+
+  assert.deepEqual(next.map(message => message.content), [
+    'first request',
+    'completed response',
+    'follow-up',
+  ])
 })
 
 test('promoteAssistantStream carries persisted question answers by identity', () => {
@@ -340,6 +392,96 @@ test('chooseActiveAssistantSurface suppresses under-caught-up stream when DB par
   assert.equal(assistantStreamCoversMessage(msg, items), false)
   assert.equal(messageCoversAssistantStream(msg, items), false)
   assert.deepEqual(chooseActiveAssistantSurface(msg, items), {
+    hideMessage: false,
+    suppressStream: true,
+  })
+})
+
+test('a durable question cannot be hidden by a source-rich older stream prefix', () => {
+  const question = {
+    type: 'question',
+    question_id: 'question-1',
+    questions: [{ question: 'Which path?' }],
+  }
+  const msg = {
+    role: 'assistant',
+    content: 'I checked the current state.',
+    blocks: [
+      { type: 'text', content: 'I checked the current state.' },
+      question,
+    ],
+  }
+  const stalePrefix = [
+    { type: 'text', content: 'I checked the current state.' },
+    {
+      type: 'tool', tool: 'Bash', status: 'done',
+      input: 'inspect everything', output: 'large but older output',
+    },
+  ]
+
+  assert.deepEqual(chooseActiveAssistantSurface(msg, stalePrefix), {
+    hideMessage: false,
+    suppressStream: true,
+  })
+  assert.deepEqual(chooseActiveAssistantSurface({
+    ...msg,
+    blocks: [msg.blocks[0], { ...question, answers: { pick: 'A' } }],
+  }, stalePrefix), {
+    hideMessage: false,
+    suppressStream: true,
+  }, 'the answered durable row stays visible until catch-up carries the card')
+})
+
+test('a stream carrying the same question may expose newer parallel output', () => {
+  const question = {
+    type: 'question',
+    question_id: 'question-1',
+    questions: [{ question: 'Which path?' }],
+  }
+  const msg = {
+    role: 'assistant',
+    content: 'I checked the current state.',
+    blocks: [
+      { type: 'text', content: 'I checked the current state.' },
+      question,
+    ],
+  }
+  const newerStream = [
+    { type: 'text', content: 'I checked the current state.' },
+    question,
+    { type: 'text', content: 'A parallel helper also finished.' },
+  ]
+
+  assert.deepEqual(chooseActiveAssistantSurface(msg, newerStream), {
+    hideMessage: true,
+    suppressStream: false,
+  })
+})
+
+test('saved final prose wins over a detailed stale replay after compact activity grouping', () => {
+  const msg = {
+    role: 'assistant',
+    ts: 2,
+    blocks: [
+      { type: 'thinking', thinking_deferred: true, thinking_revision: 20 },
+      { type: 'text', content: 'I’ll inspect the broken article.' },
+      { type: 'activity', count: 12 },
+      { type: 'text', content: 'I found the blocked embed.' },
+      { type: 'activity', count: 8 },
+      { type: 'text', content: 'It is fixed now, and the fallback is visible.' },
+    ],
+  }
+  const staleReplay = [
+    { type: 'thinking', content: 'A long private trace that adds weight.' },
+    { type: 'text', content: 'I’ll inspect the broken article.' },
+    { type: 'tool', tool: 'Bash', status: 'done', output: 'x'.repeat(200) },
+    { type: 'text', content: 'I found the blocked embed.' },
+    { type: 'tool', tool: 'Bash', status: 'done', output: 'y'.repeat(200) },
+  ]
+
+  assert.equal(assistantStreamCoversMessage(msg, staleReplay), false)
+  assert.equal(messageCoversAssistantStream(msg, staleReplay), false)
+  assert.deepEqual(chooseActiveAssistantSurface(msg, staleReplay), {
     hideMessage: false,
     suppressStream: true,
   })

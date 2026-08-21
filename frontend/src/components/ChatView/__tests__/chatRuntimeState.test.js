@@ -13,11 +13,13 @@ import {
   isOwnerUserMessage,
   jumpToLatestShown,
   openAppCtaViewModel,
-  pendingQuestionIsHydrated,
   previewReadyAnnouncement,
   previewUpdatedAnnouncement,
+  runtimeStreamAttachAction,
   serverSnapshotBehindLocal,
   shouldAttachRunningStream,
+  shouldRetireRestoredQuestionSnapshot,
+  shouldRecoverSettledRuntime,
   shouldRetryStopAfterConfirm,
   shouldShowOpenAppCta,
   startedMessagesFromResponse,
@@ -28,8 +30,8 @@ import {
 } from '../chatRuntimeState.js'
 import { mergeRecentMessagesIntoLoadedWindow } from '../../../lib/chatDetailCache.js'
 
-test('R5a: jump-to-latest shows only away from the tail and yields to attention nudges', () => {
-  // At the content tail there is nothing to jump to.
+test('R5a: jump-to-latest shows only away from the physical tail and yields to attention nudges', () => {
+  // At the physical tail there is nothing to jump to.
   assert.equal(jumpToLatestShown({ awayFromTail: false }), false)
   // Scrolled up with no competing nudge: show.
   assert.equal(jumpToLatestShown({ awayFromTail: true }), true)
@@ -137,20 +139,107 @@ test('a parked owner question uses compact history until its answer resumes the 
   }), false)
 })
 
-test('a runtime question marker requires its durable card in the transcript', () => {
+test('a known server run settling recovers a live stream that missed its terminal event', () => {
+  assert.equal(shouldRecoverSettledRuntime({
+    runtimeWasObservedRunning: true,
+    runtimeRunning: false,
+    pendingCount: 0,
+    streamStillActive: true,
+  }), true)
+
+  assert.equal(shouldRecoverSettledRuntime({
+    runtimeWasObservedRunning: false,
+    runtimeRunning: false,
+    pendingCount: 0,
+    streamStillActive: true,
+  }), false, 'the optimistic send window is not mistaken for a settled turn')
+
+  assert.equal(shouldRecoverSettledRuntime({
+    runtimeWasObservedRunning: true,
+    runtimeRunning: false,
+    pendingCount: 1,
+    streamStillActive: true,
+  }), false, 'a queued continuation still owns the handoff')
+
+  assert.equal(shouldRecoverSettledRuntime({
+    runtimeWasObservedRunning: true,
+    runtimeRunning: false,
+    pendingCount: 0,
+    streamStillActive: true,
+    stopInFlight: true,
+  }), false, 'the explicit stop flow owns its own settlement')
+
+  assert.equal(shouldRecoverSettledRuntime({
+    runtimeWasObservedRunning: true,
+    runtimeRunning: false,
+    pendingCount: 0,
+    streamStillActive: true,
+    localStartInFlight: true,
+  }), false, 'an unacknowledged local start owns the idle-snapshot race')
+})
+
+test('a fresh running verdict repairs only an exhausted visible stream', () => {
+  assert.equal(runtimeStreamAttachAction({
+    running: true,
+    connectionError: 'disconnected',
+  }), 'retry')
+  assert.equal(runtimeStreamAttachAction({
+    running: true,
+    connectionError: null,
+  }), 'connect')
+  assert.equal(runtimeStreamAttachAction({
+    running: true,
+    connectionError: 'retrying',
+  }), 'none', 'the bounded retry loop keeps sole ownership while active')
+  assert.equal(runtimeStreamAttachAction({
+    running: true,
+    pendingQuestionId: 'question-1',
+    connectionError: 'disconnected',
+  }), 'none', 'a parked question has no live output to attach to')
+  assert.equal(runtimeStreamAttachAction({
+    running: true,
+    connectionError: 'disconnected',
+    hidden: true,
+  }), 'none', 'only the visible pane owns transport recovery')
+  assert.equal(runtimeStreamAttachAction({
+    running: false,
+    connectionError: 'disconnected',
+  }), 'none', 'an idle server verdict must not resurrect a stream')
+})
+
+test('only a cold stream prefix missing the durable question is retired', () => {
   const pendingQuestionId = 'question-1'
   const messages = [{
     role: 'assistant',
     blocks: [{ type: 'question', question_id: pendingQuestionId, questions: [] }],
   }]
+  const stalePrefix = [{ type: 'text', content: 'older prefix' }]
+  const completeSnapshot = [
+    ...stalePrefix,
+    { type: 'question', question_id: pendingQuestionId, questions: [] },
+  ]
 
-  assert.equal(pendingQuestionIsHydrated(messages, pendingQuestionId), true)
-  assert.equal(pendingQuestionIsHydrated([], pendingQuestionId), false)
-  assert.equal(pendingQuestionIsHydrated([{
-    ...messages[0],
-    blocks: [{ ...messages[0].blocks[0], answers: { pick: 'yes' } }],
-  }], pendingQuestionId), false)
-  assert.equal(pendingQuestionIsHydrated(messages, 'question-2'), false)
+  assert.equal(shouldRetireRestoredQuestionSnapshot({
+    messages,
+    streamItems: stalePrefix,
+    pendingQuestionId,
+  }), true)
+  assert.equal(shouldRetireRestoredQuestionSnapshot({
+    isStreaming: true,
+    messages,
+    streamItems: stalePrefix,
+    pendingQuestionId,
+  }), false, 'a live socket keeps the buffer needed by same-turn continuation')
+  assert.equal(shouldRetireRestoredQuestionSnapshot({
+    messages,
+    streamItems: completeSnapshot,
+    pendingQuestionId,
+  }), false)
+  assert.equal(shouldRetireRestoredQuestionSnapshot({
+    messages: [],
+    streamItems: stalePrefix,
+    pendingQuestionId,
+  }), false)
 })
 
 test('a pathological cold transcript is prepared as stable prefix frames', () => {

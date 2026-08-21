@@ -91,7 +91,10 @@ import {
   composerHistoryProbeReachedBoundary,
   resolveComposerHistoryMove,
 } from './composerHistory.js'
-import { resolveComposerEnterAction } from './composerShortcuts.js'
+import {
+  isPlainTextPasteShortcut,
+  resolveComposerEnterAction,
+} from './composerShortcuts.js'
 import SlashMenu from './SlashMenu.jsx'
 import {
   applySlashCommand,
@@ -103,6 +106,10 @@ import {
 } from './slashCommands.js'
 import { filePasteNeedsDefaultPrevented, pastedFiles } from './pasteUpload.js'
 import { hasSendablePayload } from './composerSubmission.js'
+import {
+  assistantClipboardText,
+  insertClipboardText,
+} from './markdownClipboard.js'
 import {
   textareaUsesNativeSizing,
   syncComposerTallClass,
@@ -149,10 +156,10 @@ function PrimaryActionGlyphs({ action }) {
 
 function PrimaryAction({
   sending, listening, hasInput, hasUploading, offline, showSteer, steerReady,
-  submissionBlocked,
+  submissionBlocked, questionBlocked,
   onSubmit, onStop, onSteer, onToggleVoice,
 }) {
-  if (sending && !hasInput && showSteer) {
+  if (!questionBlocked && sending && !hasInput && showSteer) {
     return (
       <button
         key="primary"
@@ -172,7 +179,9 @@ function PrimaryAction({
       </button>
     )
   }
-  if (sending && !hasInput) {
+  // A pending question is a protocol barrier, not queueable work. Keep the
+  // draft editable, but let Stop outrank Send until the card is answered.
+  if (questionBlocked || (sending && !hasInput)) {
     return (
       <button
         key="primary"
@@ -463,9 +472,14 @@ function FileChips({ files, onRemove, chatId }) {
  *                        effect, so the parent (e.g. ComposerPopover)
  *                        can trigger the hidden <input type="file">
  *                        without the bar shipping a paperclip button.
+ *   attachmentsDisabled — suppresses file picker and pasted-file handling
+ *                        while a draft-only surface has no server row yet.
  *   submissionBlocked  — true while an atomic provider handoff owns the
  *                        chat; drafting stays available but send/mic-start do
  *                        not race the transition.
+ *   questionBlocked    — true while an unanswered owner question holds the
+ *                        turn; the draft stays editable and Stop owns the
+ *                        primary action until the card is answered.
  *   messageHistory     — visible owner-authored message text, oldest first.
  *   provider           — the chat's provider id ('claude' | 'codex'). Filters
  *                        the "/" menu to commands that actually dispatch on it;
@@ -497,20 +511,23 @@ export default function ChatInputBar({
   offline,
   sendFailure = null,
   submissionBlocked = false,
+  questionBlocked = false,
   pendingFiles,
   onAddFiles,
   onRemoveFile,
   leftButtons,
   rightButtons,
   attachTriggerRef,
+  attachmentsDisabled = false,
   messageHistory = [],
   provider,
 }) {
   const fileInputRef = useRef(null)
   const historyIndexRef = useRef(null)
   const historyDraftRef = useRef('')
-  const historyCaretRef = useRef(null)
+  const pendingComposerCaretRef = useRef(null)
   const historyProbeVersionRef = useRef(0)
+  const pasteAsPlainTextRef = useRef(false)
   // Captures whether the textarea was focused at the moment the file
   // picker opened. Read by `handleFileSelect` to decide whether to
   // refocus the textarea after the picker closes — refocusing
@@ -554,7 +571,7 @@ export default function ChatInputBar({
   // live click-handler across re-renders without needing a stable
   // callback identity from the caller.
   useLayoutEffect(() => {
-    if (!attachTriggerRef) return
+    if (!attachTriggerRef || attachmentsDisabled) return
     attachTriggerRef.current = () => {
       // Read focus state synchronously BEFORE the picker steals it.
       // ComposerPopover already restored focus to the textarea by
@@ -569,13 +586,13 @@ export default function ChatInputBar({
     return () => {
       if (attachTriggerRef.current) attachTriggerRef.current = null
     }
-  }, [attachTriggerRef, inputRef])
+  }, [attachTriggerRef, attachmentsDisabled, inputRef])
 
   function resetMessageHistory() {
     historyProbeVersionRef.current += 1
     historyIndexRef.current = null
     historyDraftRef.current = ''
-    historyCaretRef.current = null
+    pendingComposerCaretRef.current = null
   }
 
   // Never carry a traversal or its saved draft into another chat. History
@@ -586,14 +603,14 @@ export default function ChatInputBar({
     resetMessageHistory()
   }, [chatId])
 
-  // History values arrive through the controlled composer boundary. Restore
-  // the caret after React commits that value without changing focus or scroll.
+  // Programmatic composer edits arrive through the controlled value boundary.
+  // Restore their caret after React commits without changing focus or scroll.
   useLayoutEffect(() => {
-    const pending = historyCaretRef.current
+    const pending = pendingComposerCaretRef.current
     const textarea = inputRef?.current
     if (!pending || pending.value !== input || !textarea) return
     try { textarea.setSelectionRange(pending.caret, pending.caret) } catch {}
-    historyCaretRef.current = null
+    pendingComposerCaretRef.current = null
   }, [input, inputRef])
 
   // Modern browsers size the textarea from CSS (`field-sizing: content`).
@@ -638,7 +655,7 @@ export default function ChatInputBar({
   function handleFileSelect(e) {
     const fileList = Array.from(e.target.files || [])
     e.target.value = ''
-    if (fileList.length) onAddFiles(fileList)
+    if (fileList.length) onAddFiles?.(fileList)
     restoreFocusAfterFilePicker()
   }
 
@@ -651,12 +668,35 @@ export default function ChatInputBar({
   }
 
   function handlePaste(e) {
-    const files = pastedFiles(e.clipboardData)
-    if (files.length === 0) return
-    if (filePasteNeedsDefaultPrevented(e.clipboardData, files)) {
-      e.preventDefault()
+    const preferPlainText = pasteAsPlainTextRef.current
+    pasteAsPlainTextRef.current = false
+    const files = attachmentsDisabled ? [] : pastedFiles(e.clipboardData)
+    if (files.length > 0) {
+      if (filePasteNeedsDefaultPrevented(e.clipboardData, files)) {
+        e.preventDefault()
+      }
+      onAddFiles?.(files)
+      return
     }
-    onAddFiles(files)
+
+    const pastedText = assistantClipboardText(
+      e.clipboardData,
+      preferPlainText,
+    )
+    if (pastedText === null) return
+
+    e.preventDefault()
+    const next = insertClipboardText(
+      input,
+      e.currentTarget.selectionStart,
+      e.currentTarget.selectionEnd,
+      pastedText,
+    )
+    resetMessageHistory()
+    pendingComposerCaretRef.current = next
+    if (listeningRef?.current) onManualVoiceEdit?.(next.value)
+    onInputChange(next.value)
+    onInputIntent?.(e.nativeEvent)
   }
 
   function acceptSlashCommand(command) {
@@ -668,9 +708,13 @@ export default function ChatInputBar({
     // The textarea never lost focus (rows suppress pointerdown), but a click
     // accept still needs the caret put back after the controlled update.
     focusComposerElement(inputRef?.current)
+    requestAnimationFrame(() => placeCaretAtTextEnd(inputRef?.current))
   }
 
+  const canSubmit = !submissionBlocked && !questionBlocked
+
   function handleKeyDown(e) {
+    pasteAsPlainTextRef.current = isPlainTextPasteShortcut(e)
     // The menu claims Enter and the arrows while it is open — the same keys
     // that otherwise send and walk sent-message history — so it resolves
     // BEFORE both. Keys it doesn't claim fall through untouched.
@@ -691,7 +735,7 @@ export default function ChatInputBar({
     function applyHistoryMove(historyMove) {
       historyIndexRef.current = historyMove.index
       historyDraftRef.current = historyMove.draft
-      historyCaretRef.current = {
+      pendingComposerCaretRef.current = {
         value: historyMove.value,
         caret: historyMove.value.length,
       }
@@ -708,7 +752,7 @@ export default function ChatInputBar({
             historyMove.value.length,
           )
         } catch {}
-        historyCaretRef.current = null
+        pendingComposerCaretRef.current = null
       }
     }
 
@@ -767,14 +811,14 @@ export default function ChatInputBar({
       return
     }
     if (action === 'submit-steer') {
-      if (!submissionBlocked) {
+      if (canSubmit) {
         resetMessageHistory()
         onSubmitSteer(e)
       }
       return
     }
     if (action === 'submit') {
-      if (!submissionBlocked) {
+      if (canSubmit) {
         resetMessageHistory()
         onSubmit(e)
       }
@@ -782,6 +826,10 @@ export default function ChatInputBar({
   }
 
   function handleSubmit(e) {
+    if (!canSubmit) {
+      e?.preventDefault?.()
+      return
+    }
     resetMessageHistory()
     onSubmit(e)
   }
@@ -790,14 +838,16 @@ export default function ChatInputBar({
 
   return (
     <form className="chat__form" onSubmit={handleSubmit}>
-      <input
-        type="file"
-        multiple
-        ref={fileInputRef}
-        onChange={handleFileSelect}
-        onCancel={restoreFocusAfterFilePicker}
-        style={{ display: 'none' }}
-      />
+      {!attachmentsDisabled && (
+        <input
+          type="file"
+          multiple
+          ref={fileInputRef}
+          onChange={handleFileSelect}
+          onCancel={restoreFocusAfterFilePicker}
+          style={{ display: 'none' }}
+        />
+      )}
       {sendFailure && (
         <div
           className="chat__offline-note chat__offline-note--error"
@@ -835,6 +885,7 @@ export default function ChatInputBar({
               onChange={handleTextareaChange}
               onPaste={handlePaste}
               onKeyDown={handleKeyDown}
+              onKeyUp={() => { pasteAsPlainTextRef.current = false }}
               onFocus={(event) => {
                 placeCaretAtTextEnd(event.currentTarget)
                 setSlashInputFocused(true)
@@ -866,6 +917,7 @@ export default function ChatInputBar({
               showSteer={showSteer}
               steerReady={steerReady}
               submissionBlocked={submissionBlocked}
+              questionBlocked={questionBlocked}
               onSubmit={handleSubmit}
               onStop={onStop}
               onSteer={onSteer}

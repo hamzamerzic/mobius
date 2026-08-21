@@ -77,7 +77,7 @@ class Owner(Base):
   # other onboarding signals later — same shape as a SCD type 1 row.
   walkthrough_completed_at = Column(DateTime, nullable=True, default=None)
   # Monotonic JWT-validity generation. Every owner-derived token (the
-  # 30-day login token, the 8h app token, the 2h agent token, the
+  # 30-day login token, the 8h app token, the run-bound agent token, the
   # 90-day service token) is stamped with the owner's token_epoch at
   # mint time; the owner-resolving dependency in deps.py rejects any
   # token whose stamped epoch is behind this value. Incrementing it is
@@ -253,6 +253,21 @@ class ChatRun(Base):
   # questions are steered into the same run and must not make the goal vanish
   # after a reload. NULL is an ordinary non-goal run.
   goal_objective = Column(Text, nullable=True, default=None)
+  # Stable identity for one native Goal across physical/logical run recovery.
+  # Unlike root_run_id this survives a fresh provider turn after a restart or
+  # question checkpoint. Explicit /goal starts mint a new identity; genuine
+  # continuations inherit it.
+  goal_id = Column(String(64), nullable=True, index=True, default=None)
+  # Optional agent-authored execution plan for the logical goal rooted at this
+  # run. Only the root row stores the snapshot; continuation rows resolve it
+  # through root_run_id. The JSON document is intentionally small and bounded
+  # by the goal-plan domain validator, while revision provides optimistic
+  # concurrency so two helpers cannot silently overwrite one another's
+  # progress.
+  goal_plan_json = Column(JSON, nullable=True, default=None)
+  goal_plan_revision = Column(
+    Integer, nullable=False, default=0, server_default="0"
+  )
   # App that initiated this turn under the app-attributed-chat contract
   # (077 §1). NULL = an ordinary owner-driven turn. Reserved now so the
   # attribution lands on the run row, not retrofitted later.
@@ -373,7 +388,7 @@ class ChatSessionLink(Base):
   directly.
 
   ``create_all`` builds this table on the next boot — a new table needs no ALTER
-  migration (see ``run_migrations``, which only ALTERs existing tables); existing
+  migration (see ``schema_migrations.run_migrations``); existing
   rows are untouched.
   """
 
@@ -600,11 +615,23 @@ class App(Base):
   # between user-built apps and store-installed apps are tolerated
   # because allocate_unique_slug just picks the next free suffix.
   manifest_url = Column(String(1024), nullable=True, index=True)
-  # Public manifest URL the owner explicitly attached for sharing this app.
+  # Public manifest URL the owner explicitly attached for distributing this app.
   # Kept separate from `manifest_url`: the latter is install/update identity,
   # while a locally-built app may be published later without becoming a
   # Store-managed install or changing how its source updates are reconciled.
-  share_manifest_url = Column(String(1024), nullable=True, default=None)
+  published_manifest_url = Column(String(1024), nullable=True, default=None)
+  # Hosted anonymous use is a snapshot, not a live flag. These fields bind the
+  # exact immutable module and reviewed public network contract that the owner
+  # published. Later source/capability changes therefore remain private until
+  # the owner explicitly publishes an update.
+  public_name = Column(String(255), nullable=True, default=None)
+  public_bundle_path = Column(String(512), nullable=True, default=None)
+  public_bundle_digest = Column(String(64), nullable=True, default=None)
+  public_source_commit = Column(String(64), nullable=True, default=None)
+  public_access_contract = Column(JSON, nullable=True, default=None)
+  public_access_digest = Column(String(64), nullable=True, default=None)
+  public_token_nonce = Column(String(32), nullable=True, default=None)
+  public_published_at = Column(DateTime, nullable=True, default=None)
   # Soft-delete tombstone. Uninstall sets this instead of dropping the row, so
   # the source tree AND the id-keyed runtime storage tree survive — a reinstall
   # (matched by manifest_url) or POST /{id}/recover then revives the SAME id +
@@ -934,7 +961,7 @@ class ToolOutput(Base):
   plain text while a bounded background fix-forward updates old rows. Keeping
   one column preserves SQLite/PostgreSQL portability without a schema migration.
   `create_all` builds this table on the next boot — a new table needs no ALTER
-  migration (see run_migrations, which only ALTERs existing tables)."""
+  migration (see schema_migrations.run_migrations)."""
 
   __tablename__ = "tool_outputs"
 
@@ -1079,7 +1106,7 @@ class ContributionAutopilot(Base):
   this row. The ledger block is a one-way MIRROR of these fields for the UI/cron.
 
   ``create_all`` builds this table on the next boot — a new table needs no ALTER
-  migration (see ``database.run_migrations``, which only ALTERs existing tables).
+  migration (see ``schema_migrations.run_migrations``).
   """
 
   __tablename__ = "contribution_autopilot"

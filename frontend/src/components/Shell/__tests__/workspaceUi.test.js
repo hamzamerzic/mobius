@@ -19,6 +19,7 @@ const workspaceSession = readFileSync(
 )
 const shellBrand = readFileSync(new URL('../ShellBrand.jsx', import.meta.url), 'utf8')
 const newChatLanding = readFileSync(new URL('../NewChatLanding.jsx', import.meta.url), 'utf8')
+const chatInputBar = readFileSync(new URL('../../ChatView/ChatInputBar.jsx', import.meta.url), 'utf8')
 const workspaceViewSrc = readFileSync(new URL('../workspaceView.js', import.meta.url), 'utf8')
 const modeViewTransitionSrc = readFileSync(new URL('../useModeViewTransition.js', import.meta.url), 'utf8')
 const modeControllerSrc = readFileSync(new URL('../useModeController.js', import.meta.url), 'utf8')
@@ -778,7 +779,7 @@ test('an active overflowing chat title cycles once, then becomes idle', () => {
     'clipped titles must not share a fixed duration; distance owns the cadence')
   assert.doesNotMatch(paneStrip, /TITLE_CYCLE_MAX_MS|Math\.min/,
     'long titles must not accelerate through a duration cap')
-  assert.match(paneStrip, /const TITLE_CYCLE_MS_PER_PX = 1000 \/ 12/)
+  assert.match(paneStrip, /const TITLE_CYCLE_MS_PER_PX = 1000 \/ 14\.4/)
   assert.match(paneStrip, /className="shell__tab-text-inner"/)
   const cycle = shellCss.match(/\.shell__tabstrip:not\(\.workspace__strip\)[\s\S]*?shell-tab-title-cycle var\(--tab-title-duration\) linear 700ms 1 both/)?.[0] || ''
   assert.match(cycle, /\.workspace__strip--focused/)
@@ -857,7 +858,12 @@ test('opening navigation is presentation-only and never refetches whole lists', 
     'a run started in another live client must still advance drawer recency')
 })
 
-test('chat drawer dots distinguish active work from unseen completion', () => {
+test('chat drawer indicators distinguish owner input, active work, and unseen completion', () => {
+  assert.match(
+    shell,
+    /ev\.type === 'chat_owner_input_changed'[\s\S]*?markChatOwnerInput\(ev\.chatId, ownerInputChangeFromEvent\(ev\)\)[\s\S]*?invalidateShellListCache\('chats'\)\.then\(refreshChats\)/,
+    'an owner-input event must project immediately and reconcile the durable PWA cache',
+  )
   assert.match(
     shell,
     /ev\.type === 'chat_run_started'[\s\S]*?markStreamingStart\(ev\.chatId\)/,
@@ -875,9 +881,11 @@ test('chat drawer dots distinguish active work from unseen completion', () => {
   )
   assert.match(
     drawer,
-    /streaming \? \([\s\S]*?drawer__streaming-dot[\s\S]*?: attention \? \([\s\S]*?drawer__attention-dot/,
-    'active work must take precedence over unseen completion in a row',
+    /needsOwnerInput \? \([\s\S]*?drawer__owner-input-dot[\s\S]*?: streaming \? \([\s\S]*?drawer__streaming-dot[\s\S]*?: attention \? \([\s\S]*?drawer__attention-dot/,
+    'owner input must take precedence over active work and unseen completion',
   )
+  assert.match(drawerCss, /\.drawer__owner-input-dot\s*\{[\s\S]*?transform:\s*rotate\(45deg\)/)
+  assert.match(drawerCss, /\.drawer__owner-input-dot\s*\{[\s\S]*?var\(--owner-input, #f59e0b\)/)
   assert.match(drawerCss, /\.drawer__streaming-dot\s*\{[\s\S]*?background:\s*var\(--accent\)/)
   assert.match(drawerCss, /\.drawer__attention-dot\s*\{[\s\S]*?border:\s*1\.5px solid var\(--green\)/)
 })
@@ -1073,6 +1081,18 @@ test('a manual platform reconcile refreshes the persistent Settings surface', ()
   )
 })
 
+test('boot delegates the complete shell generation decision to one inspector', () => {
+  assert.match(
+    shell,
+    /const \{ updateAvailable \} = await inspectShellUpdate\(\{[\s\S]*?serviceWorker: navigator\.serviceWorker,[\s\S]*?\}\)/,
+  )
+})
+
+test('shell resume is a deliberate apply, not a passive visible-chat hold', () => {
+  assert.match(shell, /watchForShellUpdateOnResume\(\{[\s\S]*?rearm: \(\) => requestShellReload\(\),/)
+  assert.doesNotMatch(shell, /rearm: \(\) => requestShellReload\(\{ passive: true \}\)/)
+})
+
 test('the builder no-full-screen invariant scopes to DESTINATIONS, not transient dialogs (§2)', () => {
   // The invariant governs navigable destinations (Settings, takeover views,
   // immersive), NOT dismissible dialogs layered over the workspace. Those stay
@@ -1242,88 +1262,27 @@ test('deletion-evidence contract: probeDeletion classifies 404 vs exists vs unkn
   assert.match(shell, /probeDeletion\(`\/chats\//)
 })
 
-// ── Round 4 item 3: the null slot is a first-class, deferred New Chat landing ──
-test('round4-3: requestEmptySingleNewChat records a tokenized request and does NOT write the slot', () => {
-  const fn = shell.match(/const requestEmptySingleNewChat = useCallback\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
-  assert.ok(fn.length > 0, 'found the request helper')
-  // Guarded to an empty single slot; captures the reuse candidate from the
-  // pre-transition active chat; records a monotonic token; NEVER writes a slot itself.
-  assert.match(fn, /if \(!single \|\| ws\.singleScreen != null\) return/)
-  assert.match(fn, /currentReusableEmptyChat\(chatsRef\.current/)
-  assert.match(fn, /activeChatId: activeChatIdRef\.current/)
-  assert.match(fn, /newChatRequestSeqRef\.current = token/)
-  assert.match(fn, /pendingNewChatRef\.current = \{ token, candidateId/)
-  assert.match(fn, /setPendingNewChatToken\(token\)/)
-  assert.doesNotMatch(fn, /applyModeDestination|SET_SINGLE_SCREEN|chatsRef\.current\[0\]/)
-})
-
-test('round4-3: every reducer edge into an empty single screen uses one policy boundary', () => {
-  const dispatch = workspaceSession.match(
-    /const dispatchWorkspace = useCallback\(\(action\) => \{[\s\S]*?\}, \[setFocusedPaneViewId\]\)/,
-  )?.[0] || ''
-  assert.ok(dispatch.length > 0, 'found the workspace dispatch boundary')
-  assert.match(dispatch, /workspaceReducer\(prev, action\)/)
-  assert.match(dispatch, /enteredEmptySingleScreen\(\s*prev\.ws, next\.ws/)
-  assert.match(dispatch, /requestEmptySingleNewChatRef\.current\?\.\(\)/)
-  // Explicit calls remain only for boot states that do not cross a reducer edge:
-  // populated-history null restore and live-confirmed zero-chat bootstrap.
-  const explicitCalls = shell.match(/\brequestEmptySingleNewChat\(\)/g) || []
-  assert.equal(explicitCalls.length, 2)
-  // A create response updates the chat list before its slot write. Boot must not
-  // interpret that refresh as a second request and POST another empty row.
-  assert.match(shell, /chats\.length > 0\s*&& pendingNewChatRef\.current == null/)
-})
-
-test('round4-3: the materialize watcher gates on an IDLE descriptor', () => {
-  const effect = shell.match(/Deferred New Chat materialization watcher[\s\S]*?workspaceStateRef\]\)/)?.[0] || ''
-  assert.ok(effect.length > 0, 'found the materialize watcher')
-  // Deferred until both the browser scene and drag-preview are idle.
-  assert.match(effect, /if \(modeView\.active \|\| modeState\.transition\) return/)
-  assert.match(effect, /pending\.token !== pendingNewChatToken/)
-  assert.match(effect, /if \(!single \|\| ws\.singleScreen != null\)/)
-  assert.match(effect, /materializeNewChatHomeRef\.current\?\.\(pending\)/)
-})
-
-test('round4-3: materializeNewChatHome is stale-guarded and writes a history-free, focus-free slot', () => {
-  const fn = shell.match(/async function materializeNewChatHome\(pending\) \{[\s\S]*?\n  \}/)?.[0] || ''
-  assert.ok(fn.length > 0, 'found materializeNewChatHome')
-  // Shares the ONE reuse-and-create policy with newChat.
-  assert.match(fn, /resolveNewChatId\(\{ candidate \}\)/)
-  // Stale-guard: token still current, then invalid destinations clear the request.
-  // A live beat is a separate keep-and-resume branch, not a destructive clear.
-  assert.match(fn, /newChatRequestSeqRef\.current !== pending\.token/)
-  assert.match(fn, /latest\.resolvedChatId = chatId/)
-  assert.match(fn, /if \(!single \|\| ws\.singleScreen != null\) \{[\s\S]*?pendingNewChatRef\.current = null/)
-  assert.match(fn, /if \(modeTransitionRef\.current\) return/)
-  assert.match(fn, /pending\.resolvedChatId = chatId/)
-  // A request that supersedes an in-flight token gets one event-driven retry after
-  // the older await releases; there is no interval/polling loop.
-  assert.match(fn, /latest\.token !== pending\.token[\s\S]*?setMaterializeNewChatRevision/)
-  assert.doesNotMatch(fn, /setInterval|setTimeout/)
-  // offline/failed → keep the landing with a retry state, never chats[0].
-  assert.match(fn, /if \(chatId == null\) \{[\s\S]*?setNewChatLandingFailure\(reason === 'offline' \? 'offline' : 'error'\)/)
-  // The slot write is history-free (applyModeDestination pushes none) + preserveSettings,
-  // and there is NO composer focus (a mode toggle must not summon the keyboard).
-  assert.match(fn, /applyModeDestination\(\s*\{ view: 'chat', chatId, appId: null, paneId: ws\.focusedPaneId \},\s*\{ preserveSettings: true \}/)
-  assert.doesNotMatch(fn, /requestComposerFocus|focusComposer/)
-})
-
-test('round4-3: resolveNewChatId is the shared reuse-and-create policy; newChat + materialize both use it', () => {
-  assert.match(shell, /async function resolveNewChatId\(\{ candidate, draft, forceNew, exclude \} = \{\}\)/)
-  // newChat consumes the shared resolver, optionally supplying the standard-mode
-  // resume candidate rather than growing a second create path.
-  const fn = shell.match(/async function newChat\([\s\S]*?\n  \}/)?.[0] || ''
-  assert.ok(fn.length > 0, 'found newChat')
-  assert.match(fn, /const \{ chatId, reason \} = await resolveNewChatId\(/)
-  assert.doesNotMatch(fn, /api\.chats\.create|apiFetch\(\s*['"`]\/chats/)
-})
-
 test('round4-3: the New Chat landing renders for a null slot and reuses ChatView empty visuals', () => {
   // The presentation key + its wiring.
   assert.match(workspaceViewSrc, /export const EMPTY_SINGLE_SURFACE_KEY = 'home:new-chat'/)
   assert.match(shell, /const newChatSurface = fullBleedKey === EMPTY_SINGLE_SURFACE_KEY/)
   assert.match(shell, /<NewChatLanding/)
-  assert.match(shell, /onRetry=\{requestEmptySingleNewChat\}/)
+  assert.match(shell, /chatId=\{presentingNewChat \? newChatPresentation\.chatId : null\}/)
+  assert.match(shell, /retryDraftFirstNewChat/)
+  assert.match(newChatLanding, /submissionBlocked[\s\S]*attachmentsDisabled/)
+  assert.match(newChatLanding,
+    /focusComposerElement\(inputRef\.current\)[\s\S]*placeCaretAtTextEnd\(inputRef\.current\)/,
+    'the provisional draft resumes at its text end without changing generic focus policy')
+  assert.match(newChatLanding,
+    /leftButtons=\{<ComposerPopover pending \/>\}/,
+    'the provisional composer must reuse the real options control in its inert state')
+  assert.doesNotMatch(newChatLanding, /attachTriggerRef/,
+    'the pre-allocation surface must not expose server-bound attachment behavior')
+  assert.match(chatInputBar,
+    /const files = attachmentsDisabled \? \[\] : pastedFiles\(e\.clipboardData\)/,
+    'disabled attachments must suppress only pasted files, not text handling')
+  assert.match(chatInputBar, /\{!attachmentsDisabled && \(\s*<input/,
+    'disabled attachments must not mount a hidden file picker')
   // Seamless swap: the landing reuses ChatView's exact empty treatment.
   assert.match(newChatLanding, /className="chat chat--empty"/)
   assert.match(newChatLanding, /className="chat__empty-wrap"/)

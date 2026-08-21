@@ -1,6 +1,7 @@
 /* Resolve image-view tool results without handing their base64 payload to the generic text renderer. */
 
 const CHAT_IMAGE_PATH = /^\/data\/chats\/([A-Za-z0-9_-]+)\/(uploads|media)\/([^/]+)$/
+const TMP_IMAGE_PATH = /^\/tmp\/(.+)$/
 const INLINE_IMAGE_TYPES = new Set([
   'image/png',
   'image/jpeg',
@@ -41,10 +42,24 @@ export function chatImageReference(input) {
   }
 }
 
-/** References that can render from an existing durable URL without loading
- * the image tool's much larger base64 sidecar. */
-export function durableImageReference(input) {
-  return chatImageReference(input)
+/** A native Codex image-view event records only its path. Temporary raster
+ * images therefore use the owning chat's narrow, token-protected /tmp route
+ * instead of waiting for a base64 result that Codex never emits. */
+export function temporaryImageReference(input, chatId) {
+  if (!chatId) return null
+  const match = imagePathFromInput(input).match(TMP_IMAGE_PATH)
+  if (!match) return null
+  return {
+    kind: 'tmp',
+    chatId,
+    filename: match[1],
+  }
+}
+
+/** References that can render through an existing protected route without
+ * loading the image tool's much larger base64 sidecar. */
+export function servedImageReference(input, chatId) {
+  return chatImageReference(input) || temporaryImageReference(input, chatId)
 }
 
 /** Fallback for image tools that viewed a path outside chat media. This work
@@ -74,6 +89,6 @@ export function inlineImageReference(output) {
   }
 }
 
-export function toolImageReference(input, output) {
-  return durableImageReference(input) || inlineImageReference(output)
+export function toolImageReference(input, output, chatId) {
+  return servedImageReference(input, chatId) || inlineImageReference(output)
 }

@@ -85,7 +85,7 @@ class Settings(BaseSettings):
   max_concurrent_agent_turns: int = 6
   max_concurrent_delegated_turns: int = 3
 
-  # Managed deployments receive this public-client pair from provisioning.
+  # Managed deployments receive this complete triplet from their provisioning
   # layer. When absent, Möbius is an ordinary self-hosted installation and
   # keeps the local username/password setup flow. Partial configuration is a
   # startup error: silently falling back to first-owner setup would reopen the
