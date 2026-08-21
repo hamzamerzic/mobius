@@ -48,7 +48,7 @@ function escapeInlineScript(source) {
  * interactive preview without exposing a project directory as a public URL.
  * Missing or remote dependencies stay in the document and are blocked by CSP.
  */
-export async function assembleProjectHtmlPreview(source, entryPath, loadText) {
+export async function assembleProjectHtmlPreview(source, entryPath, loadText, loadDataUri = null) {
   let document = String(source ?? '')
   const stylesheet = /<link\b([^>]*\brel=["']?stylesheet["']?[^>]*)>/gi
   const script = /<script\b([^>]*\bsrc=["']([^"']+)["'][^>]*)><\/script\s*>/gi
@@ -75,6 +75,44 @@ export async function assembleProjectHtmlPreview(source, entryPath, loadText) {
         `<script data-project-file="${path}">${escapeInlineScript(content)}</script>`,
       )
     } catch { /* the CSP-blocked original makes a missing dependency visible */ }
+  }
+
+  // Inline local binary assets (images, fonts, CSS background images) as data:
+  // URIs when a binary loader is supplied. The srcDoc frame is an opaque origin
+  // whose CSP is default-src 'none' + img-src/font-src data:, so a relative
+  // asset URL would otherwise be blocked; a data: URI is the only way a built
+  // site's own images and fonts can render. Each local path is fetched once.
+  // Remote/absolute refs are left untouched (and stay CSP-blocked, so a missing
+  // asset is visible rather than silently wrong).
+  if (loadDataUri) {
+    const assetCache = new Map()
+    const resolveAsset = async (reference) => {
+      const path = localProjectPath(reference, entryPath)
+      if (!path) return null
+      if (!assetCache.has(path)) {
+        try { assetCache.set(path, await loadDataUri(path)) }
+        catch { assetCache.set(path, null) }
+      }
+      return assetCache.get(path)
+    }
+
+    const image = /<img\b[^>]*?\bsrc=(["'])([^"']+)\1[^>]*>/gi
+    for (const match of [...document.matchAll(image)]) {
+      const uri = await resolveAsset(match[2])
+      if (!uri) continue
+      const replaced = match[0].replace(
+        `src=${match[1]}${match[2]}${match[1]}`,
+        `src=${match[1]}${uri}${match[1]}`,
+      )
+      document = document.replace(match[0], replaced)
+    }
+
+    const cssUrl = /url\(\s*(["']?)([^)"']+)\1\s*\)/gi
+    for (const match of [...document.matchAll(cssUrl)]) {
+      const uri = await resolveAsset(match[2])
+      if (!uri) continue
+      document = document.split(match[0]).join(`url(${uri})`)
+    }
   }
 
   return safeProjectHtmlDocument(document)

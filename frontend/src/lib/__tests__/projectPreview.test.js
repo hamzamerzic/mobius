@@ -56,3 +56,40 @@ test('project HTML preview leaves remote dependencies blocked by CSP', async () 
   assert.match(result, /https:\/\/tracker.invalid\/x.js/)
   assert.match(result, /default-src 'none'/)
 })
+
+test('project HTML preview inlines local images and CSS url() as data URIs', async () => {
+  const assets = new Map([
+    ['site/logo.png', 'data:image/png;base64,AAAA'],
+    ['site/bg.jpg', 'data:image/jpeg;base64,BBBB'],
+  ])
+  const result = await assembleProjectHtmlPreview(
+    '<style>.hero{background:url("./bg.jpg")}</style><img src="./logo.png">',
+    'site/index.html',
+    async () => { throw new Error('no text deps') },
+    async path => {
+      if (!assets.has(path)) throw new Error('missing')
+      return assets.get(path)
+    },
+  )
+  assert.match(result, /<img src="data:image\/png;base64,AAAA">/)
+  assert.match(result, /url\(data:image\/jpeg;base64,BBBB\)/)
+})
+
+test('project HTML preview leaves remote images untouched (CSP-blocked)', async () => {
+  const result = await assembleProjectHtmlPreview(
+    '<img src="https://tracker.invalid/pixel.gif">',
+    'index.html',
+    async () => { throw new Error('no text deps') },
+    async () => { throw new Error('must not fetch remote') },
+  )
+  assert.match(result, /https:\/\/tracker.invalid\/pixel.gif/)
+})
+
+test('project HTML preview without a data loader keeps local images as-is', async () => {
+  const result = await assembleProjectHtmlPreview(
+    '<img src="./logo.png">',
+    'site/index.html',
+    async () => { throw new Error('no text deps') },
+  )
+  assert.match(result, /<img src="\.\/logo.png">/)
+})

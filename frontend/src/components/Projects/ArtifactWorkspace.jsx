@@ -154,7 +154,20 @@ function WebsitePreview({ projectId, artifactId, entryPath, version, name }) {
           if (!dep.ok) throw new Error(`dependency ${path} failed (${dep.status})`)
           return dep.text()
         }
-        const assembled = await assembleProjectHtmlPreview(html, entry, loadText)
+        // Local images/fonts/backgrounds become data: URIs so the site renders
+        // fully inside the opaque sandboxed srcDoc (relative URLs are CSP-blocked).
+        const loadDataUri = async (path) => {
+          const dep = await api.projects.artifactOutput(projectId, artifactId, path, { signal: controller.signal })
+          if (!dep.ok) throw new Error(`asset ${path} failed (${dep.status})`)
+          const blob = await dep.blob()
+          return await new Promise((resolve, reject) => {
+            const reader = new FileReader()
+            reader.onload = () => resolve(reader.result)
+            reader.onerror = () => reject(reader.error)
+            reader.readAsDataURL(blob)
+          })
+        }
+        const assembled = await assembleProjectHtmlPreview(html, entry, loadText, loadDataUri)
         if (active) setDoc(assembled)
       } catch (cause) {
         if (active && cause?.name !== 'AbortError') setError(cause?.message || 'The site could not be loaded.')
