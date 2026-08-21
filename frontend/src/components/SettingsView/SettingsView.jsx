@@ -560,7 +560,7 @@ export default function SettingsView({
     const rows = Array.isArray(draft) ? draft : []
     const enabled = rows.filter(row => row.enabled !== false)
     if (!enabled.length) {
-      setBackgroundError('Choose at least one background model.')
+      setBackgroundError('Some services are now disabled.')
       return Promise.resolve(false)
     }
     const reqId = ++backgroundSaveReqRef.current
@@ -1638,7 +1638,7 @@ export default function SettingsView({
                 </div>
                 {backgroundError && (
                   <Alert
-                    color="danger"
+                    color="info"
                     variant="soft"
                     description={backgroundError}
                   />
