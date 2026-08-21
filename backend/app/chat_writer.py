@@ -2741,10 +2741,12 @@ class ChatWriterActor:
   def _update_pending(self, db, cmd: UpdatePending) -> dict:
     """Replace one still-queued message's text, preserving every other field.
 
-    Matches on `cid_of` like `_cancel_pending`; stamps `updated_at` and commits
-    only when the row is still queued. Returns `{"updated", "pending"}` —
-    `updated` is False when a racing promote or cancel already removed the row,
-    so the caller can distinguish a real edit from a no-op.
+    Matches on `cid_of` like `_cancel_pending`. `updated` reports whether the
+    row is still queued (True even for a no-op edit to identical text); the
+    commit and `updated_at` bump happen only when the content actually changed,
+    mirroring `_cancel_pending`. `updated` is False only when a racing promote
+    or cancel already removed the row, so the caller can distinguish a real
+    edit from a message that has already left the queue.
     """
     from datetime import UTC, datetime
 
@@ -2755,14 +2757,19 @@ class ChatWriterActor:
       raise _PersistFailed("UpdatePending: chat not found")
     pending = list(chat.pending_messages or [])
     updated = False
+    changed = False
     next_pending = []
     for message in pending:
       if not updated and cid_of(message) == cmd.cid:
-        next_pending.append({**message, "content": cmd.content})
         updated = True
+        if message.get("content") == cmd.content:
+          next_pending.append(message)
+        else:
+          next_pending.append({**message, "content": cmd.content})
+          changed = True
       else:
         next_pending.append(message)
-    if updated:
+    if changed:
       chat.pending_messages = next_pending
       chat.updated_at = datetime.now(UTC)
       if not _commit_or_rollback(db):

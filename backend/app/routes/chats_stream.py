@@ -140,10 +140,9 @@ def _sse(data: dict) -> str:
   return f"data: {json.dumps(data)}\n\n"
 
 
-def _content_with_uploads(chat: models.Chat, body: schemas.SendMessage) -> str:
+def _content_with_uploads(chat: models.Chat, content: str) -> str:
   """Returns message content with the session upload notice appended."""
   settings = get_settings()
-  content = body.content
   # Force-steer resends the exact canonical pending-message content. Pending
   # rows already include this hidden upload manifest; appending it again makes
   # steered multi-message turns look duplicated/newline-heavy in the client and
@@ -332,7 +331,7 @@ def _user_message_from_body(
   """Builds the durable user message payload for a send request."""
   user_msg = {
     "role": "user",
-    "content": _content_with_uploads(chat, body),
+    "content": _content_with_uploads(chat, body.content),
     "ts": int(time.time() * 1000),
   }
   # Carry the client-minted identity when present; API clients may omit it, so
@@ -1233,8 +1232,13 @@ async def update_pending_message(
   db: Session = Depends(get_db),
 ):
   """Edits one queued (not-yet-started) user message in place, identified by
-  its stable `cid`. Only the text changes; the actor's UpdatePending preserves
-  the row's identity, ordering, attachments, and queue position.
+  its stable `cid`. Only the visible text changes; the actor's UpdatePending
+  preserves the row's identity, ordering, attachments, and queue position.
+
+  The request carries just the owner's text. The hidden session-file manifest
+  is re-derived here through the same `_content_with_uploads` the send path
+  uses, so the edit can never blank a row or drop its file references, and the
+  browser is never trusted to round-trip that hidden content.
 
   Returns `updated` plus the current pending queue so the client can reconcile
   drift: `updated` is False when a racing promotion or cancellation pulled the
@@ -1243,10 +1247,13 @@ async def update_pending_message(
   if principal.scope == "app":
     raise HTTPException(status_code=403, detail="App token is not valid here.")
   require_chat_embed_operation(principal, "chat:send")
-  require_active_chat_access(db, chat_id, principal)
+  chat = get_active_chat_for_principal(
+    db, chat_id, principal, load_fields=(models.Chat.uploads,),
+  )
   content = body.content.strip()
   if not content:
     raise HTTPException(status_code=422, detail="Queued message cannot be empty.")
+  content = _content_with_uploads(chat, content)
   # The actor's UpdatePending is the SOLE runtime mutator of pending_messages,
   # so an edit racing a concurrent promote/cancel can't lost-update.
   ack = get_writer().submit(

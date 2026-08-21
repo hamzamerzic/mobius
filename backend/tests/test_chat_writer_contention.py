@@ -552,6 +552,21 @@ def test_update_pending_missing_cid_is_a_noop(actor):
   ]
 
 
+def test_update_pending_same_text_reports_present_without_change(actor):
+  """Editing a queued row to its current text still reports it present
+  (updated:True) and returns the row byte-for-byte unchanged, so an idempotent
+  retry is a no-op rather than a phantom 'gone'."""
+  seeded = {
+    "role": "user", "content": "same", "ts": 10, "cid": "c-same", "position": 1,
+  }
+  _seed_chat(pending=[dict(seeded)])
+  result = _await(actor.submit(UpdatePending(
+    chat_id="c1", run_token="", cid="c-same", content="same",
+  )))
+  assert result["updated"] is True
+  assert result["pending"] == [seeded]
+
+
 # -- cid identity: dedup + idempotency ------------------------------------
 def test_append_pending_duplicate_cid_is_idempotent(actor):
   """A retried queue POST carries the SAME cid; the writer returns the

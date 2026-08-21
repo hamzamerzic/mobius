@@ -960,6 +960,35 @@ def test_update_pending_message_rejects_empty_content(client, db, auth):
   assert c.pending_messages[0]["content"] == "keep"
 
 
+def test_update_pending_message_rederives_upload_manifest(client, db, auth, chat):
+  """The edit re-derives the hidden session-file manifest server-side, so an
+  attachment-bearing queued message keeps its file references after an edit —
+  the browser only sends the visible text. (`chat` uses a UUID4 id the uploads
+  route accepts.)"""
+  chat.pending_messages = [
+    {"role": "user", "content": "before", "ts": 100, "cid": "c-up"},
+  ]
+  db.commit()
+
+  up = client.post(
+    f"/api/chats/{chat.id}/uploads",
+    files=[("files", ("report.pdf", io.BytesIO(b"data"), "application/pdf"))],
+    headers=auth,
+  )
+  assert up.status_code < 300, up.text
+
+  resp = client.patch(
+    f"/api/chats/{chat.id}/pending/c-up",
+    headers=auth,
+    json={"content": "analyze this"},
+  )
+  assert resp.status_code == 200, resp.text
+  edited = resp.json()["pending_messages"][0]
+  assert edited["content"].startswith("analyze this")
+  assert "[Files in this session:" in edited["content"]
+  assert "report.pdf" in edited["content"]
+
+
 def test_cancel_pending_row_by_backfilled_legacy_cid(client, db, auth):
   """A card-221-backfilled row carries an explicit `legacy-<ts>` cid; cancelling
   by that value removes it (the value is stored now, not derived at read time)."""
