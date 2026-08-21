@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import Ellipsis from 'lucide-react/dist/esm/icons/ellipsis.mjs'
 import MessageSquare from 'lucide-react/dist/esm/icons/message-square.mjs'
 import MessageSquarePlus from 'lucide-react/dist/esm/icons/message-square-plus.mjs'
@@ -37,6 +37,7 @@ export default function ProjectWorkspace({
   const [creatingChat, setCreatingChat] = useState(false)
   const moreMenuRef = useRef(null)
   const renameInputRef = useRef(null)
+  const queryClient = useQueryClient()
 
   const chatsQuery = useQuery({
     queryKey: projectQueries.keys.chats(project.id),
@@ -126,6 +127,33 @@ export default function ProjectWorkspace({
     }
   }
 
+  // Turn a file the owner picked in the finder into a build artifact. The finder
+  // already decided the builder from the extension; the id is derived from the
+  // path so re-running "build as …" on the same file reuses one artifact rather
+  // than piling up duplicates. Then build it and open its tab.
+  async function buildFileAsArtifact(path, builder) {
+    const base = (path.split('/').pop() || path).replace(/\.[^.]+$/, '') || 'output'
+    const id = path.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9_-]+/g, '-')
+      .replace(/^-+|-+$/g, '').toLowerCase().slice(0, 64) || 'artifact'
+    setError('')
+    try {
+      try {
+        await jsonOrThrow(await api.projects.createArtifact(project.id, {
+          id, name: base, builder, source: path,
+        }), 'Build failed:')
+      } catch (cause) {
+        // An artifact for this file already exists — reuse it. Re-raise anything
+        // that is not a duplicate (e.g. the source vanished).
+        if (!/already|exist|409/i.test(cause?.message || '')) throw cause
+      }
+      await api.projects.buildArtifact(project.id, id)
+      queryClient.invalidateQueries({ queryKey: projectQueries.keys.artifacts(project.id) })
+      onOpenArtifact?.(id)
+    } catch (cause) {
+      setError(cause?.message || 'Could not build that file.')
+    }
+  }
+
   return (
     <section className="project-workspace" aria-label={`${project.name} project`}>
       <header className="project-workspace__header">
@@ -191,7 +219,7 @@ export default function ProjectWorkspace({
         </div>
       </section>
 
-      <ProjectFinder projectId={project.id} projectName={project.name} />
+      <ProjectFinder projectId={project.id} projectName={project.name} onBuildFile={buildFileAsArtifact} />
 
       <ProjectArtifacts projectId={project.id} onOpen={onOpenArtifact} />
     </section>

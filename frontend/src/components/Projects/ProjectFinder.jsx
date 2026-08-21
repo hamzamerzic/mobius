@@ -11,6 +11,7 @@ import FileCode from 'lucide-react/dist/esm/icons/file-code.mjs'
 import FileText from 'lucide-react/dist/esm/icons/file-text.mjs'
 import Folder from 'lucide-react/dist/esm/icons/folder.mjs'
 import FolderPlus from 'lucide-react/dist/esm/icons/folder-plus.mjs'
+import Hammer from 'lucide-react/dist/esm/icons/hammer.mjs'
 import Image from 'lucide-react/dist/esm/icons/image.mjs'
 import Pencil from 'lucide-react/dist/esm/icons/pencil.mjs'
 import Upload from 'lucide-react/dist/esm/icons/upload.mjs'
@@ -45,6 +46,13 @@ const CODE_EXTS = new Set([
   'sh', 'bash', 'yml', 'yaml', 'toml', 'sql', 'rs', 'go', 'java', 'c', 'cpp',
   'h', 'xml', 'svg',
 ])
+// A file becomes a build artifact purely by its extension — dumb-simple, no
+// scanning or guessing. Only these known kinds get a "Build as …" action.
+const ARTIFACT_BUILDERS = { html: 'website', htm: 'website', tex: 'latex' }
+const ARTIFACT_BUILD_LABEL = { website: 'Build as website', latex: 'Build as PDF' }
+function builderForFile(name) {
+  return ARTIFACT_BUILDERS[(name.split('.').pop() || '').toLowerCase()] || null
+}
 const HLJS_LANG = {
   js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
   ts: 'typescript', tsx: 'typescript', py: 'python', sh: 'bash', bash: 'bash',
@@ -76,7 +84,7 @@ function formatSize(bytes) {
 // (desktop, container-query driven), with in-place inspection that never leaves
 // the tab. Folder + file navigation is wired into the shell's history stack so
 // the browser Back button walks back through it in-tab.
-export default function ProjectFinder({ projectId, projectName }) {
+export default function ProjectFinder({ projectId, projectName, onBuildFile }) {
   const history = useHistoryDismissControls()
   const [nav, setNav] = useState(() => initFinder())
   const path = nav.current.path
@@ -444,6 +452,7 @@ export default function ProjectFinder({ projectId, projectName }) {
                 onMove={(toDir) => moveEntry(entry.path, joinPath(toDir, entry.name))}
                 onDownload={() => downloadFile(entry.path)}
                 onDelete={() => deleteEntry(entry.path)}
+                onBuildAs={onBuildFile ? (builder) => onBuildFile(entry.path, builder) : null}
               />
             ))
           )}
@@ -529,7 +538,7 @@ export default function ProjectFinder({ projectId, projectName }) {
 
 // One entry row with a context action menu (open / rename / move / download /
 // delete). Rename + move both call POST /{id}/move via the parent.
-function FinderRow({ entry, active, disabled, onOpen, onRename, onMove, onDownload, onDelete }) {
+function FinderRow({ entry, active, disabled, onOpen, onRename, onMove, onDownload, onDelete, onBuildAs }) {
   const [menu, setMenu] = useState(false)
   const [mode, setMode] = useState(null) // 'rename' | 'move' | null
   const [value, setValue] = useState('')
@@ -583,6 +592,9 @@ function FinderRow({ entry, active, disabled, onOpen, onRename, onMove, onDownlo
             <button type="button" role="menuitem" onClick={() => begin('rename')}><Pencil size={15} /> Rename</button>
             <button type="button" role="menuitem" onClick={() => begin('move')}><FolderPlus size={15} /> Move…</button>
             {!isDir && <button type="button" role="menuitem" onClick={() => { setMenu(false); onDownload() }}><Download size={15} /> Download</button>}
+            {!isDir && onBuildAs && builderForFile(entry.name) && (
+              <button type="button" role="menuitem" onClick={() => { setMenu(false); onBuildAs(builderForFile(entry.name)) }}><Hammer size={15} /> {ARTIFACT_BUILD_LABEL[builderForFile(entry.name)]}</button>
+            )}
             <button type="button" role="menuitem" className="project-menu__danger" onClick={() => { setMenu(false); onDelete() }}><Trash2 size={15} /> Delete</button>
           </div>
         )}
