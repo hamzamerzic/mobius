@@ -257,6 +257,36 @@ def test_connect_start_can_explicitly_request_workflow_scope(
   assert r.json()["requested_scopes"] == ["public_repo", "workflow"]
 
 
+def test_connect_start_can_request_private_repo_scope(
+  client, auth, monkeypatch,
+):
+  """Opting into private access swaps public_repo for the full repo scope."""
+  _set_client_id(monkeypatch, "cid-123")
+  seen = {}
+
+  def handler(request):
+    if str(request.url) == _DEVICE_CODE_URL:
+      seen.update(parse_qs(request.content.decode()))
+      return httpx.Response(200, json={
+        "device_code": "DEV", "user_code": "WXYZ-1234",
+        "verification_uri": "https://github.com/login/device",
+        "interval": 5, "expires_in": 900,
+      })
+    return _fail(request)
+
+  _install_mock_transport(monkeypatch, handler)
+  r = client.post(
+    "/api/github/connect/start",
+    headers=auth,
+    json={"workflow": True, "private": True},
+  )
+
+  assert r.status_code == 200, r.text
+  # `repo` is a superset of public_repo, so it replaces it rather than combining.
+  assert seen["scope"] == ["repo workflow"]
+  assert r.json()["requested_scopes"] == ["repo", "workflow"]
+
+
 def test_connect_start_app_with_github_connect(
   client, owner_token, monkeypatch,
 ):

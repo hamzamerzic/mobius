@@ -40,6 +40,10 @@ class GithubTokenRequest(BaseModel):
 
 class GithubConnectStartRequest(BaseModel):
   workflow: bool = False
+  # Opt-in: request GitHub's full `repo` scope (read/write to private repos)
+  # instead of the default public-only `public_repo`. Kept off by default so a
+  # connection stays least-privilege unless the owner explicitly asks for it.
+  private: bool = False
 
 
 def _bounded_provider_int(
@@ -135,7 +139,10 @@ async def _start_device_attempt(
       ),
     )
   try:
-    scopes = "public_repo workflow" if body and body.workflow else "public_repo"
+    # `repo` is a superset of `public_repo` that also reaches private repos, so
+    # it replaces (never combines with) the public-only scope when requested.
+    base_scope = "repo" if body and body.private else "public_repo"
+    scopes = f"{base_scope} workflow" if body and body.workflow else base_scope
     async with httpx.AsyncClient(timeout=15.0) as client:
       r = await client.post(
         _DEVICE_CODE_URL,
