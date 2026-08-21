@@ -103,6 +103,32 @@ from app.runtime_types import RunnerResult
 
 log = logging.getLogger(__name__)
 
+# --- Provider register (documented amendment to system_prompts.py's contract) ---
+# The per-chat snapshot in `system_prompts.py` is the identical behavioral
+# constitution handed to every provider. A runner MAY append its own small,
+# provider-authored behavioral register on top of that shared base — the narrow,
+# deliberate exception that module's contract now allows. The Codex runner
+# declares none, so it is unaffected. This is the Claude runner's concise
+# register: appended AFTER the constitution, never substituted for it.
+_CONCISE_REGISTER = r"""# Concise register
+
+Be concise by default: lead with the result, skip preamble and narration, keep only what the partner needs — full detail on request. Concision trims length and preamble, never substance: it never drops a required citation, the escaped `\$` for currency, a screenshot embedded before you describe it, the detail the platform summary or a future continuation needs, or the deliberate speech acts the constitution requires (the one-sentence intent opener, making non-obvious findings explicit, clarifying-question cards, destructive-op and restart confirmations, and the turn closeout)."""
+
+
+def _system_prompt_with_register(skill_text: str) -> str:
+  """Append this runner's provider-authored register to the shared constitution.
+
+  The SDK `system_prompt` is the shared per-chat snapshot (`skill_text`) plus the
+  Claude runner's own concise register. The register is appended, never
+  substituted, so the constitution the other provider receives is unchanged. An
+  empty register returns `skill_text` unchanged, keeping the seam behavior-neutral.
+  """
+  register = _CONCISE_REGISTER.strip()
+  if not register:
+    return skill_text
+  return skill_text.rstrip() + "\n\n" + register + "\n"
+
+
 _CLAUDE_CLI = "/usr/local/bin/claude"
 _ISOLATED_CLAUDE_CLI = "/app/scripts/claude-isolated"
 
@@ -1101,7 +1127,7 @@ async def run_claude_sdk_turn(
         stderr_tail.append(line.rstrip("\n")[:500])
 
     options_kwargs = {
-      "system_prompt": skill_text,
+      "system_prompt": _system_prompt_with_register(skill_text),
       "resume": session_id if session_id is not None else None,
       "cwd": cwd,
       "env": base_env,
