@@ -7,12 +7,15 @@ const workspace = readFileSync(
   'utf8',
 )
 
-test('project add menu can create another chat from any folder', () => {
-  assert.match(workspace, /role="menuitem"[^]*?void createChat\(\)/)
-  assert.match(workspace, /Creating chat…[^]*New chat/)
+test('the workspace keeps a New chat affordance in its chats strip', () => {
+  assert.match(workspace, /void createChat\(\)/)
+  assert.match(workspace, /Creating…[^]*New chat/)
 })
 
-test('compact artifact build control keeps its action name', () => {
-  assert.match(workspace, /className="project-build-button"[^>]+aria-label=\{buildAction\.name \|\| 'Build'\}/)
-  assert.match(workspace, /title=\{buildAction\.name \|\| 'Build'\}/)
+test('the redesign composes the Finder + Artifacts zones and drops the build CTA', () => {
+  assert.match(workspace, /<ProjectFinder\b/)
+  assert.match(workspace, /<ProjectArtifacts\b/)
+  // Artifacts replace the legacy /build/i template-action CTA.
+  assert.doesNotMatch(workspace, /buildAction/)
+  assert.doesNotMatch(workspace, /project-build-button/)
 })

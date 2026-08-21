@@ -544,11 +544,13 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
-    files: (projectId, path = '') => apiFetch(
+    files: (projectId, path = '', { signal } = {}) => apiFetch(
       `/projects/${encodeURIComponent(projectId)}/files?path=${encodeURIComponent(path)}`,
+      { signal },
     ),
-    readFile: (projectId, path, { download = false } = {}) => apiFetch(
+    readFile: (projectId, path, { download = false, signal } = {}) => apiFetch(
       `/projects/${encodeURIComponent(projectId)}/file?path=${encodeURIComponent(path)}${download ? '&download=true' : ''}`,
+      { signal },
     ),
     writeFile: (projectId, path, content) => apiFetch(
       `/projects/${encodeURIComponent(projectId)}/file?path=${encodeURIComponent(path)}`,
@@ -568,6 +570,43 @@ export const api = {
     ),
     downloadUrl: (projectId, path) => (
       `${BASE}/api/projects/${encodeURIComponent(projectId)}/file?path=${encodeURIComponent(path)}&download=true`
+    ),
+    // Rename or move a file/dir within the project tree. The backend confines
+    // both paths, rejects symlink escape / dst-exists / into-descendant, and
+    // maps an os.replace failure to a 4xx rather than a 500 (see the build spec).
+    move: (projectId, { from_path, to_path }) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/move`,
+      { method: 'POST', body: JSON.stringify({ from_path, to_path }) },
+    ),
+    // ── Artifacts (buildable outputs: website / latex) ───────────────────────
+    artifacts: (projectId, { signal } = {}) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/artifacts`,
+      { signal },
+    ),
+    createArtifact: (projectId, payload) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/artifacts`,
+      { method: 'POST', body: JSON.stringify(payload) },
+    ),
+    deleteArtifact: (projectId, artifactId) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}`,
+      { method: 'DELETE' },
+    ),
+    buildArtifact: (projectId, artifactId) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}/build`,
+      { method: 'POST' },
+    ),
+    artifactLog: (projectId, artifactId) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}/log`,
+    ),
+    // Bytes of one confined output file (pdfjs fetches the latex pdf through
+    // this via apiFetch so the owner Bearer authenticates the read).
+    // Artifact output bytes always go through apiFetch with the Bearer header
+    // (pdfjs for latex, and the shell fetching + inlining a website into a
+    // sandboxed srcDoc). The owner token is NEVER placed in a URL a sandboxed
+    // artifact could read from window.location.
+    artifactOutput: (projectId, artifactId, path, { signal } = {}) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}/output/${path.split('/').map(encodeURIComponent).join('/')}`,
+      { signal },
     ),
   },
   services: {

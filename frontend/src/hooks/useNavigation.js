@@ -62,7 +62,7 @@ function navRoute(view, chatId, appId, paneId, extra = null) {
 }
 
 function isRestorableRoute(route) {
-  return route && ['chat', 'canvas', 'apps', 'projects', 'project', 'settings'].includes(route.view)
+  return route && ['chat', 'canvas', 'apps', 'projects', 'project', 'artifact', 'settings'].includes(route.view)
 }
 
 function sameRoute(a, b) {
@@ -70,6 +70,7 @@ function sameRoute(a, b) {
     && String(a?.chatId ?? '') === String(b?.chatId ?? '')
     && String(a?.appId ?? '') === String(b?.appId ?? '')
     && String(a?.projectId ?? '') === String(b?.projectId ?? '')
+    && String(a?.artifactRef ?? '') === String(b?.artifactRef ?? '')
     && String(a?.paneId ?? '') === String(b?.paneId ?? '')
 }
 
@@ -209,6 +210,10 @@ export default function useNavigation({
   const activeChatId = contentRoute.chatId
   const activeAppId = contentRoute.appId
   const activeProjectId = contentRoute.projectId ?? null
+  // The composite `<projectId>:<artifactId>` id of the artifact tab the current
+  // world is showing, or null. Shell resolves it back to its project + artifact
+  // to mount the right ArtifactWorkspace.
+  const activeArtifactRef = contentRoute.artifactRef ?? null
 
   // Guards the one-shot HOME seed against a StrictMode double-mount / any
   // remount (pushNavEntry is not idempotent). See the mount effect below.
@@ -961,9 +966,11 @@ export default function useNavigation({
           ? tabModel.projectsTab()
           : (route.view === 'project'
             ? (route.projectId != null ? { kind: 'project', id: route.projectId } : null)
-            : (route.view === 'canvas'
-              ? (route.appId != null ? { kind: 'app', id: route.appId } : null)
-              : (route.chatId != null ? { kind: 'chat', id: route.chatId } : null))))
+            : (route.view === 'artifact'
+              ? (route.artifactRef != null ? { kind: 'artifact', id: route.artifactRef } : null)
+              : (route.view === 'canvas'
+                ? (route.appId != null ? { kind: 'app', id: route.appId } : null)
+                : (route.chatId != null ? { kind: 'chat', id: route.chatId } : null)))))
       dispatchWorkspace({ type: 'SET_SINGLE_SCREEN', item })
       return
     }
@@ -976,9 +983,11 @@ export default function useNavigation({
         ? tabModel.projectsTab()
         : (route.view === 'project'
           ? tabModel.projectTab(route.projectId)
-          : (route.view === 'canvas'
-            ? tabModel.makeTab('app', route.appId)
-            : tabModel.makeTab('chat', route.chatId))))
+          : (route.view === 'artifact'
+            ? tabModel.makeTab('artifact', route.artifactRef)
+            : (route.view === 'canvas'
+              ? tabModel.makeTab('app', route.appId)
+              : tabModel.makeTab('chat', route.chatId)))))
     dispatchWorkspace({ type: 'OPEN_TAB', paneId: targetPaneId, tab, activate: true })
   }, [applySettingsDestination, dispatchWorkspace, workspaceStateRef])
 
@@ -1033,6 +1042,16 @@ export default function useNavigation({
       if (projectId == null || String(projectId).trim() === '') return
       nextRoute = navRoute('project', null, null, targetPaneId, { projectId: String(projectId) })
       openTab = tabModel.projectTab(projectId)
+    } else if (view === 'artifact') {
+      const projectId = opts.projectId
+      const artifactId = opts.artifactId
+      if (projectId == null || String(projectId).trim() === ''
+        || artifactId == null || String(artifactId).trim() === '') return
+      const artifactRef = tabModel.artifactTabId(projectId, artifactId)
+      nextRoute = navRoute('artifact', null, null, targetPaneId, {
+        projectId: String(projectId), artifactRef,
+      })
+      openTab = tabModel.makeTab('artifact', artifactRef)
     } else if (view === 'canvas') {
       const appId = 'appId' in opts ? opts.appId : activeAppIdRef.current
       const tab = tabModel.makeTab('app', appId)
@@ -1127,7 +1146,9 @@ export default function useNavigation({
       ? (route.appId != null ? `app:${route.appId}` : null)
       : (route.view === 'project'
         ? (route.projectId != null ? `project:${route.projectId}` : null)
-        : (!route.homeSeed && route.chatId != null ? `chat:${route.chatId}` : null))
+        : (route.view === 'artifact'
+          ? (route.artifactRef != null ? `artifact:${route.artifactRef}` : null)
+          : (!route.homeSeed && route.chatId != null ? `chat:${route.chatId}` : null)))
     if (tombstoneKey && tombstonedRouteRef.current.has(tombstoneKey)) {
       if (single) dispatchWorkspace({ type: 'SET_SINGLE_SCREEN', item: null })
       else dispatchWorkspace({ type: 'FOCUS', paneId })
@@ -1147,6 +1168,11 @@ export default function useNavigation({
     } else if (route.view === 'project') {
       if (route.projectId != null) itemRoute = {
         view: 'project', projectId: route.projectId, appId: null, chatId: null, paneId: route.paneId,
+      }
+    } else if (route.view === 'artifact') {
+      if (route.artifactRef != null) itemRoute = {
+        view: 'artifact', artifactRef: route.artifactRef, projectId: route.projectId ?? null,
+        appId: null, chatId: null, paneId: route.paneId,
       }
     } else if (route.view === 'canvas') {
       if (route.appId != null) itemRoute = { view: 'canvas', appId: route.appId, chatId: null, paneId: route.paneId }
@@ -1914,6 +1940,7 @@ export default function useNavigation({
     activeAppId,
     activeChatId,
     activeProjectId,
+    activeArtifactRef,
     drawerOpen: drawerVisible,
     drawerNavigationCover: drawerVisible && !drawerOpenRef.current,
     // Strictly "the full-workspace takeover overlay is up" — NOT "focused content

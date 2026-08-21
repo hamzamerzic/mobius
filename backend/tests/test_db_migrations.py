@@ -1062,6 +1062,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0015_chat_run_goal_identity",
     "0016_app_project_templates",
     "0017_project_chat_collection",
+    "0018_project_artifacts",
   ]
   assert second == first
 
@@ -1111,6 +1112,44 @@ def test_project_chat_collection_migration_preserves_and_backfills_legacy_pair(
     assert conn.execute(text(
       "SELECT chat_id FROM projects WHERE id = 'project-1'"
     )).scalar() is None
+
+
+def test_project_artifacts_migration_adds_nullable_column_idempotently(tmp_path):
+  """0018 adds artifacts_json to an already-deployed projects table."""
+  eng = create_engine(f"sqlite:///{tmp_path / 'project-artifacts.db'}")
+  with eng.begin() as conn:
+    conn.execute(text("CREATE TABLE apps (id INTEGER PRIMARY KEY)"))
+    conn.execute(text(
+      "CREATE TABLE projects ("
+      "id VARCHAR(64) PRIMARY KEY, name VARCHAR(256) NOT NULL, "
+      "project_type VARCHAR(128) NOT NULL, root_path VARCHAR(1024) NOT NULL, "
+      "template_snapshot_json JSON NOT NULL)"
+    ))
+    conn.execute(text(
+      "INSERT INTO projects (id, name, project_type, root_path, "
+      "template_snapshot_json) VALUES ('p1', 'Legacy', 'blank', "
+      "'projects/p1', '{}')"
+    ))
+
+  migrations._add_project_artifacts(eng)
+  migrations._add_project_artifacts(eng)
+
+  columns = {c["name"] for c in inspect(eng).get_columns("projects")}
+  assert "artifacts_json" in columns
+  with eng.connect() as conn:
+    value = conn.execute(text(
+      "SELECT artifacts_json FROM projects WHERE id = 'p1'"
+    )).scalar_one()
+  assert value is None
+
+
+def test_project_artifacts_migration_no_projects_table_is_a_noop(tmp_path):
+  """Fresh installs (no projects table yet) run the migration harmlessly."""
+  eng = create_engine(f"sqlite:///{tmp_path / 'no-projects.db'}")
+  with eng.begin() as conn:
+    conn.execute(text("CREATE TABLE apps (id INTEGER PRIMARY KEY)"))
+  migrations._add_project_artifacts(eng)
+  assert "projects" not in inspect(eng).get_table_names()
 
 
 def test_pending_question_migration_backfills_only_active_latest_question(
@@ -1229,7 +1268,7 @@ def test_hosted_publication_reaches_a_fully_ledgered_private_app(tmp_path):
       "CREATE TABLE schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version, _migration in migrations._SCHEMA_MIGRATIONS[:-5]:
+    for version, _migration in migrations._SCHEMA_MIGRATIONS[:-6]:
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) "
         "VALUES (:version, '2026-08-15 00:00:00')"
@@ -1287,7 +1326,7 @@ def test_hosted_publication_migrates_the_unmerged_live_flag_to_a_snapshot(
       "CREATE TABLE schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version, _migration in migrations._SCHEMA_MIGRATIONS[:-5]:
+    for version, _migration in migrations._SCHEMA_MIGRATIONS[:-6]:
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) "
         "VALUES (:version, '2026-08-15 00:00:00')"
@@ -1726,7 +1765,7 @@ def test_goal_plan_migration_adds_snapshot_and_revision_to_existing_runs(
       "CREATE TABLE IF NOT EXISTS schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version, _migration in migrations._SCHEMA_MIGRATIONS[:-4]:
+    for version, _migration in migrations._SCHEMA_MIGRATIONS[:-5]:
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) "
         "VALUES (:version, :at)"
@@ -1773,7 +1812,7 @@ def test_goal_identity_migration_preserves_distinct_historical_roots_and_index(
       "CREATE TABLE IF NOT EXISTS schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version, _migration in migrations._SCHEMA_MIGRATIONS[:-3]:
+    for version, _migration in migrations._SCHEMA_MIGRATIONS[:-4]:
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) "
         "VALUES (:version, :at)"

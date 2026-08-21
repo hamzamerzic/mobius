@@ -17,8 +17,9 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, defer
+from sqlalchemy.orm.attributes import flag_modified
 
-from app import models, providers, questions
+from app import models, project_builders, providers, questions
 from app.broadcast import get_system_broadcast
 from app.chat import (
   _finish_run,
@@ -30,7 +31,7 @@ from app.chat import (
 )
 from app.config import get_settings
 from app.database import get_db
-from app.deps import get_current_owner, reject_cross_site
+from app.deps import get_current_owner, reject_cross_site, resolve_owner_only
 from app.path_utils import validate_path_within_base
 from app.project_retention import PROJECT_LIFECYCLE_LOCK
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
@@ -42,6 +43,9 @@ log = logging.getLogger(__name__)
 _READ_MAX = 10 * 1024 * 1024
 _WRITE_MAX = 10 * 1024 * 1024
 _LIST_LIMIT = 1000
+# Tail window returned by the build-log endpoint. The on-disk log is bounded
+# separately by project_builders; this caps what a single read returns.
+_LOG_TAIL_MAX = 64 * 1024
 _LEGACY_PROJECT_ID_RE = __import__("re").compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
@@ -119,6 +123,32 @@ class FolderCreate(BaseModel):
   path: str = Field(min_length=1, max_length=2048)
 
 
+class PathMove(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+
+  from_path: str = Field(min_length=1, max_length=2048)
+  to_path: str = Field(min_length=1, max_length=2048)
+
+
+class ArtifactCreate(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+
+  name: str = Field(min_length=1, max_length=256)
+  builder: str = Field(min_length=1, max_length=32)
+  source: str = Field(min_length=1, max_length=2048)
+  # Optional caller-chosen id; otherwise derived from the name. Validated
+  # against the slug charset before it is used as a path component.
+  id: str | None = Field(default=None, min_length=1, max_length=64)
+
+  @field_validator("name")
+  @classmethod
+  def clean_name(cls, value: str) -> str:
+    value = value.strip()
+    if not value:
+      raise ValueError("name must not be blank")
+    return value
+
+
 def _project_response(
   project: models.Project, chats: list[models.Chat] | None = None,
 ) -> dict[str, Any]:
@@ -130,6 +160,7 @@ def _project_response(
     "source_app_id": project.source_app_id,
     "template": project.template_snapshot_json or {},
     "legacy_source": project.legacy_source_json,
+    "artifacts": _project_artifacts_view(project),
     "created_at": project.created_at,
     "updated_at": project.updated_at,
     "chats": [_project_chat_response(chat) for chat in (chats or [])],
@@ -196,6 +227,138 @@ def _resolve_project_path(project: models.Project, path: str) -> tuple[Path, Pat
   if candidate.is_symlink():
     raise HTTPException(403, "Symbolic links are not available in Projects.")
   return root, target
+
+
+def _artifacts_root(root: Path) -> Path:
+  """The reserved build-output area under a project root."""
+  return (root / "artifacts").resolve()
+
+
+def _within_artifacts(root: Path, path: Path) -> bool:
+  """Whether a resolved path is the reserved artifacts area or inside it."""
+  return path.resolve().is_relative_to(_artifacts_root(root))
+
+
+def _artifact_view(
+  project_id: str, root: Path, entry: dict[str, Any],
+) -> dict[str, Any]:
+  """Owner-facing artifact row: registry fields plus reconciled/derived state.
+
+  Lenient by construction — a hand-edited entry with a missing source or an
+  unknown builder surfaces ``source_missing`` / a null builder rather than
+  raising. ``status`` is reconciled against the live task registry so a stale
+  ``building`` reads as ``error`` and a queued build reads as ``building``.
+  """
+  artifact_id = entry.get("id")
+  builder = entry.get("builder")
+  source = entry.get("source")
+  output_rel = entry.get("output_rel")
+  if not (isinstance(output_rel, str) and output_rel):
+    output_rel = project_builders.default_output_rel(
+      str(artifact_id), str(builder), str(source or ""),
+    )
+  log_rel = entry.get("log_rel")
+  if not (isinstance(log_rel, str) and log_rel):
+    log_rel = project_builders.default_log_rel(str(artifact_id))
+  source_exists = bool(
+    isinstance(source, str) and source and (root / source.lstrip("/")).is_file()
+  )
+  has_output = False
+  try:
+    output_path = (root / output_rel.lstrip("/")).resolve()
+    if _within_artifacts(root, output_path) and output_path.is_file():
+      has_output = True
+  except (OSError, ValueError):
+    has_output = False
+  return {
+    "id": artifact_id,
+    "name": entry.get("name") or artifact_id,
+    "builder": builder if builder in project_builders.BUILDERS else None,
+    "source": source,
+    "output_rel": output_rel,
+    "log_rel": log_rel,
+    "status": project_builders.effective_status(project_id, entry),
+    "updated_at": entry.get("updated_at"),
+    "duration_ms": entry.get("duration_ms"),
+    "has_output": has_output,
+    "source_missing": not source_exists,
+  }
+
+
+def _project_artifacts_view(project: models.Project) -> list[dict[str, Any]]:
+  """Artifact rows for a project payload; never raises into the response."""
+  try:
+    root = _project_root(project)
+  except HTTPException:
+    return []
+  return [
+    _artifact_view(project.id, root, entry)
+    for entry in project_builders.read_artifacts(project)
+  ]
+
+
+def _previews_to_artifacts(
+  snapshot: dict, root: Path,
+) -> list[dict[str, Any]]:
+  """Map a template's website/latex previews to buildable artifact entries.
+
+  A preview declares its OUTPUT path and kind; the artifact needs the SOURCE.
+  A pdf preview (``main.pdf``) builds from the matching ``.tex`` source; an
+  html preview's path is both source and output entry. A preview is registered
+  only when its mapped source file actually exists in the freshly scaffolded
+  project, so no artifact points at a file that was never copied.
+  """
+  artifacts: list[dict[str, Any]] = []
+  seen: set[str] = set()
+  for preview in snapshot.get("previews") or []:
+    if not isinstance(preview, dict):
+      continue
+    kind = str(preview.get("kind") or "").lower()
+    output_path = str(preview.get("path") or "").lstrip("/")
+    if not output_path:
+      continue
+    if kind == "pdf":
+      builder = "latex"
+      source = Path(output_path).with_suffix(".tex").as_posix()
+    elif kind in ("html", "website"):
+      builder = "website"
+      source = output_path
+    else:
+      continue
+    if not (root / source).is_file():
+      continue
+    artifact_id = project_builders.slug_artifact_id(
+      str(preview.get("id") or preview.get("name") or builder),
+    )
+    if not project_builders.ARTIFACT_ID_RE.match(artifact_id) or artifact_id in seen:
+      continue
+    seen.add(artifact_id)
+    artifacts.append(project_builders.new_artifact_entry(
+      artifact_id,
+      str(preview.get("name") or artifact_id),
+      builder,
+      source,
+    ))
+  return artifacts
+
+
+def _resolve_output_owner(
+  request: Request,
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Owner auth for the artifact-output GET (Authorization: Bearer only).
+
+  The shell always fetches artifact output through the owner's Bearer header:
+  pdfjs for a latex document, and for a website the shell fetches the built
+  files and inlines them into a sandboxed ``srcDoc``. The owner token is never
+  carried on the URL, so a sandboxed artifact's JS cannot read it from
+  ``window.location``. App-scoped tokens are rejected (owner-only).
+  """
+  authorization = request.headers.get("Authorization", "")
+  scheme, _, header_token = authorization.partition(" ")
+  if scheme.lower() != "bearer" or not header_token:
+    raise HTTPException(401, "Not authenticated.")
+  return resolve_owner_only(header_token, db)
 
 
 def _template_key(template: dict, app: models.App | None) -> str:
@@ -370,6 +533,10 @@ def create_project(
     try:
       _copy_template_files(root, template, app)
       snapshot = _safe_template(template, app)
+      # A template's website/latex previews become buildable artifacts up
+      # front, so a new project is never left half-wired: the file grid, the
+      # artifact list, and the build button all reference the same registry.
+      artifacts = _previews_to_artifacts(snapshot, root)
       project = models.Project(
         id=project_id,
         name=body.name,
@@ -378,6 +545,7 @@ def create_project(
         chat_id=None,
         source_app_id=app.id if app is not None else None,
         template_snapshot_json=snapshot,
+        artifacts_json=artifacts or None,
       )
       db.add(project)
       db.commit()
@@ -921,3 +1089,239 @@ def delete_project_file(
   project.updated_at = now_naive_utc()
   db.commit()
   return {"ok": True}
+
+
+@router.post(
+  "/{project_id}/move", dependencies=[Depends(reject_cross_site)],
+)
+def move_project_path(
+  project_id: str,
+  body: PathMove,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Rename or move one confined file or directory within a project.
+
+  Both endpoints resolve through ``_resolve_project_path`` (confinement +
+  symlink rejection). The guards refuse moving the root, a missing source, an
+  occupied destination, a folder into its own descendant, and any move touching
+  the reserved ``artifacts/`` build-output area (managed by the artifact
+  registry, not hand-moves). An ``os.replace`` failure maps to 409, never 500.
+  """
+  project = _live_project(db, project_id)
+  root, source = _resolve_project_path(project, body.from_path)
+  _root, dest = _resolve_project_path(project, body.to_path)
+  if source == root or dest == root:
+    raise HTTPException(400, "The project root cannot be moved.")
+  if not source.exists():
+    raise HTTPException(404, "Source path not found.")
+  if dest.exists():
+    raise HTTPException(409, "A file or folder already uses the destination.")
+  if dest == source or dest.is_relative_to(source):
+    raise HTTPException(400, "Cannot move a path into itself or a descendant.")
+  if _within_artifacts(root, source) or _within_artifacts(root, dest):
+    raise HTTPException(409, "The artifacts area is managed by builds.")
+  dest.parent.mkdir(parents=True, exist_ok=True)
+  try:
+    os.replace(source, dest)
+  except OSError as exc:
+    raise HTTPException(409, "Could not move the path.") from exc
+  project.updated_at = now_naive_utc()
+  db.commit()
+  return {
+    "ok": True,
+    "from": source.relative_to(root).as_posix(),
+    "to": dest.relative_to(root).as_posix(),
+  }
+
+
+@router.get("/{project_id}/artifacts")
+def list_project_artifacts(
+  project_id: str,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """List a project's artifacts, reconciling live/stale build status."""
+  project = _live_project(db, project_id)
+  root = _project_root(project)
+  return {
+    "artifacts": [
+      _artifact_view(project.id, root, entry)
+      for entry in project_builders.read_artifacts(project)
+    ],
+  }
+
+
+@router.post(
+  "/{project_id}/artifacts", status_code=201,
+  dependencies=[Depends(reject_cross_site)],
+)
+async def create_project_artifact(
+  project_id: str,
+  body: ArtifactCreate,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Register a new buildable artifact.
+
+  Async so its ``artifacts_json`` read-update-commit is ordered on the single
+  event loop against a concurrent build's status write — the loop runs this
+  handler with no ``await`` between the read and the commit, so neither write is
+  lost. Validates the builder and that the source resolves to a real project
+  file before recording it.
+  """
+  project = _live_project(db, project_id)
+  root = _project_root(project)
+  if body.builder not in project_builders.BUILDERS:
+    raise HTTPException(422, "Unknown builder.")
+  _root, source_path = _resolve_project_path(project, body.source)
+  if not source_path.is_file():
+    raise HTTPException(422, "Source file does not exist.")
+  source_rel = source_path.relative_to(root).as_posix()
+  artifact_id = body.id or project_builders.slug_artifact_id(body.name)
+  if not project_builders.ARTIFACT_ID_RE.match(artifact_id):
+    raise HTTPException(422, "Invalid artifact id.")
+  entries = project_builders.read_artifacts(project)
+  if any(entry.get("id") == artifact_id for entry in entries):
+    raise HTTPException(409, "An artifact with that id already exists.")
+  entry = project_builders.new_artifact_entry(
+    artifact_id, body.name, body.builder, source_rel,
+  )
+  entries.append(entry)
+  project.artifacts_json = entries
+  flag_modified(project, "artifacts_json")
+  project.updated_at = now_naive_utc()
+  db.commit()
+  return _artifact_view(project.id, root, entry)
+
+
+@router.delete(
+  "/{project_id}/artifacts/{artifact_id}", status_code=204,
+  dependencies=[Depends(reject_cross_site)],
+)
+async def delete_project_artifact(
+  project_id: str,
+  artifact_id: str,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Remove an artifact entry and its on-disk ``artifacts/<id>/`` tree."""
+  project = _live_project(db, project_id)
+  root = _project_root(project)
+  if not project_builders.ARTIFACT_ID_RE.match(artifact_id):
+    raise HTTPException(400, "Invalid artifact id.")
+  if project_builders.is_build_live(project.id, artifact_id):
+    raise HTTPException(409, "A build is in progress for this artifact.")
+  entries = project_builders.read_artifacts(project)
+  remaining = [entry for entry in entries if entry.get("id") != artifact_id]
+  if len(remaining) == len(entries):
+    raise HTTPException(404, "Artifact not found.")
+  artifact_dir = (root / "artifacts" / artifact_id).resolve()
+  if _within_artifacts(root, artifact_dir) and artifact_dir != _artifacts_root(root):
+    shutil.rmtree(artifact_dir, ignore_errors=True)
+  project.artifacts_json = remaining or None
+  flag_modified(project, "artifacts_json")
+  project.updated_at = now_naive_utc()
+  db.commit()
+  return Response(status_code=204)
+
+
+@router.post(
+  "/{project_id}/artifacts/{artifact_id}/build",
+  dependencies=[Depends(reject_cross_site)],
+)
+async def build_project_artifact(
+  project_id: str,
+  artifact_id: str,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Start a build for one artifact.
+
+  409 only when a LIVE build task already exists for this artifact; a stale
+  ``building`` marker (no live task) is reconciled and a rebuild is allowed.
+  Returns the artifact row, which now reports ``building`` because the task is
+  registered before this returns.
+  """
+  project = _live_project(db, project_id)
+  root = _project_root(project)
+  if not project_builders.ARTIFACT_ID_RE.match(artifact_id):
+    raise HTTPException(400, "Invalid artifact id.")
+  entry = next(
+    (e for e in project_builders.read_artifacts(project)
+     if e.get("id") == artifact_id),
+    None,
+  )
+  if entry is None:
+    raise HTTPException(404, "Artifact not found.")
+  if entry.get("builder") not in project_builders.BUILDERS:
+    raise HTTPException(422, "This artifact has an unknown builder.")
+  source = entry.get("source")
+  if not (isinstance(source, str) and (root / source.lstrip("/")).is_file()):
+    raise HTTPException(422, "The artifact source file is missing.")
+  if project_builders.is_build_live(project.id, artifact_id):
+    raise HTTPException(409, "A build is already in progress.")
+  project_builders.start_build(project.id, artifact_id)
+  return _artifact_view(project.id, root, entry)
+
+
+@router.get("/{project_id}/artifacts/{artifact_id}/log")
+def read_project_artifact_log(
+  project_id: str,
+  artifact_id: str,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Return the tail of an artifact's build log (capped ~64 KB)."""
+  project = _live_project(db, project_id)
+  root = _project_root(project)
+  if not project_builders.ARTIFACT_ID_RE.match(artifact_id):
+    raise HTTPException(400, "Invalid artifact id.")
+  log_path = (root / "artifacts" / artifact_id / "build.log").resolve()
+  if not _within_artifacts(root, log_path):
+    raise HTTPException(400, "Invalid artifact path.")
+  if not log_path.is_file():
+    return {"log": "", "truncated": False}
+  data = log_path.read_bytes()
+  truncated = len(data) > _LOG_TAIL_MAX
+  tail = data[-_LOG_TAIL_MAX:]
+  return {"log": tail.decode("utf-8", errors="replace"), "truncated": truncated}
+
+
+@router.get("/{project_id}/artifacts/{artifact_id}/output/{path:path}")
+def serve_project_artifact_output(
+  project_id: str,
+  artifact_id: str,
+  path: str,
+  _owner: models.Owner = Depends(_resolve_output_owner),
+  db: Session = Depends(get_db),
+):
+  """Stream a confined artifact-output file.
+
+  A dedicated FileResponse with NO 10 MB read cap — a real thesis PDF or a
+  multi-asset website is large by design. Confined to ``artifacts/<id>/output/``
+  with symlink rejection. A website entry (any served HTML) gets a strict
+  per-response CSP so the sandboxed iframe cannot reach the shell token.
+  """
+  project = _live_project(db, project_id)
+  root = _project_root(project)
+  if not project_builders.ARTIFACT_ID_RE.match(artifact_id):
+    raise HTTPException(400, "Invalid artifact id.")
+  output_root = (root / "artifacts" / artifact_id / "output")
+  rel = (path or "").lstrip("/")
+  if "\x00" in rel:
+    raise HTTPException(400, "Invalid path.")
+  try:
+    target = validate_path_within_base(rel, output_root)
+  except ValueError as exc:
+    raise HTTPException(400, "Invalid artifact output path.") from exc
+  candidate = output_root / rel
+  if candidate.is_symlink():
+    raise HTTPException(403, "Symbolic links are not available in output.")
+  if not target.is_file():
+    raise HTTPException(404, "Artifact output not found.")
+  media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+  # The per-response CSP for this namespace (the exact policy the spec gives) is
+  # applied authoritatively by main._SecurityHeadersMiddleware — it strips any
+  # CSP a route sets, so setting it here would be dead. See _ARTIFACT_OUTPUT_CSP.
+  return FileResponse(target, media_type=media_type)

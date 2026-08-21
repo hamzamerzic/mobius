@@ -17,6 +17,7 @@
     "0014_chat_run_goal_plan": "28a1e1a60164ae48845a9cfb4227e7d8c58655852caed6b95e1e1725dd12a217",
     "0015_chat_run_goal_identity": "aa63ad39a2b55b364b97c950f912041ff88cd59ebf315218a824bb567bc6bf77",
     "0016_app_project_templates": "f67c3b990c6e6c0fe284247d9496b170604b813cfd2771d15d6243971f79feb3",
-    "0017_project_chat_collection": "f25031af32f2c4fc3cab731f8e94d46dd7c2f19a8277dcde8090d24629402f2c"
+    "0017_project_chat_collection": "f25031af32f2c4fc3cab731f8e94d46dd7c2f19a8277dcde8090d24629402f2c",
+    "0018_project_artifacts": "1d8bca223fd6e295d42d80c5b2e767d41f507c0d23471afc80028cd106d0d61b"
   }
 }

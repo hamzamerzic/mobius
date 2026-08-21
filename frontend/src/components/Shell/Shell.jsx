@@ -39,7 +39,9 @@ import {
 } from '../../hooks/queries.js'
 import ProjectsDirectory from '../Projects/ProjectsDirectory.jsx'
 import ProjectWorkspace from '../Projects/ProjectWorkspace.jsx'
+import ArtifactWorkspace from '../Projects/ArtifactWorkspace.jsx'
 import { defaultProjectName } from '../Projects/ProjectTypeIcon.jsx'
+import { buildEventProjectId, isArtifactBuildEvent } from '../../lib/projectArtifacts.js'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
 import { bumpChatRunSignal, chatRunSignal } from '../../lib/chatRunSignal.js'
 import { clearAppFrameStorage, clearCachedAppToken } from '../../lib/appFrameStorage.js'
@@ -218,6 +220,7 @@ export default function Shell({ onInitialVisualReady }) {
     activeAppId,
     activeChatId,
     activeProjectId,
+    activeArtifactRef,
     drawerOpen, settingsOverlayOpen, settingsOpenRaw, openDrawer, closeDrawer,
     drawerNavigationCover, finishDrawerNavigationPresentation,
     navTo, tabRevealRevision, applyModeDestination, dismissSettings,
@@ -526,7 +529,6 @@ export default function Shell({ onInitialVisualReady }) {
   const appsQuery = appQueries.list.useQuery({ reconcile: reconcileApps })
   const projectsQuery = projectQueries.list.useQuery()
   const projectTemplatesQuery = projectQueries.templates.useQuery()
-  const legacyProjectsQuery = projectQueries.legacy.useQuery()
   // Create responses are authoritative even when the next NetworkFirst list
   // request has to fall back to a just-stale service-worker copy. Reconcile at
   // the query function boundary so the protected row never disappears from
@@ -547,7 +549,6 @@ export default function Shell({ onInitialVisualReady }) {
   const apps = appsQuery.data ?? EMPTY_LIST
   const projects = projectsQuery.data ?? EMPTY_LIST
   const projectTemplates = projectTemplatesQuery.data ?? EMPTY_LIST
-  const legacyProjects = legacyProjectsQuery.data ?? EMPTY_LIST
   const chats = chatsQuery.data ?? EMPTY_LIST
   const appsStatus = apps.length > 0 || appsQuery.isSuccess
     ? 'success'
@@ -1337,7 +1338,6 @@ export default function Shell({ onInitialVisualReady }) {
     for (const project of projects) m.set(String(project.id), project)
     return m
   }, [projects])
-  const [projectLocations, setProjectLocations] = useState({})
   const [projectRenameId, setProjectRenameId] = useState(null)
   const [projectChatMeta, setProjectChatMeta] = useState({})
   const projectChatLookup = useMemo(() => {
@@ -1367,12 +1367,15 @@ export default function Shell({ onInitialVisualReady }) {
         : chatById.get(tab.id)?.title || 'Chat'
     }
     if (tab.kind === 'project') {
-      const name = projectById.get(tab.id)?.name || 'Project'
-      const location = projectLocations[tab.id]
-      return location ? `${name} · ${location.split('/').pop()}` : name
+      return projectById.get(tab.id)?.name || 'Project'
+    }
+    if (tab.kind === 'artifact') {
+      const parsed = tabModel.parseArtifactTabId(tab.id)
+      const name = parsed ? (projectById.get(parsed.projectId)?.name || 'Project') : 'Project'
+      return parsed ? `${name} · ${parsed.artifactId}` : name
     }
     return appById.get(tab.id)?.name || 'App'
-  }, [chatById, appById, projectById, projectChatLookup, projectLocations])
+  }, [chatById, appById, projectById, projectChatLookup])
 
   const renderedProjectIds = useMemo(() => {
     const ids = new Set(
@@ -1382,6 +1385,18 @@ export default function Shell({ onInitialVisualReady }) {
     if (slot?.kind === 'project') ids.add(String(slot.id))
     return [...ids].sort()
   }, [openTabs, workspace.singleScreen])
+
+  // Each open artifact tab renders its own ArtifactWorkspace, keyed by its
+  // composite `<projectId>:<artifactId>` id (the same shape the tab carries).
+  const renderedArtifactIds = useMemo(() => {
+    const ids = new Set(
+      openTabs.filter(tab => tab.kind === 'artifact').map(tab => String(tab.id)),
+    )
+    const slot = workspace.singleScreen
+    if (slot?.kind === 'artifact') ids.add(String(slot.id))
+    if (activeArtifactRef) ids.add(String(activeArtifactRef))
+    return [...ids].sort()
+  }, [openTabs, workspace.singleScreen, activeArtifactRef])
 
   function openProject(project) {
     if (!project?.id) return
@@ -1399,6 +1414,31 @@ export default function Shell({ onInitialVisualReady }) {
         if (!projectPane) return next
         next = paneModel.setActiveTab(next, projectPane.id, projectKey)
         return paneModel.focusPane(next, projectPane.id)
+      },
+    })
+  }
+
+  // Open a project artifact in its OWN workspace tab (website iframe / latex
+  // pdf preview). Mirrors openProject: reveal builder, open/activate the
+  // artifact tab, focus its pane.
+  function openArtifact(project, artifactId) {
+    const projectId = typeof project === 'object' ? project?.id : project
+    if (projectId == null || artifactId == null) return
+    navTo('artifact', { projectId, artifactId })
+    const artifactRef = tabModel.artifactTabId(projectId, artifactId)
+    dispatchWorkspace({
+      type: 'APPLY_PLACEMENT',
+      toast: null,
+      resolve: (current) => {
+        let next = paneModel.setViewMode(current, 'panes')
+        const artifactKey = tabModel.tabKey(tabModel.makeTab('artifact', artifactRef))
+        if (!paneModel.paneOf(next, artifactKey)) {
+          next = paneModel.openTab(next, tabModel.makeTab('artifact', artifactRef))
+        }
+        const pane = paneModel.paneOf(next, artifactKey)
+        if (!pane) return next
+        next = paneModel.setActiveTab(next, pane.id, artifactKey)
+        return paneModel.focusPane(next, pane.id)
       },
     })
   }
@@ -1523,7 +1563,6 @@ export default function Shell({ onInitialVisualReady }) {
       ...projectsRef.current.filter(row => String(row.id) !== String(project.id)),
     ]
     queryClient.setQueryData(projectQueries.keys.all, projectsRef.current)
-    void projectQueries.legacy.invalidate(queryClient)
     setProjectRenameId(String(project.id))
     openProject(project)
     return project
@@ -1541,14 +1580,6 @@ export default function Shell({ onInitialVisualReady }) {
   }
   const openProjectRef = useRef(openProject)
   openProjectRef.current = openProject
-
-  async function runProjectAction(project, action) {
-    if (!project?.id || !action?.prompt) return
-    await createProjectChat(project, {
-      title: action.name || `Build ${project.name}`,
-      prompt: action.prompt,
-    })
-  }
 
   // Per-chat repair callback for a mounted chat pane (design §2 M13). A pane
   // whose chat reports a real 404 drops its tab; the derived triple follows the
@@ -2701,6 +2732,12 @@ export default function Shell({ onInitialVisualReady }) {
       void projectQueries.list.invalidate(queryClient)
     } else if (ev.type === 'project_recovered') {
       void projectQueries.list.invalidate(queryClient)
+    } else if (isArtifactBuildEvent(ev)) {
+      // A build changed status (idle→building→ok/error). Refresh the project's
+      // artifacts cache so the open ArtifactWorkspace live-updates its status
+      // pill and hot-swaps the preview when a build finishes — no polling.
+      const projectId = buildEventProjectId(ev)
+      if (projectId != null) projectQueries.artifacts.invalidate(queryClient, projectId)
     } else if (ev.type === 'chat_renamed') {
       // The committed event carries the exact changed row fields. Apply those
       // in place so renaming one chat cannot parse and reconcile all hundreds
@@ -4559,12 +4596,10 @@ export default function Shell({ onInitialVisualReady }) {
               <ProjectsDirectory
                 projects={projects}
                 templates={projectTemplates}
-                legacy={legacyProjects}
                 status={projectsStatus}
                 onRetry={() => Promise.all([
                   projectsQuery.refetch(),
                   projectTemplatesQuery.refetch(),
-                  legacyProjectsQuery.refetch(),
                 ])}
                 onOpen={openProject}
                 onCreate={createProjectFromTemplate}
@@ -4613,16 +4648,57 @@ export default function Shell({ onInitialVisualReady }) {
                 project={project}
                 onOpenChat={chat => openProjectChat(project, chat)}
                 onCreateChat={() => createProjectChat(project)}
-                onLocationChange={location => setProjectLocations(current => (
-                  current[project.id] === location
-                    ? current
-                    : { ...current, [project.id]: location }
-                ))}
+                onOpenArtifact={artifactId => openArtifact(project, artifactId)}
                 onDelete={deleteProject}
-                onRunAction={runProjectAction}
                 startRenaming={String(projectRenameId) === String(project.id)}
                 onRename={name => renameProject(project, name)}
                 onRenameEnd={() => setProjectRenameId(null)}
+              />
+            </div>
+          )
+        })}
+        {/* One ArtifactWorkspace per open artifact tab (website iframe / latex
+            pdf preview), positioned exactly like the project surfaces above. */}
+        {renderedArtifactIds.map((artifactRef) => {
+          const parsed = tabModel.parseArtifactTabId(artifactRef)
+          if (!parsed) return null
+          const project = projectById.get(parsed.projectId)
+          const key = tabModel.tabKey(tabModel.makeTab('artifact', artifactRef))
+          const paned = workspaceChromeActive ? visibleTabRects.get(key) : null
+          const fullBleed = !paned && fullBleedKey === key
+          const pos = paned
+            ? {
+              top: paned.y,
+              left: paned.x,
+              width: paned.w,
+              height: paned.h,
+              ...modeViewTransitionStyle('pane', paned.paneId, key),
+            }
+            : null
+          const visible = !!(paned || fullBleed)
+          return (
+            <div
+              key={key}
+              id={paned ? panePanelDomId(paned.paneId, key) : undefined}
+              role={paned ? 'tabpanel' : undefined}
+              aria-labelledby={paned ? paneTabDomId(paned.paneId, key) : undefined}
+              data-tab-key={paned ? key : undefined}
+              data-mode-pane-vt={paned ? paned.paneId : undefined}
+              className={paned
+                ? 'shell__view shell__view--paned shell__project-view'
+                : `shell__view shell__project-view ${fullBleed ? 'shell__view--active' : ''}`}
+              style={pos || undefined}
+              inert={!visible || undefined}
+              aria-hidden={!visible ? 'true' : undefined}
+              onPointerDownCapture={paned && !modeBeatActive
+                ? () => dispatchWorkspace({ type: 'FOCUS', paneId: paned.paneId })
+                : undefined}
+            >
+              <ArtifactWorkspace
+                projectId={parsed.projectId}
+                artifactId={parsed.artifactId}
+                projectName={project?.name}
+                onOpenProject={project ? () => openProject(project) : undefined}
               />
             </div>
           )

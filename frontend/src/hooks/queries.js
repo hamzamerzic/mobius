@@ -418,6 +418,7 @@ export const projectQueries = {
     detail: (projectId) => ['projects', 'detail', projectId],
     chats: (projectId) => ['projects', 'chats', projectId],
     files: (projectId, path = '') => ['projects', 'files', projectId, path],
+    artifacts: (projectId) => ['projects', 'artifacts', projectId],
   },
   list: {
     key: projectsKey,
@@ -441,6 +442,12 @@ export const projectQueries = {
     key: (projectId, path = '') => ['projects', 'files', projectId, path],
     invalidate: (queryClient, projectId) => queryClient.invalidateQueries({
       queryKey: ['projects', 'files', projectId],
+    }),
+  },
+  artifacts: {
+    key: (projectId) => ['projects', 'artifacts', projectId],
+    invalidate: (queryClient, projectId) => queryClient.invalidateQueries({
+      queryKey: ['projects', 'artifacts', projectId],
     }),
   },
 }

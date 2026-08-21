@@ -213,10 +213,31 @@ class ChatCreate(ChatUpdate):
   id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
+def _project_ref_for_chat(db: Session, chat) -> dict | None:
+  """Live project membership for one chat, or None.
+
+  Folds both membership shapes the drawer query joins on: the current
+  ``Chat.project_id`` link and the legacy ``Project.chat_id`` primary-chat link
+  a not-yet-backfilled row may still carry. A soft-deleted project is excluded,
+  so its chip never appears.
+  """
+  project_id = getattr(chat, "project_id", None)
+  row = (
+    db.query(models.Project.id, models.Project.name)
+    .filter(
+      models.Project.deleted_at.is_(None),
+      (models.Project.id == project_id)
+      | (models.Project.chat_id == chat.id),
+    )
+    .first()
+  )
+  return {"id": row[0], "name": row[1]} if row is not None else None
+
+
 def _chat_create_response(chat: models.Chat, db: Session) -> dict:
   detail = _chat_detail_response(chat, db=db)
   return {
-    **_owner_chat_summary(chat),
+    **_owner_chat_summary(chat, project_ref=_project_ref_for_chat(db, chat)),
     "messages": detail["messages"],
     "detail": detail,
   }
@@ -331,8 +352,14 @@ def _owner_chat_summary(
   *,
   durable_running: bool = False,
   transient_owner_input_kind: OwnerInputKind | None = None,
+  project_ref: dict | None = None,
 ) -> dict:
-  """Canonical owner-list shape for a Chat or its lightweight projection."""
+  """Canonical owner-list shape for a Chat or its lightweight projection.
+
+  ``project_ref`` is ``{"id", "name"}`` when the chat belongs to a live project,
+  else None — the drawer renders it as a clickable project chip on the Recents
+  row.
+  """
   return {
     "id": chat.id,
     "title": chat.title,
@@ -341,6 +368,7 @@ def _owner_chat_summary(
     "pinned_at": chat.pinned_at.isoformat() if chat.pinned_at else None,
     "has_messages": bool(chat.has_messages),
     "created_by_app_id": chat.created_by_app_id,
+    "project": project_ref,
     "running": durable_running or is_chat_running(chat.id),
     # A turn parked on the owner's AskUserQuestion answer is `running` but is
     # NOT streaming — nothing to interrupt, and the card is durable — so the
@@ -565,6 +593,14 @@ def list_chats(
   # Drawer projection only. ``has_messages`` is maintained with the transcript
   # by the Chat model and the two writer bulk-update paths, so this hot query
   # never reads or decodes the potentially large ``messages`` JSON column.
+  # Recents now INCLUDES project chats, each carrying its project so the drawer
+  # can render a project chip. The LEFT JOIN attaches the owning live project by
+  # either membership shape — the current ``Chat.project_id`` link OR the legacy
+  # ``Project.chat_id`` primary-chat link a not-yet-backfilled row may still
+  # carry — and its ``deleted_at IS NULL`` guard means a soft-deleted project
+  # never supplies a chip (and its chats are already tombstoned by the cascade,
+  # so they do not appear at all). ``Project.id``/``Project.name`` are labelled
+  # to avoid colliding with the ``Chat.id`` projection.
   q = db.query(
     models.Chat.id,
     models.Chat.title,
@@ -581,17 +617,17 @@ def list_chats(
     # shell tell a parked turn from a live stream without decoding the messages
     # JSON. Consumed by _owner_chat_summary below.
     models.Chat.pending_question_id,
+    models.Project.id.label("project_ref_id"),
+    models.Project.name.label("project_name"),
+  ).outerjoin(
+    models.Project,
+    (
+      (models.Chat.project_id == models.Project.id)
+      | (models.Project.chat_id == models.Chat.id)
+    )
+    & models.Project.deleted_at.is_(None),
   ).filter(
     models.Chat.deleted_at.is_(None),
-    models.Chat.project_id.is_(None),
-    # Rolling-upgrade compatibility for a row not yet backfilled by migration
-    # 0014. Project chats live inside Projects, not duplicated in Recents.
-    ~models.Chat.id.in_(
-      db.query(models.Project.chat_id).filter(
-        models.Project.deleted_at.is_(None),
-        models.Project.chat_id.isnot(None),
-      )
-    ),
   )
   chats = (
     q.order_by(
@@ -618,6 +654,11 @@ def list_chats(
       durable_running=chat.id in durable_running,
       transient_owner_input_kind=(
         "secure_input" if chat.id in secure_input_chats else None
+      ),
+      project_ref=(
+        {"id": chat.project_ref_id, "name": chat.project_name}
+        if chat.project_ref_id is not None
+        else None
       ),
     )
     for chat in chats

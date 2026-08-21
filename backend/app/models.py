@@ -849,6 +849,16 @@ class Project(Base):
   )
   template_snapshot_json = Column(JSON, nullable=False, default=dict)
   legacy_source_json = Column(JSON, nullable=True, default=None)
+  # Artifact registry plus per-artifact build status for this project. The ORM
+  # row is the atomic source of truth (mirrors ``template_snapshot_json``), not
+  # a lock-free on-disk manifest: build status transitions read-update-commit
+  # this column serialized by the per-project build lock. Each entry is
+  # {id, name, builder, source, output_rel, status, updated_at, duration_ms,
+  # log_rel}. Nullable so an existing row reads as "no artifacts yet." The agent
+  # owns the project tree and may hand-edit this value, so every read tolerates
+  # malformed entries rather than trusting the shape (see project_builders and
+  # routes/projects.py artifact listing).
+  artifacts_json = Column(JSON, nullable=True, default=None)
   deleted_at = Column(DateTime, nullable=True, default=None)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(

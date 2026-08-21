@@ -596,6 +596,32 @@
   min-width: 0;
 }
 
+/* Recents project chip: a small clickable badge on a project-owned chat row
+   that opens the chat's project. A flex sibling of the row button (never nested
+   — a button inside a button is invalid) so it shrinks the label rather than
+   overlapping it. */
+.drawer__project-chip {
+  flex: 0 0 auto;
+  max-width: 40%;
+  margin-right: 6px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface);
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.drawer__project-chip span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.drawer__project-chip:hover { color: var(--text); border-color: var(--accent-dim); }
+.drawer__project-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 /* Ordinary rows retain native momentum scrolling. A pinned row must reserve its
    one-finger pointer stream from pointerdown: touch-action cannot be changed
    after a gesture starts, so allowing pan-y there lets the browser cancel the

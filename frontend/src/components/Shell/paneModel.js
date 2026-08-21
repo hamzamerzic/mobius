@@ -147,6 +147,9 @@ function sanitizeTab(raw) {
       ? tabModel.settingsTab()
       : null
   }
+  if (raw.kind === 'artifact') {
+    return tabModel.parseArtifactTabId(raw.id) ? tabModel.makeTab('artifact', raw.id) : null
+  }
   if (raw.kind !== 'chat' && raw.kind !== 'app' && raw.kind !== 'project') return null
   if (raw.kind === 'app' && !Number.isFinite(Number(raw.id))) return null
   return tabModel.makeTab(raw.kind, raw.id)
@@ -188,6 +191,9 @@ function sanitizeSingleScreen(raw) {
   }
   if (raw.kind === 'project' && raw.id != null && String(raw.id).trim() !== '') {
     return { kind: 'project', id: String(raw.id) }
+  }
+  if (raw.kind === 'artifact' && tabModel.parseArtifactTabId(raw.id)) {
+    return { kind: 'artifact', id: String(raw.id) }
   }
   return null
 }
@@ -547,6 +553,7 @@ export function singleScreenKey(ws) {
   if (slot.kind === 'apps') return tabModel.APPS_TAB_KEY
   if (slot.kind === 'projects') return tabModel.PROJECTS_TAB_KEY
   if (slot.kind === 'project') return `project:${slot.id}`
+  if (slot.kind === 'artifact') return `artifact:${slot.id}`
   return null
 }
 
@@ -595,6 +602,7 @@ function focusedSlotSeed(ws) {
   if (tab.kind === 'apps') return tabModel.appsTab()
   if (tab.kind === 'projects') return tabModel.projectsTab()
   if (tab.kind === 'project') return { kind: 'project', id: String(tab.id) }
+  if (tab.kind === 'artifact') return { kind: 'artifact', id: String(tab.id) }
   return null
 }
 
@@ -665,6 +673,14 @@ export function focusedContentRoute(ws) {
       if (tab.kind === 'apps') return { view: 'apps', chatId: null, appId: null, paneId }
       if (tab.kind === 'projects') return { view: 'projects', chatId: null, appId: null, projectId: null, paneId }
       if (tab.kind === 'project') return { view: 'project', chatId: null, appId: null, projectId: String(tab.id), paneId }
+      if (tab.kind === 'artifact') {
+        const parsed = tabModel.parseArtifactTabId(tab.id)
+        return {
+          view: 'artifact', chatId: null, appId: null,
+          projectId: parsed ? parsed.projectId : null,
+          artifactRef: String(tab.id), paneId,
+        }
+      }
       const { view, opts } = tabModel.tabNavTarget(tab)
       if (view === 'canvas') return { view: 'canvas', chatId: null, appId: opts.appId, paneId }
       return { view: 'chat', chatId: opts.chatId, appId: null, paneId }
@@ -690,6 +706,14 @@ export function singleScreenRoute(ws) {
   }
   if (slot && slot.kind === 'project') {
     return { view: 'project', chatId: null, appId: null, projectId: String(slot.id), paneId }
+  }
+  if (slot && slot.kind === 'artifact') {
+    const parsed = tabModel.parseArtifactTabId(slot.id)
+    return {
+      view: 'artifact', chatId: null, appId: null,
+      projectId: parsed ? parsed.projectId : null,
+      artifactRef: String(slot.id), paneId,
+    }
   }
   if (slot && slot.kind === 'app') {
     const appId = Number(slot.id)
@@ -738,6 +762,7 @@ function routeItemKey(route) {
   if (route.view === 'apps') return tabModel.APPS_TAB_KEY
   if (route.view === 'projects') return tabModel.PROJECTS_TAB_KEY
   if (route.view === 'project' && route.projectId != null) return `project:${route.projectId}`
+  if (route.view === 'artifact' && route.artifactRef != null) return `artifact:${route.artifactRef}`
   if (route.view === 'canvas' && route.appId != null) return `app:${route.appId}`
   if (route.view === 'chat' && !route.homeSeed && route.chatId != null) return `chat:${route.chatId}`
   return null

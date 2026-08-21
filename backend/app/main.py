@@ -316,6 +316,9 @@ _CONTENT_SECURITY_POLICY = b"content-security-policy"
 _OPAQUE_STATIC_EMBED_PREFIX = "/app-embeds/by-id/"
 _PUBLISHED_SITE_PREFIX = "/sites/"
 _APP_FRAME_PATH = re.compile(r"^/api/apps/[^/]+/frame$")
+_ARTIFACT_OUTPUT_PATH = re.compile(
+  r"^/api/projects/[^/]+/artifacts/[^/]+/output/"
+)
 
 # This isolation boundary must always be enforced, never Report-Only: browsers
 # ignore the CSP sandbox directive in a Report-Only policy. The sandbox omits
@@ -397,6 +400,26 @@ def _app_frame_csp_for_scope(scope) -> str:
 _PUBLISHED_SITE_CSP = PUBLISHED_SITE_CSP
 
 
+# A built website artifact renders in a sandboxed iframe (sandbox="allow-scripts"
+# WITHOUT allow-same-origin), so its document JS cannot reach the shell origin's
+# localStorage/cookies/owner token. This per-namespace policy is that document's
+# isolation boundary. It is set HERE rather than on the route because this
+# middleware is authoritative for CSP — it strips any route-set value — so the
+# only place a route's intended policy can actually reach the wire is this
+# namespace table. Kept exactly as the Projects build spec defines it; it also
+# covers sibling output files (assets, the compiled PDF pdfjs fetches), which a
+# stricter-than-shell policy does not harm. (Known limitation: for a sandboxed
+# opaque-origin document, WebKit does not match `'self'` against the delivering
+# origin — the same gotcha the app-frame policy names an absolute origin for —
+# so a Safari-hosted website may fail to load its own relative subresources
+# under this exact policy.)
+_ARTIFACT_OUTPUT_CSP = (
+  "default-src 'self'; img-src 'self' data:; font-src 'self' data:; "
+  "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+  "frame-ancestors 'self'"
+)
+
+
 def _is_public_service_surface(scope) -> bool:
   """Whether the gateway host may frame this registered service route."""
   path = scope.get("path") or ""
@@ -431,6 +454,7 @@ class _SecurityHeadersMiddleware:
     published_site = path.startswith(_PUBLISHED_SITE_PREFIX)
     chat_embed = path == "/shell/embed/chat"
     app_frame = bool(_APP_FRAME_PATH.fullmatch(path))
+    artifact_output = bool(_ARTIFACT_OUTPUT_PATH.match(path))
     service_surface = _is_public_service_surface(scope)
     response_headers = list(_SECURITY_HEADERS)
     replaced_header_names = _SECURITY_HEADER_NAMES
@@ -448,6 +472,8 @@ class _SecurityHeadersMiddleware:
         csp = CHAT_EMBED_CSP
       elif app_frame:
         csp = _app_frame_csp_for_scope(scope)
+      elif artifact_output:
+        csp = _ARTIFACT_OUTPUT_CSP
       else:
         csp = _SHELL_CSP
       response_headers.append((

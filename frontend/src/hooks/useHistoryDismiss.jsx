@@ -30,6 +30,19 @@ export function HistoryDismissProvider({
 }
 
 /**
+ * Raw multi-entry access to the shell's history-dismiss stack for a surface that
+ * needs MORE than one live sentinel at a time — the project Finder pushes one
+ * per folder/file it drills into so the browser Back button walks back through
+ * them in-tab. `open(onDismiss)` returns an entryId; `close(entryId)` dismisses
+ * synchronously and consumes that entry; `unregister(entryId)` drops a
+ * registration without a history traversal (unmount cleanup). Callers own the
+ * ordering discipline (the shell pops LIFO on Back).
+ */
+export function useHistoryDismissControls() {
+  return useContext(HistoryDismissContext)
+}
+
+/**
  * Returns the paired open/close operations for one conditionally rendered
  * surface. Opening pushes its sentinel before the surface paints; closing
  * consumes that same sentinel through the shell's navigation owner.

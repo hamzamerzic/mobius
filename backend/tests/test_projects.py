@@ -58,12 +58,16 @@ def test_blank_project_starts_without_chat_and_has_confined_files(
   }
   assert all(db.get(models.Chat, row["id"]).project_id == project["id"]
              for row in listed_chats)
-  # Project chats remain directly addressable, but live inside their Project
-  # rather than appearing as unrelated global Recents.
+  # Project chats now appear in Recents too, each carrying its project so the
+  # drawer can render a clickable project chip.
   chat_list = client.get("/api/chats", headers=auth)
   assert chat_list.status_code == 200
-  assert not ({first_chat["id"], second_chat["id"]}
-              & {row["id"] for row in chat_list.json()})
+  rows_by_id = {row["id"]: row for row in chat_list.json()}
+  assert {first_chat["id"], second_chat["id"]} <= set(rows_by_id)
+  for chat_id in (first_chat["id"], second_chat["id"]):
+    assert rows_by_id[chat_id]["project"] == {
+      "id": project["id"], "name": "Research",
+    }
 
   saved = client.put(
     f"/api/projects/{project['id']}/file?path=notes/idea.md",

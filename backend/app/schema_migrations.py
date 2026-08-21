@@ -1642,6 +1642,29 @@ def _add_app_project_templates(eng) -> None:
       ))
 
 
+def _add_project_artifacts(eng) -> None:
+  """Persist the per-project artifact registry and build status.
+
+  Additive and idempotent: the column is inspector-gated so a re-run no-ops.
+  ``create_all`` builds a fresh projects table with the column already present,
+  so this ALTER only covers an already-deployed projects table. Nullable with no
+  backfill — every existing row reads NULL as "no artifacts yet." Project files
+  (including the ``artifacts/`` output trees) live outside the database and are
+  untouched.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "projects" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("projects")}
+  if "artifacts_json" not in columns:
+    with eng.begin() as conn:
+      conn.execute(text(
+        "ALTER TABLE projects ADD COLUMN artifacts_json JSON NULL"
+      ))
+
+
 def _add_project_chat_collection(eng) -> None:
   """Move Projects from one required primary chat to zero-or-more chats.
 
@@ -1753,6 +1776,7 @@ _SCHEMA_MIGRATIONS = (
   ("0015_chat_run_goal_identity", _add_chat_run_goal_identity),
   ("0016_app_project_templates", _add_app_project_templates),
   ("0017_project_chat_collection", _add_project_chat_collection),
+  ("0018_project_artifacts", _add_project_artifacts),
 )
 
 

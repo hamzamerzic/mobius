@@ -47,6 +47,7 @@ import {
 } from './drawerInformationArchitecture.js'
 import ShareAppSheet from './ShareAppSheet.jsx'
 import { isDrawerAppShareEligible } from './appShareState.js'
+import { recentsProjectChip } from '../../lib/recentsProjectChip.js'
 import {
   clampDrawerRowWindow,
   drawerRowSpacerHeights,
@@ -428,6 +429,13 @@ export default function Drawer({
       current.resetAppsSurfaceUi({ restoreFocus: false })
       if (kind === 'chat') current.onChat(id)
       else current.onApp(id)
+    },
+    // The recents-row project chip opens the chat's owning project. Reuses the
+    // same open-project path as the drawer's project rows.
+    openProject(project) {
+      const current = rowActionInputsRef.current
+      current.resetAppsSurfaceUi({ restoreFocus: false })
+      current.onProject?.(project)
     },
     openMenu(menu) {
       rowActionInputsRef.current.showItemMenu(menu)
@@ -1007,6 +1015,7 @@ export default function Drawer({
   rowActionInputsRef.current = {
     onChat,
     onApp,
+    onProject,
     onDeleteChat,
     onDeleteApp,
     onDeleteAppData,
@@ -1426,6 +1435,7 @@ const DrawerRow = memo(function DrawerRow({
 }) {
   const id = item.id
   const label = kind === 'chat' ? item.title : item.name
+  const projectChip = recentsProjectChip(kind, item)
   const pinned = !!item.pinned_at
   const slug = item.slug
   const wrapRef = useRef(null)
@@ -2032,6 +2042,22 @@ const DrawerRow = memo(function DrawerRow({
         ) : null}
         <span className="drawer__item-text">{label}</span>
       </button>
+      {projectChip && (
+        // A sibling of the row button (never nested — a button inside a button is
+        // invalid). Opens the chat's owning project.
+        <button
+          type="button"
+          className="drawer__project-chip"
+          title={`Open ${projectChip.name}`}
+          aria-label={`Open project ${projectChip.name}`}
+          onClick={(event) => {
+            event.stopPropagation()
+            actions.openProject({ id: projectChip.id, name: projectChip.name })
+          }}
+        >
+          <span>{projectChip.name}</span>
+        </button>
+      )}
     </div>
   )
 })
