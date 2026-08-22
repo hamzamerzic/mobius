@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import {
   Check,
   ChevronDown,
@@ -8,6 +9,9 @@ import {
 } from '@openai/apps-sdk-ui/components/Icon'
 import { stripAugmentation } from './msgText.js'
 import { cidOf } from './messageIdentity.js'
+import { placeCaretAtTextEnd } from './composerFocusPolicy.js'
+import { autoGrowTextarea } from './composerTextareaSizing.js'
+import { restoreQueuedEditorAfterSave } from './queuedEditorFocus.js'
 import { isInlineEditorSubmit } from './composerShortcuts.js'
 import { isTouchPrimary } from '../../lib/pointerPrimary.js'
 import {
@@ -16,6 +20,9 @@ import {
 } from '../../lib/selectableTextControl.js'
 
 const TRUNCATE_AT = 80
+// Matches .queued__editor-input max-height; the JS fallback caps growth here
+// for browsers without native field-sizing.
+const EDITOR_MAX_HEIGHT = 160
 
 /**
  * Queued-messages tray rendered above the chat input.
@@ -34,6 +41,7 @@ const TRUNCATE_AT = 80
  */
 export default function QueuedMessages({
   items, onCancel, onEdit, onSteerOne, steerActive, steerBusy = false,
+  focusComposer,
 }) {
   const [expanded, setExpanded] = useState(() => new Set())
   const [collapsed, setCollapsed] = useState(false)
@@ -42,6 +50,7 @@ export default function QueuedMessages({
   const [editSaving, setEditSaving] = useState(false)
   const [editError, setEditError] = useState('')
   const pointerSelectionRef = useRef(null)
+  const editorRef = useRef(null)
 
   if (!items || items.length === 0) return null
 
@@ -69,15 +78,33 @@ export default function QueuedMessages({
   function beginEdit(msg) {
     if (editSaving) return
     const cid = cidOf(msg)
-    setEditingCid(cid)
-    setEditDraft(stripAugmentation(msg.content || ''))
-    setEditError('')
-    // Expand so the whole message is visible while editing a truncated row.
-    setExpanded(prev => new Set(prev).add(cid))
+    // Reveal the editor synchronously so the textarea exists inside this tap's
+    // call stack (also expand, so the whole message is visible while editing a
+    // truncated row), then move focus to it before the gesture ends. iOS keeps
+    // the soft keyboard open only across a focus change that happens within the
+    // user gesture; autoFocus fires after the tapped pencil is already gone,
+    // which drops the keyboard mid-composition.
+    flushSync(() => {
+      setEditingCid(cid)
+      setEditDraft(stripAugmentation(msg.content || ''))
+      setEditError('')
+      setExpanded(prev => new Set(prev).add(cid))
+    })
+    const el = editorRef.current
+    if (el) {
+      try { el.focus({ preventScroll: true }) } catch { el.focus() }
+      placeCaretAtTextEnd(el)
+      // Reveal the whole message being edited (fallback for browsers without
+      // native field-sizing).
+      autoGrowTextarea(el, EDITOR_MAX_HEIGHT)
+    }
   }
 
   function cancelEdit() {
     if (editSaving) return
+    // Hand focus back to the composer so the soft keyboard stays up and the
+    // owner can keep typing, then tear the editor down.
+    focusComposer?.()
     setEditingCid(null)
     setEditDraft('')
     setEditError('')
@@ -94,6 +121,11 @@ export default function QueuedMessages({
       cancelEdit()
       return
     }
+    // Move focus to the composer now, inside this tap, before the textarea is
+    // disabled below. A disabled field blurs — on mobile that would drop the
+    // soft keyboard for the whole save round-trip. Handing focus to the
+    // composer keeps the keyboard up and leaves the owner ready to keep typing.
+    focusComposer?.()
     setEditSaving(true)
     setEditError('')
     // Send only the owner's visible text; the server re-derives the hidden
@@ -101,15 +133,18 @@ export default function QueuedMessages({
     // reports an explicit outcome so a race can't read as success: 'saved'
     // applied, 'gone' already promoted/cancelled, 'error' transport.
     const outcome = await onEdit?.(cidOf(msg), visible)
-    setEditSaving(false)
-    if (outcome === 'saved') {
-      setEditingCid(null)
-      setEditDraft('')
-    } else if (outcome === 'gone') {
-      setEditError('This message already started — it can’t be edited now.')
-    } else {
-      setEditError('Couldn’t save this edit. Try again.')
-    }
+    flushSync(() => {
+      setEditSaving(false)
+      if (outcome === 'saved') {
+        setEditingCid(null)
+        setEditDraft('')
+      } else if (outcome === 'gone') {
+        setEditError('This message already started — it can’t be edited now.')
+      } else {
+        setEditError('Couldn’t save this edit. Try again.')
+      }
+    })
+    restoreQueuedEditorAfterSave(outcome, editorRef.current)
   }
 
   function onHdrKeyDown(e) {
@@ -176,11 +211,13 @@ export default function QueuedMessages({
                 {isEditing ? (
                   <div className="queued__editor">
                     <textarea
+                      ref={editorRef}
                       className="queued__editor-input"
                       value={editDraft}
                       onChange={(event) => {
                         setEditDraft(event.target.value)
                         setEditError('')
+                        autoGrowTextarea(event.target, EDITOR_MAX_HEIGHT)
                       }}
                       onKeyDown={(event) => {
                         if (event.key === 'Escape') {
@@ -197,7 +234,6 @@ export default function QueuedMessages({
                       }}
                       aria-label="Edit queued message"
                       rows={2}
-                      autoFocus
                       disabled={editSaving}
                     />
                     <div className="queued__editor-actions">
