@@ -11,6 +11,7 @@ import { stripAugmentation } from './msgText.js'
 import { cidOf } from './messageIdentity.js'
 import { placeCaretAtTextEnd } from './composerFocusPolicy.js'
 import { autoGrowTextarea } from './composerTextareaSizing.js'
+import { restoreQueuedEditorAfterSave } from './queuedEditorFocus.js'
 import { isInlineEditorSubmit } from './composerShortcuts.js'
 import { isTouchPrimary } from '../../lib/pointerPrimary.js'
 import {
@@ -143,10 +144,7 @@ export default function QueuedMessages({
         setEditError('Couldn’t save this edit. Try again.')
       }
     })
-    if (outcome !== 'saved') {
-      const el = editorRef.current
-      try { el?.focus({ preventScroll: true }) } catch { el?.focus() }
-    }
+    restoreQueuedEditorAfterSave(outcome, editorRef.current)
   }
 
   function onHdrKeyDown(e) {

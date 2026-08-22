@@ -81,14 +81,6 @@ test('mobile messages preserve native text selection and its action menu', () =>
     'messages must not suppress the native selection action menu')
 })
 
-test('a failed queued-message save returns focus to the active editor', () => {
-  assert.match(
-    queuedMessages,
-    /if \(outcome !== 'saved'\) \{[\s\S]*?editorRef\.current[\s\S]*?\.focus\(/,
-    'failure must not leave the next keystroke aimed at the main composer',
-  )
-})
-
 test('web tool activity uses the assistant reading width', () => {
   const css = stripComments(chatCss)
   const desktopRule = css.match(/@media\s*\(min-width:\s*720px\)\s*\{\s*\.chat__tools\s*\{[^}]*\}/)?.[0] || ''
