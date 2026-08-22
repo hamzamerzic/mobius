@@ -157,6 +157,20 @@ export default function ComposerPopover({
     function onPointer(e) {
       if (!wrapRef.current) return
       if (wrapRef.current.contains(e.target)) return
+      // Dismissing by pressing outside must not drop the soft keyboard. If the
+      // textarea was focused when the popover opened, suppress the focus change
+      // this outside press would otherwise cause (which blurs the textarea and
+      // collapses the keyboard), then restore focus next frame only if a later
+      // click still steals it — mirroring the popover's own pointer boundary.
+      // preventDefault on pointerdown keeps focus and caret without blocking
+      // scrolling, which is governed by touch-action.
+      if (wasInputFocusedRef.current) {
+        e.preventDefault()
+        requestAnimationFrame(() => {
+          const el = composerInputRef?.current
+          if (el && document.activeElement !== el) focusComposerElement(el)
+        })
+      }
       setOpen(false)
     }
     function onKey(e) {
