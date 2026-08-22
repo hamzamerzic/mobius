@@ -216,11 +216,11 @@ test('automatic geometry owners and newer semantic actions share reader authorit
     hotStart,
   )
   const hotPath = ownerSource.slice(hotStart, hotEnd)
-  assert.match(hotPath, /if \(disclosureInputOwnsGesture\) return/,
+  assert.match(hotPath, /if \(gesture\.disclosureOwns\) return/,
     'layout scrolls caused by a disclosure must not create a stale reader settle')
   assert.match(
     ownerSource,
-    /const onPointerCancelInput = \(\) => \{[\s\S]*?disclosureInputOwnsGesture = false[\s\S]*?addEventListener\('pointercancel', onPointerCancelInput/,
+    /const onPointerCancelInput = \(\) => \{[\s\S]*?gesture\.disclosureOwns = false[\s\S]*?addEventListener\('pointercancel', onPointerCancelInput/,
     'a disclosure press promoted to a native pan must become reader-owned scroll',
   )
 
