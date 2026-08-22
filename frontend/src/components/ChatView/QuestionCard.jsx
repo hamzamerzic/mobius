@@ -8,6 +8,8 @@ import {
 } from './questionDraft.js'
 import { textareaUsesNativeSizing } from './composerTextareaSizing.js'
 import { placeCaretAtTextEnd } from './composerFocusPolicy.js'
+import { isInlineEditorSubmit } from './composerShortcuts.js'
+import { isTouchPrimary } from '../../lib/pointerPrimary.js'
 import {
   pointerSelectionChangedWithin,
   textSelectionSnapshot,
@@ -41,6 +43,7 @@ function resizeCustomAnswer(textarea) {
 function CustomAnswerArea({
   active,
   answered,
+  canSubmit,
   disabled,
   onChange,
   onSubmitShortcut,
@@ -88,7 +91,10 @@ function CustomAnswerArea({
       readOnly={answered}
       disabled={disabled && !answered}
       onKeyDown={e => {
-        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+        // Let Enter stay a newline until every question is answered, so a
+        // half-filled grouped card can still take multi-line custom text.
+        if (!canSubmit) return
+        if (isInlineEditorSubmit(e, { isTouchPrimary: isTouchPrimary() })) {
           e.preventDefault()
           onSubmitShortcut()
         }
@@ -362,6 +368,7 @@ export default function QuestionCard({
             <CustomAnswerArea
               active={isOtherSelected || answeredWithOther}
               answered={answered}
+              canSubmit={allAnswered}
               disabled={inactive}
               onChange={text => setOtherText(q.question, text)}
               onSubmitShortcut={() => {
