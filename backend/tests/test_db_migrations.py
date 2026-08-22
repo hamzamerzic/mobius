@@ -24,6 +24,15 @@ from app.schema_migrations import (
 )
 
 
+def _migration_versions_before(target: str) -> list[str]:
+  versions: list[str] = []
+  for version, _migration in migrations._SCHEMA_MIGRATIONS:
+    if version == target:
+      return versions
+    versions.append(version)
+  raise AssertionError(f"Unknown migration: {target}")
+
+
 PREVIOUS_RELEASE_SCHEMA = (
   Path(__file__).parent / "fixtures" / "schema_0013.sql"
 )
@@ -1060,6 +1069,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0013_app_hosted_publication",
     "0014_chat_run_goal_plan",
     "0015_chat_run_goal_identity",
+    "0016_app_connect_manage",
   ]
   assert second == first
 
@@ -1180,7 +1190,7 @@ def test_hosted_publication_reaches_a_fully_ledgered_private_app(tmp_path):
       "CREATE TABLE schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version, _migration in migrations._SCHEMA_MIGRATIONS[:-3]:
+    for version in _migration_versions_before("0013_app_hosted_publication"):
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) "
         "VALUES (:version, '2026-08-15 00:00:00')"
@@ -1238,7 +1248,7 @@ def test_hosted_publication_migrates_the_unmerged_live_flag_to_a_snapshot(
       "CREATE TABLE schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version, _migration in migrations._SCHEMA_MIGRATIONS[:-3]:
+    for version in _migration_versions_before("0013_app_hosted_publication"):
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) "
         "VALUES (:version, '2026-08-15 00:00:00')"
@@ -1677,7 +1687,7 @@ def test_goal_plan_migration_adds_snapshot_and_revision_to_existing_runs(
       "CREATE TABLE IF NOT EXISTS schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version, _migration in migrations._SCHEMA_MIGRATIONS[:-2]:
+    for version in _migration_versions_before("0014_chat_run_goal_plan"):
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) "
         "VALUES (:version, :at)"
@@ -1724,7 +1734,7 @@ def test_goal_identity_migration_preserves_distinct_historical_roots_and_index(
       "CREATE TABLE IF NOT EXISTS schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version, _migration in migrations._SCHEMA_MIGRATIONS[:-1]:
+    for version in _migration_versions_before("0015_chat_run_goal_identity"):
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) "
         "VALUES (:version, :at)"

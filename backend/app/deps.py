@@ -927,6 +927,28 @@ def get_owner_or_app_with_connections_manage(
   )
 
 
+def get_owner_or_app_with_connect_manage(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Owner JWT, or an app token granted external-machine management."""
+  owner = principal.owner
+  if principal.app_id is None:
+    return owner
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  if bool(app.connect_manage):
+    return owner
+  raise HTTPException(
+    status_code=403,
+    detail=(
+      "This app needs permissions.connect_manage=true in its manifest "
+      "to manage paired machines on your behalf."
+    ),
+  )
+
+
 def get_owner_or_app_with_identity_manage(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),

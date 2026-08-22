@@ -432,6 +432,7 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       "github_access": bool(perms.get("github_access", False)),
       "github_connect": bool(perms.get("github_connect", False)),
       "connections_manage": bool(perms.get("connections_manage", False)),
+      "connect_manage": bool(perms.get("connect_manage", False)),
       "identity_manage": bool(perms.get("identity_manage", False)),
       "railway_manage": bool(perms.get("railway_manage", False)),
     },
@@ -515,6 +516,7 @@ def contract_from_app_state(
       "github_access": bool(getattr(app, "github_access", False)),
       "github_connect": bool(getattr(app, "github_connect", False)),
       "connections_manage": bool(getattr(app, "connections_manage", False)),
+      "connect_manage": bool(getattr(app, "connect_manage", False)),
       # Contract-only grants are declared by a local package on every apply.
       # Store installs build straight from their manifest and never enter this
       # projection. Do not inherit an older accepted value: omission revokes.

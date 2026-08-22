@@ -89,6 +89,7 @@ client_error_router = _load("client_error")
 client_signal_router = _load("client_signal")
 platform_router = _load("platform")
 published_router = _load("published")
+connect_router = _load("connect")
 
 __all__ = [
   "admin_router",
@@ -127,4 +128,5 @@ __all__ = [
   "client_signal_router",
   "platform_router",
   "published_router",
+  "connect_router",
 ]

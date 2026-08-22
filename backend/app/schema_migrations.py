@@ -1430,6 +1430,22 @@ def _add_app_connections_manage(eng) -> None:
     ))
 
 
+def _add_app_connect_manage(eng) -> None:
+  """Grant column for the Connect mini-app's external-machine access."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  columns = {
+    column["name"] for column in sa_inspect(eng).get_columns("apps")
+  }
+  if "connect_manage" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE apps ADD COLUMN connect_manage BOOLEAN "
+      "NOT NULL DEFAULT FALSE"
+    ))
+
+
 def _add_chat_pending_question_id(eng) -> None:
   """Add the durable open-AskUserQuestion marker (models.Chat).
 
@@ -1643,6 +1659,7 @@ _SCHEMA_MIGRATIONS = (
   ("0013_app_hosted_publication", _add_app_hosted_publication),
   ("0014_chat_run_goal_plan", _add_chat_run_goal_plan),
   ("0015_chat_run_goal_identity", _add_chat_run_goal_identity),
+  ("0016_app_connect_manage", _add_app_connect_manage),
 )
 
 

@@ -77,6 +77,7 @@ from app.routes import (
   client_error_router, client_signal_router, standalone_router, storage_router,
   theme_router, uploads_router, platform_router,
   published_router,
+  connect_router,
 )
 
 _BOOT_ID = os.environ.get("MOBIUS_BOOT_ID") or f"{os.getpid()}-{time.time_ns()}"
@@ -744,6 +745,7 @@ app.include_router(notify_router)
 app.include_router(proxy_router)
 app.include_router(public_apps_router)
 app.include_router(local_services_router)
+app.include_router(connect_router)
 app.include_router(client_error_router)
 app.include_router(client_signal_router)
 app.include_router(settings_router)
