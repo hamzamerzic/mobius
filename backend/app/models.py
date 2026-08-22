@@ -54,11 +54,6 @@ class Owner(Base):
   auto_resume_on_limit_default = Column(
     Boolean, nullable=False, default=False, server_default=false()
   )
-  # Planned restarts are initiated by Möbius, so continuing interrupted work
-  # is initially on. This remains independently configurable per chat.
-  auto_resume_on_restart_default = Column(
-    Boolean, nullable=False, default=True, server_default=true()
-  )
   # Per-owner model-picker preferences. Shape:
   #   {"hidden_ids": ["claude-haiku-4-5-20251001", ...]}
   # The picker filters out any registry entry whose ID appears in
@@ -194,8 +189,12 @@ class Chat(Base):
   auto_resume_on_limit = Column(
     Boolean, nullable=False, default=False, server_default=false()
   )
-  # Per-chat policy for continuing after a supervisor-authenticated planned
-  # restart. Initially on because Möbius interrupted the work itself.
+  # Internal latch for continuing after a supervisor-authenticated planned
+  # restart. This is NOT an owner preference — a Möbius-initiated restart
+  # should always continue interrupted work, so it is on for every real chat
+  # and there is no toggle. It is only ever cleared internally, by
+  # delegations.mark_cancelled, so a cancelled delegated child cannot
+  # resurrect itself when the boot sweep claims restart parks.
   auto_resume_on_restart = Column(
     Boolean, nullable=False, default=True, server_default=true()
   )

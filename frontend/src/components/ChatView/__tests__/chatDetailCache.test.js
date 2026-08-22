@@ -103,7 +103,6 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
     effective_agent_settings: { effort: 'high' },
     has_assistant_turns: true,
     auto_resume_on_limit: true,
-    auto_resume_on_restart: false,
   }
 
   const cached = chatDetailCacheValue(source)
@@ -122,7 +121,6 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
     effective: { effort: 'high' },
     has_assistant_turns: true,
     auto_resume_on_limit: true,
-    auto_resume_on_restart: false,
   })
 })
 

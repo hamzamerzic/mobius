@@ -628,8 +628,6 @@ class ChatPatch(BaseModel):
   pinned: bool | None = None
   # Per-chat automatic continuation after a paid provider limit.
   auto_resume_on_limit: bool | None = None
-  # Per-chat automatic continuation after a supervisor-authenticated restart.
-  auto_resume_on_restart: bool | None = None
   # Naming precedence. by_agent marks an AGENT title-sync — it fills the name
   # only when the owner hasn't locked it via a manual rename. clear_title resets
   # the name (unlock + drop to the first-message default; re-derived next turn).
