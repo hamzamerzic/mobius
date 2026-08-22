@@ -128,6 +128,19 @@ export function chatSnapshotMatchesRuntime(cached, runtime) {
     )
 }
 
+/** Decide whether an idle runtime read disproves the retained transcript.
+ * Live local work owns the surface until it settles; otherwise a missing or
+ * moved durable version requires the authoritative detail path. */
+export function shouldRefetchTranscriptForRuntime(
+  cached,
+  runtime,
+  localAuthoritative = false,
+) {
+  return !runtime?.running
+    && !localAuthoritative
+    && !chatSnapshotMatchesRuntime(cached, runtime)
+}
+
 export function chatDetailCacheValue(data = {}) {
   const sourceWindowValid = Array.isArray(data.messages)
     && Number.isInteger(data.offset)
