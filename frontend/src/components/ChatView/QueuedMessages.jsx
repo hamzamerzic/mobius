@@ -132,14 +132,20 @@ export default function QueuedMessages({
     // reports an explicit outcome so a race can't read as success: 'saved'
     // applied, 'gone' already promoted/cancelled, 'error' transport.
     const outcome = await onEdit?.(cidOf(msg), visible)
-    setEditSaving(false)
-    if (outcome === 'saved') {
-      setEditingCid(null)
-      setEditDraft('')
-    } else if (outcome === 'gone') {
-      setEditError('This message already started — it can’t be edited now.')
-    } else {
-      setEditError('Couldn’t save this edit. Try again.')
+    flushSync(() => {
+      setEditSaving(false)
+      if (outcome === 'saved') {
+        setEditingCid(null)
+        setEditDraft('')
+      } else if (outcome === 'gone') {
+        setEditError('This message already started — it can’t be edited now.')
+      } else {
+        setEditError('Couldn’t save this edit. Try again.')
+      }
+    })
+    if (outcome !== 'saved') {
+      const el = editorRef.current
+      try { el?.focus({ preventScroll: true }) } catch { el?.focus() }
     }
   }
 
