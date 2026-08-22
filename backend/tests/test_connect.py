@@ -1,11 +1,15 @@
 """Pairing, revocation, and app-capability boundaries for Möbius Connect."""
 
+import shlex
+import sys
+import time
 from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
 
 from app import models
+from app.connect_runner import _run_command
 from app.database import SessionLocal
 from app.manifest_contract import ManifestContractError, validate_manifest_contract
 from app.routes import connect as connect_routes
@@ -98,6 +102,32 @@ def test_pairing_is_one_time_and_delete_revokes_runner(client, auth):
     "/api/connect/result", headers=runner_auth,
     json={"request_id": "not-pending"},
   ).status_code == 401
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group contract")
+def test_runner_timeout_terminates_the_entire_command_tree(tmp_path: Path):
+  """A timed-out command must not leave descendants running on the machine."""
+  marker = tmp_path / "descendant-finished"
+  descendant = (
+    "import pathlib,time; time.sleep(0.5); "
+    f"pathlib.Path({str(marker)!r}).touch()"
+  )
+  launcher = (
+    "import subprocess,sys; "
+    f"subprocess.Popen([sys.executable, '-c', {descendant!r}])"
+  )
+  # The launcher and its shell both exit immediately. The descendant retains
+  # their captured pipes, reproducing the case where checking only the shell's
+  # status would mistake a still-running command tree for completed work.
+  cmd = f"{shlex.quote(sys.executable)} -c {shlex.quote(launcher)}"
+
+  stdout, stderr, exit_code = _run_command(cmd, None, 0.05)
+
+  assert stdout == ""
+  assert "timed out" in stderr
+  assert exit_code == 124
+  time.sleep(0.6)
+  assert not marker.exists()
 
 
 def test_manifest_requires_boolean_connect_permission():

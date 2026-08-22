@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import platform
+import signal
 import ssl
 import subprocess
 import sys
@@ -187,16 +188,54 @@ def _uninstall_service():
           % CONFIG_PATH)
 
 
+def _terminate_process_tree(proc):
+    """Stop the shell and every process the remote command started."""
+    if os.name == "nt":
+        if proc.poll() is None:
+            # CREATE_NEW_PROCESS_GROUP gives taskkill a tree root to terminate.
+            _run(["taskkill", "/PID", str(proc.pid), "/T", "/F"])
+    else:
+        # The shell may already have exited while one of its descendants keeps
+        # the captured pipes open. Its process group still identifies that tree.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    if proc.poll() is None:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+
 def _run_command(cmd, cwd, timeout):
+    popen_args = {
+        "shell": True,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "cwd": (cwd or None),
+    }
+    if os.name == "nt":
+        popen_args["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_args["start_new_session"] = True
+    proc = None
     try:
-        proc = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True,
-            cwd=(cwd or None), timeout=timeout,
-        )
-        return proc.stdout, proc.stderr, proc.returncode
+        proc = subprocess.Popen(cmd, **popen_args)
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return stdout, stderr, proc.returncode
     except subprocess.TimeoutExpired:
+        _terminate_process_tree(proc)
         return "", "command timed out after %ss" % timeout, 124
+    except KeyboardInterrupt:
+        if proc is not None:
+            _terminate_process_tree(proc)
+        raise
     except Exception as exc:  # noqa: BLE001 - report any spawn failure back
+        if proc is not None:
+            _terminate_process_tree(proc)
         return "", "runner error: %s" % exc, 1
 
 
