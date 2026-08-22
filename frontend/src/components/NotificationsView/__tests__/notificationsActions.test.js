@@ -17,3 +17,13 @@ test('notification header clears immediately and closes through the bell boundar
     /@media \(hover: hover\) and \(pointer: fine\)[\s\S]*?\.notifications__clear:hover/,
   )
 })
+
+test('notification preview stays content-sized until its compact scroll cap', () => {
+  const panelRule = css.match(/\.notifications\s*\{([^}]*)\}/)?.[1] ?? ''
+  const contentRule = css.match(/\.notifications__content\s*\{([^}]*)\}/)?.[1] ?? ''
+
+  assert.match(panelRule, /max-height:\s*min\([\s\S]*?70dvh/)
+  assert.doesNotMatch(panelRule, /(?:^|\n)\s*height:/)
+  assert.match(contentRule, /overflow-y:\s*auto/)
+  assert.doesNotMatch(contentRule, /(?:^|\n)\s*flex:/)
+})
