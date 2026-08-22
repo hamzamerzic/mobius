@@ -70,6 +70,7 @@ from app.routes import (
   secure_inputs_router,
   connectors_router, connectors_public_router,
   debug_router, delegations_router, fs_router, goal_plans_router, github_router, media_router,
+  identity_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
   public_apps_router,
   secrets_router, self_reminders_router, settings_router, skills_router,
@@ -751,6 +752,7 @@ app.include_router(uploads_router)
 app.include_router(media_router)
 app.include_router(secrets_router)
 app.include_router(github_router)
+app.include_router(identity_router)
 app.include_router(push_router)
 app.include_router(notifications_router)
 app.include_router(debug_router)
