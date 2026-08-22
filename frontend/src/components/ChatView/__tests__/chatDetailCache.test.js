@@ -45,7 +45,7 @@ test('cache first paint requires the saved reading coordinate when one exists', 
 })
 
 
-test('a running cache waits for subscribe-time replay', () => {
+test('a running cache enters the in-place stream reconciliation phase', () => {
   const running = {
     restorationWindowComplete: true,
     running: true,

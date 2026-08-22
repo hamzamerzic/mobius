@@ -401,8 +401,7 @@ export default function ChatView({
   // Cached rows are safe restoration geometry, but their persisted liveness can
   // be stale. Do not publish a chat-to-chat handoff until this activation's
   // runtime/detail verdict has arrived: otherwise an apparently idle cache can
-  // be promoted, then disappear when the server reports a running turn and the
-  // stream catch-up gate closes one frame later.
+  // be promoted before the server reports that its turn is still running.
   const [activationSettled, setActivationSettled] = useState(false)
   const acceptCachedReadingCoordinate = useCallback(() => {
     // The scroll owner has proved the exact nested part against committed DOM.
@@ -1936,8 +1935,10 @@ export default function ChatView({
           ? visibleMessages[visibleMessages.length - 1]
           : null,
       })
-      // Persisted rows are not the complete surface of a running turn. Keep
-      // the outgoing chat visible until the subscribe-time replay commits.
+      // Runtime truth is enough to present the canonical transcript and its
+      // stable in-progress assistant surface. Subscribe-time replay reconciles
+      // into that same row after presentation instead of holding the outgoing
+      // chat—and its stale reading cues—through the transport catch-up.
       setInitialEntryPhase(attachesToStream ? 'stream-catchup' : 'ready')
       setLoading(false)
       setActivationSettled(true)
@@ -3915,9 +3916,13 @@ export default function ChatView({
 
   // A safe cached window can prepare while its freshness check runs. History
   // and progressive preparation remain hidden; `cached` is granted only after
-  // the saved-coordinate coverage check above.
+  // the saved-coordinate coverage check above. The display-ready gate below
+  // publishes a running frame only after the activation verdict settles, while
+  // catch-up continues to reconcile into the same active assistant row.
   const transcriptPaintable = (
-    initialEntryPhase === 'cached' || initialEntryPhase === 'ready'
+    initialEntryPhase === 'cached'
+    || initialEntryPhase === 'stream-catchup'
+    || initialEntryPhase === 'ready'
   ) && revealed
   const displayReady = activationSettled
     && !loading
