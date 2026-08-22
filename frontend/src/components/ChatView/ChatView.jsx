@@ -69,6 +69,7 @@ import {
 import { questionKey } from './questionKey.js'
 import { clearChatQuestionDrafts } from './questionDraft.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
+import { isTouchPrimary } from '../../lib/pointerPrimary.js'
 import { resolveStopResend } from './resolveStopResend.js'
 import {
   focusComposerElement,
@@ -168,13 +169,6 @@ import {
 } from './goalProgress.js'
 import './ChatView.css'
 
-
-// Cache touch-primary detection. Updated dynamically if input devices change.
-const _touchMql = typeof matchMedia === 'function'
-  ? matchMedia('(hover: none) and (pointer: coarse)')
-  : null
-let _isTouchPrimary = _touchMql?.matches ?? false
-_touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
 
 const STOP_RETRY_DELAYS_MS = [0, 250, 700, 1200]
 const CHAT_FETCH_TIMEOUT_MS = 15000
@@ -2418,7 +2412,7 @@ export default function ChatView({
     // can be typed immediately. Fresh sends and explicit queue+steer submits
     // dismiss it; desktop retains its existing cursor-ready behaviour.
     if (shouldDismissComposerKeyboardOnSubmit({
-      isTouchPrimary: _isTouchPrimary,
+      isTouchPrimary: isTouchPrimary(),
       queuesBehindActiveTurn,
       directSteer,
     })) {
@@ -3586,7 +3580,7 @@ export default function ChatView({
       // changes. Both composer and per-row steer actions share this path.
       const inputEl = inputRef.current
       steerKeyboardDismissRequestRef.current = null
-      if (_isTouchPrimary && document.activeElement === inputEl) {
+      if (isTouchPrimary() && document.activeElement === inputEl) {
         steerKeyboardDismissRequestRef.current = {
           chatId: String(chatId),
           cid: steerCid,

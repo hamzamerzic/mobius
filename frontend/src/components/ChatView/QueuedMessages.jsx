@@ -8,6 +8,8 @@ import {
 } from '@openai/apps-sdk-ui/components/Icon'
 import { stripAugmentation } from './msgText.js'
 import { cidOf } from './messageIdentity.js'
+import { isInlineEditorSubmit } from './composerShortcuts.js'
+import { isTouchPrimary } from '../../lib/pointerPrimary.js'
 import {
   pointerSelectionChangedWithin,
   textSelectionSnapshot,
@@ -184,9 +186,11 @@ export default function QueuedMessages({
                         if (event.key === 'Escape') {
                           event.preventDefault()
                           cancelEdit()
-                        } else if (
-                          event.key === 'Enter' && (event.metaKey || event.ctrlKey)
-                        ) {
+                          return
+                        }
+                        // Empty draft can't save, so leave Enter as a newline.
+                        if (!editDraft.trim()) return
+                        if (isInlineEditorSubmit(event, { isTouchPrimary: isTouchPrimary() })) {
                           event.preventDefault()
                           void saveEdit(msg)
                         }
