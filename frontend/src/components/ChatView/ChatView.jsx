@@ -4662,6 +4662,7 @@ export default function ChatView({
             onSteerOne={handleSteerOne}
             steerActive={turnActive && !hasPendingQuestion}
             steerBusy={steerBusy}
+            focusComposer={() => focusComposerElement(inputRef.current)}
           />
         )}
         <ChatInputBar

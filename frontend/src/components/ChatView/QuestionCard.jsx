@@ -6,7 +6,7 @@ import {
   readQuestionDraft,
   writeQuestionDraft,
 } from './questionDraft.js'
-import { textareaUsesNativeSizing } from './composerTextareaSizing.js'
+import { autoGrowTextarea, textareaUsesNativeSizing } from './composerTextareaSizing.js'
 import { placeCaretAtTextEnd } from './composerFocusPolicy.js'
 import { isInlineEditorSubmit } from './composerShortcuts.js'
 import { isTouchPrimary } from '../../lib/pointerPrimary.js'
@@ -30,13 +30,7 @@ const CUSTOM_ANSWER_MAX_HEIGHT = 180
 
 
 function resizeCustomAnswer(textarea) {
-  if (!textarea || textareaUsesNativeSizing()) return
-  textarea.style.height = 'auto'
-  const contentHeight = textarea.scrollHeight
-  textarea.style.height = `${Math.min(contentHeight, CUSTOM_ANSWER_MAX_HEIGHT)}px`
-  textarea.style.overflowY = contentHeight > CUSTOM_ANSWER_MAX_HEIGHT
-    ? 'auto'
-    : 'hidden'
+  autoGrowTextarea(textarea, CUSTOM_ANSWER_MAX_HEIGHT)
 }
 
 

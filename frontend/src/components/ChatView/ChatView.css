@@ -3610,7 +3610,12 @@
   min-height: 56px;
   max-height: 160px;
   padding: 8px 10px;
-  resize: vertical;
+  /* Grow to fit the message being edited (capped by max-height, then scroll)
+     so a longer draft is visible instead of scrolling a cramped fixed box.
+     Browsers without field-sizing fall back to autoGrowTextarea's measurement. */
+  field-sizing: content;
+  overflow-y: auto;
+  resize: none;
   border: 1px solid var(--border);
   border-radius: 9px;
   outline: none;
