@@ -324,6 +324,18 @@ Then act on the **system** signal:
   runs alongside that work as optional durable context. When direct evidence
   contradicts a recalled claim, verify that the mismatch was surfaced for the
   next Memory maintenance run rather than silently following the stale claim.
+- A measured recall drop is partner-facing signal in its own right — do not
+  wait for the partner to notice it. On any comparable night, compare live
+  recall (recalling chats ÷ active cue-bearing chats) against its recent
+  baseline. On a material drop, first distinguish a genuinely cue-free workload
+  (correct, low recall) from over-skipping on cue-bearing chats (a regression)
+  by sampling a few no-recall chats. If it is over-skipping, surface a decisive
+  brief card with a concrete proposed trigger fix — even when the Memory app
+  owns the eventual change, and even if the partner has not raised it.
+  Fix-ownership by another surface, and "the partner is already iterating on
+  it," are never reasons to defer a drop to a silent "no action." Improve the
+  smallest owning instruction directly when it is a clear, reversible wording
+  fix; otherwise card it.
 - If Memory is healthy and no interview raised a memory-system issue, write one
   sentence in your run notes and move on. Empty phase 3 is fine.
 
