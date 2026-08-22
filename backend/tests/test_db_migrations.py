@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import String, create_engine, inspect, text
+from sqlalchemy import String, create_engine, event, inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -1029,6 +1029,53 @@ def test_retire_restart_resume_toggle_lifts_stranded_chats(tmp_path):
   assert rows["active-child"] in (True, 1)
   # The cancelled delegation child keeps its internal latch.
   assert rows["cancelled-child"] in (False, 0)
+
+
+def test_retire_restart_resume_toggle_retries_as_one_transaction(tmp_path):
+  """A failed schema retirement must not hide a half-applied migration."""
+  from app.schema_migrations import _retire_restart_resume_toggle
+
+  eng = create_engine(f"sqlite:///{tmp_path / 'retire-retry.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE owner (id INTEGER PRIMARY KEY, "
+      "auto_resume_on_restart_default BOOLEAN NOT NULL DEFAULT TRUE)"
+    ))
+    conn.execute(text(
+      "CREATE TABLE chats (id VARCHAR PRIMARY KEY, "
+      "auto_resume_on_restart BOOLEAN NOT NULL DEFAULT TRUE)"
+    ))
+    conn.execute(text(
+      "INSERT INTO chats (id, auto_resume_on_restart) VALUES ('stranded', 0)"
+    ))
+
+  def refuse_drop(_conn, _cursor, statement, _parameters, _context, _many):
+    if statement.startswith("ALTER TABLE owner DROP COLUMN"):
+      raise RuntimeError("simulated locked schema")
+
+  event.listen(eng, "before_cursor_execute", refuse_drop)
+  try:
+    with pytest.raises(RuntimeError, match="simulated locked schema"):
+      _retire_restart_resume_toggle(eng)
+  finally:
+    event.remove(eng, "before_cursor_execute", refuse_drop)
+
+  assert "auto_resume_on_restart_default" in {
+    c["name"] for c in inspect(eng).get_columns("owner")
+  }
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT auto_resume_on_restart FROM chats WHERE id = 'stranded'"
+    )).scalar_one() in (False, 0)
+
+  _retire_restart_resume_toggle(eng)
+  assert "auto_resume_on_restart_default" not in {
+    c["name"] for c in inspect(eng).get_columns("owner")
+  }
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT auto_resume_on_restart FROM chats WHERE id = 'stranded'"
+    )).scalar_one() in (True, 1)
 
 
 def test_fresh_owner_schema_has_auto_resume_default():

@@ -1663,8 +1663,11 @@ def _retire_restart_resume_toggle(eng) -> None:
   owner_cols = {c["name"] for c in inspector.get_columns("owner")}
   if "auto_resume_on_restart_default" not in owner_cols:
     return
-  if "chats" in tables:
-    with eng.connect() as conn:
+  # The data lift and schema retirement are one migration outcome. If the
+  # column drop fails (for example because the database is locked), roll the
+  # lift back and let the migration ledger retry the complete operation later.
+  with eng.begin() as conn:
+    if "chats" in tables:
       if "delegations" in tables:
         conn.execute(text(
           "UPDATE chats SET auto_resume_on_restart = 1 "
@@ -1677,19 +1680,9 @@ def _retire_restart_resume_toggle(eng) -> None:
           "UPDATE chats SET auto_resume_on_restart = 1 "
           "WHERE auto_resume_on_restart = 0"
         ))
-      conn.commit()
-  # Best-effort drop: the lift above is the part that matters and is already
-  # committed. A DROP that cannot run (older engine, held lock) just leaves a
-  # harmless unused column; the ledger still records this migration complete, so
-  # the dead column lingers rather than stranding the lift or blocking boot.
-  try:
-    with eng.connect() as conn:
-      conn.execute(text(
-        "ALTER TABLE owner DROP COLUMN auto_resume_on_restart_default"
-      ))
-      conn.commit()
-  except Exception:
-    pass
+    conn.execute(text(
+      "ALTER TABLE owner DROP COLUMN auto_resume_on_restart_default"
+    ))
 
 
 _SCHEMA_MIGRATIONS = (
