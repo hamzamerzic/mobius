@@ -432,10 +432,16 @@ def serialize_delegation(
     db, row, load_result=include_result,
   )
   _record_lifecycle(db, row, status)
+  parent_chat_title = (
+    db.query(models.Chat.title)
+    .filter(models.Chat.id == row.parent_chat_id)
+    .scalar()
+  )
   return {
     "id": row.id,
     "app_id": row.app_id,
     "parent_chat_id": row.parent_chat_id,
+    "parent_chat_title": parent_chat_title,
     "parent_root_run_id": row.parent_root_run_id,
     "task_key": row.task_key,
     "child_chat_id": row.child_chat_id,
