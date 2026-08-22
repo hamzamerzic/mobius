@@ -4,7 +4,7 @@
 Dials OUT to your Mobius instance and lets it run commands on this machine.
 It only makes OUTBOUND HTTPS requests (no open ports), and it runs commands as
 YOU, in your own environment -- the same trust model as running a coding CLI
-locally. Remove the machine in the Connect app to revoke its token.
+locally. Disconnecting in the Connect app stops this runner and revokes it.
 
 Pair AND install as a background service that survives reboots (recommended):
     curl -fsSL "https://YOUR-INSTANCE/api/connect/runner" | python3 - \
@@ -34,6 +34,7 @@ CONFIG_DIR = os.path.expanduser("~/.mobius-connect")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 RUNNER_PATH = os.path.join(CONFIG_DIR, "runner.py")
 LOG_PATH = os.path.join(CONFIG_DIR, "service.log")
+PID_PATH = os.path.join(CONFIG_DIR, "runner.pid")
 LAUNCHD_LABEL = "sh.mobius.connect"
 LAUNCHD_PLIST = os.path.expanduser("~/Library/LaunchAgents/%s.plist" % LAUNCHD_LABEL)
 SYSTEMD_UNIT = os.path.expanduser("~/.config/systemd/user/mobius-connect.service")
@@ -76,6 +77,14 @@ def _run(cmd):
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
+def _run_required(cmd, action):
+    result = _run(cmd)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
+        raise RuntimeError("%s failed: %s" % (action, detail))
+    return result
+
+
 def _self_download(base):
     os.makedirs(CONFIG_DIR, exist_ok=True)
     with urllib.request.urlopen(base + "/api/connect/runner", timeout=30) as resp:
@@ -96,7 +105,8 @@ def _install_launchd(py):
         "  <key>ProgramArguments</key><array>"
         "<string>%s</string><string>%s</string></array>\n"
         "  <key>RunAtLoad</key><true/>\n"
-        "  <key>KeepAlive</key><true/>\n"
+        "  <key>KeepAlive</key><dict>"
+        "<key>SuccessfulExit</key><false/></dict>\n"
         "  <key>StandardOutPath</key><string>%s</string>\n"
         "  <key>StandardErrorPath</key><string>%s</string>\n"
         "</dict></plist>\n"
@@ -122,7 +132,7 @@ def _install_systemd(py):
         "After=network-online.target\n\n"
         "[Service]\n"
         "ExecStart=%s %s\n"
-        "Restart=always\n"
+        "Restart=on-failure\n"
         "RestartSec=5\n\n"
         "[Install]\n"
         "WantedBy=default.target\n"
@@ -149,13 +159,15 @@ def _install_background(py):
     # Last resort (no launchd/systemd): detached background process. Survives
     # closing the terminal, but NOT a reboot.
     with open(LOG_PATH, "ab") as log:
-        subprocess.Popen(
-            [py, RUNNER_PATH], stdout=log, stderr=log,
+        proc = subprocess.Popen(
+            [py, RUNNER_PATH, "--background-service"], stdout=log, stderr=log,
             stdin=subprocess.DEVNULL, start_new_session=True,
         )
+    with open(PID_PATH, "w", encoding="utf-8") as fh:
+        fh.write(str(proc.pid))
     print("Started in the background (survives closing this terminal, NOT a reboot).")
     print("  Logs: tail -f %s" % LOG_PATH)
-    print("  Stop: pkill -f %s" % RUNNER_PATH)
+    print("  Uninstall: python3 %s --uninstall" % RUNNER_PATH)
     return True
 
 
@@ -170,22 +182,70 @@ def _install_service(cfg):
     return _install_background(py)
 
 
-def _uninstall_service():
+def _remove_file(path):
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+
+def _background_pid():
+    try:
+        with open(PID_PATH, "r", encoding="utf-8") as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _revoke_server(cfg):
+    if not cfg.get("url") or not cfg.get("token"):
+        return
+    try:
+        _post(cfg["url"].rstrip("/") + "/api/connect/disconnect", {},
+              token=cfg["token"])
+    except (urllib.error.URLError, ValueError) as exc:
+        print("Could not reach Mobius to remove the saved connection: %s" % exc)
+
+
+def _uninstall_service(stop_running=True):
     system = platform.system()
+    stop_cmd = None
     if system == "Darwin" and os.path.exists(LAUNCHD_PLIST):
-        _run(["launchctl", "unload", LAUNCHD_PLIST])
-        os.remove(LAUNCHD_PLIST)
-        print("Removed launchd service.")
+        domain = "gui/%s/%s" % (os.getuid(), LAUNCHD_LABEL)
+        _run_required(["launchctl", "disable", domain], "launchd disable")
+        _remove_file(LAUNCHD_PLIST)
+        if stop_running:
+            stop_cmd = ["launchctl", "bootout", domain]
+        print("Removed launchd service registration.")
     elif system == "Linux" and os.path.exists(SYSTEMD_UNIT):
-        _run(["systemctl", "--user", "disable", "--now", "mobius-connect.service"])
-        os.remove(SYSTEMD_UNIT)
-        _run(["systemctl", "--user", "daemon-reload"])
-        print("Removed systemd service.")
-    else:
-        print("No service unit found. If it is running in the background, "
-              "stop it with: pkill -f %s" % RUNNER_PATH)
-    print("(Your token in %s is kept; remove the machine in Connect to revoke it.)"
-          % CONFIG_PATH)
+        _run_required(
+            ["systemctl", "--user", "disable", "mobius-connect.service"],
+            "systemd disable",
+        )
+        _remove_file(SYSTEMD_UNIT)
+        _run_required(
+            ["systemctl", "--user", "daemon-reload"], "systemd reload",
+        )
+        if stop_running:
+            stop_cmd = ["systemctl", "--user", "stop", "mobius-connect.service"]
+        print("Removed systemd service registration.")
+
+    pid = _background_pid()
+    _remove_file(CONFIG_PATH)
+    _remove_file(PID_PATH)
+    _remove_file(RUNNER_PATH)
+    print("Removed Connect credentials and runner.")
+
+    if stop_cmd:
+        _run_required(stop_cmd, "daemon stop")
+    elif stop_running and pid and pid != os.getpid():
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    elif stop_running:
+        # Compatibility for fallback installs made before PID tracking.
+        _run(["pkill", "-f", RUNNER_PATH])
 
 
 def _terminate_process_tree(proc):
@@ -263,6 +323,24 @@ def _serve(cfg):
                         evt = json.loads(line[5:].strip())
                     except ValueError:
                         continue
+                    if evt.get("type") == "disconnect":
+                        try:
+                            _uninstall_service(stop_running=False)
+                            payload = {
+                                "request_id": evt.get("request_id"),
+                                "stdout": "Connect daemon removed.",
+                                "stderr": "", "exit_code": 0,
+                            }
+                        except Exception as exc:  # report local cleanup failure
+                            payload = {
+                                "request_id": evt.get("request_id"),
+                                "stdout": "", "stderr": str(exc), "exit_code": 1,
+                            }
+                        try:
+                            _post(base + "/api/connect/result", payload, token=token)
+                        except urllib.error.URLError as exc:
+                            print("failed to report disconnect: %s" % exc)
+                        return
                     if evt.get("type") != "exec":
                         continue
                     print("$ " + evt.get("cmd", ""))
@@ -301,9 +379,13 @@ def main():
                     help="remove the installed service")
     ap.add_argument("--foreground", action="store_true",
                     help="run in this terminal (Ctrl-C stops it)")
+    ap.add_argument("--background-service", action="store_true",
+                    help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     if args.uninstall:
+        cfg = _load_config()
+        _revoke_server(cfg)
         _uninstall_service()
         return
 
@@ -322,7 +404,15 @@ def main():
         _install_service(cfg)
         return
 
-    _serve(cfg)
+    if args.background_service:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(PID_PATH, "w", encoding="utf-8") as fh:
+            fh.write(str(os.getpid()))
+    try:
+        _serve(cfg)
+    finally:
+        if args.background_service:
+            _remove_file(PID_PATH)
 
 
 if __name__ == "__main__":

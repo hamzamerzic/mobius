@@ -9,6 +9,7 @@ Transport is plain HTTP so the runner needs only the Python stdlib:
   POST /api/connect/pair    {code}          -> {host_id, token}   (one-time)
   GET  /api/connect/stream  (host bearer)   -> SSE stream of {exec} commands
   POST /api/connect/result  (host bearer)   -> {request_id, stdout, ...}
+  POST /api/connect/disconnect (host bearer) -> revoke this runner
 
 Owner/app surface:
 
@@ -58,6 +59,12 @@ _PAIRING_TTL_SECONDS = 15 * 60
 _HEARTBEAT_SECONDS = 15
 # Default ceiling for a single remote command.
 _DEFAULT_EXEC_TIMEOUT = 60
+_DISCONNECT_COMMAND = "python3 ~/.mobius-connect/runner.py --uninstall"
+# Older runners only understand exec events. The uninstall command can return
+# without stopping a fallback runner, so terminate its parent runner too.
+_LEGACY_DISCONNECT_COMMAND = f'{_DISCONNECT_COMMAND}; kill -TERM "$PPID"'
+_DISCONNECT_ACK_TIMEOUT = 4
+_LEGACY_DISCONNECT_TIMEOUT = 4
 
 
 # --------------------------------------------------------------------------- #
@@ -133,6 +140,7 @@ class _Channel:
   def __init__(self) -> None:
     self.queue: asyncio.Queue[dict] = asyncio.Queue()
     self.pending: dict[str, asyncio.Future] = {}
+    self.closed = asyncio.Event()
     self.connected_at = _now()
 
 
@@ -217,7 +225,64 @@ def _public_host(host: dict) -> dict:
     "last_seen": host.get("last_seen"),
     "created_at": host.get("created_at"),
     "platform": host.get("platform"),
+    "disconnect_command": _DISCONNECT_COMMAND,
   }
+
+
+def _forget_host(host_id: str) -> None:
+  ch = _channels.pop(host_id, None)
+  if ch is not None:
+    for fut in ch.pending.values():
+      if not fut.done():
+        fut.cancel()
+  _host_path(host_id).unlink(missing_ok=True)
+
+
+async def _ask_runner_to_disconnect(ch: _Channel) -> str:
+  request_id = secrets.token_hex(8)
+  loop = asyncio.get_running_loop()
+  fut: asyncio.Future = loop.create_future()
+  ch.pending[request_id] = fut
+  await ch.queue.put({"type": "disconnect", "request_id": request_id})
+  try:
+    result = await asyncio.wait_for(
+      asyncio.shield(fut), timeout=_DISCONNECT_ACK_TIMEOUT,
+    )
+  except asyncio.TimeoutError:
+    # Runners installed before the disconnect protocol ignore the event. Their
+    # exec channel can still uninstall the service, then explicitly terminate
+    # the runner if that older uninstaller returns without doing so.
+    legacy_id = secrets.token_hex(8)
+    await ch.queue.put({
+      "type": "exec",
+      "request_id": legacy_id,
+      "cmd": _LEGACY_DISCONNECT_COMMAND,
+      "cwd": None,
+      "timeout": _LEGACY_DISCONNECT_TIMEOUT,
+    })
+    try:
+      await asyncio.wait_for(
+        ch.closed.wait(), timeout=_LEGACY_DISCONNECT_TIMEOUT,
+      )
+    except asyncio.TimeoutError:
+      raise HTTPException(
+        status_code=504,
+        detail=(
+          "The machine did not confirm that its daemon stopped. "
+          "The saved connection was kept."
+        ),
+      )
+    return "legacy-stopped"
+  finally:
+    ch.pending.pop(request_id, None)
+    if not fut.done():
+      fut.cancel()
+  if int(result.get("exit_code", 1)) != 0:
+    raise HTTPException(
+      status_code=502,
+      detail=result.get("stderr") or "The machine could not stop its daemon.",
+    )
+  return "acknowledged"
 
 
 @router.post("/hosts")
@@ -285,18 +350,29 @@ async def host_pairing(
 @router.delete("/hosts/{host_id}")
 async def delete_host(
   host_id: str,
+  force: bool = False,
   _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
 ) -> dict:
   host = _load_host(host_id)
   if host is None:
     raise HTTPException(status_code=404, detail="No such host.")
-  ch = _channels.pop(host_id, None)
-  if ch is not None:
-    for fut in ch.pending.values():
-      if not fut.done():
-        fut.cancel()
-  _host_path(host_id).unlink(missing_ok=True)
-  return {"ok": True}
+  ch = _channels.get(host_id)
+  daemon = "not-installed"
+  if host.get("token_sha256"):
+    if ch is None:
+      if not force:
+        raise HTTPException(
+          status_code=409,
+          detail=(
+            "This machine is offline, so Möbius cannot stop its daemon. "
+            f"Run `{_DISCONNECT_COMMAND}` on it, then remove the connection."
+          ),
+        )
+      daemon = "offline-manual"
+    else:
+      daemon = await _ask_runner_to_disconnect(ch)
+  _forget_host(host_id)
+  return {"ok": True, "daemon": daemon}
 
 
 @router.post("/hosts/{host_id}/exec")
@@ -402,6 +478,7 @@ async def stream(request: Request) -> StreamingResponse:
       for fut in ch.pending.values():
         if not fut.done():
           fut.cancel()
+      ch.closed.set()
       _touch(host_id)
 
   return StreamingResponse(
@@ -426,6 +503,14 @@ async def result(body: ResultBody, request: Request) -> dict:
         }
       )
   _touch(host["id"])
+  return {"ok": True}
+
+
+@router.post("/disconnect")
+async def runner_disconnect(request: Request) -> dict:
+  """Let a locally run --uninstall command revoke its own host token."""
+  host = _auth_host(request)
+  _forget_host(host["id"])
   return {"ok": True}
 
 
