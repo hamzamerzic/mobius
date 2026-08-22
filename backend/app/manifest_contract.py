@@ -16,6 +16,7 @@ RECOGNIZED_CAPABILITIES = (
   "github_connect",
   "filesystem_access",
   "connections_manage",
+  "connect_manage",
   "identity_manage",
   "railway_manage",
 )

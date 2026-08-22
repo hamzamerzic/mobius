@@ -766,6 +766,10 @@ class App(Base):
   # canonical holder. Stored keys and broker capabilities never cross this
   # surface, so the grant manages rows without holding what they protect.
   connections_manage = Column(Boolean, nullable=False, default=False)
+  # External-machine management: pair/revoke runners and dispatch commands.
+  # Connect is the canonical holder. This is separate from filesystem_access:
+  # the command runs on another machine rather than this Möbius host.
+  connect_manage = Column(Boolean, nullable=False, default=False)
   # Offline capability. The agent opts an app in (default False) only
   # when it's built to run without the network — it uses
   # window.mobius.storage (which queues writes and syncs on reconnect)
