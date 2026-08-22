@@ -1199,13 +1199,9 @@ export default function ChatView({
     clearAutoResumeError,
     handleAutoResumeChange,
     handleAutoResumeSettingsChange,
-    handleRestartResumeChange,
     mergeChatInfo,
     providerSwitchState,
     providerSwitching,
-    restartResumeEnabled,
-    restartResumeError,
-    restartResumeSaving,
     setChatInfo,
   } = useChatRuntimePolicy({
     chatId,
@@ -4724,12 +4720,6 @@ export default function ChatView({
                 }
                 onAutoResumeChange={
                   embedded ? undefined : handleAutoResumeSettingsChange
-                }
-                restartResumeEnabled={restartResumeEnabled}
-                restartResumeSaving={restartResumeSaving}
-                restartResumeError={restartResumeError}
-                onRestartResumeChange={
-                  embedded ? undefined : handleRestartResumeChange
                 }
                 onChangeChatInfo={mergeChatInfo}
                 providerSwitchState={providerSwitchState}

@@ -1643,6 +1643,55 @@ def _add_app_hosted_publication(eng) -> None:
         conn.execute(text(f"ALTER TABLE apps DROP COLUMN {retired}"))
 
 
+def _retire_restart_resume_toggle(eng) -> None:
+  """Retire the owner restart-resume seed and lift chats a toggle latched off.
+
+  Restart continuation is now always on with no owner toggle. Earlier installs
+  carried an ``auto_resume_on_restart_default`` owner seed and let a per-chat
+  toggle latch continuation off. Lift every chat a prior toggle latched off —
+  EXCEPT a cancelled delegation child, whose ``False`` is an internal
+  do-not-resurrect latch owned by ``delegations.mark_cancelled`` — then drop the
+  dead seed column. Guarded on the seed column's presence, so it no-ops on any
+  database that never carried it.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  tables = set(inspector.get_table_names())
+  if "owner" not in tables:
+    return
+  owner_cols = {c["name"] for c in inspector.get_columns("owner")}
+  if "auto_resume_on_restart_default" not in owner_cols:
+    return
+  if "chats" in tables:
+    with eng.connect() as conn:
+      if "delegations" in tables:
+        conn.execute(text(
+          "UPDATE chats SET auto_resume_on_restart = 1 "
+          "WHERE auto_resume_on_restart = 0 AND id NOT IN ("
+          "SELECT child_chat_id FROM delegations "
+          "WHERE cancelled_at IS NOT NULL AND child_chat_id IS NOT NULL)"
+        ))
+      else:
+        conn.execute(text(
+          "UPDATE chats SET auto_resume_on_restart = 1 "
+          "WHERE auto_resume_on_restart = 0"
+        ))
+      conn.commit()
+  # Best-effort drop: the lift above is the part that matters and is already
+  # committed. A DROP that cannot run (older engine, held lock) just leaves a
+  # harmless unused column; the ledger still records this migration complete, so
+  # the dead column lingers rather than stranding the lift or blocking boot.
+  try:
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE owner DROP COLUMN auto_resume_on_restart_default"
+      ))
+      conn.commit()
+  except Exception:
+    pass
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -1660,6 +1709,7 @@ _SCHEMA_MIGRATIONS = (
   ("0014_chat_run_goal_plan", _add_chat_run_goal_plan),
   ("0015_chat_run_goal_identity", _add_chat_run_goal_identity),
   ("0016_app_connect_manage", _add_app_connect_manage),
+  ("0017_retire_restart_resume_toggle", _retire_restart_resume_toggle),
 )
 
 

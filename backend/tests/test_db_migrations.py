@@ -970,17 +970,65 @@ def test_run_migrations_adds_owner_auto_resume_default(tmp_path):
   cols = {c["name"]: c for c in inspect(eng).get_columns("owner")}
   assert "auto_resume_on_limit_default" in cols
   assert cols["auto_resume_on_limit_default"]["nullable"] is False
-  assert "auto_resume_on_restart_default" in cols
-  assert cols["auto_resume_on_restart_default"]["nullable"] is False
+  # Restart continuation is always on and has no owner-default seed.
+  assert "auto_resume_on_restart_default" not in cols
   with eng.connect() as conn:
     value = conn.execute(text(
       "SELECT auto_resume_on_limit_default FROM owner WHERE id = 1"
     )).scalar_one()
-    restart_value = conn.execute(text(
-      "SELECT auto_resume_on_restart_default FROM owner WHERE id = 1"
-    )).scalar_one()
   assert value in (False, 0)
-  assert restart_value in (True, 1)
+
+
+def test_retire_restart_resume_toggle_lifts_stranded_chats(tmp_path):
+  """The one-time retirement drops the owner seed column and lifts every chat a
+  prior toggle latched off, while preserving a cancelled delegation child's
+  internal do-not-resurrect latch."""
+  from app.schema_migrations import _retire_restart_resume_toggle
+
+  db_path = tmp_path / "retire.db"
+  eng = create_engine(f"sqlite:///{db_path}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE owner (id INTEGER PRIMARY KEY, "
+      "auto_resume_on_restart_default BOOLEAN NOT NULL DEFAULT TRUE)"
+    ))
+    conn.execute(text(
+      "CREATE TABLE chats (id VARCHAR PRIMARY KEY, "
+      "auto_resume_on_restart BOOLEAN NOT NULL DEFAULT TRUE)"
+    ))
+    conn.execute(text(
+      "CREATE TABLE delegations (id VARCHAR PRIMARY KEY, "
+      "child_chat_id VARCHAR, cancelled_at DATETIME NULL)"
+    ))
+    conn.execute(text(
+      "INSERT INTO chats (id, auto_resume_on_restart) VALUES "
+      "('stranded', 0), ('kept', 1), ('cancelled-child', 0), "
+      "('active-child', 0)"
+    ))
+    # Only a CANCELLED delegation child keeps its latch; a live delegation
+    # child is lifted like any other chat.
+    conn.execute(text(
+      "INSERT INTO delegations (id, child_chat_id, cancelled_at) VALUES "
+      "('d1', 'cancelled-child', '2026-08-01 00:00:00'), "
+      "('d2', 'active-child', NULL)"
+    ))
+
+  _retire_restart_resume_toggle(eng)
+  # Idempotent: the dropped seed column means a second pass is a clean no-op.
+  _retire_restart_resume_toggle(eng)
+
+  assert "auto_resume_on_restart_default" not in {
+    c["name"] for c in inspect(eng).get_columns("owner")
+  }
+  with eng.connect() as conn:
+    rows = dict(conn.execute(text(
+      "SELECT id, auto_resume_on_restart FROM chats"
+    )).all())
+  assert rows["stranded"] in (True, 1)
+  assert rows["kept"] in (True, 1)
+  assert rows["active-child"] in (True, 1)
+  # The cancelled delegation child keeps its internal latch.
+  assert rows["cancelled-child"] in (False, 0)
 
 
 def test_fresh_owner_schema_has_auto_resume_default():
@@ -990,11 +1038,8 @@ def test_fresh_owner_schema_has_auto_resume_default():
   assert column.default is not None
   assert column.server_default is not None
   assert str(column.server_default.arg).lower() == "false"
-  restart = models.Owner.__table__.c.auto_resume_on_restart_default
-  assert restart.nullable is False
-  assert restart.default is not None
-  assert restart.server_default is not None
-  assert str(restart.server_default.arg).lower() == "true"
+  # Restart continuation is always on: there is no owner-default column.
+  assert not hasattr(models.Owner.__table__.c, "auto_resume_on_restart_default")
 
 
 def test_run_migrations_adds_read_at_and_backfills_notifications(tmp_path):
@@ -1070,6 +1115,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0014_chat_run_goal_plan",
     "0015_chat_run_goal_identity",
     "0016_app_connect_manage",
+    "0017_retire_restart_resume_toggle",
   ]
   assert second == first
 
