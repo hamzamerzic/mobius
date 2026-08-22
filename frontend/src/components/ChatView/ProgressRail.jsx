@@ -41,6 +41,8 @@ function ProgressStep({ item, detailsExpanded, onDetailsToggle }) {
       aria-expanded={expanded}
       aria-label={`${expanded ? 'Collapse' : 'Expand'}: ${accessibleLabel}`}
       title={expanded ? 'Collapse' : title}
+      // Keep composer focus (and the soft keyboard) put when expanding.
+      onPointerDown={(event) => event.preventDefault()}
       onClick={() => {
         if (hasDetails) onDetailsToggle?.()
         else setLabelExpanded(value => !value)
