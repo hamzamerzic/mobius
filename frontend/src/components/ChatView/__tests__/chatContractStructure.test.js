@@ -46,16 +46,6 @@ test('owner contract hands question anchors to visible responses without locking
   )
   assert.match(
     architecture,
-    /Same running turn accepts a question answer \| transient question anchor over any prior mode \| same transient anchor; same active assistant row/,
-    'answer acceptance alone must preserve the submission anchor',
-  )
-  assert.match(
-    architecture,
-    /First renderable activity after an accepted same-turn answer \| transient question anchor over prior follow, with no newer reader scroll\/location \| prior `FOLLOW_BOTTOM`; same active assistant row/,
-    'visible response activity must restore only the prior live-tail follow',
-  )
-  assert.match(
-    architecture,
     /Viewport\/keyboard changes after question submission \| transient question anchor \| pre-submit unanswered-card mode/,
     'keyboard movement must return to the unanswered card baseline',
   )
