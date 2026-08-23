@@ -285,10 +285,10 @@ def _run_command(cmd, cwd, timeout):
     try:
         proc = subprocess.Popen(cmd, **popen_args)
         stdout, stderr = proc.communicate(timeout=timeout)
-        return stdout, stderr, proc.returncode
+        return stdout, stderr, proc.returncode, False
     except subprocess.TimeoutExpired:
         _terminate_process_tree(proc)
-        return "", "command timed out after %ss" % timeout, 124
+        return "", "command timed out after %ss" % timeout, 124, True
     except KeyboardInterrupt:
         if proc is not None:
             _terminate_process_tree(proc)
@@ -296,7 +296,7 @@ def _run_command(cmd, cwd, timeout):
     except Exception as exc:  # noqa: BLE001 - report any spawn failure back
         if proc is not None:
             _terminate_process_tree(proc)
-        return "", "runner error: %s" % exc, 1
+        return "", "runner error: %s" % exc, 1, False
 
 
 def _serve(cfg):
@@ -344,7 +344,7 @@ def _serve(cfg):
                     if evt.get("type") != "exec":
                         continue
                     print("$ " + evt.get("cmd", ""))
-                    out, err, rc = _run_command(
+                    out, err, rc, timed_out = _run_command(
                         evt.get("cmd", ""), evt.get("cwd"),
                         int(evt.get("timeout", 60)),
                     )
@@ -352,6 +352,7 @@ def _serve(cfg):
                         _post(base + "/api/connect/result", {
                             "request_id": evt.get("request_id"),
                             "stdout": out, "stderr": err, "exit_code": rc,
+                            "timed_out": timed_out,
                         }, token=token)
                     except urllib.error.URLError as exc:
                         print("failed to report result: %s" % exc)
