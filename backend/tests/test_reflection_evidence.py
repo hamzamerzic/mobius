@@ -9,29 +9,28 @@ import unittest
 from unittest import mock
 
 
-SCRIPT = (
-  Path(__file__).resolve().parents[1]
-  / "scripts"
-  / "seed-skills"
-  / "manager-session-evidence.py"
-)
-SPEC = importlib.util.spec_from_file_location("manager_session_evidence", SCRIPT)
-manager_evidence = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(manager_evidence)
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "reflection-evidence.py"
+SPEC = importlib.util.spec_from_file_location("reflection_evidence", SCRIPT)
+reflection_evidence = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(reflection_evidence)
 
 
-class ManagerSessionEvidenceTests(unittest.TestCase):
+class ReflectionEvidenceTests(unittest.TestCase):
+  def test_helper_uses_reflection_not_manager_session_branding(self):
+    text = SCRIPT.read_text(encoding="utf-8")
+    self.assertIn("REFLECTION EVIDENCE BUNDLE", text)
+    self.assertNotIn("MANAGER-SESSION EVIDENCE BUNDLE", text)
   def test_skill_section_labels_old_aggregate_counts_as_legacy_unknown(self):
     output = io.StringIO()
     with (
       mock.patch.object(
-        manager_evidence,
+        reflection_evidence,
         "api_json",
         return_value={"skills": [{"skill": "memory", "count": 7}]},
       ),
       contextlib.redirect_stdout(output),
     ):
-      manager_evidence.section_skill_loads(24)
+      reflection_evidence.section_skill_loads(24)
 
     self.assertIn("complete=0", output.getvalue())
     self.assertIn("legacy=7", output.getvalue())
@@ -47,15 +46,15 @@ class ManagerSessionEvidenceTests(unittest.TestCase):
       }))
       output = io.StringIO()
       with (
-        mock.patch.object(manager_evidence, "MEM_RUN_STATUS", str(status)),
+        mock.patch.object(reflection_evidence, "MEM_RUN_STATUS", str(status)),
         mock.patch.object(
-          manager_evidence, "MEM_UPDATE_LOG", str(root / "missing-updates"),
+          reflection_evidence, "MEM_UPDATE_LOG", str(root / "missing-updates"),
         ),
         mock.patch.object(
-          manager_evidence, "installed_app", return_value={"id": 57},
+          reflection_evidence, "installed_app", return_value={"id": 57},
         ),
         mock.patch.object(
-          manager_evidence,
+          reflection_evidence,
           "latest_cron_outcome",
           return_value={
             "ev": "cron_outcome",
@@ -67,7 +66,7 @@ class ManagerSessionEvidenceTests(unittest.TestCase):
         ),
         contextlib.redirect_stdout(output),
       ):
-        manager_evidence.section_memory(3)
+        reflection_evidence.section_memory(3)
 
     rendered = output.getvalue()
     self.assertIn("outer scheduler receipt (not run-id linked): exit=4", rendered)
@@ -83,9 +82,9 @@ class ManagerSessionEvidenceTests(unittest.TestCase):
         json.dumps({"run_id": "target", "status": "published", "seq": 1}),
         json.dumps({"run_id": "target", "status": "abandoned", "seq": 2}),
       ]) + "\n")
-      with mock.patch.object(manager_evidence, "MEM_RUN_LOG", str(run_log)):
-        receipt = manager_evidence._memory_run_for_id("target")
-        missing = manager_evidence._memory_run_for_id("missing")
+      with mock.patch.object(reflection_evidence, "MEM_RUN_LOG", str(run_log)):
+        receipt = reflection_evidence._memory_run_for_id("target")
+        missing = reflection_evidence._memory_run_for_id("missing")
 
     self.assertEqual(receipt["status"], "abandoned")
     self.assertEqual(receipt["seq"], 2)
@@ -95,16 +94,16 @@ class ManagerSessionEvidenceTests(unittest.TestCase):
     run_id = "12345678-1234-5678-1234-567812345678"
     output = io.StringIO()
     with (
-      mock.patch.object(manager_evidence, "MEM_RUN_STATUS", "/missing/status"),
-      mock.patch.object(manager_evidence, "installed_app", return_value=None),
+      mock.patch.object(reflection_evidence, "MEM_RUN_STATUS", "/missing/status"),
+      mock.patch.object(reflection_evidence, "installed_app", return_value=None),
       mock.patch.object(
-        manager_evidence,
+        reflection_evidence,
         "_read_update_log",
         return_value=[{"run_id": run_id, "status": "published"}],
       ),
       contextlib.redirect_stdout(output),
     ):
-      manager_evidence.section_memory(3)
+      reflection_evidence.section_memory(3)
 
     self.assertIn(f"run={run_id}", output.getvalue())
 
@@ -124,15 +123,15 @@ class ManagerSessionEvidenceTests(unittest.TestCase):
       (run_dir / "memory-writer-review.md").write_text("review\n")
       output = io.StringIO()
       with (
-        mock.patch.object(manager_evidence, "REFLECTION_METRICS", str(metrics)),
+        mock.patch.object(reflection_evidence, "REFLECTION_METRICS", str(metrics)),
         mock.patch.object(
-          manager_evidence,
+          reflection_evidence,
           "REFLECTION_RUNS",
           str(root / "runs"),
         ),
         contextlib.redirect_stdout(output),
       ):
-        manager_evidence.section_reflection(5)
+        reflection_evidence.section_reflection(5)
 
     rendered = output.getvalue()
     self.assertIn("2026-07-28", rendered)
@@ -182,11 +181,11 @@ class ManagerSessionEvidenceTests(unittest.TestCase):
       ).strip()
 
       with mock.patch.object(
-        manager_evidence,
+        reflection_evidence,
         "MEM_REPOSITORY",
         str(repo),
       ):
-        diff = manager_evidence._applied_memory_diff({
+        diff = reflection_evidence._applied_memory_diff({
           "previous_commit": before,
           "commit": after,
           "changed_paths": ["notes/selected.md"],
@@ -208,15 +207,15 @@ class ManagerSessionEvidenceTests(unittest.TestCase):
       }],
     }
     with (
-      mock.patch.object(manager_evidence, "_read_update_log", return_value=[outcome]),
-      mock.patch.object(manager_evidence, "_recall_audits_for_run", return_value=[]),
-      mock.patch.object(manager_evidence, "_read_json", return_value={"run_id": "run-1"}),
-      mock.patch.object(manager_evidence, "_read_text", return_value="skill"),
-      mock.patch.object(manager_evidence, "_function_source", return_value="prompt"),
-      mock.patch.object(manager_evidence, "_applied_memory_diff", return_value="diff"),
+      mock.patch.object(reflection_evidence, "_read_update_log", return_value=[outcome]),
+      mock.patch.object(reflection_evidence, "_recall_audits_for_run", return_value=[]),
+      mock.patch.object(reflection_evidence, "_read_json", return_value={"run_id": "run-1"}),
+      mock.patch.object(reflection_evidence, "_read_text", return_value="skill"),
+      mock.patch.object(reflection_evidence, "_function_source", return_value="prompt"),
+      mock.patch.object(reflection_evidence, "_applied_memory_diff", return_value="diff"),
       contextlib.redirect_stdout(output),
     ):
-      manager_evidence.section_memory_writer_packet()
+      reflection_evidence.section_memory_writer_packet()
 
     self.assertIn("testimony=native writer self-review", output.getvalue())
     self.assertIn("Which route to shorten", output.getvalue())
@@ -245,15 +244,15 @@ class ManagerSessionEvidenceTests(unittest.TestCase):
       "deferred_chat_count": 90,
     }
     with (
-      mock.patch.object(manager_evidence, "_read_update_log", return_value=[outcome]),
-      mock.patch.object(manager_evidence, "_recall_audits_for_run", return_value=[]),
-      mock.patch.object(manager_evidence, "_read_json", return_value=current),
-      mock.patch.object(manager_evidence, "_memory_run_for_id", return_value=historical),
-      mock.patch.object(manager_evidence, "_read_text", return_value="skill"),
-      mock.patch.object(manager_evidence, "_function_source", return_value="prompt"),
+      mock.patch.object(reflection_evidence, "_read_update_log", return_value=[outcome]),
+      mock.patch.object(reflection_evidence, "_recall_audits_for_run", return_value=[]),
+      mock.patch.object(reflection_evidence, "_read_json", return_value=current),
+      mock.patch.object(reflection_evidence, "_memory_run_for_id", return_value=historical),
+      mock.patch.object(reflection_evidence, "_read_text", return_value="skill"),
+      mock.patch.object(reflection_evidence, "_function_source", return_value="prompt"),
       contextlib.redirect_stdout(output),
     ):
-      manager_evidence.section_memory_writer_packet()
+      reflection_evidence.section_memory_writer_packet()
 
     rendered = output.getvalue()
     self.assertIn('"provider": "codex"', rendered)
@@ -270,19 +269,19 @@ class ManagerSessionEvidenceTests(unittest.TestCase):
     }
     with (
       mock.patch.object(
-        manager_evidence,
+        reflection_evidence,
         "_read_update_log",
         return_value=[{"status": "published"}],
       ),
-      mock.patch.object(manager_evidence, "_recall_audits_for_run", return_value=[]),
-      mock.patch.object(manager_evidence, "_read_json", return_value=current),
-      mock.patch.object(manager_evidence, "_memory_run_for_id", return_value=None),
-      mock.patch.object(manager_evidence, "_read_text", return_value="skill"),
-      mock.patch.object(manager_evidence, "_function_source", return_value="prompt"),
-      mock.patch.object(manager_evidence, "_applied_memory_diff", return_value="diff"),
+      mock.patch.object(reflection_evidence, "_recall_audits_for_run", return_value=[]),
+      mock.patch.object(reflection_evidence, "_read_json", return_value=current),
+      mock.patch.object(reflection_evidence, "_memory_run_for_id", return_value=None),
+      mock.patch.object(reflection_evidence, "_read_text", return_value="skill"),
+      mock.patch.object(reflection_evidence, "_function_source", return_value="prompt"),
+      mock.patch.object(reflection_evidence, "_applied_memory_diff", return_value="diff"),
       contextlib.redirect_stdout(output),
     ):
-      manager_evidence.section_memory_writer_packet()
+      reflection_evidence.section_memory_writer_packet()
 
     rendered = output.getvalue()
     self.assertIn("writer outcome has no run_id", rendered)

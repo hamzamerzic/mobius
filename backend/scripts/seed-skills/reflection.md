@@ -198,7 +198,7 @@ non-response evidence. A mismatched older answer record proves neither that the
 previous brief asked questions nor that its cards were ignored. One unanswered
 brief is a weak channel signal, never a durable partner preference.
 
-### 1. INTROSPECTION — interview the agents worth interviewing (summary-first triage)
+### 1. INTROSPECTION — coach the agents worth coaching (summary-first triage)
 
 Start with `inputs/learning-loop.json` for a compact orientation across source
 health, Memory, experiments, friction, resources, and prior effort. It is an
@@ -241,34 +241,44 @@ friction, novel durable learning, a partner correction, or a thin/suspicious
 summary that prevents a sound conclusion. Record the outcome, then move to the
 next row. Empty app-created stubs have no work to review and may be skipped.
 
-**Interview each selected candidate — fork, don't touch the original.**
+**Coach each selected candidate — use the shared Agent Coaching method.** Read
+`/data/shared/skills/agent-coaching.md` completely before the first coaching
+conversation. It owns the neutral feedback-first posture, historical
+fork-or-reseed mechanics, provenance labels, learning questions, and
+verify-before-acting rule. Do not maintain a second Reflection-only coaching
+script here.
 
-- Active chats: `/data/apps/reflection/fork-chat.sh <chat_id> "<interview>"` (runtime wrapper around the platform script; looks up provider + session, forks a throwaway copy, prints the answer to stdout). The original transcript is never modified. Deleted chats are never forked; use their summary/transcript as read-only evidence.
-- App subagent runs: `bash "$SCRIPTS_DIR/fork-session.sh" <session_id> <cwd> "<interview>"`.
+Apply that method to the concrete evidence already staged for this run. Begin
+with a genuine, specific strength worth preserving; then neutrally ask what
+shaped the outcome, what the agent could improve, what lesson generalizes, and
+where that lesson belongs. Add one Reflection-specific self-improvement
+question: **what should Reflection itself change about how it selects, coaches,
+verifies, or acts on agents next time?** This turns the conversation into input
+for phase 2 rather than a retrospective defect report.
 
-**Time-box each fork and validate the result.** Set the outer tool timeout
-above the inner shell timeout so the inner limit can return partial output. Use
-`170000` ms outside and `timeout 150` for an ordinary interview; reserve
-`300000` ms / `timeout 280` for the single highest-value giant chat. Codex can
-be slow to first token regardless of transcript size. Treat a result as failed
-when it is empty, under roughly 200 characters, matches a provider/auth/quota
-error, or lacks the requested structure.
+- Active chats: `timeout 150 /data/apps/reflection/fork-chat.sh --json
+  <chat_id> "<focused coaching prompt>"`. The structured result says whether
+  continuity came from an exact Claude session fork or a same-provider
+  transcript reseed. The original transcript is never modified. Deleted chats
+  are never forked; use their summary/transcript as read-only evidence.
+- App subagent runs: `timeout 150 bash "$SCRIPTS_DIR/fork-session.sh"
+  <session_id> <cwd> "<focused coaching prompt>"`.
 
-On failure, synthesize from the chat transcript or a bounded messages tail and
-say the interview did not complete. That is an **evidence review**, never agent
-testimony; do not count a non-empty error string as an interview.
+Follow Agent Coaching's timeout and validation rules. On failure, synthesize
+from the chat transcript or a bounded messages tail and say the coaching did
+not complete. That is an **evidence review**, never agent testimony; do not
+count a non-empty error string as coaching.
 
-**What to ask** (specialize per chat — read what the agent actually did first, then ask about *that*; a generic template gets shallow answers):
+**Don't repeat yourself across nights.** Agent Coaching's question sequence is a
+*frame*, not a fixed script. Before forking a recurring chat, skim what prior
+runs already asked it (`/data/apps/reflection/runs/*/interviews.md` — the legacy
+artifact name for the coaching records written in this phase). **Drop questions
+you already have a solid answer to**, and spend the fork going deeper or on
+what is genuinely new since the last coverage. A chat with nothing moved since
+then needs no coaching. Repeating the same sequence every night burns budget
+and buries the new signal under answers already captured.
 
-1. **What happened — with proof.** What did you build/change/decide, in one paragraph — and *cite the evidence* so it's verifiable, not testimony: the file path(s) plus a unique token from the diff I can `grep`, the commit (`git log` / `pm-commit`), the files and tools you touched. "I fixed X" is a rumor; "I fixed X in `apps/foo/index.jsx` — grep `clampScrollTargetToView`" is checkable in one command.
-2. **What to prepare for the partner** — what should the morning brief flag? Open loops, decisions awaiting them, anything that'll surprise them when they open the app.
-3. **What was hard** — where did you get stuck, retry, or work around something? What cost you turns?
-4. **Skills** — which skill did you lean on, did it hold up, and what one edit would have saved you time? (This feeds phase 2.)
-5. **Memory** — what did you wish you'd remembered, or what would have been worth recording? Any note that misled you? (This feeds phase 3, where you compare the complaint with Memory's own update log and decide whether the memory system needs a skill/process change.)
-
-**Don't repeat yourself across nights.** The five above are the default *frame*, not a fixed script. Before forking a recurring chat, skim what prior runs already asked it (`/data/apps/reflection/runs/*/interviews.md` — the same files you write in this phase) — **drop the questions you already have a solid answer to**, and spend the fork going *deeper* or on what's genuinely *new* since you last covered it. A chat with nothing moved since your last coverage needs no interview at all (the phase-1 triage already drops the un-moved ones). Re-asking the same five every night burns budget and buries the one new signal under four answers you already had.
-
-**Interviews are testimony, not ground truth — verify before you act.** A forked agent missing recent state will confidently invent a plausible cause, or report a fix that never landed. The proof you asked for in Q1 is what makes verification cheap: `Grep` for the cited token. If it isn't there, the interview confabulated — fall back to the raw record (the same transcript / DB `messages` JSON fallback as the time-box note above) and trust *that*. Treat mismatches as the default expectation, not the exception. Two traps make a sincere "I fixed it" false even when the agent is honest:
+**Coaching testimony is not ground truth — verify before you act.** A forked agent missing recent state will confidently invent a plausible cause, or report a fix that never landed. Agent Coaching's evidence request makes verification cheap: `Grep` for the cited token. If it isn't there, the testimony confabulated — fall back to the raw record (the same transcript / DB `messages` JSON fallback as the failure note above) and trust *that*. Treat mismatches as the default expectation, not the exception. Two traps make a sincere "I fixed it" false even when the agent is honest:
 - **Real but already gone.** Backend fixes must land in the served clone under `/data/platform`, not in image-floor paths under `/app` (for example `/app/platform-baked/backend/app` or `/app/shell-src`). `/app` is replaced when the container is recreated from a new image, so a claimed fix whose file mtime predates the last recreate may no longer exist.
 - **Never landed.** Frontend fixes must land in the served clone under `/data/platform/frontend`, not in image-floor paths. A claimed shell edit with no newer mtime, no `grep` hit, and no relevant `/data/platform` diff simply didn't happen — the agent's working memory was confident; the filesystem is the truth.
 
@@ -303,12 +313,13 @@ Before phase 2, validate and summarize the receipts:
 /data/apps/reflection/runs/<date>/interview-status.json`. Fix malformed rows;
 do not proceed with an ambiguous or silently dropped candidate. Use the status
 to confirm every staged candidate has one disposition and to carry only earned
-follow-ups forward. The interviews remain primary qualitative signal for what
-follows—treat testimony as a lead and verified evidence as fact.
+follow-ups forward. The coaching records remain the primary qualitative signal
+for what follows—treat testimony as a lead and verified evidence as fact.
 
 ### 2. IMPROVE SKILLS from what you learned — including this one
 
-The interviews just told you where the skills failed today's agents. Act on it.
+The coaching conversations just surfaced where today's agents and Reflection
+itself could improve. Act on the verified lessons.
 
 - For each skill-improvement the interviews surfaced, `Read` the named skill under `/data/shared/skills/`, record the `/data` revision, make the **smallest edit that fixes the real gap** (a new gotcha line, a corrected contract, a sharper rule), and `pm-commit --from <sha-before-edit> 'skill(<name>): <what and why>' -- shared/skills/<name>.md`. One commit per skill so each is reversible on its own.
 - **Edit THIS skill (`/data/shared/skills/reflection.md`) too.** Reflection is a skill like any other, and you're the agent best placed to improve it. If a phase wasted time, a question got shallow answers, the brief was too long, or you found a better order — change the rule and commit it. Adapt what you prioritize, what you stop doing, how you phrase the interviews. This is the loop that makes each night's reflection better than the last.
@@ -351,7 +362,7 @@ Read, in this order:
    is terminal. Report a newer running attempt separately rather than treating
    the completed run as unavailable.
 2. Run the helper once:
-   `python3 /data/shared/skills/manager-session-evidence.py --limit 3 --memory-writer-packet`
+   `python3 /data/platform/backend/scripts/reflection-evidence.py --limit 3 --memory-writer-packet`
    The base section identifies the current attempt and recent writer outcomes;
    the packet adds evidence for one outcome. Attribute provider, queue, and
    update claims only when their non-empty full `run_id` matches the terminal

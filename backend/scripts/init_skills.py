@@ -79,6 +79,12 @@ _UNMODIFIED_MIGRATIONS = {
     # Pre-reconciliation seed: still scanned provider credential caches and
     # lagged the checkpoint-ordered live Reflection procedure.
     "1086688efd4dede48ebc95b12b92fb958280e67896a53e52e02cd5def3aa265f",
+    # Pre-Agent-Coaching seed: kept a separate Reflection interview method and
+    # still referenced the retired manager-session evidence helper.
+    "daf11f9e65e347334b57b5f5607a7a3fe4135349b4cbe20d94e53444f37e9535",
+    # Current upstream predecessor, including the learning-loop and receipt
+    # refinements that Agent Coaching must preserve during migration.
+    "3b9af10ffe3db873df8ba7fd9719c126e1de2951c10c7b85cac9f47f27c82217",
   },
   "cron.md": {
     "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
@@ -125,11 +131,6 @@ _UNMODIFIED_MIGRATIONS = {
     # Pre-direct-result seed: sent Codex through a backing file under the
     # protected credentials tree instead of returning the tool result.
     "75271f2a704a6db349e2529d76ddfa505f0ceb1a7f33894a6d4bba23dbd317bb",
-  },
-  "manager-session.md": {
-    # Pre-slimming seed: every interview paid the giant-session timeout and
-    # duplicated Reflection's longer failure explanation.
-    "3a3535b7bfa5d8214a5559567c1e7fb4b7218f404e8a8cf1426455cf46af075d",
   },
   "notifications.md": {
     # Pre-slimming seed: open_item mechanics still lived in core.md, leaving
@@ -199,6 +200,15 @@ _UNMODIFIED_MIGRATIONS = {
 # undo-and-restore.md. Current-seed hashes belong here by design: retirement,
 # unlike a fix-forward replacement, must also remove the latest untouched copy.
 _RETIRED_UNMODIFIED_SKILLS = {
+  # Agent Coaching subsumes the former on-demand manager ritual with a neutral
+  # feedback-first method that Reflection can also use for self-improvement.
+  # Preserve customized copies in retired-skills, but keep no parallel active
+  # skill whose framing or procedure can drift from Agent Coaching.
+  "manager-session.md": {
+    "3a3535b7bfa5d8214a5559567c1e7fb4b7218f404e8a8cf1426455cf46af075d",
+    "8375041d3b37cd3f97d8a3d554c85485a35dc9c8b1466abab2c5f52ff44e1c18",
+    "f1157721e9c874cd69c961bd018d13d0233bac1e3720b1d5655e06033bc20aea",
+  },
   "recovery.md": {
     "0a028cfea8427d9c7b7cd9522da64caf196554f268957e305dc521bb7d6faa3d",
     "0e68863722e977c2ca78754fb2699ac0c19906062bbc63acc3a1aab41b4ea260",
