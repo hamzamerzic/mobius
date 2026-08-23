@@ -7,6 +7,7 @@ import { assistantAnchorKey, messageKey } from '../../../lib/chatDetailCache.js'
 
 import {
   streamItemsToAssistantPayload,
+  carryQuestionAnswers,
   promoteAssistantStream,
   promoteAssistantStreamWithFollowingMessages,
   assistantStreamCoversMessage,
@@ -53,6 +54,71 @@ test('streamItemsToAssistantPayload preserves text boundaries in legacy content'
   assert.equal(payload.content, 'first\n\nsecond')
   assert.deepEqual(payload.blocks.map(b => b.type), ['text', 'tool', 'text'])
   assert.equal(payload.blocks[1].status, 'done')
+})
+
+test('active live payload keeps a durable answer while retaining newer replay output', () => {
+  const question = {
+    type: 'question',
+    question_id: 'b2991163-0d7b-4b85-9bf3-82fcc8ae0e04',
+    questions: [{
+      id: 'push_requeue_787',
+      question: 'Should I push exact commit fd0e64eed to #787 and requeue that head?',
+    }],
+  }
+  const answers = {
+    'Should I push exact commit fd0e64eed to #787 and requeue that head?':
+      'Push & requeue (Recommended)',
+  }
+  const payload = streamItemsToAssistantPayload([
+    { type: 'text', content: 'The remote is unchanged.' },
+    question,
+    { type: 'tool', tool: 'Bash', status: 'running', input: 'verify head' },
+    { type: 'text', content: 'The protected queue is still running.' },
+  ], { finalize: false })
+  payload.blocks = carryQuestionAnswers(payload.blocks, [
+    { type: 'text', content: 'The remote is unchanged.' },
+    { ...question, answers },
+  ])
+
+  assert.deepEqual(payload.blocks[1].answers, answers,
+    'the authoritative saved answer must survive a blank question replay')
+  assert.equal(payload.blocks.at(-1).content, 'The protected queue is still running.',
+    'newer live progress must remain visible while the answer is carried')
+  assert.equal(payload.blocks[2].status, 'running',
+    'the active payload must retain live tool state')
+})
+
+test('a durable answer overrides conflicting optimistic replay state', () => {
+  const question = {
+    type: 'question',
+    question_id: 'question-authority',
+    questions: [{ id: 'choice', question: 'Which direction?' }],
+  }
+  const savedAnswers = { 'Which direction?': 'Keep the durable choice' }
+  const liveAnswers = { 'Which direction?': 'Stale optimistic choice' }
+
+  const [carried] = carryQuestionAnswers(
+    [{ ...question, answers: liveAnswers }],
+    [{ ...question, answers: savedAnswers }],
+  )
+
+  assert.deepEqual(carried.answers, savedAnswers)
+})
+
+test('an empty saved answer map cannot erase newer live answer state', () => {
+  const question = {
+    type: 'question',
+    question_id: 'question-empty-snapshot',
+    questions: [{ id: 'choice', question: 'Which direction?' }],
+  }
+  const liveAnswers = { 'Which direction?': 'Accepted live choice' }
+
+  const [carried] = carryQuestionAnswers(
+    [{ ...question, answers: liveAnswers }],
+    [{ ...question, answers: {} }],
+  )
+
+  assert.deepEqual(carried.answers, liveAnswers)
 })
 
 test('context compaction survives live promotion as its own block', () => {

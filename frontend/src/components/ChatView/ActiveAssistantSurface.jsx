@@ -2,7 +2,10 @@
 
 import { memo, useMemo } from 'react'
 import StreamingMessage from './StreamingMessage.jsx'
-import { streamItemsToAssistantPayload } from './streamPromotion.js'
+import {
+  carryQuestionAnswers,
+  streamItemsToAssistantPayload,
+} from './streamPromotion.js'
 
 
 /**
@@ -39,12 +42,20 @@ function ActiveAssistantSurface({
   const msg = useMemo(() => {
     if (useDbActivePayload) return activeMirrorMsg
     if (!hasLivePayload) return null
+    const livePayload = streamItemsToAssistantPayload(streamItems, { finalize: false })
     return {
       ...(activeMirrorMsg || {}),
       role: 'assistant',
       // Live rendering keeps running tool state and thinking clock anchors;
-      // final promotion converts the same items with finalize=true.
-      ...streamItemsToAssistantPayload(streamItems, { finalize: false }),
+      // final promotion converts the same items with finalize=true. The
+      // mirrored DB blocks supply only durable interaction state: a catch-up
+      // replay can be richer overall while still carrying the original blank
+      // form of a question whose answer has already committed.
+      ...livePayload,
+      blocks: carryQuestionAnswers(
+        livePayload.blocks,
+        activeMirrorMsg?.blocks || [],
+      ),
     }
   }, [activeMirrorMsg, hasLivePayload, streamItems, useDbActivePayload])
 

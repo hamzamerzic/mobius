@@ -399,6 +399,13 @@ class StartTurnBlockedByPendingQuestion:
   question_id: str
 
 
+@dataclass(frozen=True)
+class PromotePendingBlockedByPendingQuestion:
+  """Expected non-promotion while an owner question is open."""
+
+  question_id: str
+
+
 @dataclass
 class StartTurn(_Command):
   """Initial send: append the user message, set title/provider, mark run.
@@ -502,12 +509,13 @@ class PromotePending(_Command):
   committing (so a malformed entry can't silently consume a turn — building
   the validated schema surfaces it), moves pending rows into `messages`,
   sets the durable run marker, stamps `updated_at`, and commits. Returns
-  `{"history", "promoted", "session_id"}`; `promoted` is None (queue
-  unchanged) only when there was nothing to promote. Newer code persists
-  each promoted pending row as its own visible user message, while
-  `promoted.content` remains the combined provider-facing text for the
-  continuation turn. A malformed pending entry that can't build a valid
-  history instead RAISES `_PersistFailed` — the turn-end drain maps that to
+  `{"history", "promoted", "session_id"}` with `promoted=None` only when
+  there was nothing to promote. Returns
+  ``PromotePendingBlockedByPendingQuestion`` when an owner question is open.
+  Newer code persists each promoted pending row as its own visible user message,
+  while `promoted.content` remains the combined provider-facing text for the
+  continuation turn. A malformed pending entry that can't build a valid history
+  instead RAISES `_PersistFailed` — the turn-end drain maps that to
   FAILED_LEAVE_MARKER (leave the marker for reconciliation) rather than
   confusing it with an empty queue and clearing the marker on stranded work.
   """
@@ -1886,6 +1894,11 @@ class ChatWriterActor:
         messages=cmd.messages,
         has_messages=bool(cmd.messages),
         live_assistant=None,
+        # Startup repair owns the durable transcript after a process loss.
+        # Rebuild the protocol barrier from that repaired source instead of
+        # preserving a marker that Finalize may have cleared just before the
+        # process died (or that an older write may have left stale).
+        pending_question_id=_tail_open_question_id(cmd.messages),
       )
     )
     if chat_update.rowcount != 1:
@@ -2570,7 +2583,9 @@ class ChatWriterActor:
       raise _PersistFailed("PersistCompaction did not persist")
     return {"status": "committed", "stored": new_msg}
 
-  def _promote_pending(self, db, cmd: PromotePending) -> dict:
+  def _promote_pending(
+    self, db, cmd: PromotePending,
+  ) -> dict | PromotePendingBlockedByPendingQuestion:
     """Move pending follow-ups into the transcript and mark the run.
 
     Replicates `promote_pending_messages_locked`: builds the next-turn
@@ -2586,6 +2601,14 @@ class ChatWriterActor:
     chat = _active_chat(db, cmd.chat_id)
     if chat is None:
       raise _PersistFailed("PromotePending: chat not found or deleted")
+    # Moving queued rows into the transcript is a turn-admission operation,
+    # just like StartTurn. Keep the owner-question barrier
+    # at the actor-owned commit boundary so every caller — including recovery
+    # sweepers and future programmatic wakes — gets the same TOCTOU-safe rule.
+    if chat.pending_question_id is not None:
+      question_id = chat.pending_question_id
+      db.rollback()
+      return PromotePendingBlockedByPendingQuestion(question_id)
     pending = list(chat.pending_messages or [])
     if not pending:
       return {"history": [], "promoted": None, "session_id": chat.session_id}

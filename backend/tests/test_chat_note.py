@@ -112,6 +112,14 @@ def test_fires_on_limit_parked(tmp_path):
   )
 
 
+def test_fires_when_owner_question_is_parked(tmp_path):
+  assert chat._should_ensure_chat_note(
+    _settings(on=True), "c1",
+    chat_queue.TerminalDisposition.QUESTION_PARKED,
+    str(tmp_path), 0.0,
+  )
+
+
 def test_fires_on_provider_free_completion(tmp_path):
   assert chat._should_ensure_chat_note(
     _settings(on=True), "c1",
