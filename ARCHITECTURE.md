@@ -959,10 +959,14 @@ every supervisor sweep, so a later ledger read cannot disagree with the boot.
 When a successful pass leaves a restart remainder, the same supervisor follows
 up after two seconds; a no-progress pass returns to the event/60-second cadence.
 It creates neither per-chat workers nor a permanent short poll. Paid
-provider-limit continuation (`auto_resume_on_limit`) initially defaults off;
-planned-restart continuation (`auto_resume_on_restart`) initially defaults on.
-Each chat stores both choices independently, and changing either choice seeds
-future chats without rewriting existing conversations.
+provider-limit continuation (`auto_resume_on_limit`) is an owner choice that
+initially defaults off; each chat stores it independently, and changing it
+seeds future chats without rewriting existing conversations. Planned-restart
+continuation is always on and has no owner toggle — Möbius interrupted the work
+itself, so it should just continue. The per-chat `auto_resume_on_restart`
+column remains only as an internal latch: it defaults on and is cleared solely
+by `delegations.mark_cancelled`, so a cancelled delegated child cannot
+resurrect itself when the boot sweep claims restart parks.
 
 ### Tool output rendering
 

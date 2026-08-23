@@ -133,6 +133,7 @@ def test_controlled_skills_have_fix_forward_migrations():
 
   assert module._UNMODIFIED_MIGRATIONS["goal-planning.md"] == {
     "2adb39457e0ec2ee9d9a3596cb96e5a6240bae23d725e6459ba0f6e77d5474c4",
+    "a3edc5fcc453a5305102e144c2d58ae16b828612ac93a6a7442be7e267779f59",
   }
   assert "1086688efd4dede48ebc95b12b92fb958280e67896a53e52e02cd5def3aa265f" in (
     module._UNMODIFIED_MIGRATIONS["reflection.md"]

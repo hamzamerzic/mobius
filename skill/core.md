@@ -104,11 +104,19 @@ Then triage the prompt into one of three tiers:
   clarifying-question tool, and wait for a pick. Recommendations in prose alone
   do not count as waiting.
 
-**Automatic Goal routing.** Before material work on every ordinary prompt that
-delegates an outcome, read the `goal-planning` skill and make its conservative
-Goal-versus-standard decision. Questions and explanation-only prompts are not
-delegated outcomes. Use the working agent's judgment, never a keyword/length
-classifier or a separate model call. Explicit `/goal` remains authoritative.
+**Automatic Goal routing.** Before material work on an ordinary top-level
+partner request that delegates an outcome, create a Goal only when completion
+is observable and durability materially helps (multiple stages/turns,
+repetition, discovery, parallel work,
+or restart risk), and work can begin without an owner choice or external event.
+When those criteria hold, before material work read `goal-planning`, then run
+`python3 /data/platform/backend/scripts/goal_promote.py '<objective>'`. Never use a
+provider-private Goal or synthetic `/goal` message.
+If discovery makes the criteria true only later, promote promptly before
+starting the newly discovered durable branch.
+Keep questions, explanations, and honestly bounded one-turn work standard.
+Delegated subagents remain bounded tasks rather than starting their own Goals.
+Explicit `/goal` and explicit opt-outs remain authoritative.
 
 **Scope check before any restyle.** "The app" is ambiguous: it can mean the whole Möbius shell with one global look or a single mini-app with app-scoped styling. Resolve which BEFORE styling — "restyle the whole app / make everything feel like X" most likely means the shell, not the last mini-app you happened to build. Confirm scope if it's at all ambiguous, follow the matching injected skill, and in your reply say what you changed and what you left untouched.
 

@@ -74,6 +74,7 @@ import {
 } from './questionAnswerHandoff.js'
 import { clearChatQuestionDrafts } from './questionDraft.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
+import { isTouchPrimary } from '../../lib/pointerPrimary.js'
 import { resolveStopResend } from './resolveStopResend.js'
 import {
   focusComposerElement,
@@ -163,6 +164,8 @@ import {
   railAtRunStart,
 } from './buildPhaseRail.js'
 import {
+  compactGoalObjective,
+  goalObjectiveForQueuedStart,
   goalObjectiveAtRunStart,
   goalObjectiveFromRuntime,
   latestGoalObjective,
@@ -171,13 +174,6 @@ import {
 } from './goalProgress.js'
 import './ChatView.css'
 
-
-// Cache touch-primary detection. Updated dynamically if input devices change.
-const _touchMql = typeof matchMedia === 'function'
-  ? matchMedia('(hover: none) and (pointer: coarse)')
-  : null
-let _isTouchPrimary = _touchMql?.matches ?? false
-_touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
 
 const STOP_RETRY_DELAYS_MS = [0, 250, 700, 1200]
 const CHAT_FETCH_TIMEOUT_MS = 15000
@@ -410,8 +406,7 @@ export default function ChatView({
   // Cached rows are safe restoration geometry, but their persisted liveness can
   // be stale. Do not publish a chat-to-chat handoff until this activation's
   // runtime/detail verdict has arrived: otherwise an apparently idle cache can
-  // be promoted, then disappear when the server reports a running turn and the
-  // stream catch-up gate closes one frame later.
+  // be promoted before the server reports that its turn is still running.
   const [activationSettled, setActivationSettled] = useState(false)
   const acceptCachedReadingCoordinate = useCallback(() => {
     // The scroll owner has proved the exact nested part against committed DOM.
@@ -553,15 +548,16 @@ export default function ChatView({
   // real run-start seam and left intact across mid-turn steers; a fresh mount
   // can recover it from the visible run-start message once liveness is known.
   const [activeGoalObjective, setActiveGoalObjective] = useState(
-    () => cached?.running ? (cached?.activeGoalObjective ?? '') : '',
+    () => compactGoalObjective(cached?.activeGoalObjective),
   )
   const [activeGoalPlan, setActiveGoalPlan] = useState(null)
   const setActiveGoalState = useCallback((objective) => {
-    setActiveGoalObjective(objective)
+    const compactObjective = compactGoalObjective(objective)
+    setActiveGoalObjective(compactObjective)
     updateChatRuntimeCache(
       queryClient,
       chatMessagesQueryKey(chatId),
-      { activeGoalObjective: objective },
+      { activeGoalObjective: compactObjective },
     )
   }, [chatId, queryClient])
 
@@ -582,7 +578,9 @@ export default function ChatView({
   }, [])
   useEffect(() => {
     const runtime = queryClient.getQueryData(chatMessagesQueryKey(chatId))
-    setActiveGoalObjective(runtime?.running ? (runtime.activeGoalObjective ?? '') : '')
+    setActiveGoalObjective(
+      compactGoalObjective(runtime?.activeGoalObjective),
+    )
   }, [chatId, queryClient])
 
   useEffect(() => {
@@ -1233,13 +1231,9 @@ export default function ChatView({
     clearAutoResumeError,
     handleAutoResumeChange,
     handleAutoResumeSettingsChange,
-    handleRestartResumeChange,
     mergeChatInfo,
     providerSwitchState,
     providerSwitching,
-    restartResumeEnabled,
-    restartResumeError,
-    restartResumeSaving,
     setChatInfo,
   } = useChatRuntimePolicy({
     chatId,
@@ -1326,7 +1320,9 @@ export default function ChatView({
         setSending(false)
         sendingRef.current = false
         setServerRunningState(false)
-        setActiveGoalState('')
+        if (activeGoalPlan?.summary?.can_complete !== false) {
+          setActiveGoalState('')
+        }
         // Stream ended without continuation. If we have local pending
         // entries, server may have cleared them (auth fail, error) —
         // refetch to reconcile. Skip when pending empty.
@@ -1338,6 +1334,11 @@ export default function ChatView({
       onStreamEnd?.({ continues })
     },
     onSystemEvent: event => {
+      if (event?.type === 'goal_activated') {
+        setActiveGoalPlan(null)
+        setActiveGoalState(event.objective || '')
+        return
+      }
       if (event?.type === 'goal_plan_updated') {
         setActiveGoalPlan(current => newestGoalPlan(current, event.plan || null))
         return
@@ -1360,9 +1361,8 @@ export default function ChatView({
       // position the live stream did (old-run phases, then reset) and the
       // rail always lands on the run being displayed.
       setBuildPhases(railAtRunStart())
-      setActiveGoalState(goalObjectiveAtRunStart(
-        message?.content,
-        messagesRef.current,
+      setActiveGoalState(goalObjectiveForQueuedStart(
+        message, messagesRef.current,
       ))
       const consumedCids = message?._consumed_cids
       const serverRows = Array.isArray(message?._messages)
@@ -1965,8 +1965,10 @@ export default function ChatView({
           ? visibleMessages[visibleMessages.length - 1]
           : null,
       })
-      // Persisted rows are not the complete surface of a running turn. Keep
-      // the outgoing chat visible until the subscribe-time replay commits.
+      // Runtime truth is enough to present the canonical transcript and its
+      // stable in-progress assistant surface. Subscribe-time replay reconciles
+      // into that same row after presentation instead of holding the outgoing
+      // chat—and its stale reading cues—through the transport catch-up.
       setInitialEntryPhase(attachesToStream ? 'stream-catchup' : 'ready')
       setLoading(false)
       setActivationSettled(true)
@@ -2324,6 +2326,11 @@ export default function ChatView({
   useLayoutEffect(() => {
     const el = scrollRef.current
     if (!el || loadingOlder.current || loading || offset <= 0) return
+    // A failed page must hand control to the manual retry button, not auto-fill
+    // again: the failed fetch added no rows, so the surface is still
+    // non-scrollable and this dependency-less effect would otherwise re-fire and
+    // re-fetch on every render — an unbounded, backoff-free request storm.
+    if (olderHistoryError) return
     if (olderHistoryShouldLoad(el)) loadOlderMessages()
   })
 
@@ -2345,7 +2352,7 @@ export default function ChatView({
   function handleScroll() {
     updateJumpToLatest()
     const el = scrollRef.current
-    if (!el || loadingOlder.current || loading) return
+    if (!el || loadingOlder.current || loading || olderHistoryError) return
     // Programmatic scrolls can land near the top, so the shared gesture window
     // still owns intent. Prefetch before the loaded-page boundary can become a
     // visible interruption instead of waiting for the absolute top.
@@ -2436,7 +2443,7 @@ export default function ChatView({
     // can be typed immediately. Fresh sends and explicit queue+steer submits
     // dismiss it; desktop retains its existing cursor-ready behaviour.
     if (shouldDismissComposerKeyboardOnSubmit({
-      isTouchPrimary: _isTouchPrimary,
+      isTouchPrimary: isTouchPrimary(),
       queuesBehindActiveTurn,
       directSteer,
     })) {
@@ -3263,6 +3270,37 @@ export default function ChatView({
     }
   }, [chatId, pendingQueue])
 
+  const handleUpdatePending = useCallback(async (cid, content) => {
+    // Let any in-flight enqueue for this cid settle first, so we PATCH a row
+    // the server already knows about rather than racing its POST.
+    const queueWrite = queuedSendRequestsRef.current.get(cid)
+    if (queueWrite) await Promise.allSettled([queueWrite])
+    try {
+      const res = await apiFetch(
+        `/chats/${chatId}/pending/${encodeURIComponent(cid)}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content }),
+          timeoutMs: CHAT_FETCH_TIMEOUT_MS,
+        },
+      )
+      const data = await jsonOrThrow(res, 'Queued-message edit failed')
+      if (data.updated && Array.isArray(data.pending_messages)) {
+        // Reconcile the edited text from server truth.
+        pendingQueue.hydrate(data.pending_messages)
+        return 'saved'
+      }
+      // updated:false — a racing promotion or cancel already pulled this row
+      // from the queue, so the edit could not apply. Report it distinctly
+      // instead of a phantom success; the normal stream reconcile drops the
+      // stale row and the editor explains why.
+      return 'gone'
+    } catch {
+      return 'error'
+    }
+  }, [chatId, pendingQueue])
+
   async function handleStop() {
     // Re-entry guard. Without this, two rapid Stop clicks would both
     // snapshot the same pending queue (the snapshot happens BEFORE
@@ -3603,7 +3641,7 @@ export default function ChatView({
       // changes. Both composer and per-row steer actions share this path.
       const inputEl = inputRef.current
       steerKeyboardDismissRequestRef.current = null
-      if (_isTouchPrimary && document.activeElement === inputEl) {
+      if (isTouchPrimary() && document.activeElement === inputEl) {
         steerKeyboardDismissRequestRef.current = {
           chatId: String(chatId),
           cid: steerCid,
@@ -3938,9 +3976,13 @@ export default function ChatView({
 
   // A safe cached window can prepare while its freshness check runs. History
   // and progressive preparation remain hidden; `cached` is granted only after
-  // the saved-coordinate coverage check above.
+  // the saved-coordinate coverage check above. The display-ready gate below
+  // publishes a running frame only after the activation verdict settles, while
+  // catch-up continues to reconcile into the same active assistant row.
   const transcriptPaintable = (
-    initialEntryPhase === 'cached' || initialEntryPhase === 'ready'
+    initialEntryPhase === 'cached'
+    || initialEntryPhase === 'stream-catchup'
+    || initialEntryPhase === 'ready'
   ) && revealed
   const displayReady = activationSettled
     && !loading
@@ -4669,7 +4711,7 @@ export default function ChatView({
         </div>
         <ProgressRail
           items={progressRail}
-          key={activeGoalPlan?.root_run_id || visibleGoalObjective || 'build-progress'}
+          resetKey={activeGoalPlan?.root_run_id || visibleGoalObjective || 'build-progress'}
           ariaLabel={visibleGoalObjective ? 'Goal progress' : 'Build progress'}
         />
         <ConnectionStatus
@@ -4681,9 +4723,11 @@ export default function ChatView({
           <QueuedMessages
             items={pendingQueue.visiblePendingMessages}
             onCancel={handleCancelPending}
+            onEdit={handleUpdatePending}
             onSteerOne={handleSteerOne}
             steerActive={turnActive && !hasPendingQuestion}
             steerBusy={steerBusy}
+            focusComposer={() => focusComposerElement(inputRef.current)}
           />
         )}
         <ChatInputBar
@@ -4740,12 +4784,6 @@ export default function ChatView({
                 }
                 onAutoResumeChange={
                   embedded ? undefined : handleAutoResumeSettingsChange
-                }
-                restartResumeEnabled={restartResumeEnabled}
-                restartResumeSaving={restartResumeSaving}
-                restartResumeError={restartResumeError}
-                onRestartResumeChange={
-                  embedded ? undefined : handleRestartResumeChange
                 }
                 onChangeChatInfo={mergeChatInfo}
                 providerSwitchState={providerSwitchState}

@@ -70,12 +70,14 @@ from app.routes import (
   secure_inputs_router,
   connectors_router, connectors_public_router,
   debug_router, delegations_router, fs_router, goal_plans_router, github_router, media_router,
+  identity_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
   public_apps_router,
   secrets_router, self_reminders_router, settings_router, skills_router,
   client_error_router, client_signal_router, standalone_router, storage_router,
   theme_router, uploads_router, platform_router,
   published_router,
+  connect_router,
 )
 
 _BOOT_ID = os.environ.get("MOBIUS_BOOT_ID") or f"{os.getpid()}-{time.time_ns()}"
@@ -743,6 +745,7 @@ app.include_router(notify_router)
 app.include_router(proxy_router)
 app.include_router(public_apps_router)
 app.include_router(local_services_router)
+app.include_router(connect_router)
 app.include_router(client_error_router)
 app.include_router(client_signal_router)
 app.include_router(settings_router)
@@ -751,6 +754,7 @@ app.include_router(uploads_router)
 app.include_router(media_router)
 app.include_router(secrets_router)
 app.include_router(github_router)
+app.include_router(identity_router)
 app.include_router(push_router)
 app.include_router(notifications_router)
 app.include_router(debug_router)
