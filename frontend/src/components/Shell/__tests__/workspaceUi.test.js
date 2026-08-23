@@ -61,6 +61,7 @@ test('the workspace tab menu stays close-only, edge-clamped, and keyboard naviga
   assert.match(shell, /aria-label="Tab actions"/)
   assert.match(menuMarkup, /Close tab/)
   assert.match(menuMarkup, /Close all other tabs/)
+  assert.match(menuMarkup, /Close tabs to the left/)
   assert.match(menuMarkup, /Close tabs to the right/)
   assert.doesNotMatch(
     menuMarkup,
@@ -256,6 +257,9 @@ test('the context menu offers pane-scoped bulk close actions only when useful', 
   assert.match(shell, /const hasSiblingTabs = Boolean\(menuPane && menuPane\.tabs\.length > 1\)/)
   assert.match(shell, /type: 'CLOSE_OTHER_TABS',[\s\S]*?tabKey: tabMenu\.tabKey/)
   assert.match(shell, /Close all other tabs/)
+  assert.match(shell, /const hasTabsToLeft = Boolean\(/)
+  assert.match(shell, /type: 'CLOSE_TABS_TO_LEFT',[\s\S]*?tabKey: tabMenu\.tabKey/)
+  assert.match(shell, /Close tabs to the left/)
   assert.match(shell, /const hasTabsToRight = Boolean\(/)
   assert.match(shell, /type: 'CLOSE_TABS_TO_RIGHT',[\s\S]*?tabKey: tabMenu\.tabKey/)
   assert.match(shell, /Close tabs to the right/)

@@ -955,6 +955,29 @@ export function closeTabsToRight(ws, tabKey) {
   })
 }
 
+// Close only the tabs before the named tab in its pane. If the active tab is
+// among those removed, the named tab becomes active; otherwise focus stays
+// where it was. Other panes are untouched and the operation is reversible.
+export function closeTabsToLeft(ws, tabKey) {
+  const pane = paneOf(ws, tabKey)
+  if (!pane) return ws
+  const index = pane.tabs.findIndex(tab => tabModel.tabKey(tab) === tabKey)
+  if (index <= 0) return ws
+  const tabs = pane.tabs.slice(index)
+  const activeSurvives = tabs.some(tab => tabModel.tabKey(tab) === pane.activeTabKey)
+  return commit(ws, {
+    ...ws,
+    panes: {
+      ...ws.panes,
+      [pane.id]: {
+        ...pane,
+        tabs,
+        activeTabKey: activeSurvives ? pane.activeTabKey : tabKey,
+      },
+    },
+  })
+}
+
 // Move a tab within/between panes. target is one of:
 //   { paneId, index? }  insert into an existing pane at index (append if absent)
 //   { paneId, edge }    split that pane on the edge, the tab alone in the new one
@@ -1742,6 +1765,12 @@ export function workspaceReducer(state, action) {
       const next = closeTabsToRight(ws, action.tabKey)
       if (next === ws) return state
       const label = action.label || 'Closed tabs to the right'
+      return { ws: next, undo: { ws, label, toast: label } }
+    }
+    case 'CLOSE_TABS_TO_LEFT': {
+      const next = closeTabsToLeft(ws, action.tabKey)
+      if (next === ws) return state
+      const label = action.label || 'Closed tabs to the left'
       return { ws: next, undo: { ws, label, toast: label } }
     }
     case 'MOVE_TAB': {
