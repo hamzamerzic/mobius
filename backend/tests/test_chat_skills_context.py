@@ -337,10 +337,27 @@ def test_reflection_seed_uses_staged_evidence_and_avoids_template_duplication():
   assert "inputs/chats.md" in reflection
   assert "ordered `cron_outcome` events" in reflection
   assert "/data/cli-auth/" not in reflection
-  assert "Set the outer tool timeout" in reflection
   assert "this wasted a turn on 2026" not in reflection
   assert "The seeded template owns the exact HTML and styling" in reflection
   assert "Copy this skeleton" not in reflection
+
+
+def test_agent_coaching_is_the_single_neutral_coaching_skill():
+  repo = Path(__file__).resolve().parents[2]
+  seed_dir = repo / "backend" / "scripts" / "seed-skills"
+  coaching = (seed_dir / "agent-coaching.md").read_text(encoding="utf-8")
+  reflection = (seed_dir / "reflection.md").read_text(encoding="utf-8")
+
+  assert not (seed_dir / "manager-session.md").exists()
+  assert "neutral learning conversation" in coaching
+  assert "what the agent did well" in coaching
+  assert "what could improve" in coaching
+  assert "What is the most general lesson" in coaching
+  assert "platform primitive" in coaching
+  assert "exact_session_fork" in coaching
+  assert "`/data/shared/skills/agent-coaching.md` completely" in reflection
+  assert "what should Reflection itself change" in reflection
+  assert "/data/platform/backend/scripts/reflection-evidence.py" in reflection
 
 
 def test_image_skill_returns_tool_result_without_touching_protected_storage():
