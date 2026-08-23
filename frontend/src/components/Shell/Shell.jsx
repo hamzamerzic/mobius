@@ -26,7 +26,10 @@ import { recordClientError } from '../../lib/errorLog.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import useTheme from '../../hooks/useTheme.js'
 import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
-import { useReachabilityPhase } from '../../hooks/useOnlineStatus.js'
+import {
+  useReachabilityPhase,
+  useRecoveryGeneration,
+} from '../../hooks/useOnlineStatus.js'
 import { ReachabilityPhase } from '../../lib/connectivityStore.js'
 import {
   appQueries,
@@ -95,6 +98,7 @@ import {
   persistComposerDraft,
   readComposerDraft,
   readComposerDraftAsync,
+  readComposerHandoff,
   stageComposerHandoff,
 } from '../ChatView/composerDraft.js'
 import {
@@ -619,6 +623,7 @@ export default function Shell({ onInitialVisualReady }) {
   const newChatPresentationRef = useRef(null)
   const newChatPresentationSeqRef = useRef(0)
   const newChatAllocationPromisesRef = useRef(new Map())
+  const settleDraftFirstNewChatRef = useRef(null)
   const builderNewChatRequestRef = useRef(null)
   const newChatIntentLoadedRef = useRef(false)
   const newChatIntentRef = useRef(null)
@@ -783,6 +788,9 @@ export default function Shell({ onInitialVisualReady }) {
   // still disables sends while unavailable, but does not repeat this status
   // beside the composer.
   const reachabilityPhase = useReachabilityPhase()
+  const recoveryGeneration = useRecoveryGeneration()
+  const recoveryGenerationRef = useRef(recoveryGeneration)
+  recoveryGenerationRef.current = recoveryGeneration
   const online = reachabilityPhase !== ReachabilityPhase.OFFLINE
   const reachabilityLabel = reachabilityPhase === ReachabilityPhase.CHECKING
     ? 'Reconnecting…'
@@ -2827,6 +2835,7 @@ export default function Shell({ onInitialVisualReady }) {
       if (!draftFirstPresentationIsCurrent(presentation)) return
       if (String(newChatIntentRef.current?.chatId ?? '') !== intentId) return
       const saved = await readComposerDraftAsync(intentId)
+      const autoSendDraft = readComposerHandoff(intentId).autoSendDraft
       // Durable hydration is asynchronous. Navigation, another New Chat tap,
       // or a newer conflict may have replaced this waiter while IndexedDB was
       // being read; claim both owners again before copying or moving the
@@ -2839,7 +2848,16 @@ export default function Shell({ onInitialVisualReady }) {
         saved.attachments,
       )
       if (!copied) {
-        const failed = { ...presentation, failure: 'error' }
+        if (autoSendDraft) {
+          consumeComposerHandoff(intentId, autoSendDraft, { autoSend: true })
+        }
+        const current = newChatPresentationRef.current
+        const failed = {
+          ...current,
+          submitted: false,
+          failure: autoSendDraft ? 'queue' : 'error',
+          failedAtRecoveryGeneration: recoveryGenerationRef.current,
+        }
         if (newChatPresentationRef.current?.token === presentation.token) {
           newChatPresentationRef.current = failed
           setNewChatPresentation(failed)
@@ -2847,12 +2865,35 @@ export default function Shell({ onInitialVisualReady }) {
         rememberOpenNewChatIntent({ chatId: intentId, status: 'failed' })
         return
       }
+      if (autoSendDraft) {
+        stageComposerHandoff(decision.chatId, autoSendDraft, { autoSend: true })
+        if (readComposerHandoff(decision.chatId).autoSendDraft !== autoSendDraft) {
+          consumeComposerHandoff(intentId, autoSendDraft, { autoSend: true })
+          rememberOpenNewChatIntent({ chatId: decision.chatId, status: 'failed' })
+          const current = newChatPresentationRef.current
+          const failed = {
+            ...current,
+            chatId: decision.chatId,
+            focusToken: current.focusToken + 1,
+            submitted: false,
+            failure: 'queue',
+            failedAtRecoveryGeneration: recoveryGenerationRef.current,
+            materialized: false,
+            handoffRequested: false,
+          }
+          newChatPresentationRef.current = failed
+          flushSync(() => setNewChatPresentation(failed))
+          return
+        }
+      }
       rememberOpenNewChatIntent({ chatId: decision.chatId, status: 'allocating' })
+      const current = newChatPresentationRef.current
       const replacement = {
-        ...presentation,
+        ...current,
         chatId: decision.chatId,
-        focusToken: presentation.focusToken + 1,
+        focusToken: current.focusToken + 1,
         failure: null,
+        failedAtRecoveryGeneration: null,
         materialized: false,
         handoffRequested: false,
       }
@@ -2867,9 +2908,11 @@ export default function Shell({ onInitialVisualReady }) {
         rememberOpenNewChatIntent({ chatId: intentId, status: 'failed' })
       }
       if (!draftFirstPresentationIsCurrent(presentation)) return
+      const current = newChatPresentationRef.current
       const failed = {
-        ...presentation,
+        ...current,
         failure: result.verdict === 'offline' ? 'offline' : 'error',
+        failedAtRecoveryGeneration: recoveryGenerationRef.current,
       }
       newChatPresentationRef.current = failed
       setNewChatPresentation(failed)
@@ -2889,14 +2932,16 @@ export default function Shell({ onInitialVisualReady }) {
     if (!draftFirstPresentationIsCurrent(presentation)) return
     if (String(newChatIntentRef.current?.chatId ?? '') !== intentId) return
 
+    const current = newChatPresentationRef.current
     const changesRoute = activeViewRef.current !== 'chat'
       || String(activeChatIdRef.current) !== intentId
     if (changesRoute) navTo('chat', { chatId: intentId })
     const resolved = {
-      ...presentation,
+      ...current,
       materialized: true,
       handoffRequested: !changesRoute,
       failure: null,
+      failedAtRecoveryGeneration: null,
       navigationEpoch: navigationEpochRef.current,
       // navTo consumes the modal drawer entry synchronously. Carry that
       // ownership change into the presentation or the validity guard will
@@ -2924,15 +2969,58 @@ export default function Shell({ onInitialVisualReady }) {
     }
   }
 
-  function retryDraftFirstNewChat() {
+  settleDraftFirstNewChatRef.current = settleDraftFirstNewChat
+
+  const retryDraftFirstNewChat = useCallback(() => {
     const presentation = newChatPresentationRef.current
     if (!presentation || presentation.materialized || presentation.releasing) return
-    const retrying = { ...presentation, failure: null }
+    const retrying = {
+      ...presentation,
+      failure: null,
+      failedAtRecoveryGeneration: null,
+    }
     newChatPresentationRef.current = retrying
     setNewChatPresentation(retrying)
     rememberOpenNewChatIntent({ chatId: retrying.chatId, status: 'allocating' })
-    void settleDraftFirstNewChat(retrying)
-  }
+    void settleDraftFirstNewChatRef.current?.(retrying)
+  }, [rememberOpenNewChatIntent])
+
+  const queueDraftFirstNewChat = useCallback((input) => {
+    const presentation = newChatPresentationRef.current
+    if (!presentation || presentation.materialized || presentation.releasing) return
+    const text = typeof input === 'string' ? input : ''
+    if (!text.trim()) return
+
+    stageComposerHandoff(presentation.chatId, text, { autoSend: true })
+    if (readComposerHandoff(presentation.chatId).autoSendDraft !== text) {
+      const failed = {
+        ...presentation,
+        submitted: false,
+        failure: 'queue',
+        failedAtRecoveryGeneration: recoveryGenerationRef.current,
+      }
+      newChatPresentationRef.current = failed
+      setNewChatPresentation(failed)
+      return
+    }
+
+    const shouldRetryAllocation = !!presentation.failure
+    const queued = { ...presentation, submitted: true }
+    newChatPresentationRef.current = queued
+    setNewChatPresentation(queued)
+    if (shouldRetryAllocation) retryDraftFirstNewChat()
+  }, [retryDraftFirstNewChat])
+
+  // Retry only on the shared store's proven recovery edge. A render, a browser
+  // `online` event, or a phase-label change is not enough evidence and cannot
+  // create a retry loop while an ordinary server error remains unresolved.
+  useEffect(() => {
+    const presentation = newChatPresentationRef.current
+    if (!presentation?.failure || presentation.failure === 'queue') return
+    if (presentation.materialized || presentation.releasing) return
+    if (recoveryGeneration <= (presentation.failedAtRecoveryGeneration ?? 0)) return
+    retryDraftFirstNewChat()
+  }, [recoveryGeneration, retryDraftFirstNewChat])
 
   function startUserNewChatPresentation({ forceNew = false } = {}) {
     const ws = workspaceStateRef.current.ws
@@ -3025,6 +3113,8 @@ export default function Shell({ onInitialVisualReady }) {
       handoffRequested: false,
       focusToken: token,
       failure: null,
+      failedAtRecoveryGeneration: null,
+      submitted: readComposerHandoff(chatId).autoSendDraft != null,
       leaseOwner,
       navigationEpoch: navigationEpochRef.current,
       viewMode: ws.viewMode,
@@ -4160,6 +4250,10 @@ export default function Shell({ onInitialVisualReady }) {
                   ? newChatPresentation.failure
                   : newChatLandingFailure}
                 onComposerReady={handleNewChatLandingComposerReady}
+                submitted={!!newChatPresentation?.submitted}
+                onSubmit={presentingNewChat
+                  ? queueDraftFirstNewChat
+                  : undefined}
                 onRetry={presentingNewChat
                   ? retryDraftFirstNewChat
                   : requestEmptySingleNewChat}
