@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   questionResponseActivityChanged,
   questionResponseActivitySnapshot,
+  questionResponseBaselineSnapshot,
 } from '../questionResponseActivity.js'
 
 const question = {
@@ -76,4 +77,47 @@ test('a catch-up snapshot containing post-answer content is response activity', 
     { ...question, answers: { Continue: 'Yes' } },
     { type: 'text', content: 'After reconnect' },
   ]), true)
+})
+
+test('arming baseline detects a continuation already present at arm time', () => {
+  // A reconnect delivers the answered question AND its post-answer text in one
+  // snapshot, so arming captures its baseline from items that already carry the
+  // continuation. Keying the baseline to the answered question keeps that
+  // continuation detectable; a whole-surface baseline would swallow it and the
+  // handoff would never fire.
+  const armItems = [
+    { type: 'text', content: 'Before' },
+    { ...question, answers: { Continue: 'Yes' } },
+    { type: 'text', content: 'After reconnect' },
+  ]
+  const baseline = questionResponseBaselineSnapshot(armItems, 'question_id:q-1')
+  assert.equal(questionResponseActivityChanged(baseline, armItems), true)
+})
+
+test('arming baseline holds until real continuation renders', () => {
+  // Live path: the answered question is the last item at arm time, so the
+  // baseline equals the current surface and reports no activity until content
+  // actually lands after it.
+  const armItems = [
+    { type: 'text', content: 'Before' },
+    { ...question, answers: { Continue: 'Yes' } },
+  ]
+  const baseline = questionResponseBaselineSnapshot(armItems, 'question_id:q-1')
+  assert.equal(questionResponseActivityChanged(baseline, armItems), false)
+  assert.equal(questionResponseActivityChanged(
+    baseline,
+    [...armItems, { type: 'text', content: 'Continuation' }],
+  ), true)
+})
+
+test('arming baseline keys on the answered card among several', () => {
+  const later = { ...question, question_id: 'q-2' }
+  const armItems = [
+    question,
+    { type: 'text', content: 'between' },
+    { ...later, answers: { Continue: 'Yes' } },
+    { type: 'text', content: 'after q-2' },
+  ]
+  const baseline = questionResponseBaselineSnapshot(armItems, 'question_id:q-2')
+  assert.equal(questionResponseActivityChanged(baseline, armItems), true)
 })
