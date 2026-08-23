@@ -195,6 +195,7 @@ class ResultBody(BaseModel):
   stdout: str = Field(default="", max_length=8 * 1024 * 1024)
   stderr: str = Field(default="", max_length=8 * 1024 * 1024)
   exit_code: int = 0
+  timed_out: bool = False
 
 
 class ExecBody(BaseModel):
@@ -447,7 +448,7 @@ async def exec_on_host(
     "stderr": stderr,
     "exit_code": exit_code,
     "truncated": stdout_truncated or stderr_truncated,
-    "timed_out": exit_code == 124,
+    "timed_out": bool(result.get("timed_out", False)),
   }
 
 
@@ -545,6 +546,7 @@ async def result(body: ResultBody, request: Request) -> dict:
           "stdout": body.stdout,
           "stderr": body.stderr,
           "exit_code": body.exit_code,
+          "timed_out": body.timed_out,
         }
       )
   _touch(host["id"])

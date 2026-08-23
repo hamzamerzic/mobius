@@ -357,6 +357,7 @@ async def test_exec_caps_large_output_and_reports_runner_timeout(client, auth):
     "stdout": oversized,
     "stderr": "runner timed out",
     "exit_code": 124,
+    "timed_out": True,
   })
 
   result = await request
@@ -416,13 +417,23 @@ def test_runner_timeout_terminates_the_entire_command_tree(tmp_path: Path):
   # status would mistake a still-running command tree for completed work.
   cmd = f"{shlex.quote(sys.executable)} -c {shlex.quote(launcher)}"
 
-  stdout, stderr, exit_code = _run_command(cmd, None, 0.05)
+  stdout, stderr, exit_code, timed_out = _run_command(cmd, None, 0.05)
 
   assert stdout == ""
   assert "timed out" in stderr
   assert exit_code == 124
+  assert timed_out is True
   time.sleep(0.6)
   assert not marker.exists()
+
+
+def test_runner_does_not_mislabel_command_exit_124_as_timeout():
+  stdout, stderr, exit_code, timed_out = _run_command("exit 124", None, 1)
+
+  assert stdout == ""
+  assert stderr == ""
+  assert exit_code == 124
+  assert timed_out is False
 
 
 def test_manifest_requires_boolean_connect_permission():
