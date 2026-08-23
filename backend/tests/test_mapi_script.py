@@ -64,3 +64,21 @@ def test_mapi_preserves_an_explicit_content_type(tmp_path: Path):
   assert result.returncode == 0, result.stderr
   assert result.curl_arguments.count(b"Content-Type: text/css") == 1
   assert b"Content-Type: application/json" not in result.curl_arguments
+
+
+def test_mapi_recognizes_joined_data_and_header_options(tmp_path: Path):
+  result = _run_mapi(
+    tmp_path,
+    "/api/chats",
+    '--data={"title":"Notes"}',
+    "--header=Content-Type: application/merge-patch+json",
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert result.curl_arguments == [
+    b"-sS",
+    b"-H", b"Authorization: Bearer owner-token",
+    b"https://mobius.example/api/chats",
+    b'--data={"title":"Notes"}',
+    b"--header=Content-Type: application/merge-patch+json",
+  ]

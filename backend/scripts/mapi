@@ -11,9 +11,16 @@ previous=""
 for argument in "$@"; do
   case "$argument" in
     -d|--data|--data-raw|--data-binary|--data-urlencode) has_body=true ;;
+    -d?*|--data=*|--data-raw=*|--data-binary=*|--data-urlencode=*)
+      has_body=true
+      ;;
   esac
+  lower_argument="${argument,,}"
   if [[ "$previous" == "-H" || "$previous" == "--header" ]]; then
-    [[ "${argument,,}" == content-type:* ]] && has_content_type=true
+    [[ "$lower_argument" == content-type:* ]] && has_content_type=true
+  elif [[ "$lower_argument" == -hcontent-type:* \
+       || "$lower_argument" == --header=content-type:* ]]; then
+    has_content_type=true
   fi
   if [[ "$argument" == /api/* || "$argument" == /api ]]; then
     argument="${API_BASE_URL%/}$argument"
