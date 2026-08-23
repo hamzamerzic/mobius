@@ -3067,9 +3067,22 @@
   gap: 6px;
 }
 
+.chat__attach-thumb-frame {
+  /* The token fetch may finish after the optimistic message commits. Layout
+     readiness cannot depend on that authorization hop: reserve the exact
+     composer-card footprint immediately, then paint the image inside it. */
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: var(--attach-card, 96px);
+  height: var(--attach-card, 96px);
+  border-radius: 14px;
+  background: var(--surface2);
+}
+
 .chat__attach-thumb-button {
   display: inline-flex;
-  width: fit-content;
+  width: 100%;
+  height: 100%;
   padding: 0;
   border: 0;
   border-radius: 14px;
@@ -3087,8 +3100,8 @@
   /* Match the composer's attachment card after send — same `--attach-card`
      token, so the two can't drift. The thumbnail is a consistent square
      crop; tapping it still opens the full source image. */
-  width: var(--attach-card, 96px);
-  height: var(--attach-card, 96px);
+  width: 100%;
+  height: 100%;
   object-fit: cover;
   border-radius: 14px;
   border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
