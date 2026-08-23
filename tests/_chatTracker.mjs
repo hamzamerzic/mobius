@@ -106,6 +106,28 @@ export async function createTaggedChat(page, label = '') {
     ? workerChatTitle(info.workerIndex, label || info.title)
     : null
   const token = await page.evaluate(() => localStorage.getItem('token'))
+  // Browser behavior specs mock the agent transport, so they also need an
+  // explicit connected provider. Install that boundary before callers reload
+  // or deep-link to the fixture chat; production correctly refuses to send on
+  // a selected model whose provider is disconnected.
+  await page.route('**/api/auth/providers/status', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    json: {
+      claude: {
+        name: 'Claude Code',
+        configured: true,
+        authenticated: true,
+        error: null,
+      },
+      codex: {
+        name: 'Codex',
+        configured: false,
+        authenticated: false,
+        error: 'Not connected in this test fixture.',
+      },
+    },
+  }))
   const response = await page.request.post(`${BASE}/api/chats`, {
     headers: { Authorization: `Bearer ${token}` },
     data: title ? { title } : {},
