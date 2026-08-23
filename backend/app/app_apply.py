@@ -137,24 +137,24 @@ def _read_manifest(snapshot_dir: Path) -> dict:
   return dict(manifest)
 
 
-def _entry_source(snapshot_dir: Path, manifest: dict) -> str:
-  entry = snapshot_dir / manifest["entry"]
+def _entry_source(snapshot_dir: Path, relative: str) -> str:
+  entry = snapshot_dir / relative
   try:
     raw = entry.read_bytes()
   except FileNotFoundError as exc:
     raise AppApplyError(
       "entry_missing",
-      f"Manifest entry {manifest['entry']!r} does not exist.",
+      f"App entry {relative!r} does not exist.",
     ) from exc
   except OSError as exc:
     raise AppApplyError(
-      "entry_unreadable", f"Could not read {manifest['entry']}: {exc}",
+      "entry_unreadable", f"Could not read {relative}: {exc}",
     ) from exc
   try:
     source = raw.decode("utf-8")
   except UnicodeDecodeError as exc:
     raise AppApplyError(
-      "entry_invalid", f"Manifest entry {manifest['entry']!r} is not UTF-8.",
+      "entry_invalid", f"App entry {relative!r} is not UTF-8.",
     ) from exc
   if not source.strip():
     raise AppApplyError("entry_empty", "Manifest entry index.jsx is empty.")
@@ -292,13 +292,19 @@ async def apply_source_revision(
         candidate.tree_oid,
         snapshot_dir,
       )
-      manifest = _read_manifest(snapshot_dir)
-      if app is None or app.manifest_url is None:
+      store_managed = app is not None and app.manifest_url is not None
+      manifest = None if store_managed else _read_manifest(snapshot_dir)
+      if manifest is not None:
         _validate_local_identity(source_path, manifest)
-      source = _entry_source(snapshot_dir, manifest)
+      # Store-installed source trees intentionally exclude reviewed package
+      # metadata. Their App row owns that identity; the editable source
+      # contract has one fixed entry. Local apps retain the strict manifest
+      # reader and its declared entry.
+      entry_relative = "index.jsx" if store_managed else manifest["entry"]
+      source = _entry_source(snapshot_dir, entry_relative)
       package_icon = (
         _manifest_icon(snapshot_dir, manifest)
-        if app is None or app.manifest_url is None
+        if manifest is not None
         else None
       )
 
@@ -337,7 +343,7 @@ async def apply_source_revision(
         app.id,
         source,
         out_path=staged,
-        source_path=snapshot_dir / manifest["entry"],
+        source_path=snapshot_dir / entry_relative,
       )
 
       stable = await _git_operation(
