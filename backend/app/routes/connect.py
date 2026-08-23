@@ -59,6 +59,10 @@ _PAIRING_TTL_SECONDS = 15 * 60
 _HEARTBEAT_SECONDS = 15
 # Default ceiling for a single remote command.
 _DEFAULT_EXEC_TIMEOUT = 60
+# Keep each returned stream bounded so one remote command cannot flood the
+# caller's context. Preserve both ends because diagnostics commonly put the
+# error at the tail after a large body.
+_MAX_EXEC_STREAM = 60_000
 _DISCONNECT_COMMAND = "python3 ~/.mobius-connect/runner.py --uninstall"
 # Older runners only understand exec events. The uninstall command can return
 # without stopping a fallback runner, so terminate its parent runner too.
@@ -191,12 +195,17 @@ class ResultBody(BaseModel):
   stdout: str = Field(default="", max_length=8 * 1024 * 1024)
   stderr: str = Field(default="", max_length=8 * 1024 * 1024)
   exit_code: int = 0
+  timed_out: bool = False
 
 
 class ExecBody(BaseModel):
   cmd: str = Field(min_length=1, max_length=64 * 1024)
   cwd: str | None = Field(default=None, max_length=4096)
   timeout: int = Field(default=_DEFAULT_EXEC_TIMEOUT, ge=1, le=3600)
+
+
+class RenameHostBody(BaseModel):
+  name: str = Field(min_length=1, max_length=80)
 
 
 # --------------------------------------------------------------------------- #
@@ -321,6 +330,24 @@ async def list_hosts(
   return {"hosts": [_public_host(h) for h in _list_hosts()]}
 
 
+@router.patch("/hosts/{host_id}")
+async def rename_host(
+  host_id: str,
+  body: RenameHostBody,
+  _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
+) -> dict:
+  """Rename a paired machine without requiring it to be online."""
+  host = _load_host(host_id)
+  if host is None:
+    raise HTTPException(status_code=404, detail="No such host.")
+  name = body.name.strip()
+  if not name:
+    raise HTTPException(status_code=400, detail="A machine name can’t be empty.")
+  host["name"] = name
+  _save_host(host)
+  return _public_host(host)
+
+
 @router.get("/hosts/{host_id}/pairing")
 async def host_pairing(
   host_id: str,
@@ -413,7 +440,26 @@ async def exec_on_host(
     raise HTTPException(status_code=409, detail="The machine disconnected.")
   finally:
     ch.pending.pop(request_id, None)
-  return result
+  stdout, stdout_truncated = _cap_stream(result.get("stdout", ""))
+  stderr, stderr_truncated = _cap_stream(result.get("stderr", ""))
+  exit_code = int(result.get("exit_code", 0))
+  return {
+    "stdout": stdout,
+    "stderr": stderr,
+    "exit_code": exit_code,
+    "truncated": stdout_truncated or stderr_truncated,
+    "timed_out": bool(result.get("timed_out", False)),
+  }
+
+
+def _cap_stream(text: str) -> tuple[str, bool]:
+  if len(text) <= _MAX_EXEC_STREAM:
+    return text, False
+  marker = "\n…[output truncated]…\n"
+  kept = _MAX_EXEC_STREAM - len(marker)
+  head = (kept + 1) // 2
+  tail = kept // 2
+  return f"{text[:head]}{marker}{text[-tail:]}", True
 
 
 # --------------------------------------------------------------------------- #
@@ -500,6 +546,7 @@ async def result(body: ResultBody, request: Request) -> dict:
           "stdout": body.stdout,
           "stderr": body.stderr,
           "exit_code": body.exit_code,
+          "timed_out": body.timed_out,
         }
       )
   _touch(host["id"])
