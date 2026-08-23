@@ -151,6 +151,7 @@ import {
   reconcileComposerTextarea,
   resetComposerTextarea,
 } from './composerTextareaSizing.js'
+import { needsModelSelection } from './modelSelectionPolicy.js'
 import {
   EMPTY_BUILD_PHASE_RAIL,
   accumulateBuildPhase,
@@ -624,6 +625,11 @@ export default function ChatView({
   // settles. Keep its serialized write tail at ChatView scope so both a closed
   // + popover and an immediate Send still observe the same ordering boundary.
   const settingsSaveTailRef = useRef(Promise.resolve())
+  // A send with no explicit model turns into an open-picker request rather
+  // than falling through to the provider SDK's invisible default. A monotonic
+  // request keeps the popover's open state local while making repeated submit
+  // attempts observable even when it was dismissed between them.
+  const [modelSelectionRequest, setModelSelectionRequest] = useState(0)
   // Refs for the absolutely-positioned foot. Its ResizeObserver notifies the
   // scroll controller, which owns publishing composer clearance together with
   // every other indirect scroll-geometry write.
@@ -3150,12 +3156,20 @@ export default function ChatView({
   function handleSubmit(e) {
     e.preventDefault()
     if (isProviderSwitchBlocking(chatId)) return
+    if (needsModelSelection({ showPicker, chatInfo })) {
+      setModelSelectionRequest(request => request + 1)
+      return
+    }
     doSend(input.trim())
   }
 
   function handleSubmitSteer(e) {
     e.preventDefault()
     if (isProviderSwitchBlocking(chatId)) return
+    if (needsModelSelection({ showPicker, chatInfo })) {
+      setModelSelectionRequest(request => request + 1)
+      return
+    }
     if (submitSteerInFlightRef.current) return
     submitSteerInFlightRef.current = true
     void doSend(input.trim(), { directSteer: true })
@@ -4725,6 +4739,7 @@ export default function ChatView({
                 providerSwitchState={providerSwitchState}
                 settingsSaveTailRef={settingsSaveTailRef}
                 composerInputRef={inputRef}
+                modelSelectionRequest={modelSelectionRequest}
                 onOpenInspector={() => setShowInspector(true)}
                 onOpenSummary={() => setShowSummary(true)}
                 embedded={embedded}
