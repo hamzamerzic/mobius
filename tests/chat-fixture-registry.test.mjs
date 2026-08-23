@@ -8,6 +8,7 @@ import {
 import {
   installMockAgentProvider,
   persistTestChatModel,
+  testChatAgentSettings,
   TEST_CHAT_MODEL,
 } from './_chatTestPrerequisites.mjs'
 
@@ -51,5 +52,12 @@ test('chat fixtures persist a model and simulate its provider boundary', async (
   assert.deepEqual(calls.map(call => call.method), ['PATCH'])
   assert.deepEqual(calls[0].options.data, {
     agent_settings_json: { model: TEST_CHAT_MODEL },
+  })
+  assert.deepEqual(testChatAgentSettings(), {
+    agent_settings_json: { model: TEST_CHAT_MODEL },
+    effective_agent_settings: {
+      model: TEST_CHAT_MODEL,
+      effort: 'medium',
+    },
   })
 })

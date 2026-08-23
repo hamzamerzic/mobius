@@ -6,7 +6,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
-import { TEST_CHAT_MODEL } from './_chatTestPrerequisites.mjs'
+import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -174,7 +174,7 @@ for (const scenario of questionFollowScenarios) test(scenario.name, async ({ pag
         total: turnStarted ? 1 : 0,
         offset: 0,
         provider: 'claude',
-        agent_settings_json: { model: TEST_CHAT_MODEL },
+        ...testChatAgentSettings(),
       }),
     })
   })
