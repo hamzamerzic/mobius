@@ -324,7 +324,20 @@ async def _linked_remote(
   return _identity_contract(payload)
 
 
-def _merge_local_deployment(payload: dict) -> dict:
+def _linked_since(db: Session, owner_id: int) -> str | None:
+  """UTC link-creation instant, or None when no link row survives.
+
+  The remote profile deliberately carries no account-creation date, so the
+  local link row is the only truthful "since" the card can show. Relinking
+  creates a fresh row and honestly resets the date.
+  """
+  link = _linked_row(db, owner_id)
+  if link is None or link.linked_at is None:
+    return None
+  return link.linked_at.replace(microsecond=0).isoformat() + "Z"
+
+
+def _merge_local_deployment(payload: dict, linked_since: str | None = None) -> dict:
   local = _local_payload()
   remote_deployments = payload.get("deployments")
   deployments = list(remote_deployments) if isinstance(remote_deployments, list) else []
@@ -344,6 +357,7 @@ def _merge_local_deployment(payload: dict) -> dict:
       payload.get("profile") if isinstance(payload.get("profile"), dict) else None
     ),
     "deployments": deployments,
+    "linked_at": linked_since,
   }
 
 
@@ -375,11 +389,15 @@ async def read_identity(
       linked = await _linked_remote(db, owner.id, "GET")
     except HTTPException as exc:
       if exc.status_code == 502 and had_link:
-        return _local_payload(
+        degraded = _local_payload(
           account_mode="linked", account_unavailable=True,
         )
+        degraded["linked_at"] = _linked_since(db, owner.id)
+        return degraded
       raise
-    return _merge_local_deployment(linked) if linked is not None else local
+    if linked is None:
+      return local
+    return _merge_local_deployment(linked, _linked_since(db, owner.id))
   try:
     remote = await _managed_remote("GET")
   except HTTPException as exc:
@@ -416,7 +434,7 @@ async def update_profile(
   )
   if remote is None:
     raise HTTPException(409, "Sign in to edit your Möbius profile.")
-  return _merge_local_deployment(remote)
+  return _merge_local_deployment(remote, _linked_since(db, owner.id))
 
 
 @router.post("/avatar")
@@ -438,7 +456,7 @@ async def update_avatar(
   remote = await _linked_remote(db, owner.id, "POST", "/avatar", files=files)
   if remote is None:
     raise HTTPException(409, "Sign in to edit your Möbius profile.")
-  return _merge_local_deployment(remote)
+  return _merge_local_deployment(remote, _linked_since(db, owner.id))
 
 
 @router.get("/avatar")
@@ -1054,7 +1072,7 @@ async def complete_link(
       _open(winner.access_token_encrypted), token,
     ):
       raise HTTPException(409, "Another account link completed first.")
-  return _merge_local_deployment(identity)
+  return _merge_local_deployment(identity, _linked_since(db, owner.id))
 
 
 @router.delete("/link", status_code=204)
