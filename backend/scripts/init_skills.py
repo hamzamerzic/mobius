@@ -61,6 +61,12 @@ RETIRED_SKILLS = DATA_DIR / "shared" / "retired-skills"
 # touched. A set preserves every known unmodified predecessor when one skill
 # needs more than one fix-forward migration over its lifetime.
 _UNMODIFIED_MIGRATIONS = {
+  "platform-maintenance.md": {
+    # Baked copies before the container-boundary guidance. Both hashes are
+    # released, untouched generations; owner-edited copies remain protected.
+    "bcc617354747c49ddad7fa1f419cf921fd7280909358096323cdbc427ad063c3",
+    "b591d15e335c72c0acf394ca7ce4b0daa633e124a487df7a713847cafc13ab6d",
+  },
   "goal-planning.md": {
     # First dependency-aware Goal-plan seed. Replace only the untouched copy
     # so existing instances learn the completion preflight without clobbering
