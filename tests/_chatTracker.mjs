@@ -112,7 +112,26 @@ export async function createTaggedChat(page, label = '') {
     failOnStatusCode: false,
   })
   const result = response.ok() ? await response.json() : null
-  if (info && result?.id) registerCreatedChats(info.workerIndex, result.id)
+  if (result?.id) {
+    // Most browser tests exercise chat behavior after the first-send choice,
+    // not the picker itself. Keep that prerequisite explicit in the shared
+    // fixture now that production no longer inherits an SDK default.
+    const selected = await page.request.put(`${BASE}/api/chats/${result.id}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: {
+        agent_settings_json: {
+          model: process.env.MOBIUS_TEST_MODEL || 'claude-sonnet-4-6',
+        },
+      },
+      failOnStatusCode: false,
+    })
+    if (!selected.ok()) {
+      throw new Error(
+        `Could not select the test chat model (${selected.status()})`,
+      )
+    }
+    if (info) registerCreatedChats(info.workerIndex, result.id)
+  }
   return result
 }
 
