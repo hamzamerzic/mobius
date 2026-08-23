@@ -213,8 +213,8 @@
 }
 
 .standalone-install__warming-skip {
-  min-height: 0;
-  padding: 4px 8px;
+  min-height: 44px;
+  padding: 8px 12px;
   border: none;
   background: transparent;
   color: var(--accent, #a78bfa);
