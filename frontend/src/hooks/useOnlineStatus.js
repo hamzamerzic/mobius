@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import {
   getOnlineSnapshot,
+  getRecoverySnapshot,
   getReachabilityPhaseSnapshot,
   ReachabilityPhase,
   subscribeOnline,
@@ -19,4 +20,11 @@ export function useReachabilityPhase() {
     getReachabilityPhaseSnapshot,
     () => ReachabilityPhase.ONLINE,
   )
+}
+
+// A monotonic recovery edge for work that failed while the shared transport
+// was unavailable. This deliberately shares the same singleton subscriber as
+// the phase hooks above; consumers gain an event, not another connection owner.
+export function useRecoveryGeneration() {
+  return useSyncExternalStore(subscribeOnline, getRecoverySnapshot, () => 0)
 }
