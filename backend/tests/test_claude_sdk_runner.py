@@ -1159,6 +1159,61 @@ def test_dispatch_thinking_delta_emits_thinking(monkeypatch):
   }]
 
 
+def test_control_mcp_readiness_waits_for_promote_goal_tool():
+  from app import claude_sdk_runner
+
+  class _Client:
+    def __init__(self):
+      self.calls = 0
+
+    async def get_mcp_status(self):
+      self.calls += 1
+      if self.calls == 1:
+        return {"mcpServers": [{
+          "name": "mobius_control",
+          "status": "pending",
+        }]}
+      return {"mcpServers": [{
+        "name": "mobius_control",
+        "status": "connected",
+        "tools": [{"name": "promote_goal"}],
+      }]}
+
+  client = _Client()
+  assert asyncio.run(
+    claude_sdk_runner._await_control_mcp_ready(client, enabled=True)
+  ) is None
+  assert client.calls == 2
+
+
+def test_control_mcp_readiness_reports_terminal_failure_without_retrying():
+  from app import claude_sdk_runner
+
+  class _Client:
+    async def get_mcp_status(self):
+      return {"mcpServers": [{
+        "name": "mobius_control",
+        "status": "failed",
+        "error": "stdio child exited",
+      }]}
+
+  assert asyncio.run(
+    claude_sdk_runner._await_control_mcp_ready(_Client(), enabled=True)
+  ) == "failed: stdio child exited"
+
+
+def test_control_mcp_readiness_is_absent_for_restricted_turns():
+  from app import claude_sdk_runner
+
+  class _Client:
+    async def get_mcp_status(self):
+      raise AssertionError("restricted turns must not inspect owner controls")
+
+  assert asyncio.run(
+    claude_sdk_runner._await_control_mcp_ready(_Client(), enabled=False)
+  ) is None
+
+
 def test_claude_thinking_config_requests_summarized_adaptive_thinking():
   assert claude_sdk_runner._claude_thinking_config("claude-opus-4-8") == {
     "type": "adaptive",

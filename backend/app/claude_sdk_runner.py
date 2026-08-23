@@ -107,6 +107,64 @@ from app.runtime_types import RunnerResult
 
 log = logging.getLogger(__name__)
 
+_CONTROL_MCP_READY_TIMEOUT_SECONDS = 10.0
+
+
+async def _await_control_mcp_ready(client, *, enabled: bool) -> str | None:
+  """Wait for Claude's local control tool to be discoverable before query.
+
+  ``ClaudeSDKClient.connect()`` establishes the SDK control channel, but stdio
+  MCP servers may still be pending. Querying before the tool appears creates a
+  cold-start race where ToolSearch reports no match and the same session sees
+  it only later. The SDK's MCP status is the owning readiness signal.
+
+  Return ``None`` when ready, otherwise a bounded diagnostic. Agent turns keep
+  the documented shell fallback rather than failing wholesale when this
+  optional control cannot start.
+  """
+  if not enabled:
+    return None
+  get_status = getattr(client, "get_mcp_status", None)
+  if not callable(get_status):
+    # Lightweight test doubles and older compatible SDK clients do not expose
+    # the status call. Production's pinned SDK does.
+    return None
+
+  from app.platform_tools import CONTROL_SERVER_NAME, CONTROL_TOOL_NAME
+
+  loop = asyncio.get_running_loop()
+  deadline = loop.time() + _CONTROL_MCP_READY_TIMEOUT_SECONDS
+  last_state = "not listed"
+  while True:
+    remaining = deadline - loop.time()
+    if remaining <= 0:
+      return f"timed out ({last_state})"
+    try:
+      payload = await asyncio.wait_for(get_status(), timeout=remaining)
+    except asyncio.TimeoutError:
+      return f"timed out ({last_state})"
+    except Exception as exc:
+      return f"status unavailable: {exc}"
+
+    servers = payload.get("mcpServers", []) if isinstance(payload, dict) else []
+    server = next((
+      item for item in servers
+      if isinstance(item, dict) and item.get("name") == CONTROL_SERVER_NAME
+    ), None)
+    if server is not None:
+      status = str(server.get("status") or "unknown")
+      tools = server.get("tools") if isinstance(server.get("tools"), list) else []
+      if status == "connected" and any(
+        isinstance(tool, dict) and tool.get("name") == CONTROL_TOOL_NAME
+        for tool in tools
+      ):
+        return None
+      if status in {"failed", "needs-auth", "disabled"}:
+        detail = server.get("error")
+        return f"{status}: {detail}" if detail else status
+      last_state = status
+    await asyncio.sleep(min(0.05, max(0, deadline - loop.time())))
+
 # --- Provider register (documented amendment to system_prompts.py's contract) ---
 # The per-chat snapshot in `system_prompts.py` is the identical behavioral
 # constitution handed to every provider. A runner MAY append its own small,
@@ -1181,22 +1239,28 @@ async def run_claude_sdk_turn(
     # would let the argv-visible path alias an unrelated descriptor later.
     connector_config_stack = ExitStack()
     connector_config_handle = None
-    if connector_plan is not None:
-      try:
-        from app.connectors import claude_mcp_config_handle
-        connector_config_handle = connector_config_stack.enter_context(
-          claude_mcp_config_handle(connector_plan)
+    control_tools_enabled = run_policy is None
+    try:
+      from app.connectors import claude_mcp_config_handle
+      from app.platform_tools import claude_control_servers
+      connector_config_handle = connector_config_stack.enter_context(
+        claude_mcp_config_handle(
+          connector_plan,
+          extra_servers=claude_control_servers(
+            enabled=control_tools_enabled,
+          ),
         )
-        if connector_config_handle:
-          options_kwargs["mcp_servers"] = connector_config_handle.path
-      except Exception:
-        connector_config_stack.close()
-        connector_config_stack = ExitStack()
-        log.warning(
-          "Claude MCP connection injection skipped chat_id=%s",
-          chat_id,
-          exc_info=True,
-        )
+      )
+      if connector_config_handle:
+        options_kwargs["mcp_servers"] = connector_config_handle.path
+    except Exception:
+      connector_config_stack.close()
+      connector_config_stack = ExitStack()
+      log.warning(
+        "Claude MCP connection injection skipped chat_id=%s",
+        chat_id,
+        exc_info=True,
+      )
     try:
       options = ClaudeAgentOptions(**options_kwargs)
       client = ClaudeSDKClient(options)
@@ -1211,11 +1275,24 @@ async def run_claude_sdk_turn(
       try:
         try:
           await asyncio.wait_for(client.connect(), timeout=30.0)
+          control_ready_error = await _await_control_mcp_ready(
+            client,
+            enabled=(
+              control_tools_enabled and connector_config_handle is not None
+            ),
+          )
+          if control_ready_error:
+            log.warning(
+              "Claude control MCP unavailable before query chat_id=%s: %s",
+              chat_id,
+              control_ready_error,
+            )
         finally:
-          # Claude has consumed the config by the time the control channel is
-          # connected. Destroy its contents before query() gives the model a
-          # shell or process-inspection tool, while reserving the argv-visible
-          # fd number so it cannot alias another live descriptor.
+          # Keep the anonymous config readable until the local control MCP has
+          # completed its initialize + tools/list handshake. Then destroy its
+          # contents before query() gives the model a shell or process-
+          # inspection tool, while reserving the argv-visible fd number so it
+          # cannot alias another live descriptor.
           if connector_config_handle is not None:
             connector_config_handle.retire()
       except asyncio.TimeoutError:
