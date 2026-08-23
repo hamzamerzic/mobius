@@ -31,9 +31,11 @@ import {
   appMediaSessionEvent,
   applyVirtualStorageMutation,
   attributedFrameVersion,
+  serveClipboardWrite,
   serveModuleRequest,
   serveStorageRpc,
 } from './appFrameProtocol.js'
+import { writeClipboardText } from '../../runtime/clipboard.js'
 import {
   initSwapState, reduceSwap, compareVersions, INCOMING_SWAP_TIMEOUT_MS,
 } from '../../lib/previewSwapState.js'
@@ -78,6 +80,11 @@ function appFrameRequestUrl(appId, version, frameRev) {
 //      frame → parent, answered by `moebius:storage-rpc-result`. The shell owns
 //      IndexedDB/cache/outbox because an opaque frame cannot open it. Exact
 //      source attribution and the app id + installation nonce bind every call.
+//
+//   Clipboard write: {type:'moebius:clipboard-write', requestId, text}
+//      live visible frame → parent, answered by moebius:clipboard-write-result.
+//      The host is a fallback for engines that deny clipboard access inside an
+//      opaque frame; source attribution and visibility gate the side effect.
 //
 //   2. {type: 'moebius:frame-mounted', appId}              frame → parent
 //      Fired by the frame AFTER its first render COMMITS (MountSignal's
@@ -799,6 +806,16 @@ const AppCanvas = forwardRef(function AppCanvas({
       // directly — it is the verified sender window.
       if (srcVersion !== liveVersionRef.current) return
 
+      if (msg.type === 'moebius:clipboard-write') {
+        if (!visibleRef.current) return
+        serveClipboardWrite({
+          message: msg,
+          source: e.source,
+          writeText: writeClipboardText,
+        })
+        return
+      }
+
       if (msg.type === 'moebius:account-link-register') {
         if (!visibleRef.current || !identityLinkBrokerAllowed(capabilityContractRef.current)) {
           return
@@ -1487,7 +1504,7 @@ const AppCanvas = forwardRef(function AppCanvas({
             // withholds it.
             data-app-id={isLive ? appId : undefined}
             data-frame-version={v}
-            allow="fullscreen"
+            allow="clipboard-write; fullscreen"
             allowFullScreen
             onLoad={() => handleFrameLoad(v)}
           />
