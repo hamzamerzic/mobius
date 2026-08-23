@@ -32,7 +32,9 @@ def _run_mapi(tmp_path: Path, *arguments: str) -> subprocess.CompletedProcess:
     text=True,
     check=False,
   )
-  result.curl_arguments = capture.read_bytes().split(b"\0")[:-1]
+  result.curl_arguments = (
+    capture.read_bytes().split(b"\0")[:-1] if capture.exists() else None
+  )
   return result
 
 
@@ -82,3 +84,27 @@ def test_mapi_recognizes_joined_data_and_header_options(tmp_path: Path):
     b'--data={"title":"Notes"}',
     b"--header=Content-Type: application/merge-patch+json",
   ]
+
+
+def test_mapi_refuses_external_targets_without_exposing_owner_auth(tmp_path: Path):
+  result = _run_mapi(tmp_path, "https://example.net/collect")
+
+  assert result.returncode == 2
+  assert result.curl_arguments is None
+  assert "refusing to forward owner auth" in result.stderr
+
+
+def test_mapi_rejects_curl_url_indirection(tmp_path: Path):
+  result = _run_mapi(tmp_path, "--url=https://example.net/collect")
+
+  assert result.returncode == 2
+  assert result.curl_arguments is None
+  assert "refusing to forward owner auth" in result.stderr
+
+
+def test_mapi_refuses_bare_hosts_even_after_a_valid_api_target(tmp_path: Path):
+  result = _run_mapi(tmp_path, "/api/ready", "example.net/collect")
+
+  assert result.returncode == 2
+  assert result.curl_arguments is None
+  assert "only Möbius /api paths are allowed" in result.stderr
