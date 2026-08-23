@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
 import {
@@ -18,6 +19,24 @@ test('registry drains only exact IDs registered by one worker', () => {
   assert.deepEqual(drainCreatedChats(3), ['chat-a', 'chat-b'])
   assert.deepEqual(drainCreatedChats(3), [])
   assert.deepEqual(drainCreatedChats(4), ['other-worker-chat'])
+})
+
+test('created chats are registered before model setup can fail', async () => {
+  const source = await readFile(
+    new URL('./_chatTracker.mjs', import.meta.url),
+    'utf8',
+  )
+  const createStart = source.indexOf('export async function createTaggedChat')
+  const cleanupStart = source.indexOf('export async function cleanupWorkerChats')
+  const createSource = source.slice(createStart, cleanupStart)
+  const registerIndex = createSource.indexOf(
+    'registerCreatedChats(info.workerIndex, result.id)',
+  )
+  const modelSetupIndex = createSource.indexOf('persistTestChatModel(page')
+
+  assert.ok(registerIndex >= 0)
+  assert.ok(modelSetupIndex >= 0)
+  assert.ok(registerIndex < modelSetupIndex)
 })
 
 test('chat fixtures persist a model and simulate its provider boundary', async () => {
