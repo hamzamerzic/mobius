@@ -13,7 +13,10 @@ def _install_control(tmp_path, monkeypatch):
   control = tmp_path / "mobius-rebuild"
   inbox = control / "inbox"
   inbox.mkdir(parents=True)
-  (control / "status.json").write_text('{"state":"idle"}', encoding="utf-8")
+  (control / "status.json").write_text(
+    '{"state":"idle","handoff":"external-cutover-v1"}',
+    encoding="utf-8",
+  )
   monkeypatch.setattr(dc, "_control_dir", lambda: control)
   return control, inbox
 
@@ -56,7 +59,8 @@ async def test_request_writes_only_the_derived_sha(tmp_path, monkeypatch):
 async def test_queued_request_masks_the_previous_terminal_status(tmp_path, monkeypatch):
   control, inbox = _install_control(tmp_path, monkeypatch)
   (control / "status.json").write_text(
-    '{"state":"succeeded","operation_id":"old"}', encoding="utf-8",
+    '{"state":"succeeded","operation_id":"old",'
+    '"handoff":"external-cutover-v1"}', encoding="utf-8",
   )
   (inbox / "request.json").write_text(json.dumps({
     "version": 1, "expected_sha": "e" * 40,
@@ -105,6 +109,24 @@ async def test_status_reports_unconfigured_self_host(monkeypatch):
 
   assert status["supported"] is False
   assert status["code"] == "not_configured"
+
+
+@pytest.mark.asyncio
+async def test_legacy_host_helper_is_visible_but_cannot_queue_replacement(
+  tmp_path, monkeypatch,
+):
+  control, inbox = _install_control(tmp_path, monkeypatch)
+  (control / "status.json").write_text('{"state":"idle"}', encoding="utf-8")
+  monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "self_hosted")
+
+  status = await dc.read_rebuild_status()
+
+  assert status["supported"] is False
+  assert status["code"] == "controller_upgrade_required"
+  with pytest.raises(dc.DeploymentControlError) as exc:
+    await dc.request_rebuild()
+  assert exc.value.code == "controller_upgrade_required"
+  assert not (inbox / "request.json").exists()
 
 
 def test_prepare_path_requires_matching_root_owned_operation(tmp_path, monkeypatch):

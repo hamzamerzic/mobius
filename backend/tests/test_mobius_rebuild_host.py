@@ -274,6 +274,7 @@ def test_replacement_drains_then_rolls_back_after_cutover_error(tmp_path, monkey
   monkeypatch.setattr(
     host, "request_drain", lambda *_args: order.append("drain") or ready,
   )
+  monkeypatch.setattr(host, "restart_ledger", lambda *_args, **_kwargs: True)
 
   def compose(_config, *args, image=None, **_kwargs):
     order.append(f"compose:{image}")
@@ -295,6 +296,77 @@ def test_replacement_drains_then_rolls_back_after_cutover_error(tmp_path, monkey
   ]
   assert statuses[-1]["state"] == "rolled_back"
   assert statuses[-1]["code"] == "replacement_failed"
+
+
+def test_success_reports_when_chat_handoff_receipt_cannot_be_retired(
+  tmp_path, monkeypatch,
+):
+  _config, inbox = _worker_paths(tmp_path, monkeypatch)
+  expected = "9" * 40
+  (inbox / "request.json").write_text(
+    f'{{"version":1,"expected_sha":"{expected}"}}', encoding="utf-8",
+  )
+  monkeypatch.setattr(host, "app_container", lambda _config: ("cid", "old"))
+  monkeypatch.setattr(host, "require_pull_space", lambda _image: None)
+  monkeypatch.setattr(host.subprocess, "run", lambda *_args, **_kwargs: None)
+  monkeypatch.setattr(host, "inspect_image", lambda _image, template: (
+    expected if "revision" in template else
+    host.IMAGE_SOURCE if "source" in template else
+    "amd64" if "Architecture" in template else "new"
+  ))
+  monkeypatch.setattr(host, "request_drain", lambda *_args: None)
+  monkeypatch.setattr(host, "compose", lambda *_args, **_kwargs: None)
+  monkeypatch.setattr(host, "wait_healthy", lambda *_args, **_kwargs: True)
+  monkeypatch.setattr(host, "retain_images", lambda *_args: None)
+  monkeypatch.setattr(
+    host, "restart_ledger",
+    lambda _config, _cid, command, _operation, **_kwargs:
+      command != "finalize-cutover",
+  )
+  statuses = []
+  monkeypatch.setattr(
+    host, "write_status", lambda _config, **fields: statuses.append(fields) or fields,
+  )
+
+  assert host.run() == 0
+  assert statuses[-1]["state"] == "succeeded"
+  assert statuses[-1]["code"] == "handoff_finalize_failed"
+  assert "could not verify and retire" in statuses[-1]["message"]
+
+
+@pytest.mark.parametrize(
+  ("rearmed", "finalized", "expected_code", "message_fragment"),
+  [
+    (False, False, "handoff_rearm_failed", "may need manual Resume"),
+    (True, False, "handoff_finalize_failed", "could not verify and retire"),
+  ],
+)
+def test_healthy_rollback_reports_degraded_chat_handoff(
+  tmp_path, monkeypatch, rearmed, finalized, expected_code, message_fragment,
+):
+  config, _inbox = _worker_paths(tmp_path, monkeypatch)
+  operation = "a" * 32
+  expected = "b" * 40
+  monkeypatch.setattr(host, "app_container", lambda _config: ("cid", "old"))
+  monkeypatch.setattr(host, "compose", lambda *_args, **_kwargs: None)
+  monkeypatch.setattr(host, "wait_healthy", lambda *_args, **_kwargs: True)
+
+  def ledger(_config, _cid, command, _operation, **_kwargs):
+    assert _operation == operation
+    return rearmed if command == "rearm-cutover" else finalized
+
+  monkeypatch.setattr(host, "restart_ledger", ledger)
+  statuses = []
+  monkeypatch.setattr(
+    host, "write_status", lambda _config, **fields: statuses.append(fields) or fields,
+  )
+
+  assert host.rollback(
+    config, operation, expected, "health_check_failed", "new image unhealthy",
+  ) == 1
+  assert statuses[-1]["state"] == "rolled_back"
+  assert statuses[-1]["code"] == expected_code
+  assert message_fragment in statuses[-1]["message"]
 
 
 def test_reconcile_marks_interrupted_active_worker_failed(tmp_path, monkeypatch):
@@ -326,26 +398,30 @@ def test_reconcile_cleans_claim_abandoned_before_first_status(tmp_path, monkeypa
   assert not abandoned.exists()
 
 
-def test_drain_waits_for_the_root_supervisor_receipt(tmp_path, monkeypatch):
+def test_drain_requires_root_open_prepare_accept_order(tmp_path, monkeypatch):
   data = tmp_path / "data"
-  inbox = data / "mobius-rebuild" / "inbox"
-  ledger = data / ".restart-ledger"
-  inbox.mkdir(parents=True)
-  ledger.mkdir()
+  data.mkdir()
   operation = "a" * 32
+  order = []
 
-  def execute(*_args, **_kwargs):
-    (inbox / f"ready-{operation}").write_text("ready\n", encoding="utf-8")
-    (ledger / "accepted.json").write_text("{}", encoding="utf-8")
+  def ledger(_config, _cid, command, value, **_kwargs):
+    order.append(command)
+    assert value == operation
+    return True
+
+  def execute(args, **_kwargs):
+    order.append("prepare")
+    assert args[-1] == operation
     return subprocess.CompletedProcess([], 0)
 
+  monkeypatch.setattr(host, "restart_ledger", ledger)
   monkeypatch.setattr(host.subprocess, "run", execute)
-  monkeypatch.setattr(host.time, "time", lambda: 0)
 
-  ready = host.request_drain(
+  result = host.request_drain(
     {"data_dir": data, "control_dir": data / "mobius-rebuild"},
     operation,
     "container",
   )
 
-  assert ready == inbox / f"ready-{operation}"
+  assert result is None
+  assert order == ["open-cutover", "prepare", "accept-cutover"]

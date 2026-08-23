@@ -25,6 +25,7 @@ def test_rebuild_routes_require_owner(client):
   assert client.get("/api/admin/rebuild").status_code == 401
   assert client.post("/api/admin/rebuild").status_code == 401
   assert client.post("/api/admin/rebuild/prepare").status_code == 401
+  assert client.post("/api/admin/restart/prepare-cutover").status_code == 401
 
 
 def test_rebuild_post_rejects_cross_site(client, auth):
@@ -109,3 +110,54 @@ def test_host_prepare_drains_only_the_matching_operation(
 
   assert response.status_code == 202
   assert calls == [ready]
+
+
+def test_external_cutover_requires_root_challenge_before_drain(
+  client, auth, monkeypatch,
+):
+  calls = []
+  monkeypatch.setattr(
+    "app.restart_ledger.authorized_cutover_challenge", lambda _value: False,
+  )
+
+  async def prepare(value):
+    calls.append(value)
+    return {"status": "prepared"}
+
+  monkeypatch.setattr(admin_routes, "prepare_container_cutover", prepare)
+
+  response = client.post(
+    "/api/admin/restart/prepare-cutover",
+    json={"cutover_id": "cutover-12345678"},
+    headers=auth,
+  )
+
+  assert response.status_code == 409
+  assert response.json()["detail"]["code"] == "cutover_not_open"
+  assert calls == []
+
+
+def test_external_cutover_prepares_only_the_root_opened_id(
+  client, auth, monkeypatch,
+):
+  calls = []
+  monkeypatch.setattr(
+    "app.restart_ledger.authorized_cutover_challenge",
+    lambda value: value == "cutover-12345678",
+  )
+
+  async def prepare(value):
+    calls.append(value)
+    return {"status": "prepared", "cutover_id": value, "run_count": 2}
+
+  monkeypatch.setattr(admin_routes, "prepare_container_cutover", prepare)
+
+  response = client.post(
+    "/api/admin/restart/prepare-cutover",
+    json={"cutover_id": "cutover-12345678"},
+    headers=auth,
+  )
+
+  assert response.status_code == 200
+  assert response.json()["run_count"] == 2
+  assert calls == ["cutover-12345678"]

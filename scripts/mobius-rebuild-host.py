@@ -29,6 +29,7 @@ IMAGE = "ghcr.io/mobius-os/mobius"
 IMAGE_SOURCE = "https://github.com/mobius-os/mobius"
 ROLLBACK_TAG = f"{IMAGE}:mobius-rebuild-last-good"
 ACTIVE_STATES = {"queued", "preparing", "replacing", "verifying"}
+HANDOFF_VERSION = "external-cutover-v1"
 
 
 def now() -> str:
@@ -95,12 +96,14 @@ def write_status(config_value: dict, **fields) -> dict:
     current = {
         "supported": True, "operation_id": None, "state": "idle",
         "expected_sha": None, "code": None, "message": None,
+        "handoff": HANDOFF_VERSION,
     }
     try:
         current.update(read_json(STATUS))
     except (OSError, ValueError, json.JSONDecodeError):
         pass
     current.update(fields)
+    current["handoff"] = HANDOFF_VERSION
     current["updated_at"] = now()
     _atomic_json(STATUS, current)
     _atomic_json(config_value["control_dir"] / "status.json", current, 0o644)
@@ -173,39 +176,43 @@ def require_pull_space(current_image: str) -> None:
         )
 
 
-def request_drain(config_value: dict, operation: str, cid: str) -> Path:
-    ready = config_value["control_dir"] / "inbox" / f"ready-{operation}"
-    ready.unlink(missing_ok=True)
-    requested_at = time.time()
+def restart_ledger(config_value: dict, cid: str, command: str,
+                   operation: str, *, image: str | None = None) -> bool:
+    """Run one root ledger command, even when the app is crash-looping."""
+    invocation = ["python3", "-P", "/app/runtime/restart_ledger.py",
+                  command, operation]
+    result = subprocess.run(
+        ["docker", "exec", cid, *invocation],
+        text=True, capture_output=True,
+    )
+    if result.returncode == 0:
+        return True
+    if not image:
+        return False
+    # A failed replacement may not stay alive long enough for docker exec.
+    # The prior verified image carries the same frozen helper; mount only the
+    # persistent data root and run no entrypoint or application code.
+    result = subprocess.run(
+        ["docker", "run", "--rm", "--mount",
+         f"type=bind,src={config_value['data_dir']},dst=/data",
+         "--entrypoint", "python3", image, *invocation[1:]],
+        text=True, capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def request_drain(config_value: dict, operation: str, cid: str) -> None:
+    if not restart_ledger(config_value, cid, "open-cutover", operation):
+        raise RuntimeError("the running image does not support safe Host cutover")
     result = subprocess.run(
         ["docker", "exec", cid, "python3",
-         "/data/platform/backend/scripts/prepare-container-replacement.py", operation],
+         "/data/platform/backend/scripts/prepare-container-cutover.py", operation],
         text=True, capture_output=True,
     )
     if result.returncode != 0:
-        raise RuntimeError("the running server could not begin a safe chat drain")
-    deadline = time.monotonic() + 45
-    while time.monotonic() < deadline:
-        if ready.is_file():
-            break
-        time.sleep(0.25)
-    else:
-        raise RuntimeError("active chats did not drain before the cutover deadline")
-    # The app writes `ready` after publishing its restart intent, but the
-    # root-owned entrypoint poller must accept that nonce before Docker removes
-    # the old container. Waiting for its fresh accepted receipt preserves the
-    # same authenticated continuation contract as the ordinary Restart button.
-    accepted = Path(config_value["data_dir"]) / ".restart-ledger" / "accepted.json"
-    request = Path(config_value["data_dir"]) / ".platform-restart-requested"
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        try:
-            if accepted.stat().st_mtime >= requested_at and not request.exists():
-                return ready
-        except OSError:
-            pass
-        time.sleep(0.25)
-    raise RuntimeError("the restart supervisor did not accept the chat continuation")
+        raise RuntimeError("the running server could not complete a safe chat drain")
+    if not restart_ledger(config_value, cid, "accept-cutover", operation):
+        raise RuntimeError("the root supervisor did not accept the chat handoff")
 
 
 def _image_state() -> dict:
@@ -267,12 +274,41 @@ def rollback(config_value: dict, operation: str, expected: str,
     write_status(config_value, operation_id=operation, state="verifying",
                  expected_sha=expected, code=code,
                  message="Replacement failed; restoring the previous container.")
+    try:
+        cid, _current = app_container(config_value)
+    except Exception:
+        cid = ""
+    handoff_rearmed = restart_ledger(
+        config_value, cid, "rearm-cutover", operation, image=ROLLBACK_TAG,
+    )
     compose(config_value, "up", "-d", "--no-build", "--no-deps",
             "--force-recreate", "app", image=ROLLBACK_TAG)
     if wait_healthy(config_value, 120):
+        cid, _current = app_container(config_value)
+        handoff_finalized = restart_ledger(
+            config_value, cid, "finalize-cutover", operation,
+            image=ROLLBACK_TAG,
+        )
+        if handoff_finalized:
+            status_code = code
+            message = f"The previous container was restored: {detail}"
+        elif not handoff_rearmed:
+            status_code = "handoff_rearm_failed"
+            message = (
+                "The previous container was restored, but exact active-chat "
+                "continuation could not be re-armed; affected chats may need "
+                f"manual Resume. Original failure: {detail}"
+            )
+        else:
+            status_code = "handoff_finalize_failed"
+            message = (
+                "The previous container was restored, but the Host could not "
+                "verify and retire the exact chat handoff receipt. Check the "
+                f"affected chats. Original failure: {detail}"
+            )
         write_status(config_value, operation_id=operation, state="rolled_back",
-                     expected_sha=expected, code=code,
-                     message=f"The previous container was restored: {detail}"[:300])
+                     expected_sha=expected, code=status_code,
+                     message=message[:300])
         return 1
     write_status(config_value, operation_id=operation, state="needs_recovery",
                  expected_sha=expected, code="rollback_failed",
@@ -297,7 +333,6 @@ def run() -> int:
     image_ref = None
     pulled_recorded = False
     replacement_started = False
-    ready: Path | None = None
     try:
         with LOCK.open("a+") as lock:
             acquire_lock(lock)
@@ -343,7 +378,7 @@ def run() -> int:
                 return 0
             subprocess.run(["docker", "tag", previous, ROLLBACK_TAG], check=True,
                            text=True, capture_output=True)
-            ready = request_drain(config_value, operation, cid)
+            request_drain(config_value, operation, cid)
             write_status(config_value, operation_id=operation, state="replacing",
                          expected_sha=expected, code=None,
                          message="Replacing the container.")
@@ -359,10 +394,25 @@ def run() -> int:
                 )
                 discard_pulled_image(image_ref)
                 return result
+            cid, _current = app_container(config_value)
+            handoff_finalized = restart_ledger(
+                config_value, cid, "finalize-cutover", operation,
+                image=image_ref,
+            )
             retain_images(image_ref, previous)
+            if handoff_finalized:
+                status_code = None
+                message = "Container replaced successfully."
+            else:
+                status_code = "handoff_finalize_failed"
+                message = (
+                    "Container replaced successfully, but the Host could not "
+                    "verify and retire the exact chat handoff receipt. Check "
+                    "the affected chats."
+                )
             write_status(config_value, operation_id=operation, state="succeeded",
-                         expected_sha=expected, code=None,
-                         message="Container replaced successfully.")
+                         expected_sha=expected, code=status_code,
+                         message=message)
             return 0
     except BlockingIOError:
         write_status(config_value, operation_id=operation, state="failed",
@@ -395,8 +445,6 @@ def run() -> int:
             # A malformed path or other claim failure must not leave the path
             # unit continuously retriggering an unrecoverable request.
             request.unlink(missing_ok=True)
-        if ready is not None:
-            ready.unlink(missing_ok=True)
 
 
 def reconcile() -> int:

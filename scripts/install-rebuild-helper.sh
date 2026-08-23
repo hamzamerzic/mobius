@@ -23,6 +23,7 @@ git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
 git -C "$ROOT" ls-files --error-unmatch \
   scripts/install-rebuild-helper.sh scripts/mobius-rebuild-host.py \
   scripts/rebuild-topology.py backend/scripts/prepare-container-replacement.py \
+  backend/scripts/prepare-container-cutover.py \
   docker-compose.yml >/dev/null \
   || { echo "The replacement helper must be tracked in the trusted checkout." >&2; exit 1; }
 
@@ -51,11 +52,13 @@ done
 git -C "$ROOT" diff --quiet HEAD -- \
   scripts/install-rebuild-helper.sh scripts/mobius-rebuild-host.py \
   scripts/rebuild-topology.py backend/scripts/prepare-container-replacement.py \
+  backend/scripts/prepare-container-cutover.py \
   "${FILES[@]#"$ROOT/"}" \
   || { echo "Commit and review every helper and Compose input first." >&2; exit 1; }
 [[ -z $(git -C "$ROOT" status --porcelain=v1 --untracked-files=all -- \
   scripts/install-rebuild-helper.sh scripts/mobius-rebuild-host.py \
   scripts/rebuild-topology.py backend/scripts/prepare-container-replacement.py \
+  backend/scripts/prepare-container-cutover.py \
   "${FILES[@]#"$ROOT/"}") ]] \
   || { echo "The selected helper and Compose inputs must be clean." >&2; exit 1; }
 
