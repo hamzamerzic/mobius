@@ -545,6 +545,7 @@ def test_linked_host_outage_preserves_local_deployment(client, auth, monkeypatch
   assert body["account_mode"] == "linked"
   assert body["account_unavailable"] is True
   assert body["profile"] is None
+  assert isinstance(body["linked_at"], str) and body["linked_at"].endswith("Z")
   assert body["deployments"] == [{
     "id": "local",
     "name": "This Möbius",
