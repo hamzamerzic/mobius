@@ -1838,10 +1838,14 @@ export default function useScrollMode({
     // the scroll that positioned the question card.
     supersedePendingReaderGesture()
     readerLocationExplicitRef.current = true
-    return transitionMode(
+    const mode = transitionMode(
       nextMode,
       'send:question-freeze',
     )
+    return {
+      mode,
+      readerIntentVersion: readerIntentVersionRef.current,
+    }
   }, [scrollRef, supersedePendingReaderGesture, transitionMode])
 
   const resumeQuestionSubmissionOnResponse = useCallback((submission) => {
