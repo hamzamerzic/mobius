@@ -82,7 +82,7 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
   // store flips this card to `ready` on its own, and if the window closes
   // quietly the manual steps take over.
   useEffect(() => {
-    if (!warmingUp) return undefined
+    if (!open || !warmingUp) return undefined
     if (installState !== 'manual') {
       setWarmingUp(false)
       return undefined
@@ -90,9 +90,9 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
     const timer = setTimeout(() => {
       setWarmingUp(false)
       setShowInstructions(true)
-    }, 25000)
+    }, 30000)
     return () => clearTimeout(timer)
-  }, [warmingUp, installState])
+  }, [open, warmingUp, installState])
 
   useEffect(() => {
     const previous = previousInstallStateRef.current
