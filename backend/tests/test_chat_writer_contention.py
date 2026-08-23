@@ -36,6 +36,7 @@ from app.chat_writer import (
   PersistSessionId,
   PersistTranscript,
   PromotePending,
+  PromotePendingBlockedByPendingQuestion,
   QuestionCommit,
   RecoverWedgedRun,
   ReplaceTranscript,
@@ -781,6 +782,74 @@ def test_start_turn_does_not_bypass_pending_owner_question(actor):
   assert chat["live_assistant"] is None
   assert chat["running_status"] is None
   assert _load_run("blocked-run") is None
+
+
+def test_promote_pending_does_not_bypass_pending_owner_question(actor):
+  question = _question_msg("owner-decision", content="Choose a direction.")
+  queued = [{
+    "role": "user",
+    "content": "<wait_result>checks completed</wait_result>",
+    "hidden": True,
+    "ts": 5,
+    "cid": "wait-result",
+  }]
+  _seed_chat(
+    messages=[question],
+    pending=queued,
+    pending_question_id="owner-decision",
+  )
+
+  result = _await(actor.submit(PromotePending(
+    chat_id="c1",
+    run_token="blocked-promotion",
+  )))
+
+  assert result == PromotePendingBlockedByPendingQuestion("owner-decision")
+  chat = _load_chat()
+  assert chat["messages"] == [question]
+  assert chat["pending_messages"] == queued
+  assert chat["pending_question_id"] == "owner-decision"
+  assert chat["live_assistant"] is None
+  assert chat["running_status"] is None
+  assert _load_run("blocked-promotion") is None
+
+
+def test_answering_owner_question_releases_pending_promotion(actor):
+  """The owner barrier is monotonic but not sticky after a saved answer."""
+  question = _question_msg("owner-decision", content="Choose a direction.")
+  queued = [{
+    "role": "user",
+    "content": "<wait_result>checks completed</wait_result>",
+    "hidden": True,
+    "ts": 5,
+    "cid": "wait-result",
+  }]
+  _seed_chat(
+    messages=[question],
+    pending=queued,
+    pending_question_id="owner-decision",
+  )
+
+  assert _await(actor.submit(AnswerQuestion(
+    chat_id="c1",
+    run_token="",
+    question_id="owner-decision",
+    answers={"Choose a direction.": "Continue"},
+  ))) is True
+  promoted = _await(actor.submit(PromotePending(
+    chat_id="c1",
+    run_token="released-promotion",
+  )))
+
+  assert promoted["promoted"]["cid"] == "wait-result"
+  chat = _load_chat()
+  assert chat["messages"][0]["blocks"][0]["answers"] == {
+    "Choose a direction.": "Continue",
+  }
+  assert chat["pending_question_id"] is None
+  assert chat["pending_messages"] == []
+  assert chat["running_status"] == "running"
+  assert _load_run("released-promotion")["status"] == "running"
 
 
 def test_persist_session_id_updates_chat_without_touching_transcript(actor):

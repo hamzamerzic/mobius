@@ -784,6 +784,9 @@ async def send_message(
             "question_id": body.question_id,
             "answers": body.answers,
           })
+      except chat_queue.PendingQuestionBlocksPromotion:
+        discard_starting(chat_id)
+        raise _pending_question_open_conflict()
       except HTTPException:
         discard_starting(chat_id)
         raise
@@ -1067,6 +1070,9 @@ async def _send_message_locked(
             # MALFORMED head no longer lands here: it raises in the actor and
             # is handled by the `except` below (→ FAILED_LEAVE_MARKER).
             discard_starting(chat_id)
+        except chat_queue.PendingQuestionBlocksPromotion:
+          discard_starting(chat_id)
+          raise _pending_question_open_conflict()
         except Exception:
           discard_starting(chat_id)
           raise

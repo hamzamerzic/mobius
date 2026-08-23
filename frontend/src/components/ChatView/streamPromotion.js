@@ -448,15 +448,25 @@ export function streamItemsHaveRenderableContent(items) {
 export function carryQuestionAnswers(blocks, existingBlocks = []) {
   const existingAnswersByKey = new Map()
   for (const block of existingBlocks) {
-    if (block?.type === 'question' && block.answers) {
+    const answers = block?.answers
+    if (
+      block?.type === 'question'
+      && answers
+      && typeof answers === 'object'
+      && Object.keys(answers).length > 0
+    ) {
       existingAnswersByKey.set(questionKey(block), block.answers)
     }
   }
   if (existingAnswersByKey.size === 0) return blocks
 
   return blocks.map(block => {
-    if (block.type !== 'question' || block.answers) return block
+    if (block.type !== 'question') return block
     const carried = existingAnswersByKey.get(questionKey(block))
+    // The mirrored DB answer is authoritative. A reconnect can replay an
+    // older optimistic/non-empty answer as well as the original blank card;
+    // neither may replace the answer that actually committed. Conversely an
+    // empty saved map is still unanswered and must not erase newer live state.
     return carried ? { ...block, answers: carried } : block
   })
 }

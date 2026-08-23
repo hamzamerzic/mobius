@@ -76,6 +76,7 @@ from app.chat_logging import (
 from app.chat_writer import (
   AppendPending,
   Barrier,
+  CancelPending,
   ClearPending,
   FinishRun,
   Finalize,
@@ -1027,7 +1028,11 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
     # the rows were released. The queue is the candidate index; load one full
     # Chat only after its projected pending head proves old enough to recover.
     candidates = (
-      db.query(models.Chat.id, models.Chat.pending_messages)
+      db.query(
+        models.Chat.id,
+        models.Chat.pending_messages,
+        models.Chat.pending_question_id,
+      )
       .filter(models.Chat.deleted_at.is_(None))
       .all()
     )
@@ -1040,6 +1045,8 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
     chat_id = candidate.id
     pending = list(candidate.pending_messages or [])
     if not _pending_head_is_stale(pending, now_ms):
+      continue
+    if candidate.pending_question_id is not None:
       continue
     # A limit-parked queue is NOT abandoned work: LIMIT_PARKED preserves
     # pending precisely so it is not fired back into the exhausted limit
@@ -1069,6 +1076,7 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
             if (
               has_running_run(db, chat_id)
               or not _pending_head_is_stale(pending, now_ms)
+              or chat.pending_question_id is not None
               or _parked_until_for_chat(db, chat_id) is not None
               or _restart_manual_hold_for_chat(db, chat_id)
               or not mark_starting(chat_id)
@@ -1103,6 +1111,12 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
       if claimed:
         discard_starting(chat_id)
       raise
+    except chat_queue.PendingQuestionBlocksPromotion:
+      if claimed:
+        discard_starting(chat_id)
+      # The actor closed a check-to-commit race by observing a question that
+      # opened after the locked preflight. Leaving the queue untouched is the
+      # intended outcome, not a failed recovery attempt.
     except Exception:
       if claimed:
         discard_starting(chat_id)
@@ -1627,6 +1641,11 @@ async def _auto_resume_chat(
           if not mark_starting(chat_id):
             return False
           claimed = True
+          continuation_cid = (
+            f"restart-resume-{park_token or chat_id}"
+            if resume_reason == "restart"
+            else f"limit-resume-{park_token or chat_id}"
+          )
           ack = get_writer().submit(
             AppendPending(
               chat_id=chat_id,
@@ -1639,22 +1658,31 @@ async def _auto_resume_chat(
                 "continuation_reason": resume_reason,
                 # A retry after AppendPending succeeded but a later step failed
                 # must not enqueue a second synthetic continuation.
-                "cid": (
-                  f"restart-resume-{park_token or chat_id}"
-                  if resume_reason == "restart"
-                  else f"limit-resume-{park_token or chat_id}"
-                ),
+                "cid": continuation_cid,
               },
               initiated_by_app_id=resume_app_id,
             )
           )
           await _await_ack(ack)
           drain_token = alloc_run_token()
-          next_messages, next_user, next_session_id = (
-            await chat_queue.promote_pending_messages_locked(
-              None, chat_id, drain_token,
+          try:
+            next_messages, next_user, next_session_id = (
+              await chat_queue.promote_pending_messages_locked(
+                None, chat_id, drain_token,
+              )
             )
-          )
+          except chat_queue.PendingQuestionBlocksPromotion:
+            # A question committed between the locked preflight and the actor
+            # transition. Remove only this synthetic retry marker; real queued
+            # owner/product rows stay behind the question.
+            await _await_ack(get_writer().submit(CancelPending(
+              chat_id=chat_id,
+              run_token="",
+              cid=continuation_cid,
+            )))
+            discard_starting(chat_id)
+            claimed = False
+            return False
           if not next_user:
             discard_starting(chat_id)
             claimed = False
@@ -3001,7 +3029,8 @@ async def _complete_turn(
        disposition: `CONTINUATION_PROMOTED` (a head was promoted — marker
        stays set, schedule the continuation), `EMPTY_TERMINAL_CLEARED` (the
        drain already cleared the marker + forgot the chat under the lock),
-       or `STALE_NO_ACTION` (a newer gen owns the chat).
+       `QUESTION_PARKED` (queued work stayed behind the owner barrier), or
+       `STALE_NO_ACTION` (a newer gen owns the chat).
 
   A drain that RAISES — the `PromotePending` / `FinishRun` ack failed
   or timed out, OR the terminal lock acquisition exceeded
@@ -3409,7 +3438,8 @@ async def run_chat(
     # still owns. Every other disposition handled its own marker INSIDE the
     # locked terminal transition: EMPTY_TERMINAL_CLEARED + the setup-error
     # cleanups already cleared it; CONTINUATION_PROMOTED leaves it set for
-    # the next turn; STALE_NO_ACTION leaves a newer run's marker untouched;
+    # the next turn; QUESTION_PARKED preserves it for the owner;
+    # STALE_NO_ACTION leaves a newer run's marker untouched;
     # FAILED_LEAVE_MARKER leaves it set for reconciliation. Here we clear ONLY
     # when this run was Stop-bumped AND Stop still owns the immediate
     # successor generation (current == run_gen + 1) — never a newer run's
@@ -3559,14 +3589,16 @@ def _chat_note_mtime(data_dir: str, chat_id: str) -> float:
 # its title-sync sibling) fires. STOP_HANDOFF_CLEARED only results when NO
 # fresh claim raced in — a stopped chat genuinely settled — and a Stop is often
 # the day's last touch on a chat; skipping it left the chat note-less for the
-# night's reflection. LIMIT_PARKED is settled too. Its publisher is forced onto
-# the deterministic path so it never retries the provider that just hit a
-# limit, while still preserving the final parked state for compaction/recovery.
+# night's reflection. LIMIT_PARKED and QUESTION_PARKED are settled too. The
+# former is forced onto the deterministic path so it never retries the provider
+# that just hit a limit; the latter preserves the owner handoff in the ordinary
+# summary without advancing the chat.
 _NOTE_SETTLED_DISPOSITIONS = frozenset({
   chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED,
   chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED,
   chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED,
   chat_queue.TerminalDisposition.LIMIT_PARKED,
+  chat_queue.TerminalDisposition.QUESTION_PARKED,
 })
 
 
