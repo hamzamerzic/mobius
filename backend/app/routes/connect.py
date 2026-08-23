@@ -15,6 +15,7 @@ Owner/app surface:
 
   POST   /api/connect/hosts               create a host + pairing code
   GET    /api/connect/hosts               list hosts + live status
+  PATCH  /api/connect/hosts/{id}          rename a host
   GET    /api/connect/hosts/{id}/pairing  re-show/refresh the install command
   DELETE /api/connect/hosts/{id}          remove a host
   POST   /api/connect/hosts/{id}/exec     run a command on that host

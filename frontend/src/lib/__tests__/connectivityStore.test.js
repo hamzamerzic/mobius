@@ -234,6 +234,7 @@ test('the hook and API client consume the shared store contract', () => {
   const client = readFileSync(new URL('../../api/client.js', import.meta.url), 'utf8')
   assert.match(hook, /useSyncExternalStore\(subscribeOnline, getOnlineSnapshot/)
   assert.match(hook, /getReachabilityPhaseSnapshot/)
+  assert.match(hook, /useRecoveryGeneration[\s\S]*?getRecoverySnapshot/)
   assert.doesNotMatch(hook, /fetch\(|setInterval\(/)
   assert.match(client, /void verifyConnectivity\(\)/)
 })

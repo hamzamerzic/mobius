@@ -107,6 +107,7 @@ import {
 import { composerHistoryFromMessages } from './composerHistory.js'
 import useOpenAppCtaAutoDismiss from './hooks/useOpenAppCtaAutoDismiss.js'
 import {
+  isModelSelectionRequiredFailure,
   isPendingQuestionSendFailure,
   sendFailureMessage,
 } from './sendFailure.js'
@@ -156,6 +157,7 @@ import {
   reconcileComposerTextarea,
   resetComposerTextarea,
 } from './composerTextareaSizing.js'
+import { needsModelSelection } from './modelSelectionPolicy.js'
 import {
   EMPTY_BUILD_PHASE_RAIL,
   accumulateBuildPhase,
@@ -641,6 +643,11 @@ export default function ChatView({
   // settles. Keep its serialized write tail at ChatView scope so both a closed
   // + popover and an immediate Send still observe the same ordering boundary.
   const settingsSaveTailRef = useRef(Promise.resolve())
+  // A send with no explicit model turns into an open-picker request rather
+  // than falling through to the provider SDK's invisible default. A monotonic
+  // request keeps the popover's open state local while making repeated submit
+  // attempts observable even when it was dismissed between them.
+  const [modelSelectionRequest, setModelSelectionRequest] = useState(0)
   // Refs for the absolutely-positioned foot. Its ResizeObserver notifies the
   // scroll controller, which owns publishing composer clearance together with
   // every other indirect scroll-geometry write.
@@ -2752,6 +2759,8 @@ export default function ChatView({
         }
       } catch (err) {
         const pendingQuestionBlocked = isPendingQuestionSendFailure(err)
+        const modelSelectionBlocked = showPicker
+          && isModelSelectionRequiredFailure(err)
         // Roll back optimistic + restore input.
         if (!directSteer) pendingQueue.cancelByCid(queuedMsg.cid)
         forgetSendIntent({ cid: queuedMsg.cid })
@@ -2764,8 +2773,14 @@ export default function ChatView({
           })
         }
         restoreComposerAfterFailedSend()
-        setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
-        if (pendingQuestionBlocked) revealPendingQuestion()
+        setSendFailure(modelSelectionBlocked
+          ? null
+          : sendFailureMessage(err, { online: getOnlineSnapshot() }))
+        if (modelSelectionBlocked) {
+          setModelSelectionRequest(request => request + 1)
+        } else if (pendingQuestionBlocked) {
+          revealPendingQuestion()
+        }
       } finally {
         if (!directSteer
             && queuedSendRequestsRef.current.get(cid) === queueRequest) {
@@ -2935,6 +2950,8 @@ export default function ChatView({
       }
     } catch (err) {
       const pendingQuestionBlocked = isPendingQuestionSendFailure(err)
+      const modelSelectionBlocked = showPicker
+        && isModelSelectionRequiredFailure(err)
       if (!pendingQuestionBlocked) {
         setSending(false)
         sendingRef.current = false
@@ -2959,8 +2976,13 @@ export default function ChatView({
         if (idx >= 0) next.splice(idx, 1)
         return next
       })
-      setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
-      if (pendingQuestionBlocked) {
+      setSendFailure(modelSelectionBlocked
+        ? null
+        : sendFailureMessage(err, { online: getOnlineSnapshot() }))
+      if (modelSelectionBlocked) {
+        setModelSelectionRequest(request => request + 1)
+        onStreamEndRef.current?.({ continues: false })
+      } else if (pendingQuestionBlocked) {
         revealPendingQuestion()
       } else {
         onStreamEndRef.current?.({ continues: false })
@@ -3188,6 +3210,9 @@ export default function ChatView({
       sendingRef.current = wasSending
       setSending(wasSending)
       setServerRunningState(wasServerRunning)
+      if (showPicker && isModelSelectionRequiredFailure(err)) {
+        setModelSelectionRequest(request => request + 1)
+      }
       if (err.message === 'HTTP 410') {
         // The backend refused this answer because the durable transcript no
         // longer has that open question (for example Stop cancelled it, or a
@@ -3210,12 +3235,20 @@ export default function ChatView({
   function handleSubmit(e) {
     e.preventDefault()
     if (isProviderSwitchBlocking(chatId)) return
+    if (needsModelSelection({ showPicker, chatInfo })) {
+      setModelSelectionRequest(request => request + 1)
+      return
+    }
     doSend(input.trim())
   }
 
   function handleSubmitSteer(e) {
     e.preventDefault()
     if (isProviderSwitchBlocking(chatId)) return
+    if (needsModelSelection({ showPicker, chatInfo })) {
+      setModelSelectionRequest(request => request + 1)
+      return
+    }
     if (submitSteerInFlightRef.current) return
     submitSteerInFlightRef.current = true
     void doSend(input.trim(), { directSteer: true })
@@ -4786,6 +4819,7 @@ export default function ChatView({
                 providerSwitchState={providerSwitchState}
                 settingsSaveTailRef={settingsSaveTailRef}
                 composerInputRef={inputRef}
+                modelSelectionRequest={modelSelectionRequest}
                 onOpenInspector={() => setShowInspector(true)}
                 onOpenSummary={() => setShowSummary(true)}
                 embedded={embedded}
