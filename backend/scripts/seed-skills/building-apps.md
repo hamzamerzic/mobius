@@ -518,6 +518,34 @@ deep-link fallback so one provider failure cannot blank the app.
 
 A non-self external resource referenced at load time — a Google Fonts `<link>`/`@import`, any off-origin CDN script or stylesheet — can do worse than fail silently under the `default-src 'self'` CSP: it can HANG the in-app browser so the page never finishes loading and the whole app goes non-interactive (taps and anchors dead, "loading timeout"). So when the owner reports BOTH "X doesn't work" AND "loading timeout" in the same breath, treat the hang as the primary signal and grep the app for off-origin references first — it is not a scroll/offset bug. Vendor the font/asset same-origin or drop it; bundle fonts as a `@font-face` over a self-hosted file, never a CDN link.
 
+## Clipboard — use `window.mobius.clipboard`, never raw `navigator.clipboard`
+
+The opaque app frame is delegated `clipboard-write`, but the async Clipboard API
+still needs an active user gesture and is unavailable in some engines/PWA
+webviews, so a bare `navigator.clipboard.writeText(...)` fails silently for a lot
+of users. Use the runtime helper, which keeps the synchronous attempt inside the
+tap and lets the attributed trusted host try when the opaque frame cannot:
+
+```jsx
+async function onCopy() {
+  // Call it directly inside the click handler (the gesture must still be live).
+  const ok = await window.mobius.clipboard.writeText(text)
+  if (ok) setCopied(true)
+  else {
+    // Rare: both paths failed. Select the visible text so a keystroke copies it.
+    selectVisibleText()
+    setHint('Selected — press ⌘/Ctrl+C.')
+  }
+}
+```
+
+It returns a boolean (never throws): `true` means copied, `false` means both
+paths failed. Keep a select-the-text-and-prompt fallback for the `false` case,
+and make the copyable element `user-select: all` so long-press/tap-to-select
+works on touch. Do not add `allow-same-origin` or an app-specific parent bridge
+to reach the clipboard; the shared helper already owns the attributed host
+fallback.
+
 ## Host capabilities (microphone and future device/browser access)
 
 Shell-mounted mini-apps have an opaque origin by design, so some origin-bound
