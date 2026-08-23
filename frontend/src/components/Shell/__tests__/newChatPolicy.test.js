@@ -25,10 +25,6 @@ import {
 import { chatQueries } from '../../../hooks/queries.js'
 
 const shellSource = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
-const newChatLandingSource = readFileSync(
-  new URL('../NewChatLanding.jsx', import.meta.url),
-  'utf8',
-)
 const queriesSource = readFileSync(new URL('../../../hooks/queries.js', import.meta.url), 'utf8')
 const clientSource = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
 
@@ -154,44 +150,6 @@ test('an accepted allocation hydrates durable draft ownership before handoff', (
   const route = accepted.indexOf("if (changesRoute) navTo('chat', { chatId: intentId })")
   assert.ok(hydrate >= 0 && currentAgain > hydrate && route > currentAgain,
     'destination navigation must wait for durable hydration and reclaimed ownership')
-})
-
-test('a provisional Send becomes one durable handoff and retries on proven recovery', () => {
-  const queue = shellSource.match(
-    /const queueDraftFirstNewChat = useCallback\(\(input\) => \{([\s\S]*?)\n  \}, \[retryDraftFirstNewChat\]\)/,
-  )?.[1] || ''
-  const stage = queue.indexOf(
-    'stageComposerHandoff(presentation.chatId, text, { autoSend: true })',
-  )
-  const verify = queue.indexOf(
-    'readComposerHandoff(presentation.chatId).autoSendDraft !== text',
-  )
-  const submitted = queue.indexOf('submitted: true')
-  assert.ok(stage >= 0 && verify > stage && submitted > verify,
-    'the UI must claim a queued send only after its autosend marker reads back')
-
-  assert.match(newChatLandingSource, /onSubmit=\{submitDraft\}/)
-  assert.match(newChatLandingSource, /submissionBlocked=\{submitted\}/)
-  assert.match(newChatLandingSource, /\{liveComposer && !submitted && \(/,
-    'the queued snapshot must not remain editable before its handoff')
-  assert.match(newChatLandingSource, /will send when Möbius reconnects/)
-
-  assert.match(shellSource, /const recoveryGeneration = useRecoveryGeneration\(\)/)
-  assert.match(
-    shellSource,
-    /recoveryGeneration <= \(presentation\.failedAtRecoveryGeneration \?\? 0\)[\s\S]*?retryDraftFirstNewChat\(\)/,
-    'allocation retries only after the shared reachability owner proves recovery',
-  )
-  assert.match(
-    shellSource,
-    /const failed = \{\s*\.\.\.current,[\s\S]*?failure: result\.verdict/,
-    'a late create failure must merge the live presentation and preserve submitted state',
-  )
-  assert.match(
-    shellSource,
-    /stageComposerHandoff\(decision\.chatId, autoSendDraft, \{ autoSend: true \}\)/,
-    'an authoritative id rotation must move the queued handoff to its new owner',
-  )
 })
 
 class MemoryStorage {

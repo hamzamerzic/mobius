@@ -68,6 +68,7 @@ import {
   clearNewChatIntent,
   createdChatDetailCache,
   currentReusableEmptyChat,
+  failedNewChatPresentation,
   mergeChatListWithCreatedGuards,
   newChatPresentationCoversSurface,
   newChatPresentationIsCurrent,
@@ -77,6 +78,8 @@ import {
   rememberCreatedChat,
   resolveNewChatIntentId,
   reusableChatDetailVerdict,
+  shouldRetryNewChatAllocation,
+  stageVerifiedNewChatHandoff,
   writeNewChatIntent,
 } from './newChatPolicy.js'
 import {
@@ -2909,11 +2912,11 @@ export default function Shell({ onInitialVisualReady }) {
       }
       if (!draftFirstPresentationIsCurrent(presentation)) return
       const current = newChatPresentationRef.current
-      const failed = {
-        ...current,
-        failure: result.verdict === 'offline' ? 'offline' : 'error',
-        failedAtRecoveryGeneration: recoveryGenerationRef.current,
-      }
+      const failed = failedNewChatPresentation(
+        current,
+        result.verdict,
+        recoveryGenerationRef.current,
+      )
       newChatPresentationRef.current = failed
       setNewChatPresentation(failed)
       return
@@ -2991,8 +2994,11 @@ export default function Shell({ onInitialVisualReady }) {
     const text = typeof input === 'string' ? input : ''
     if (!text.trim()) return
 
-    stageComposerHandoff(presentation.chatId, text, { autoSend: true })
-    if (readComposerHandoff(presentation.chatId).autoSendDraft !== text) {
+    const staged = stageVerifiedNewChatHandoff(presentation.chatId, text, {
+      stageHandoff: stageComposerHandoff,
+      readHandoff: readComposerHandoff,
+    })
+    if (!staged) {
       const failed = {
         ...presentation,
         submitted: false,
@@ -3016,9 +3022,7 @@ export default function Shell({ onInitialVisualReady }) {
   // create a retry loop while an ordinary server error remains unresolved.
   useEffect(() => {
     const presentation = newChatPresentationRef.current
-    if (!presentation?.failure || presentation.failure === 'queue') return
-    if (presentation.materialized || presentation.releasing) return
-    if (recoveryGeneration <= (presentation.failedAtRecoveryGeneration ?? 0)) return
+    if (!shouldRetryNewChatAllocation(presentation, recoveryGeneration)) return
     retryDraftFirstNewChat()
   }, [recoveryGeneration, retryDraftFirstNewChat])
 
