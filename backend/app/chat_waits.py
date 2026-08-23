@@ -26,6 +26,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import signal
+import threading
 import time
 import uuid
 from datetime import timedelta
@@ -49,6 +52,13 @@ MAX_CONCURRENT_CHECKS = 4
 _OUTPUT_TAIL = 2000
 _OUTPUT_TAIL_BYTES = _OUTPUT_TAIL * 4
 _RESULT_MAX = 3000
+
+# Cancellation is synchronous at the API/chat-lifecycle boundary while checks
+# run in the supervisor's event loop. Keep only process ids here: killing the
+# process group is thread-safe, and the durable row remains the state owner.
+_ACTIVE_CHECKS_LOCK = threading.Lock()
+_ACTIVE_CHECK_PIDS: dict[str, int] = {}
+_CANCELLED_CHECK_IDS: set[str] = set()
 
 
 class WaitValidationError(ValueError):
@@ -159,22 +169,44 @@ def cancel_wait(db: Session, row: models.ChatWait) -> models.ChatWait:
     row.cancelled_at = now_naive_utc()
     db.commit()
     db.refresh(row)
+    _cancel_active_check(row.id)
     _broadcast_changed(row.chat_id)
   return row
 
 
 def stage_cancel_waits_for_chat(db: Session, chat_id: str) -> int:
   """Cancel every armed wait inside the caller's chat lifecycle transaction."""
-  return db.query(models.ChatWait).filter(
+  query = db.query(models.ChatWait).filter(
     models.ChatWait.chat_id == chat_id,
     models.ChatWait.status == "armed",
-  ).update(
+  )
+  wait_ids = [row_id for (row_id,) in query.with_entities(models.ChatWait.id)]
+  count = query.update(
     {
       models.ChatWait.status: "cancelled",
       models.ChatWait.cancelled_at: now_naive_utc(),
     },
     synchronize_session=False,
   )
+  for wait_id in wait_ids:
+    _cancel_active_check(wait_id)
+  return count
+
+
+def _kill_process_group(pid: int) -> None:
+  try:
+    os.killpg(os.getpgid(pid), signal.SIGKILL)
+  except (ProcessLookupError, PermissionError):
+    pass
+
+
+def _cancel_active_check(wait_id: str) -> None:
+  """Prevent a selected check from starting or kill its live process group."""
+  with _ACTIVE_CHECKS_LOCK:
+    _CANCELLED_CHECK_IDS.add(wait_id)
+    pid = _ACTIVE_CHECK_PIDS.get(wait_id)
+  if pid is not None:
+    _kill_process_group(pid)
 
 
 def serialize_wait(row: models.ChatWait) -> dict:
@@ -213,10 +245,13 @@ def _broadcast_changed(chat_id: str) -> None:
     _LOG.debug("chat_wait_changed broadcast failed", exc_info=True)
 
 
-async def _run_check(command: str) -> tuple[int, str]:
+async def _run_check(command: str, *, wait_id: str | None = None) -> tuple[int, str]:
   """Run one read-only check command; return (exit_code, output_tail)."""
-  import os
-  import signal
+  if wait_id is not None:
+    with _ACTIVE_CHECKS_LOCK:
+      if wait_id in _CANCELLED_CHECK_IDS:
+        _CANCELLED_CHECK_IDS.discard(wait_id)
+        return (-1, "check cancelled")
 
   proc = await asyncio.create_subprocess_shell(
     command,
@@ -227,6 +262,14 @@ async def _run_check(command: str) -> tuple[int, str]:
     # the shell — a stray `gh` or poll child must not linger between sweeps.
     start_new_session=True,
   )
+  cancelled = False
+  if wait_id is not None:
+    with _ACTIVE_CHECKS_LOCK:
+      cancelled = wait_id in _CANCELLED_CHECK_IDS
+      if not cancelled:
+        _ACTIVE_CHECK_PIDS[wait_id] = proc.pid
+  if cancelled:
+    _kill_process_group(proc.pid)
 
   async def stop_process_group() -> None:
     try:
@@ -261,6 +304,11 @@ async def _run_check(command: str) -> tuple[int, str]:
   except Exception:
     await stop_process_group()
     raise
+  finally:
+    if wait_id is not None:
+      with _ACTIVE_CHECKS_LOCK:
+        _ACTIVE_CHECK_PIDS.pop(wait_id, None)
+        _CANCELLED_CHECK_IDS.discard(wait_id)
   text = (out or b"").decode("utf-8", errors="replace")
   return (proc.returncode if proc.returncode is not None else -1,
           text[-_OUTPUT_TAIL:])
@@ -492,7 +540,7 @@ async def _check_one(row_id: str) -> None:
     met = due_at is not None and now >= due_at
     check_failed = False
   else:
-    exit_code, output = await _run_check(command or "false")
+    exit_code, output = await _run_check(command or "false", wait_id=row_id)
     met = exit_code == 0
     # Command waits have a deliberate three-way contract. A normal unmet
     # predicate is silent exit 1; output is reserved for diagnostics or a met

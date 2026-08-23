@@ -258,7 +258,7 @@ def test_broken_command_wait_wakes_with_diagnostic_instead_of_rotting(
   )
   starts = _capture_starts(monkeypatch, running=False)
 
-  async def broken(_command):
+  async def broken(_command, *, wait_id=None):
     return (1, "accepts at most 1 arg, received 5\n")
 
   monkeypatch.setattr(chat_waits_mod, "_run_check", broken)
@@ -540,6 +540,35 @@ def test_cancelled_wait_is_never_checked(client, owner_token, db, monkeypatch):
 
   assert asyncio.run(sweep_due_waits()) == 0
   assert starts == []
+
+
+def test_cancelling_wait_kills_its_running_check(client, owner_token, db):
+  chat_id = _owner_chat(client, owner_token)
+  row = declare_wait(
+    db, chat_id=chat_id, description="running cancellation",
+    kind="command", command="sleep 30",
+  )
+
+  async def exercise():
+    task = asyncio.create_task(chat_waits_mod._run_check(
+      row.command, wait_id=row.id,
+    ))
+    for _ in range(100):
+      with chat_waits_mod._ACTIVE_CHECKS_LOCK:
+        if row.id in chat_waits_mod._ACTIVE_CHECK_PIDS:
+          break
+      await asyncio.sleep(0.01)
+    else:
+      raise AssertionError("check process did not start")
+
+    cancel_wait(db, row)
+    exit_code, output = await asyncio.wait_for(task, timeout=2)
+    assert exit_code != 0
+    assert output == ""
+    with chat_waits_mod._ACTIVE_CHECKS_LOCK:
+      assert row.id not in chat_waits_mod._ACTIVE_CHECK_PIDS
+
+  asyncio.run(exercise())
 
 
 # ─────────────────────────── goal identity ───────────────────────────
