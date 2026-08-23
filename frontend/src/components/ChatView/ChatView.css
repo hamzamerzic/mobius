@@ -3336,6 +3336,102 @@
   scrollbar-width: thin;
 }
 
+.chat__goal-history {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 10px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--green) 30%, var(--border-light));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--green) 6%, var(--surface));
+}
+
+.chat__goal-history--failed {
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--border-light));
+  background: color-mix(in srgb, var(--danger) 5%, var(--surface));
+}
+
+.chat__goal-history-marker {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+.chat__goal-history-marker::after {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 3px;
+  width: 4px;
+  height: 8px;
+  border-right: 2px solid var(--bg);
+  border-bottom: 2px solid var(--bg);
+  transform: rotate(45deg);
+}
+
+.chat__goal-history--failed .chat__goal-history-marker {
+  background: var(--danger);
+}
+
+.chat__goal-history--failed .chat__goal-history-marker::after {
+  content: '!';
+  inset: 0;
+  width: auto;
+  height: auto;
+  border: 0;
+  color: white;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 18px;
+  text-align: center;
+  transform: none;
+}
+
+.chat__goal-history-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chat__goal-history-kicker {
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+.chat__goal-history--failed .chat__goal-history-kicker { color: var(--danger); }
+
+.chat__goal-history-objective {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.chat__goal-history-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.chat__goal-history-details { margin-top: 5px; }
+
+.chat__goal-history-details > summary {
+  width: fit-content;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chat__goal-history-details[open] > summary { color: var(--text); }
+
 .chat__goal-task {
   display: grid;
   grid-template-columns: 14px minmax(0, 1fr);

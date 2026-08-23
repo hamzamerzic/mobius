@@ -68,6 +68,13 @@ _UNMODIFIED_MIGRATIONS = {
     "2adb39457e0ec2ee9d9a3596cb96e5a6240bae23d725e6459ba0f6e77d5474c4",
     # Dependency-aware plan seed before provider-neutral automatic promotion.
     "a3edc5fcc453a5305102e144c2d58ae16b828612ac93a6a7442be7e267779f59",
+    # Hierarchical Goal seed before provider-neutral automatic promotion.
+    "bca228c745881bfffdad5d7adaab3c62871e6f62801252784fb0522787cfb850",
+    # Provider-neutral promotion seed before phase-transition rechecks and the
+    # first-class platform promote_goal affordance.
+    "0c2b88ff8a79ff05f75ebaa60af2899f0b9ed27d0a23bfff83b54f4e2a1de97a",
+    # Phase-transition seed before the mandatory turn-local routing decision.
+    "7a80e90870f75be7c8802f421e76ac21790f1ef812d4a4d0d923d474e5dadd2d",
   },
   "reflection.md": {
     "c0f57c227f61cd8539a56b70eadfbbe2212125c23b7137472dd173a578baacd8",
