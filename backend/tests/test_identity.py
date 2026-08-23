@@ -388,6 +388,10 @@ def test_link_complete_consumes_attempt_and_stores_encrypted_grant(
   assert body["account_mode"] == "linked"
   assert body["profile"]["user_id"] == "usr_123"
   assert [item["id"] for item in body["deployments"]] == ["remote", "local"]
+  # The local link row is the only truthful "since" date the account card can
+  # show (the remote profile carries no creation date), so linked responses
+  # must expose the UTC link instant.
+  assert isinstance(body["linked_at"], str) and body["linked_at"].endswith("Z")
 
   with SessionLocal() as session:
     assert session.query(models.IdentityLinkAttempt).count() == 0
