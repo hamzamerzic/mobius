@@ -4867,11 +4867,11 @@ export default function ChatView({
           provider={chatInfo?.provider}
           leftButtons={
             <BrainUsageButton usageEnabled={!embedded}>
-              {({ icon, ariaLabel }) => (
+              {({ icon, ariaLabel, providerUsage }) => (
               <ComposerPopover
-                modelTriggerIcon={icon}
-                modelTriggerAriaLabel={ariaLabel}
-                triggerAriaLabel={embedded ? 'Attach files' : 'Attach files or view chat info'}
+                triggerIcon={icon}
+                providerUsage={providerUsage}
+                triggerAriaLabel={embedded ? 'Attach files' : ariaLabel}
                 chatInfo={showPicker ? chatInfo : null}
                 chatId={chatId}
                 onAttachClick={() => attachTriggerRef.current?.()}

@@ -23,6 +23,10 @@ export default function BrainUsageButton({ children, usageEnabled = true }) {
 
   return children({
     icon: <BrainUsageIcon leftPercent={leftPercent} rightPercent={rightPercent} />,
-    ariaLabel: `Choose model. ${usageSummary}`,
+    ariaLabel: `Chat options. ${usageSummary}`,
+    providerUsage: {
+      codex: leftPercent,
+      claude: rightPercent,
+    },
   })
 }

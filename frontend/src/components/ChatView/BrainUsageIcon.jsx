@@ -1,18 +1,17 @@
 /**
- * BrainUsageIcon — a lobed brain silhouette (frontal view), split into two
+ * BrainUsageIcon — a solid brain silhouette (frontal view), split into two
  * hemispheres that each act as a liquid-style gauge for one provider's
  * remaining usage before it rate-limits.
  *
  * The outline is adapted from the platform's own installed brain glyph
  * (`@openai/apps-sdk-ui/components/Icon`'s `Brain`, MIT-licensed like the
  * rest of that package) rather than hand-drawn from scratch — it already
- * reads as a proper scalloped brain silhouette (see that package's asset),
- * closer to the reference the owner asked for than an earlier bespoke
- * teardrop shape. It's drawn as ONE contour spanning both lobes (no seam
- * down the middle in the path data itself), so the two hemispheres are
- * carved out here with rectangular clips at the vertical center (x=12 of a
- * 24-wide viewBox) rather than by splitting the path — simpler and exactly
- * as precise, since a clip only needs a straight edge.
+ * reads as a proper scalloped brain silhouette (see that package's asset).
+ * The SDK glyph's complete path is made from narrow lobe shapes; applying the
+ * usage color directly to it looked like colored wiring rather than a filled
+ * hemisphere. We therefore fill only its outer contour, then redraw the full
+ * path as a quiet structural stroke. The provider color now occupies the
+ * whole available hemisphere while the brain still reads at 26px.
  *
  * Left hemisphere = Codex (purple), right hemisphere = Claude (orange) —
  * this mirrors PROVIDER_ORDER in ChatSettingsPanel.jsx (`['codex', 'claude']`,
@@ -48,7 +47,7 @@ const ORANGE = '#d97757'
 // Full brain silhouette, both lobes in one contour. Bounding box is roughly
 // x:[2.3, 21.7] y:[2.3, 21.7] in the 24x24 viewBox — centered, so a clip at
 // x=12 splits it evenly.
-const BRAIN_PATH = 'M14.8974 2.29998C15.8303 2.29013 16.802 2.58194 17.5566 3.22577'
+const BRAIN_SILHOUETTE_PATH = 'M14.8974 2.29998C15.8303 2.29013 16.802 2.58194 17.5566 3.22577'
   + 'C18.1589 3.73967 18.5845 4.44761 18.7451 5.31073C20.0159 5.68745 21.0027 6.50113 21.4482 7.6037'
   + 'C21.8952 8.70995 21.7263 9.93091 20.9902 10.9914C21.5775 11.9456 21.7666 13.1257 21.6757 14.2189'
   + 'C21.6886 14.283 21.6962 14.3493 21.6962 14.4172C21.6961 16.0908 20.757 17.5402 19.3808 18.2785'
@@ -60,7 +59,8 @@ const BRAIN_PATH = 'M14.8974 2.29998C15.8303 2.29013 16.802 2.58194 17.5566 3.22
   + 'C5.41438 4.44772 5.84013 3.73967 6.44233 3.22577C7.19688 2.58201 8.16873 2.2902 9.10151 2.29998'
   + 'C10.0348 2.30984 11.0025 2.62141 11.7509 3.2785C11.8376 3.35461 11.9199 3.43566 11.999 3.51971'
   + 'C12.0783 3.43538 12.162 3.35484 12.249 3.2785C12.9972 2.62161 13.9643 2.3099 14.8974 2.29998Z'
-  + 'M10.9999 6.17108C10.9998 5.5022 10.7533 5.06474 10.4306 4.78143C10.0884 4.48116 9.60157 4.30555 9.081 4.29998'
+
+const BRAIN_FOLD_PATH = 'M10.9999 6.17108C10.9998 5.5022 10.7533 5.06474 10.4306 4.78143C10.0884 4.48116 9.60157 4.30555 9.081 4.29998'
   + 'C8.55965 4.29448 8.07721 4.46058 7.74116 4.74725C7.42624 5.01593 7.18256 5.43636 7.18256 6.09393V6.12225'
   + 'C7.18544 6.6218 6.81963 7.04734 6.32514 7.11834C5.22327 7.27654 4.61609 7.83085 4.40522 8.35272'
   + 'C4.26751 8.69354 4.25234 9.13509 4.5058 9.61639C5.13533 9.26679 5.86003 9.06662 6.6308 9.06659'
@@ -83,11 +83,13 @@ const BRAIN_PATH = 'M14.8974 2.29998C15.8303 2.29013 16.802 2.58194 17.5566 3.22
   + 'C14.398 4.30549 13.9106 4.48092 13.5683 4.78143C13.286 5.02931 13.0623 5.39527 13.0107 5.93084'
   + 'L12.9999 6.17108V17.6877Z'
 
+const BRAIN_DETAIL_PATH = BRAIN_SILHOUETTE_PATH + BRAIN_FOLD_PATH
+
 // Fill grows bottom-up across the path's actual ink, not the full viewBox.
 const TOP = 2.3
 const BOTTOM = 21.7
 
-function HemisphereFill({ id, percent, color, side }) {
+function HemisphereFill({ id, percent, side }) {
   const known = typeof percent === 'number' && Number.isFinite(percent)
   const clamped = known ? Math.min(100, Math.max(0, percent)) : 100
   const fillHeight = ((BOTTOM - TOP) * clamped) / 100
@@ -130,21 +132,33 @@ export default function BrainUsageIcon({
 
       {/* Grey base — each half dimmed independently while its provider's
           usage is unknown, since the two are unrelated data points. */}
-      <path d={BRAIN_PATH} fill={GREY} opacity={leftKnown ? 1 : 0.35} clipPath={`url(#${leftHalfId})`} />
-      <path d={BRAIN_PATH} fill={GREY} opacity={rightKnown ? 1 : 0.35} clipPath={`url(#${rightHalfId})`} />
+      <path d={BRAIN_SILHOUETTE_PATH} fill={GREY} opacity={leftKnown ? 1 : 0.58} clipPath={`url(#${leftHalfId})`} />
+      <path d={BRAIN_SILHOUETTE_PATH} fill={GREY} opacity={rightKnown ? 1 : 0.58} clipPath={`url(#${rightHalfId})`} />
 
       {leftKnown && (
         <>
           <HemisphereFill id={leftId} percent={leftPercent} side="left" />
-          <path d={BRAIN_PATH} fill={PURPLE} clipPath={`url(#${leftId})`} />
+          <path d={BRAIN_SILHOUETTE_PATH} fill={PURPLE} clipPath={`url(#${leftId})`} />
         </>
       )}
       {rightKnown && (
         <>
           <HemisphereFill id={rightId} percent={rightPercent} side="right" />
-          <path d={BRAIN_PATH} fill={ORANGE} clipPath={`url(#${rightId})`} />
+          <path d={BRAIN_SILHOUETTE_PATH} fill={ORANGE} clipPath={`url(#${rightId})`} />
         </>
       )}
+
+      {/* Provider meaning belongs to the solid fill, not to a few colored
+          internal lines; the original glyph remains as neutral structure. */}
+      <path
+        d={BRAIN_DETAIL_PATH}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="0.82"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        opacity="0.78"
+      />
     </svg>
   )
 }

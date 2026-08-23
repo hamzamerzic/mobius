@@ -1015,6 +1015,7 @@ test.describe('Touch navigation', () => {
     await expect(presentation.getByText("What's on your mind?", { exact: true })).toBeVisible()
     await expect(pendingOptions).toBeVisible()
     await expect(pendingOptions).toBeDisabled()
+    await expect(pendingOptions.locator('svg')).toBeVisible()
     const pendingOptionsBox = await pendingOptions.boundingBox()
     await expect(immediateComposer).toBeFocused()
     await page.keyboard.type('Typed while opening')
@@ -1044,10 +1045,11 @@ test.describe('Touch navigation', () => {
       end: element.selectionEnd,
       length: element.value.length,
     }))).toEqual({ start: 19, end: 19, length: 19 })
-    const readyOptions = page.locator('[data-chat-surface="painted"]')
-      .getByRole('button', { name: 'Attach files or view chat info' })
+    const readySurface = page.locator('[data-chat-surface="painted"]')
+    const readyOptions = readySurface.getByRole('button', { name: /Chat options/ })
     await expect(readyOptions).toBeVisible()
     await expect(readyOptions).toBeEnabled()
+    await expect(readySurface.locator('.composer-plus > button')).toHaveCount(1)
     const readyOptionsBox = await readyOptions.boundingBox()
     expect(pendingOptionsBox).not.toBeNull()
     expect(readyOptionsBox).not.toBeNull()

@@ -1,6 +1,6 @@
 /**
  * ChatSettingsPanel — the per-chat model + effort picker inside the
- * composer's `+` popover. Renders the model rows and effort slider, and owns
+ * composer's brain popover. Renders the model rows and effort slider, and owns
  * the confirmation and atomic handoff flow used for cross-provider switches
  * after a chat has assistant turns.
  *
@@ -232,6 +232,7 @@ export default function ChatSettingsPanel({
   // what keeps navigation away/back from unlocking a live handoff or losing
   // its retry id and error feedback.
   providerSwitchState,
+  providerUsage = null,
 }) {
   const [saving, setSaving] = useState(false)
   const [localError, setLocalError] = useState('')
@@ -627,7 +628,19 @@ export default function ChatSettingsPanel({
 
   return (
     <div className="csp">
-      <div className="csp__label">Model</div>
+      <div className="csp__heading">
+        <div className="csp__label">Model</div>
+        <div className="csp__usage-key" aria-label="Brain colors show remaining provider usage">
+          <span className="csp__usage-key-item">
+            <span className="csp__usage-key-line csp__usage-key-line--codex" aria-hidden="true" />
+            <span>Codex{typeof providerUsage?.codex === 'number' ? ` · ${Math.round(providerUsage.codex)}% left` : ''}</span>
+          </span>
+          <span className="csp__usage-key-item">
+            <span className="csp__usage-key-line csp__usage-key-line--claude" aria-hidden="true" />
+            <span>Claude{typeof providerUsage?.claude === 'number' ? ` · ${Math.round(providerUsage.claude)}% left` : ''}</span>
+          </span>
+        </div>
+      </div>
       {!dataReady && (
         <>
           {modelLoadError ? (
