@@ -254,6 +254,37 @@ test('question response resumes the exact follow intent captured at submit', () 
   }
 })
 
+test('question response cannot restore follow after a newer reader scroll', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, listeners, scroll } = mountTailController(
+      'question-reader-override-owner',
+    )
+    const target = { parentElement: scroll, closest: () => null }
+
+    listeners.get('wheel')({
+      type: 'wheel', deltaY: 80, shiftKey: false, target,
+    })
+    assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM')
+
+    listeners.get('wheel')({
+      type: 'wheel', deltaY: -120, shiftKey: false, target,
+    })
+    scroll.scrollTop -= 120
+    listeners.get('scroll')()
+
+    const submission = hook.result.current.freezeQuestionSubmission()
+    assert.equal(submission.mode.questionSubmitBaseMode.kind, 'ANCHOR_AT')
+
+    hook.result.current.resumeQuestionSubmissionOnResponse(submission)
+    assert.equal(scroll.dataset.scrollMode, 'ANCHOR_AT',
+      'new response content cannot revive follow after the reader moved')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
 test('a no-scroll tail relatch preserves the queued send-time pin decision', () => {
   const restoreBrowser = installBrowserEnvironment()
   try {

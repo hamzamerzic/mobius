@@ -1485,6 +1485,11 @@ export default function useScrollMode({
   // settlement still waiting on the quiet edge. The effect publishes its
   // local cancel closure here so those actions cannot be overwritten later.
   const discardPendingReaderSettleRef = useRef(null)
+  // Question Submit must snapshot before it retires a pending gesture, while
+  // the gesture's dirty state lives inside the layout effect. This bridge reads
+  // the exact hold only on that rare semantic boundary, never in the hot scroll
+  // path.
+  const capturePendingReaderHoldRef = useRef(null)
   // Monotonic generation for actual reader scroll intent. Send/steer snapshots
   // and every deferred/automatic geometry commit use this same authority:
   // once a newer gesture lands, older work can never regain ownership merely
@@ -1832,19 +1837,24 @@ export default function useScrollMode({
   }, [scrollRef, transitionMode])
 
   const freezeQuestionSubmission = useCallback(() => {
-    const nextMode = modeForQuestionSubmission(scrollRef.current, modeRef.current)
+    const pendingReaderHold = capturePendingReaderHoldRef.current?.()
+    const nextMode = modeForQuestionSubmission(
+      scrollRef.current,
+      pendingReaderHold || modeRef.current,
+    )
+    const readerIntentVersion = readerIntentVersionRef.current
     // Submit is a newer semantic reading action. Its current-geometry snapshot
     // must not be replaced a few milliseconds later by the quiet settlement of
     // the scroll that positioned the question card.
-    supersedePendingReaderGesture()
     readerLocationExplicitRef.current = true
+    supersedePendingReaderGesture()
     const mode = transitionMode(
       nextMode,
       'send:question-freeze',
     )
     return {
       mode,
-      readerIntentVersion: readerIntentVersionRef.current,
+      readerIntentVersion,
     }
   }, [scrollRef, supersedePendingReaderGesture, transitionMode])
 
@@ -2494,6 +2504,10 @@ export default function useScrollMode({
       disclosureInputOwnsGesture = false
     }
     discardPendingReaderSettleRef.current = discardPendingReaderSettle
+    const capturePendingReaderHold = () => (
+      readerScrollDirty ? anchorModeFromScroll(scrollEl) : null
+    )
+    capturePendingReaderHoldRef.current = capturePendingReaderHold
 
     const settleReaderScroll = () => {
       clearTimeout(readerSettleTimer)
@@ -2968,6 +2982,9 @@ export default function useScrollMode({
       clearTimeout(readerSettleTimer)
       if (discardPendingReaderSettleRef.current === discardPendingReaderSettle) {
         discardPendingReaderSettleRef.current = null
+      }
+      if (capturePendingReaderHoldRef.current === capturePendingReaderHold) {
+        capturePendingReaderHoldRef.current = null
       }
       clearTimeout(revealTimer)
       clearTimeout(deferredGestureLayoutTimer)
