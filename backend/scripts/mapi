@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Call the Möbius backend with the current agent's base URL and owner auth.
+set -euo pipefail
+: "${AGENT_TOKEN:?mapi: AGENT_TOKEN is not set in this environment}"
+: "${API_BASE_URL:?mapi: API_BASE_URL is not set in this environment}"
+
+resolved=()
+has_body=false
+has_content_type=false
+previous=""
+for argument in "$@"; do
+  case "$argument" in
+    -d|--data|--data-raw|--data-binary|--data-urlencode) has_body=true ;;
+  esac
+  if [[ "$previous" == "-H" || "$previous" == "--header" ]]; then
+    [[ "${argument,,}" == content-type:* ]] && has_content_type=true
+  fi
+  if [[ "$argument" == /api/* || "$argument" == /api ]]; then
+    argument="${API_BASE_URL%/}$argument"
+  fi
+  resolved+=("$argument")
+  previous="$argument"
+done
+
+curl_args=(-sS -H "Authorization: Bearer $AGENT_TOKEN")
+if $has_body && ! $has_content_type; then
+  curl_args+=(-H "Content-Type: application/json")
+fi
+exec curl "${curl_args[@]}" "${resolved[@]}"
