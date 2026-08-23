@@ -32,6 +32,10 @@ import {
   drainCreatedChats,
   registerCreatedChats,
 } from './_chatFixtureRegistry.mjs'
+import {
+  installMockAgentProvider,
+  persistTestChatModel,
+} from './_chatTestPrerequisites.mjs'
 
 export { registerCreatedChats } from './_chatFixtureRegistry.mjs'
 
@@ -110,24 +114,7 @@ export async function createTaggedChat(page, label = '') {
   // explicit connected provider. Install that boundary before callers reload
   // or deep-link to the fixture chat; production correctly refuses to send on
   // a selected model whose provider is disconnected.
-  await page.route('**/api/auth/providers/status', route => route.fulfill({
-    status: 200,
-    contentType: 'application/json',
-    json: {
-      claude: {
-        name: 'Claude Code',
-        configured: true,
-        authenticated: true,
-        error: null,
-      },
-      codex: {
-        name: 'Codex',
-        configured: false,
-        authenticated: false,
-        error: 'Not connected in this test fixture.',
-      },
-    },
-  }))
+  await installMockAgentProvider(page)
   const response = await page.request.post(`${BASE}/api/chats`, {
     headers: { Authorization: `Bearer ${token}` },
     data: title ? { title } : {},
@@ -138,14 +125,10 @@ export async function createTaggedChat(page, label = '') {
     // Most browser tests exercise chat behavior after the first-send choice,
     // not the picker itself. Keep that prerequisite explicit in the shared
     // fixture now that production no longer inherits an SDK default.
-    const selected = await page.request.patch(`${BASE}/api/chats/${result.id}`, {
-      headers: { Authorization: `Bearer ${token}` },
-      data: {
-        agent_settings_json: {
-          model: process.env.MOBIUS_TEST_MODEL || 'claude-sonnet-4-6',
-        },
-      },
-      failOnStatusCode: false,
+    const selected = await persistTestChatModel(page, {
+      base: BASE,
+      chatId: result.id,
+      token,
     })
     if (!selected.ok()) {
       throw new Error(
