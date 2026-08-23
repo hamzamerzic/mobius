@@ -71,7 +71,12 @@ const questionFollowScenarios = [
     name: 'accepted same-turn answer waits for response activity before following',
     readerScrollBeforeSubmit: false,
     expectedMode: 'FOLLOW_BOTTOM',
-    viewport: { width: 412, initialHeight: 520, expandedHeight: 915 },
+    viewport: {
+      width: 412,
+      initialHeight: 520,
+      expandedHeight: 915,
+      postSubmitHeight: 1015,
+    },
   },
   {
     name: 'reader scroll immediately before Submit cancels stale follow restoration',
@@ -253,6 +258,27 @@ for (const scenario of questionFollowScenarios) test(scenario.name, async ({ pag
   )
   expect(cardTopAfterAcceptance).toBeCloseTo(cardTopBeforeSubmit, 0)
 
+  let cardTopBeforeResponse = cardTopAfterAcceptance
+  if (scenario.viewport.postSubmitHeight) {
+    // Model the software keyboard closing after answer acceptance but before
+    // the continuation begins. Responsive geometry must preserve the same
+    // submission anchor rather than restoring the pre-submit follow mode.
+    await page.setViewportSize({
+      width: scenario.viewport.width,
+      height: scenario.viewport.postSubmitHeight,
+    })
+    await page.evaluate(() => new Promise(resolve => (
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    )))
+    await expect.poll(() => surface.locator('.chat__scroll').getAttribute(
+      'data-scroll-mode',
+    )).toBe('ANCHOR_AT')
+    cardTopBeforeResponse = await card.evaluate(
+      element => element.getBoundingClientRect().top,
+    )
+    expect(cardTopBeforeResponse).toBeCloseTo(cardTopAfterAcceptance, 0)
+  }
+
   // Only now let the provider emit its continuation. A previously-followed
   // card may move with this new content, never with the answer-only commit.
   await page.evaluate(() => window.__continueQuestionStream?.())
@@ -276,6 +302,6 @@ for (const scenario of questionFollowScenarios) test(scenario.name, async ({ pag
     const cardTopAfterResponse = await card.evaluate(
       element => element.getBoundingClientRect().top,
     )
-    expect(cardTopAfterResponse).toBeLessThan(cardTopAfterAcceptance - 40)
+    expect(cardTopAfterResponse).toBeLessThan(cardTopBeforeResponse - 40)
   }
 })

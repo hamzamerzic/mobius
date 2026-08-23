@@ -756,7 +756,7 @@ test.describe('Q&A atomic write', () => {
     expect(laterReaderBottom).toBe(false)
   })
 
-  test('an Android viewport growth releases a submitted question to its unanswered mode', async ({ page }) => {
+  test('an Android viewport growth keeps a submitted question anchored', async ({ page }) => {
     const longLead = 'Context before the question. '.repeat(180)
     const streamBody = [
       `data: ${JSON.stringify({ type: 'text', content: longLead })}\n\n`,
@@ -847,18 +847,16 @@ test.describe('Q&A atomic write', () => {
       requestAnimationFrame(() => requestAnimationFrame(resolve))
     )))
     const after = await geometry()
-    const viewportRelease = await page.evaluate(() => (
-      window.__mobiusChatScrollTrace?.transitions?.find(
-        row => row.event === 'layout:question-viewport-release',
-      ) || null
+    const modeAfterResize = await page.evaluate(() => (
+      document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+        ?.dataset.scrollMode || null
     ))
     releaseAnswer()
     await submitClick
 
     expect(after.viewport).toBeGreaterThan(before.viewport)
-    expect(viewportRelease).toBeTruthy()
-    expect(viewportRelease.from?.kind).toBe('ANCHOR_AT')
-    expect(Math.abs(after.cardTop - before.cardTop)).toBeGreaterThan(2)
+    expect(modeAfterResize).toBe('ANCHOR_AT')
+    expect(after.cardTop).toBeCloseTo(before.cardTop, 0)
   })
 })
 

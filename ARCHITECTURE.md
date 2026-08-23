@@ -544,7 +544,7 @@ installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.21 (2026-08-20).** This section is the
+**Owner-authoritative contract — v1.22 (2026-08-23).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -594,10 +594,10 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   participates—an older user row never gets a separate reservation. Durable anchor
   validation still rejects locations wholly inside reserved blank space, so
   restoring a chat lands on real conversation content. R6's transient
-  question-submit hold is the sole calculation exception: it may reserve only the
-  exact tail deficit required for a stable card handoff while the viewport size is
-  unchanged. It is never persisted and must release to the unanswered card's prior
-  mode before a keyboard or other viewport resize is laid out.
+  question-submit hold is the sole calculation exception: it reserves only the
+  exact tail deficit required to keep the card at its submitted viewport offset.
+  Responsive geometry recomputes that deficit and reapplies the same transient
+  anchor; viewport size never releases it. The overlay is never persisted.
 - **R2 — One send rule everywhere.** The first visible user message always pins to
   the viewport top. Every subsequent direct, queued, promoted, or steered message
   pins only when its submit-time DOM snapshot is at the one physical
@@ -750,7 +750,7 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   physical tail without moving through blank room. The only ordinary mode change
   is R3's existing armed-pin handoff when the responsive spacer reaches zero; a
   settled pin never gains follow from resize geometry. The R6 question-submission
-  release and focused native-caret rebase remain the two explicit editing rules,
+  anchor and focused native-caret rebase remain the two explicit editing rules,
   not a general keyboard heuristic. Open/close cycles therefore repeat the same
   idempotent operation every time. Browser clamps and controller writes may emit
   `scroll` while the box is changing, but only a gesture-owned scroll may change
@@ -771,14 +771,13 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   it. If response activity races the answer request, neither boundary moves the
   card alone: the release waits until both commits exist. A card that
   began in hold remains held, and a recovered `answer_turn: "new"` continuation
-  never gains follow. The exact temporary hold is scoped to the viewport where
-  Submit occurred. If the mobile keyboard changes the viewport first, the controller
-  restores the mode that owned the unanswered card before sizing the new geometry.
-  Acceptance therefore adds no movement; an already-followed tail begins moving
-  only with the response it is following. The keyboard still moves the card exactly
-  as it would have moved unanswered. The transient hold is stripped before
-  persistence. A failed answer keeps that settled reading anchor for the retryable
-  card rather than manufacturing follow intent again.
+  never gains follow. Keyboard, toolbar, orientation, and pane changes recompute
+  reachability and reapply that same transient anchor; responsive geometry never
+  restores the pre-submit mode. Acceptance therefore adds no movement, and an
+  already-followed tail begins moving only with the visible response it is
+  following. The transient hold is stripped before persistence. A failed answer
+  keeps that settled reading anchor for the retryable card rather than
+  manufacturing follow intent again.
   While the custom-answer field is focused, a visual-viewport change may rebase
   an ordinary `ANCHOR_AT` hold to the browser's current caret-visible position
   instead of reapplying its stale pre-edit offset. `PIN_USER_MSG`,
@@ -812,11 +811,11 @@ path means routing it through the same entries rather than inventing another rul
 | Viewport/keyboard changes | settled `PIN_USER_MSG` | same `PIN_USER_MSG` | Reapply the same pin; geometry never reclassifies it |
 | Viewport/keyboard changes | follow or anchor hold | same mode | Resize reservation to the visible scroll box, then reapply the physical tail or exact anchor; never create or retire follow |
 | Chat exits/backgrounds/returns | any | `ANCHOR_AT` | Restore exact saved anchor |
-| In-message question Submit begins | any | transient `ANCHOR_AT` over the prior mode | Hold exact visible anchor through the unresolved same-viewport card reflow |
+| In-message question Submit begins | any | transient `ANCHOR_AT` over the prior mode | Hold the exact visible anchor through acceptance; only response activity may restore captured follow |
 | Same running turn accepts a question answer | transient question anchor over any prior mode | same transient anchor; same active assistant row | None; acceptance alone does not move through blank tail room |
 | First renderable activity after an accepted same-turn answer | transient question anchor over prior follow, with no newer reader scroll/location | prior `FOLLOW_BOTTOM`; same active assistant row | Resume the one physical live tail with the response commit |
 | First renderable activity after an accepted same-turn answer | transient question anchor over hold, or superseded submit intent | existing hold | None; resumed output grows below the reader |
-| Viewport/keyboard changes after question submission | transient question anchor | pre-submit unanswered-card mode | Apply ordinary viewport behavior; answering adds no extra movement |
+| Viewport/keyboard/pane changes after question submission | transient question anchor | same transient question anchor | Recompute reachability and reapply the exact anchor; responsive geometry never releases submission |
 | Focused Q&A custom answer grows or its keyboard viewport changes | ordinary hold | current caret-visible `ANCHOR_AT` | Browser may reveal the caret once; controller rebases instead of snapping back. Pins, reserved-tail holds, follow, and submission overlay are unchanged |
 | Live assistant row settles to the durable transcript | any | same mode and row identity | None (except R3's exact spacer handoff) |
 | Offscreen question or paused-turn nudge tapped | any hold | `ANCHOR_AT` at physical tail | User-requested one-shot move; clears the overlaid composer |

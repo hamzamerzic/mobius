@@ -28,12 +28,12 @@ test('ChatView only consumes methods returned by the scroll controller', () => {
     `ChatView consumes missing useScrollMode members: ${missing.join(', ')}`)
 })
 
-test('owner contract hands question anchors to visible responses without locking keyboard movement', () => {
+test('owner contract keeps question anchors through responsive geometry', () => {
   const architecture = readFileSync(
     new URL('../../../../../ARCHITECTURE.md', import.meta.url),
     'utf8',
   )
-  assert.match(architecture, /Owner-authoritative contract — v1\.21 \(2026-08-20\)/)
+  assert.match(architecture, /Owner-authoritative contract — v1\.22 \(2026-08-23\)/)
   assert.match(
     architecture,
     /In-message question Submit begins \| any \| transient `ANCHOR_AT` over the prior mode/,
@@ -41,13 +41,13 @@ test('owner contract hands question anchors to visible responses without locking
   )
   assert.match(
     architecture,
-    /question-submit hold is the sole calculation exception: it may reserve only the\s+exact tail deficit required for a stable card handoff while the viewport size is\s+unchanged/,
-    'question submission may reserve only its same-viewport reachability deficit',
+    /question-submit hold is the sole calculation exception: it reserves only the\s+exact tail deficit required to keep the card at its submitted viewport offset/,
+    'question submission reserves only its exact responsive reachability deficit',
   )
   assert.match(
     architecture,
-    /Viewport\/keyboard changes after question submission \| transient question anchor \| pre-submit unanswered-card mode/,
-    'keyboard movement must return to the unanswered card baseline',
+    /Viewport\/keyboard\/pane changes after question submission \| transient question anchor \| same transient question anchor/,
+    'responsive geometry must preserve the submitted question anchor',
   )
   assert.match(
     architecture,
