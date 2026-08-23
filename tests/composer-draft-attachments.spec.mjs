@@ -125,7 +125,9 @@ test('a sent image keeps one geometry while its media token resolves', async ({ 
     })
 
   await composer.fill('Image attachment geometry check')
-  await paintedChat.getByRole('button', { name: 'Send' }).click()
+  const send = paintedChat.getByRole('button', { name: 'Send', exact: true })
+  await expect(send).toBeEnabled()
+  await send.click()
   await requested
 
   const userRow = paintedChat.locator('.chat__msg--user').last()
