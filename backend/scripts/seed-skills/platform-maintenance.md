@@ -64,6 +64,29 @@ docker compose exec -u 0 app bash
 That also attaches to the normal live container; it does not select a Recovery
 boot profile.
 
+### Host-owned container replacement
+
+A container recreation is not an ordinary server restart. On a self-hosted
+Host, use one of the two owning paths:
+
+- `scripts/deploy-prod.sh` for a checkout/image deployment; or
+- the installed Settings replacement controller documented in
+  `scripts/CONTAINER-REBUILD.md` for an official-image refresh.
+
+Both paths open a root-owned cutover challenge, ask the still-running worker to
+park and nonce-bind exact active chat runs, then let Docker perform the only
+stop. A failed replacement explicitly re-arms the same receipt for one rollback
+boot. This is why a raw `docker compose up --force-recreate`, `docker restart`,
+or direct container replacement is not an equivalent shortcut: it bypasses the
+handoff and intentionally falls back to conservative manual Resume after boot.
+Unexpected crashes remain manual by design; never make arbitrary boots look
+planned merely to hide recovery prompts.
+
+The running image must already contain the frozen `external-cutover-v1` helper.
+The first upgrade from an older image cannot manufacture that root capability;
+`deploy-prod.sh` says when it is using the legacy owner-presence gate, and that
+one upgrade installs the helper for later replacements.
+
 ---
 
 ## Choose the smallest activation action

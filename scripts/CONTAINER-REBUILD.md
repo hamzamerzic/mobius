@@ -38,12 +38,27 @@ The worker:
 1. checks Docker free space and pulls `ghcr.io/mobius-os/mobius:sha-<sha>`;
 2. verifies the image source, revision, and amd64 architecture;
 3. returns `no_change` without disturbing chats if that image is already live;
-4. asks the running worker to use Möbius's existing restart drain, which closes
-   admission, parks active turns, and authorizes their boot continuation;
-5. recreates only `app` from the frozen topology and verifies health;
-6. restores the prior image on failure; and
-7. retains only the current helper-owned SHA tag plus one last-good rollback
+4. opens a root-owned one-boot cutover challenge, then asks the running worker
+   to close admission, park active turns, and bind them to that exact id;
+5. accepts the matching app intent without self-stopping, so Compose owns the
+   only stop and the authorization cannot be consumed by an intermediate boot;
+6. recreates only `app` from the frozen topology and verifies health;
+7. explicitly re-arms the same root receipt for one rollback boot if the new
+   container never becomes serviceable, then retires it after either healthy
+   outcome; and
+8. retains only the current helper-owned SHA tag plus one last-good rollback
    tag, without a host-wide prune.
+
+The canonical local `scripts/deploy-prod.sh` uses the same challenge → drain →
+accept contract when the image identity changes. A running image from before
+this protocol cannot provide the frozen root helper, so the first upgrade uses
+the existing owner-presence gate and says so explicitly; subsequent Host
+replacements preserve eligible active chats even with `--force-now`.
+
+An installation of the older Host helper is reported as **upgrade required**
+and cannot queue a Settings replacement. Re-run
+`sudo scripts/install-rebuild-helper.sh` from the current trusted checkout;
+the refusal happens before chat admission is closed or an image is touched.
 
 Möbius refuses the request when its activation receipt records local-only image
 or baked-runtime changes that the official target does not contain. Undeclared

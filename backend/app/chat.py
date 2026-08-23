@@ -505,10 +505,11 @@ async def _recover_wedged_run_strict(chat_id: str, run_token: str) -> None:
 
 @dataclass(frozen=True)
 class StartupReconcileResult:
-  """Distinct boot outcomes: manual crash recovery vs authenticated replay."""
+  """Distinct boot outcomes: manual, replayable, or question-waiting."""
 
   manual: list[str]
   restart_parks: list[str]
+  restart_waiting: list[str]
 
 
 def reconcile_startup_chats(
@@ -571,15 +572,18 @@ def reconcile_startup_chats(
   different from a generic crash. After the same transcript finalization, an
   opted-in owner turn with no unanswered question or app-attributed work is
   converted to a due ``restart`` park. The initial continuation sweep then
-  resumes it before lifespan yields. Every other stranded turn remains the
-  conservative manual-resume outcome.
+  resumes it before lifespan yields. An authenticated turn blocked on an
+  unanswered question instead preserves that durable question handoff without
+  automatic Continue or a false manual-Resume notification. Every other
+  stranded turn remains the conservative manual-resume outcome.
 
-  Returns both outcomes separately so startup can notify only genuinely manual
+  Returns the outcomes separately so startup can notify only genuinely manual
   recoveries and can report authenticated fallbacks without conflating them.
   """
   log = _get_logger()
   manual: list[str] = []
   restart_parks: list[str] = []
+  restart_waiting: list[str] = []
   try:
     from app.run_state import running_chat_ids
     stale_ids = running_chat_ids(db)
@@ -591,7 +595,11 @@ def reconcile_startup_chats(
     ) if stale_ids else []
   except Exception:
     log.exception("reconcile_startup_chats: query failed")
-    return StartupReconcileResult(manual=manual, restart_parks=restart_parks)
+    return StartupReconcileResult(
+      manual=manual,
+      restart_parks=restart_parks,
+      restart_waiting=restart_waiting,
+    )
 
   for chat in stale:
     # Belt-and-suspenders: if a live registry entry somehow exists for
@@ -631,6 +639,13 @@ def reconcile_startup_chats(
         isinstance(msg, dict)
         and msg.get("_initiated_by_app_id") is not None
         for msg in pending
+      )
+      restart_question_wait = bool(
+        restart_run is not None
+        and restart_run.initiated_by_app_id is None
+        and chat.auto_resume_on_restart
+        and not app_work_queued
+        and _has_unanswered_question(chat)
       )
       restart_eligible = bool(
         restart_run is not None
@@ -787,6 +802,13 @@ def reconcile_startup_chats(
       db.expire_all()
       if restart_eligible:
         restart_parks.append(chat.id)
+      elif restart_question_wait:
+        # The question card is already the durable continuation boundary.
+        # Starting a synthetic "continue" would compete with the owner's
+        # required answer (and could accidentally advance an approval gate).
+        # Keep it distinct from a generic crash/manual Resume so startup does
+        # not send the false "tap to resume" notification.
+        restart_waiting.append(chat.id)
       else:
         manual.append(chat.id)
     except Exception:
@@ -806,6 +828,11 @@ def reconcile_startup_chats(
       "recovered %d authenticated restart fallback(s) for immediate "
       "continuation: %s",
       len(restart_parks), ", ".join(restart_parks),
+    )
+  if restart_waiting:
+    log.info(
+      "preserved %d authenticated restart question handoff(s): %s",
+      len(restart_waiting), ", ".join(restart_waiting),
     )
 
   # A running row whose chat is gone or soft-deleted cannot receive transcript
@@ -859,6 +886,7 @@ def reconcile_startup_chats(
   return StartupReconcileResult(
     manual=manual,
     restart_parks=restart_parks,
+    restart_waiting=restart_waiting,
   )
 
 
@@ -1305,8 +1333,8 @@ async def drain_all_for_restart(
         stopped = False
       if not stopped:
         log.warning(
-          "drain-for-restart stop timed out; authenticated boot recovery "
-          "will continue chat_id=%s kind=%s",
+          "drain-for-restart stop timed out; authenticated boot "
+          "reconciliation will preserve chat_id=%s kind=%s",
           chat_id, getattr(handle, "kind", "?"),
         )
         all_interrupted = False

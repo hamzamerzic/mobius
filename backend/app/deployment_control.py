@@ -56,6 +56,11 @@ _KNOWN_STATES = {
   "no_change", "failed", "rolled_back", "needs_recovery",
 }
 _ACTIVE_STATES = {"queued", "preparing", "replacing", "verifying"}
+_HANDOFF_VERSION = "external-cutover-v1"
+_UPGRADE_MESSAGE = (
+  "The Host replacement helper predates safe chat continuation. Re-run "
+  "scripts/install-rebuild-helper.sh from the current trusted checkout."
+)
 
 
 def _empty_status(
@@ -170,8 +175,13 @@ def _read_host_status() -> dict[str, Any]:
         "state": "queued",
         "expected_sha": expected,
         "message": "Container replacement queued.",
+        "handoff": value.get("handoff"),
       }
   return value
+
+
+def _current_handoff(raw: dict[str, Any]) -> bool:
+  return raw.get("handoff") == _HANDOFF_VERSION
 
 
 def _write_request(expected_sha: str) -> None:
@@ -245,7 +255,15 @@ async def read_rebuild_status() -> RebuildStatus:
       code="not_configured",
       message="Container replacement is not set up on this installation.",
     )
-  return _normalize_status(await asyncio.to_thread(_read_host_status))
+  raw = await asyncio.to_thread(_read_host_status)
+  if not _current_handoff(raw):
+    return _empty_status(
+      deployment,
+      supported=False,
+      code="controller_upgrade_required",
+      message=_UPGRADE_MESSAGE,
+    )
+  return _normalize_status(raw)
 
 
 async def request_rebuild() -> RebuildStatus:
@@ -260,6 +278,13 @@ async def request_rebuild() -> RebuildStatus:
     raise DeploymentControlError(
       "not_configured",
       "Container replacement is not set up on this installation.",
+      status_code=409,
+    )
+  host_status = await asyncio.to_thread(_read_host_status)
+  if not _current_handoff(host_status):
+    raise DeploymentControlError(
+      "controller_upgrade_required",
+      _UPGRADE_MESSAGE,
       status_code=409,
     )
   expected_sha = _expected_upstream_sha()
@@ -277,7 +302,7 @@ async def request_rebuild() -> RebuildStatus:
       "Commit them upstream or remove them before replacing this container.",
       status_code=409,
     )
-  current = _normalize_status(await asyncio.to_thread(_read_host_status))
+  current = _normalize_status(host_status)
   if current["state"] in _ACTIVE_STATES:
     raise DeploymentControlError(
       "already_running",

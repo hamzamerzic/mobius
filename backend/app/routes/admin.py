@@ -22,13 +22,13 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app import activity, deployment_control, models
 from app.database import get_db
 from app.deps import get_current_owner, reject_cross_site
-from app.restart_util import restart_this_worker
+from app.restart_util import prepare_container_cutover, restart_this_worker
 
 # Event names the admin emit endpoint will accept. This is intentionally not
 # the complete activity vocabulary: ``app_signal`` has its own app-scoped,
@@ -143,6 +143,10 @@ class ContainerReplacementPrepare(BaseModel):
   operation_id: str
 
 
+class ContainerCutoverPrepare(BaseModel):
+  cutover_id: str = Field(pattern=r"^[A-Za-z0-9._:-]{8,160}$")
+
+
 @router.post("/activity/emit", status_code=204)
 def emit_activity_event(
   body: ActivityEmit,
@@ -231,6 +235,40 @@ def restart_server(
     {"status": "restarting"},
     background=BackgroundTask(restart_this_worker),
   )
+
+
+@router.post(
+  "/restart/prepare-cutover",
+  dependencies=[Depends(reject_cross_site)],
+)
+async def prepare_external_container_cutover(
+  body: ContainerCutoverPrepare,
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Park exact live runs for a root-opened Host replacement.
+
+  An owner token alone is insufficient: the frozen root supervisor must first
+  publish the matching one-boot challenge.  The response means the app-side
+  intent is durable; the Host still has to accept it before replacing the
+  container.
+  """
+  from app.restart_ledger import authorized_cutover_challenge
+
+  if not authorized_cutover_challenge(body.cutover_id):
+    raise HTTPException(
+      status_code=409,
+      detail={
+        "code": "cutover_not_open",
+        "message": "The Host did not open this container cutover.",
+      },
+    )
+  try:
+    return await prepare_container_cutover(body.cutover_id)
+  except RuntimeError as exc:
+    raise HTTPException(
+      status_code=409,
+      detail={"code": "cutover_not_prepared", "message": str(exc)},
+    ) from exc
 
 
 @router.get("/rebuild")
