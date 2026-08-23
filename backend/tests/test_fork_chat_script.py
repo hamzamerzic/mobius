@@ -84,12 +84,16 @@ fi
   fake.chmod(0o755)
 
 
-def _write_fake_claude(bin_dir: Path) -> None:
+def _write_fake_claude(bin_dir: Path, *, exit_code=0) -> None:
   bin_dir.mkdir()
   fake = bin_dir / "claude"
   fake.write_text(
-    """#!/usr/bin/env bash
+    f"""#!/usr/bin/env bash
 set -euo pipefail
+if [[ {exit_code} -ne 0 ]]; then
+  echo "fake claude failure" >&2
+  exit {exit_code}
+fi
 if [[ " $* " == *" --resume "* && " $* " == *" --fork-session "* ]]; then
   echo "answer from exact session fork"
 else
@@ -238,6 +242,56 @@ def test_json_contract_labels_claude_transcript_reseed(tmp_path):
   assert payload["exact_session_fork"] is False
   assert payload["answer"] == "answer from transcript reseed"
   assert "has no resumable transcript; reseeding from DB" in proc.stderr
+
+
+def test_claude_session_fork_failure_is_not_emitted_as_coaching(tmp_path):
+  _seed_chat(tmp_path, provider="claude", session_id="claude-session")
+  bin_dir = tmp_path / "bin"
+  _write_fake_claude(bin_dir, exit_code=9)
+  encoded_cwd = "-" + str(tmp_path).lstrip("/").replace("/", "-")
+  transcript = (
+    tmp_path / "cli-auth" / "claude" / "projects" / encoded_cwd
+    / "claude-session.jsonl"
+  )
+  transcript.parent.mkdir(parents=True)
+  transcript.write_text("{}\n", encoding="utf-8")
+
+  proc = subprocess.run(
+    ["bash", str(SCRIPT), "--json", "chat-1", "coaching"],
+    env={
+      **os.environ,
+      "DATA_DIR": str(tmp_path),
+      "CLAUDE_CONFIG_DIR": str(tmp_path / "cli-auth" / "claude"),
+      "PATH": f"{bin_dir}:{os.environ['PATH']}",
+    },
+    text=True,
+    capture_output=True,
+  )
+
+  assert proc.returncode == 9
+  assert proc.stdout == ""
+  assert "claude session fork failed for chat-1 (rc=9)" in proc.stderr
+
+
+def test_claude_reseed_failure_is_not_emitted_as_coaching(tmp_path):
+  _seed_chat(tmp_path, provider="claude", session_id="missing-session")
+  bin_dir = tmp_path / "bin"
+  _write_fake_claude(bin_dir, exit_code=8)
+
+  proc = subprocess.run(
+    ["bash", str(SCRIPT), "--json", "chat-1", "coaching"],
+    env={
+      **os.environ,
+      "DATA_DIR": str(tmp_path),
+      "PATH": f"{bin_dir}:{os.environ['PATH']}",
+    },
+    text=True,
+    capture_output=True,
+  )
+
+  assert proc.returncode == 8
+  assert proc.stdout == ""
+  assert "claude transcript reseed failed for chat-1 (rc=8)" in proc.stderr
 
 
 def test_deleted_chat_is_evidence_only_and_never_forked(tmp_path):
