@@ -73,6 +73,40 @@ def test_app_token_requires_connect_manage(client, auth):
   assert created.json()["name"] == "Workstation"
 
 
+def test_host_rename_updates_and_trims_the_name(client, auth):
+  pairing, _ = _paired_host(client, auth, name="Old name")
+
+  renamed = client.patch(
+    f"/api/connect/hosts/{pairing['id']}",
+    headers=auth,
+    json={"name": "  New name  "},
+  )
+
+  assert renamed.status_code == 200, renamed.text
+  assert renamed.json()["name"] == "New name"
+  assert client.get(
+    "/api/connect/hosts", headers=auth,
+  ).json()["hosts"][0]["name"] == "New name"
+
+
+def test_host_rename_rejects_empty_or_unknown_hosts(client, auth):
+  pairing, _ = _paired_host(client, auth)
+
+  empty = client.patch(
+    f"/api/connect/hosts/{pairing['id']}",
+    headers=auth,
+    json={"name": "   "},
+  )
+  missing = client.patch(
+    "/api/connect/hosts/h_does_not_exist",
+    headers=auth,
+    json={"name": "New name"},
+  )
+
+  assert empty.status_code == 400, empty.text
+  assert missing.status_code == 404, missing.text
+
+
 def test_pairing_is_one_time_and_delete_revokes_runner(client, auth):
   runner = client.get("/api/connect/runner")
   assert runner.status_code == 200
@@ -297,8 +331,45 @@ async def test_exec_correlates_the_runner_result(client, auth):
     "stdout": "ready", "stderr": "", "exit_code": 0,
   })
 
-  assert await request == {"stdout": "ready", "stderr": "", "exit_code": 0}
+  assert await request == {
+    "stdout": "ready",
+    "stderr": "",
+    "exit_code": 0,
+    "truncated": False,
+    "timed_out": False,
+  }
   assert channel.pending == {}
+
+
+@pytest.mark.asyncio
+async def test_exec_caps_large_output_and_reports_runner_timeout(client, auth):
+  pairing, _ = _paired_host(client, auth)
+  channel = connect_routes._Channel()
+  connect_routes._channels[pairing["id"]] = channel
+  request = asyncio.create_task(connect_routes.exec_on_host(
+    pairing["id"],
+    connect_routes.ExecBody(cmd="large command"),
+    _owner=object(),
+  ))
+  event = await asyncio.wait_for(channel.queue.get(), timeout=1)
+  oversized = "head-" + ("x" * connect_routes._MAX_EXEC_STREAM) + "-tail"
+  channel.pending[event["request_id"]].set_result({
+    "stdout": oversized,
+    "stderr": "runner timed out",
+    "exit_code": 124,
+    "timed_out": True,
+  })
+
+  result = await request
+
+  assert result["stdout"].startswith("head-")
+  assert result["stdout"].endswith("-tail")
+  assert "output truncated" in result["stdout"]
+  assert len(result["stdout"]) == connect_routes._MAX_EXEC_STREAM
+  assert result["stderr"] == "runner timed out"
+  assert result["exit_code"] == 124
+  assert result["truncated"] is True
+  assert result["timed_out"] is True
 
 
 @pytest.mark.asyncio
@@ -346,13 +417,23 @@ def test_runner_timeout_terminates_the_entire_command_tree(tmp_path: Path):
   # status would mistake a still-running command tree for completed work.
   cmd = f"{shlex.quote(sys.executable)} -c {shlex.quote(launcher)}"
 
-  stdout, stderr, exit_code = _run_command(cmd, None, 0.05)
+  stdout, stderr, exit_code, timed_out = _run_command(cmd, None, 0.05)
 
   assert stdout == ""
   assert "timed out" in stderr
   assert exit_code == 124
+  assert timed_out is True
   time.sleep(0.6)
   assert not marker.exists()
+
+
+def test_runner_does_not_mislabel_command_exit_124_as_timeout():
+  stdout, stderr, exit_code, timed_out = _run_command("exit 124", None, 1)
+
+  assert stdout == ""
+  assert stderr == ""
+  assert exit_code == 124
+  assert timed_out is False
 
 
 def test_manifest_requires_boolean_connect_permission():

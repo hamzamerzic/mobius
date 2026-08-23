@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# Usage: python3 /data/shared/skills/manager-session-evidence.py [--hours 72] [--limit 5] [--traces 12] [--memory-writer-packet] [CHAT_ID]
-"""One consolidated performance bundle for a manager session, in ONE call.
+# Usage: python3 /data/platform/backend/scripts/reflection-evidence.py [--hours 72] [--limit 5] [--traces 12] [--memory-writer-packet] [CHAT_ID]
+"""One consolidated evidence bundle for Reflection and related agent coaching.
 
 Instead of running many sequential tools (read the memory run-status, tail the
 update log, cross-check read-traces against the chat DB, tail reflection
 metrics, list Reflection run artifacts, curl the skills API), this prints all
-of it as a single readable report so a 1-on-1 can start from one command.
+of it as a single readable report so coaching can start from one command.
 
 Read-only, defensive (missing pieces are skipped, never fatal), python3 stdlib
-+ sqlite3 only. It gathers evidence; it does not judge — the manager session
-reads the bundle and forms the coaching.
++ sqlite3 only. It gathers evidence; it does not judge — Agent Coaching or
+Reflection reads the bundle and forms the assessment.
 """
 
 import argparse
@@ -658,13 +658,13 @@ def section_focus_chat(con, chat_id):
         print("  memory recall: no read-trace for this chat")
 
     fork = "fork-chat.sh" if not session else "fork-session.sh"
-    print(f"  fork with: /data/apps/reflection/{fork} "
-          f"{chat_id if fork == 'fork-chat.sh' else session + ' <cwd>'} \"<interview>\"")
+    print(f"  coach with: /data/apps/reflection/{fork} "
+          f"{chat_id if fork == 'fork-chat.sh' else session + ' <cwd>'} \"<coaching-prompt>\"")
 
 
 def main():
     ap = argparse.ArgumentParser(
-        description="One-call performance bundle for a manager session.")
+        description="One-call evidence bundle for Reflection and agent coaching.")
     ap.add_argument("--hours", type=int, default=72,
                     help="lookback window for read-traces and skill reads (default 72)")
     ap.add_argument("--limit", type=int, default=5,
@@ -678,7 +678,7 @@ def main():
     args = ap.parse_args()
 
     con = open_db()
-    header(f" MANAGER-SESSION EVIDENCE BUNDLE   generated {now_utc().strftime('%Y-%m-%d %H:%M UTC')}"
+    header(f" REFLECTION EVIDENCE BUNDLE   generated {now_utc().strftime('%Y-%m-%d %H:%M UTC')}"
            f"   window: last {args.hours}h")
 
     section_memory(args.limit)
