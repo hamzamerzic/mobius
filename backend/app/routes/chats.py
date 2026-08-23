@@ -18,6 +18,11 @@ from app import (
   activity, auth, chat_search, models, providers, questions, secure_inputs,
 )
 from app.chat_visibility import coerce_agent_settings, visible_in_owner_drawer
+from app.chat_waits import (
+  armed_wait_chat_ids,
+  armed_waits_for_chat,
+  serialize_wait,
+)
 from app.config import get_settings
 from app.chat import (
   _finish_run,
@@ -330,6 +335,7 @@ def _owner_chat_summary(
   chat,
   *,
   durable_running: bool = False,
+  durable_waiting: bool = False,
   transient_owner_input_kind: OwnerInputKind | None = None,
 ) -> dict:
   """Canonical owner-list shape for a Chat or its lightweight projection."""
@@ -342,6 +348,10 @@ def _owner_chat_summary(
     "has_messages": bool(chat.has_messages),
     "created_by_app_id": chat.created_by_app_id,
     "running": durable_running or is_chat_running(chat.id),
+    # Waiting is durable idle work, distinct from an agent actively streaming.
+    # The drawer renders it explicitly rather than making an armed chat look
+    # inactive or overloading the running indicator.
+    "waiting": durable_waiting,
     # A turn parked on the owner's AskUserQuestion answer is `running` but is
     # NOT streaming — nothing to interrupt, and the card is durable — so the
     # shell excludes it from the reload-defer's active-turn test. The durable
@@ -553,6 +563,15 @@ def _chat_detail_response(
     "has_assistant_turns": any(
       message.get("role") == "assistant" for message in all_msgs
     ),
+    # Armed durable waits: the visible "Waiting for …" state. Refreshed by the
+    # detail refetches the run lifecycle already triggers, so declare (during a
+    # run) and resume (a new run) both reach the UI without extra plumbing.
+    # Owner surface only — wait check commands are backend operational detail
+    # an embedded app frame has no business reading (same boundary as
+    # session_id).
+    "waits": [
+      serialize_wait(row) for row in armed_waits_for_chat(db, chat.id)
+    ] if expose_session else [],
   }
   if requested_anchor_found is not None:
     response["requested_anchor_found"] = requested_anchor_found
@@ -609,6 +628,7 @@ def list_chats(
     # owner conversation into the drawer by setting owner_visible at creation.
     chats = [c for c in chats if _visible_in_owner_drawer(c)]
   durable_running = running_chat_ids(db, (chat.id for chat in chats))
+  durable_waiting = armed_wait_chat_ids(db)
   secure_input_chats = secure_inputs.pending_chat_ids()
   record_memory_checkpoint_once(
     "shell_chat_list_first_response",
@@ -618,6 +638,7 @@ def list_chats(
     _owner_chat_summary(
       chat,
       durable_running=chat.id in durable_running,
+      durable_waiting=chat.id in durable_waiting,
       transient_owner_input_kind=(
         "secure_input" if chat.id in secure_input_chats else None
       ),
@@ -1354,6 +1375,9 @@ def get_chat_runtime(
     "pending_messages": list(chat.pending_messages or []),
     "pending_question_id": _open_question_id_for(chat),
     "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
+    "waits": [
+      serialize_wait(row) for row in armed_waits_for_chat(db, chat.id)
+    ] if principal.scope != "chat_embed" else [],
   }
 
 
@@ -1822,6 +1846,12 @@ async def _delete_chat_locked(chat_id: str, db: Session) -> None:
   bump_run_generation(chat_id)
   chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
   if chat:
+    # Deleting a chat is also owner intent to stop its future work. Stage the
+    # cancellation in the same transaction as the tombstone so an in-flight
+    # probe cannot re-arm or deliver after deletion; recovery does not revive
+    # a promise the owner explicitly removed.
+    from app.chat_waits import stage_cancel_waits_for_chat
+    stage_cancel_waits_for_chat(db, chat_id)
     chat.deleted_at = now_naive_utc()
     db.commit()
     # Publish the committed tombstone before best-effort run cleanup. If that

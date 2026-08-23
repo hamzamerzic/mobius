@@ -49,6 +49,27 @@ def goal_identity_for_run_start(
       if source is not None:
         return source.goal_objective, source.goal_id
     return None, None
+  from app.continuations import WAIT_RESULT_MESSAGE_KIND
+  if (
+    isinstance(message, Mapping)
+    and message.get("kind") == WAIT_RESULT_MESSAGE_KIND
+  ):
+    # `source_work_id` is the physical run that declared the wait; resume
+    # under that run's Goal identity so a Goal spanning the wait continues.
+    source_work_id = message.get("source_work_id")
+    if isinstance(source_work_id, str) and source_work_id:
+      source = (
+        db.query(models.ChatRun)
+        .filter(
+          models.ChatRun.chat_id == chat_id,
+          models.ChatRun.id == source_work_id,
+          models.ChatRun.goal_objective.isnot(None),
+        )
+        .first()
+      )
+      if source is not None:
+        return source.goal_objective, source.goal_id
+    return None, None
   previous = latest_run(db, chat_id)
   semantic_continuation = is_continuation_message(message)
   literal_continue = str(content or "").strip().lower() == "continue"

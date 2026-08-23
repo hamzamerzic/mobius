@@ -390,6 +390,49 @@ class Delegation(Base):
   parent_woken_at = Column(DateTime, nullable=True, default=None)
 
 
+class ChatWait(Base):
+  """One durable declared wait: resume this chat when a condition is met.
+
+  Replaces the anti-pattern of an agent promising a continuation in prose and
+  ending the turn with nothing recorded. The row is the promise: a supervisor
+  loop runs the check on its interval and resumes the same chat through the
+  programmatic-turn boundary when the condition passes or the deadline expires.
+  Restart-immune by construction — no live process owns the wait.
+
+  A purely new table: ``create_all`` builds it on the next boot, so no
+  schema-migration entry is needed for existing databases.
+  """
+
+  __tablename__ = "chat_waits"
+
+  id = Column(String(64), primary_key=True)
+  chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=False, index=True
+  )
+  created_by_run_id = Column(String(64), nullable=True, default=None)
+  description = Column(String(500), nullable=False)
+  kind = Column(String(16), nullable=False)
+  command = Column(Text, nullable=True, default=None)
+  due_at = Column(DateTime, nullable=True, default=None)
+  interval_secs = Column(Integer, nullable=False, default=300)
+  deadline_at = Column(DateTime, nullable=False)
+  # armed -> met | expired | failed | cancelled. `failed` means the check
+  # itself broke (distinct from a valid silent exit-1 "not yet"). Terminal
+  # rows are kept for audit.
+  status = Column(String(16), nullable=False, default="armed", index=True)
+  next_check_at = Column(DateTime, nullable=False, index=True)
+  checks_count = Column(Integer, nullable=False, default=0)
+  last_exit_code = Column(Integer, nullable=True, default=None)
+  last_output = Column(Text, nullable=True, default=None)
+  last_checked_at = Column(DateTime, nullable=True, default=None)
+  met_at = Column(DateTime, nullable=True, default=None)
+  cancelled_at = Column(DateTime, nullable=True, default=None)
+  # Delivery is at-least-once across a crash between starting the continuation
+  # and stamping this latch, preferring a repeated wake to a silently lost one.
+  resume_delivered_at = Column(DateTime, nullable=True, default=None)
+  created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+
+
 class ChatSessionLink(Base):
   """Append-only provider-session -> chat identity map (subagent observability).
 

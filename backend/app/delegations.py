@@ -829,7 +829,7 @@ async def _deliver_parent_wake(
   result; the ordinary in-process path is serialized by the queue lock.
   """
   import app.chat_queue as chat_queue
-  from app.chat import is_chat_running
+  from app.chat import is_chat_running, programmatic_start_blocked
   from app.chat_start import start_programmatic_chat_turn
   from app.continuations import DELEGATION_RESULT_MESSAGE_KIND
   from app.database import SessionLocal
@@ -852,9 +852,13 @@ async def _deliver_parent_wake(
       if parent_chat is None:
         return False
       provider = parent_chat.provider or "claude"
+      # A limit-parked/restart-held parent reads as not-running, but a fresh
+      # StartTurn would supersede the park as if the owner resumed it. Machine
+      # wakes queue instead; the park's own resume promotes them later.
+      start_blocked = programmatic_start_blocked(db, parent_chat_id)
 
     delivered = False
-    if is_chat_running(parent_chat_id):
+    if start_blocked or is_chat_running(parent_chat_id):
       delivered = await _append_wake_pending(
         content, parent_chat_id, source_work_id,
       )

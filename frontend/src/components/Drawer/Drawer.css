@@ -797,6 +797,20 @@
   background: var(--accent);
 }
 
+/* "The agent will resume itself when a durable condition is met." Waiting is
+   idle, not streaming, so give it a pause silhouette rather than reusing the
+   active-work dot or the finished-activity ring. */
+.drawer__waiting-icon {
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  margin-right: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+}
+
 /* "The agent needs YOUR answer" — amber is reserved here for a blocked
    handoff, while the diamond silhouette keeps the state distinguishable
    without colour. Mixing the amber toward --text preserves 3:1+ contrast

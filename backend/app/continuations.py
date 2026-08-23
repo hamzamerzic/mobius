@@ -20,6 +20,10 @@ CONTINUATION_MESSAGE_KINDS = frozenset({
 # so Goal identity, summaries, and recency never mistake them for owner speech.
 DELEGATION_RESULT_MESSAGE_KIND = "delegation_result"
 
+# A durable declared wait resuming its own chat travels the same hidden
+# user-message slot: product-owned, never owner speech.
+WAIT_RESULT_MESSAGE_KIND = "wait_result"
+
 
 def is_continuation_message(message: Mapping[str, Any] | None) -> bool:
   return bool(

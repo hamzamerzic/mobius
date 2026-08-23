@@ -36,6 +36,29 @@ def test_purge_after_seven_days(db, chat):
   assert gone is None, "Chat deleted 8 days ago must be purged"
 
 
+def test_hard_purge_removes_durable_waits(db, chat):
+  """A deleted chat cannot leave executable wait checks behind."""
+  chat_id = chat.id
+  db.add(models.ChatWait(
+    id="wait-for-purged-chat",
+    chat_id=chat_id,
+    description="external task finishes",
+    kind="command",
+    command="false",
+    interval_secs=300,
+    deadline_at=datetime.now(UTC).replace(tzinfo=None) + timedelta(days=1),
+    status="armed",
+    next_check_at=datetime.now(UTC).replace(tzinfo=None),
+  ))
+  chat.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
+  db.commit()
+
+  purge_expired_chat_tombstones(db)
+
+  assert db.get(models.Chat, chat_id) is None
+  assert db.get(models.ChatWait, "wait-for-purged-chat") is None
+
+
 def test_hard_purge_removes_derived_search_transcript_without_later_search(
   db, chat,
 ):

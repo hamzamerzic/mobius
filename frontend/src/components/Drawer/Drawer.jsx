@@ -1364,6 +1364,7 @@ const DrawerRow = memo(function DrawerRow({
   const id = item.id
   const label = kind === 'chat' ? item.title : item.name
   const pinned = !!item.pinned_at
+  const waiting = kind === 'chat' && !!item.waiting
   const slug = item.slug
   const wrapRef = useRef(null)
   const inputRef = useRef(null)
@@ -1952,6 +1953,15 @@ const DrawerRow = memo(function DrawerRow({
             aria-label="Currently streaming"
             title="Currently streaming"
           />
+        ) : waiting ? (
+          <span
+            className="drawer__waiting-icon"
+            role="img"
+            aria-label="Waiting to resume"
+            title="Waiting to resume"
+          >
+            <Pause width={8} height={8} aria-hidden="true" />
+          </span>
         ) : building ? (
           <span
             className="drawer__streaming-dot"
