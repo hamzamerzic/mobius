@@ -20,6 +20,13 @@ const providerUsageRootKey = ['settings', 'provider-usage']
 const providerUsageKey = (provider) => [...providerUsageRootKey, provider]
 const appsKey = ['apps']
 const chatsKey = ['chats']
+const chatCurrentUsageRootKey = ['chat-current-usage']
+const chatCurrentUsageKey = (chatId, provider, providerSessionId) => [
+  ...chatCurrentUsageRootKey,
+  chatId,
+  provider,
+  providerSessionId,
+]
 const providersStatusKey = ['auth', 'providers', 'status']
 const modelRegistryKey = ['models', 'registry']
 const modelPrefsKey = ['owner', 'model-prefs']
@@ -134,6 +141,40 @@ async function fetchChatMessages(chatId, { signal } = {}) {
   })
   const data = await jsonOrThrow(res, 'chat fetch failed:')
   return chatDetailCacheValue(data)
+}
+
+async function fetchChatCurrentUsage(
+  chatId,
+  provider,
+  providerSessionId,
+  { signal } = {},
+) {
+  const res = await api.chats.currentUsage(chatId, {
+    provider,
+    providerSessionId,
+    signal,
+  })
+  return jsonOrThrow(res, 'current chat usage fetch failed:')
+}
+
+function useChatCurrentUsageQuery(
+  chatId,
+  provider,
+  providerSessionId,
+  { enabled = true } = {},
+) {
+  return useQuery({
+    queryKey: chatCurrentUsageKey(chatId, provider, providerSessionId),
+    queryFn: context => fetchChatCurrentUsage(
+      chatId,
+      provider,
+      providerSessionId,
+      context,
+    ),
+    enabled: enabled && Boolean(chatId && provider && providerSessionId),
+    staleTime: 60_000,
+    retry: 0,
+  })
 }
 
 function useChatsQuery({ reconcile } = {}) {
@@ -381,6 +422,7 @@ export const chatQueries = {
   keys: {
     all: chatsKey,
     messages: (chatId) => ['chat-messages', chatId],
+    currentUsage: chatCurrentUsageKey,
   },
   list: {
     key: chatsKey,
@@ -392,6 +434,16 @@ export const chatQueries = {
     key: (chatId) => ['chat-messages', chatId],
     fetch: fetchChatMessages,
     remove: (queryClient, chatId) => queryClient.removeQueries({ queryKey: ['chat-messages', chatId] }),
+  },
+  currentUsage: {
+    key: chatCurrentUsageKey,
+    fetch: fetchChatCurrentUsage,
+    useQuery: useChatCurrentUsageQuery,
+    invalidate: (queryClient, chatId) => queryClient.invalidateQueries({
+      queryKey: chatId
+        ? [...chatCurrentUsageRootKey, chatId]
+        : chatCurrentUsageRootKey,
+    }),
   },
 }
 

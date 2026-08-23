@@ -1,32 +1,56 @@
-import { settingsQueries } from '../../hooks/queries.js'
+import { chatQueries, settingsQueries } from '../../hooks/queries.js'
 import BrainUsageIcon from './BrainUsageIcon.jsx'
 import { mostConstrainedRemainingPercent } from '../SettingsView/providerUsage.js'
+import { contextUsedPercent, usedPercentFromRemaining } from './brainUsage.js'
 
-export default function BrainUsageButton({ children, usageEnabled = true }) {
-  const codexUsage = settingsQueries.providerUsage.useQuery('codex', {
-    enabled: usageEnabled,
+const PROVIDER_LABELS = {
+  claude: 'Claude',
+  codex: 'Codex',
+  mobius: 'Möbius',
+}
+
+export default function BrainUsageButton({
+  children,
+  usageEnabled = true,
+  chatId = null,
+  provider = null,
+  providerSessionId = null,
+}) {
+  const providerUsageQuery = settingsQueries.providerUsage.useQuery(provider, {
+    enabled: usageEnabled && Boolean(provider),
   })
-  const claudeUsage = settingsQueries.providerUsage.useQuery('claude', {
-    enabled: usageEnabled,
-  })
-  const leftPercent = codexUsage.isLoading
+  const contextUsageQuery = chatQueries.currentUsage.useQuery(
+    chatId,
+    provider,
+    providerSessionId,
+    { enabled: usageEnabled },
+  )
+  const remainingPercent = providerUsageQuery.isLoading
     ? null
-    : mostConstrainedRemainingPercent(codexUsage.data)
-  const rightPercent = claudeUsage.isLoading
+    : mostConstrainedRemainingPercent(providerUsageQuery.data)
+  const leftPercent = usedPercentFromRemaining(remainingPercent)
+  const rightPercent = contextUsageQuery.isLoading
     ? null
-    : mostConstrainedRemainingPercent(claudeUsage.data)
+    : contextUsedPercent(contextUsageQuery.data)
+  const providerLabel = PROVIDER_LABELS[provider] || 'Current model'
 
   const usageSummary = [
-    leftPercent === null ? 'Codex usage: unknown' : `Codex usage left: ${Math.round(leftPercent)}%`,
-    rightPercent === null ? 'Claude usage: unknown' : `Claude usage left: ${Math.round(rightPercent)}%`,
+    leftPercent === null
+      ? `${providerLabel} allowance used: unknown`
+      : `${providerLabel} allowance used: ${Math.round(leftPercent)}%`,
+    rightPercent === null
+      ? 'Context used: unknown'
+      : `Context used: ${Math.round(rightPercent)}%; ${Math.round(100 - rightPercent)}% remains before compaction`,
   ].join(' · ')
 
   return children({
     icon: <BrainUsageIcon leftPercent={leftPercent} rightPercent={rightPercent} />,
     ariaLabel: `Chat options. ${usageSummary}`,
     providerUsage: {
-      codex: leftPercent,
-      claude: rightPercent,
+      provider,
+      providerLabel,
+      usedPercent: leftPercent,
+      contextUsedPercent: rightPercent,
     },
   })
 }

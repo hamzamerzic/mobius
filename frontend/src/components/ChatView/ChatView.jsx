@@ -13,7 +13,11 @@ import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
 import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
-import { chatMessagesQueryKey, settingsQueries } from '../../hooks/queries.js'
+import {
+  chatMessagesQueryKey,
+  chatQueries,
+  settingsQueries,
+} from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode, {
   FOLLOW_STICK_BAND_PX,
@@ -3877,9 +3881,10 @@ export default function ChatView({
   useEffect(() => {
     if (wasTurnActiveRef.current && !turnActive) {
       settingsQueries.providerUsage.invalidate(queryClient)
+      chatQueries.currentUsage.invalidate(queryClient, chatId)
     }
     wasTurnActiveRef.current = turnActive
-  }, [turnActive, queryClient])
+  }, [chatId, turnActive, queryClient])
 
   useEffect(() => {
     if (!turnActive) return
@@ -4866,7 +4871,12 @@ export default function ChatView({
           messageHistory={messageHistory}
           provider={chatInfo?.provider}
           leftButtons={
-            <BrainUsageButton usageEnabled={!embedded}>
+            <BrainUsageButton
+              usageEnabled={!embedded}
+              chatId={chatId}
+              provider={chatInfo?.provider}
+              providerSessionId={chatInfo?.session_id}
+            >
               {({ icon, ariaLabel, providerUsage }) => (
               <ComposerPopover
                 triggerIcon={icon}

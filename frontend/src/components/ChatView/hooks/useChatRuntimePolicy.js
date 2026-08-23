@@ -53,12 +53,22 @@ export default function useChatRuntimePolicy({
     provider,
     effective,
   }) => {
-    setChatInfo(previous => previous ? ({
-      ...previous,
-      agent_settings_json,
-      provider: provider || previous.provider,
-      effective: effective || previous.effective,
-    }) : previous)
+    setChatInfo(previous => {
+      if (!previous) return previous
+      const nextProvider = provider || previous.provider
+      return {
+        ...previous,
+        agent_settings_json,
+        provider: nextProvider,
+        // Provider sessions are not portable. A switch clears the server's
+        // session immediately; keep the live shell from showing the outgoing
+        // provider's context until the incoming provider completes a turn.
+        session_id: nextProvider === previous.provider
+          ? previous.session_id
+          : null,
+        effective: effective || previous.effective,
+      }
+    })
   }, [])
 
   useEffect(() => {

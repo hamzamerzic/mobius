@@ -625,19 +625,21 @@ export default function ChatSettingsPanel({
 
   const currentProviderConfigured = availability.configuredProviders.has(draftProvider)
   const currentProviderLabel = PROVIDER_INFO[draftProvider]?.label || draftProvider
-
   return (
     <div className="csp">
       <div className="csp__heading">
         <div className="csp__label">Model</div>
-        <div className="csp__usage-key" aria-label="Brain colors show remaining provider usage">
+        <div
+          className="csp__usage-key"
+          aria-label="Brain fill shows allowance and context consumed"
+        >
           <span className="csp__usage-key-item">
-            <span className="csp__usage-key-line csp__usage-key-line--codex" aria-hidden="true" />
-            <span>Codex{typeof providerUsage?.codex === 'number' ? ` · ${Math.round(providerUsage.codex)}% left` : ''}</span>
+            <span className="csp__usage-key-line csp__usage-key-line--provider" aria-hidden="true" />
+            <span>{typeof providerUsage?.usedPercent === 'number' ? `${Math.round(providerUsage.usedPercent)}% used` : 'Usage'}</span>
           </span>
           <span className="csp__usage-key-item">
-            <span className="csp__usage-key-line csp__usage-key-line--claude" aria-hidden="true" />
-            <span>Claude{typeof providerUsage?.claude === 'number' ? ` · ${Math.round(providerUsage.claude)}% left` : ''}</span>
+            <span className="csp__usage-key-line csp__usage-key-line--context" aria-hidden="true" />
+            <span>{typeof providerUsage?.contextUsedPercent === 'number' ? `${Math.round(providerUsage.contextUsedPercent)}% context` : 'Context'}</span>
           </span>
         </div>
       </div>

@@ -2628,9 +2628,9 @@
   box-shadow: none;
 }
 
-/* Keep the solid provider fills legible while the popover is open. A purple
-   active disc would swallow the Codex half of the gauge, so the brain uses a
-   quieter selected surface and the existing accent border for open state. */
+/* Keep the solid gauge fills legible while the popover is open. A purple
+   active disc would swallow the left half, so the brain uses a quieter
+   selected surface and the existing accent border for open state. */
 .chat__brain-usage {
   align-self: flex-end;
 }

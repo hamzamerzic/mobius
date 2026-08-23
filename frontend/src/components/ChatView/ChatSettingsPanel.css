@@ -51,8 +51,8 @@
   flex: 0 0 auto;
 }
 
-.csp__usage-key-line--codex { background: #8b5cf6; }
-.csp__usage-key-line--claude { background: #d97757; }
+.csp__usage-key-line--provider { background: #8b5cf6; }
+.csp__usage-key-line--context { background: #d97757; }
 
 .csp__automation {
   margin-top: 8px;

@@ -1,29 +1,21 @@
 /**
- * BrainUsageIcon — a solid brain silhouette (frontal view), split into two
- * hemispheres that each act as a liquid-style gauge for one provider's
- * remaining usage before it rate-limits.
+ * BrainUsageIcon — the canonical OpenAI Apps SDK brain outline with two
+ * bottom-up gauges behind its transparent lobes: selected-provider allowance
+ * consumed on the left and current context consumed on the right.
  *
- * The outline is adapted from the platform's own installed brain glyph
- * (`@openai/apps-sdk-ui/components/Icon`'s `Brain`, MIT-licensed like the
- * rest of that package) rather than hand-drawn from scratch — it already
- * reads as a proper scalloped brain silhouette (see that package's asset).
- * The SDK glyph's complete path is made from narrow lobe shapes; applying the
- * usage color directly to it looked like colored wiring rather than a filled
- * hemisphere. We therefore fill only its outer contour, then redraw the full
- * path as a quiet structural stroke. The provider color now occupies the
- * whole available hemisphere while the brain still reads at 26px.
+ * The visible white boundary is the actual installed SDK <Brain>, not a
+ * redrawn approximation. Only its outer contour is repeated locally as a
+ * clip for the colored liquid beneath it. The SDK's transparent lobe spaces
+ * reveal that fill while its own thick white perimeter, folds, and center
+ * split remain untouched.
  *
- * Left hemisphere = Codex (purple), right hemisphere = Claude (orange) —
- * this mirrors PROVIDER_ORDER in ChatSettingsPanel.jsx (`['codex', 'claude']`,
- * codex first/left) and Claude's own brand mark color (warm clay/orange), so
- * the pairing reads naturally rather than being arbitrary.
+ * Left hemisphere = selected provider's allowance used (purple).
+ * Right hemisphere = context window used (orange).
  *
  * Each hemisphere fills bottom-up: `leftPercent`/`rightPercent` (0-100) is
- * the remaining fraction of whichever rate-limit window (5-hour or weekly —
- * see BrainUsageButton.jsx) is CLOSER to exhausted for that provider. 100 =
- * fully colored, 0 = fully grey (exhausted), 50 = half grey/half colored.
- * `null` (usage not loaded yet / unavailable) renders a dim neutral outline
- * instead of guessing.
+ * the consumed fraction. 100 = fully colored, 0 = transparent, 50 = half
+ * transparent/half colored. `null` (not loaded / unavailable) stays
+ * transparent instead of guessing.
  *
  * clipPath ids MUST be unique per rendered instance (via `useId()`), not a
  * static string. Möbius routinely keeps more than one chat pane mounted at
@@ -39,10 +31,10 @@
  */
 
 import { useId } from 'react'
+import { Brain } from '@openai/apps-sdk-ui/components/Icon'
 
-const GREY = 'var(--muted, #8a8a94)'
-const PURPLE = '#8b5cf6'
-const ORANGE = '#d97757'
+const PROVIDER_COLOR = '#8b5cf6'
+const CONTEXT_COLOR = '#d97757'
 
 // Full brain silhouette, both lobes in one contour. Bounding box is roughly
 // x:[2.3, 21.7] y:[2.3, 21.7] in the 24x24 viewBox — centered, so a clip at
@@ -60,65 +52,33 @@ const BRAIN_SILHOUETTE_PATH = 'M14.8974 2.29998C15.8303 2.29013 16.802 2.58194 1
   + 'C10.0348 2.30984 11.0025 2.62141 11.7509 3.2785C11.8376 3.35461 11.9199 3.43566 11.999 3.51971'
   + 'C12.0783 3.43538 12.162 3.35484 12.249 3.2785C12.9972 2.62161 13.9643 2.3099 14.8974 2.29998Z'
 
-const BRAIN_FOLD_PATH = 'M10.9999 6.17108C10.9998 5.5022 10.7533 5.06474 10.4306 4.78143C10.0884 4.48116 9.60157 4.30555 9.081 4.29998'
-  + 'C8.55965 4.29448 8.07721 4.46058 7.74116 4.74725C7.42624 5.01593 7.18256 5.43636 7.18256 6.09393V6.12225'
-  + 'C7.18544 6.6218 6.81963 7.04734 6.32514 7.11834C5.22327 7.27654 4.61609 7.83085 4.40522 8.35272'
-  + 'C4.26751 8.69354 4.25234 9.13509 4.5058 9.61639C5.13533 9.26679 5.86003 9.06662 6.6308 9.06659'
-  + 'C7.18307 9.06659 7.63077 9.51433 7.6308 10.0666C7.6308 10.6189 7.18309 11.0666 6.6308 11.0666'
-  + 'C5.98117 11.0666 5.39367 11.3251 4.96284 11.7473C4.92842 11.781 4.89119 11.8103 4.85346 11.8381'
-  + 'C4.39663 12.4129 4.18564 13.3773 4.35932 14.4074C4.55066 15.5418 5.13668 16.3609 5.82123 16.6213'
-  + 'C6.14352 16.7438 6.38036 17.0242 6.44721 17.3625C6.7245 18.7647 7.77678 19.5806 8.74799 19.6877'
-  + 'C9.2239 19.74 9.68087 19.6256 10.0615 19.3322C10.4299 19.0481 10.794 18.5409 10.9999 17.6867V6.17108Z'
-  + 'M12.9999 17.6877C13.2056 18.54 13.5688 19.047 13.9365 19.3312C14.3162 19.6246 14.7714 19.7397 15.246 19.6887'
-  + 'C15.8221 19.6267 16.4253 19.3131 16.8808 18.7775C16.3687 18.7272 15.881 18.5901 15.4345 18.3781'
-  + 'C14.9357 18.1411 14.7229 17.544 14.9599 17.0451C15.197 16.5466 15.7933 16.3347 16.2919 16.5715'
-  + 'C16.6002 16.7179 16.9461 16.8 17.3134 16.8C17.5725 16.8 17.8193 16.7562 18.0507 16.6808'
-  + 'C18.0914 16.6584 18.1336 16.6381 18.1777 16.6213C18.8623 16.3609 19.4482 15.5419 19.6396 14.4074'
-  + 'C19.8303 13.2768 19.5586 12.2249 19.0058 11.6808C18.8148 11.4929 18.707 11.236 18.707 10.968'
-  + 'C18.707 10.7 18.8148 10.443 19.0058 10.2551C19.7383 9.53413 19.7916 8.84018 19.5947 8.35272'
-  + 'C19.4539 8.00424 19.1357 7.64175 18.6122 7.39178C18.2868 8.40588 17.5605 9.23979 16.6191 9.70233'
-  + 'C16.1235 9.94566 15.5237 9.74089 15.2802 9.2453C15.0368 8.74965 15.2416 8.14994 15.7373 7.90643'
-  + 'C16.3692 7.59585 16.8006 6.94772 16.8007 6.20038C16.8007 6.148 16.8057 6.09628 16.8134 6.04608'
-  + 'C16.802 5.41578 16.5659 5.0094 16.2587 4.74725C15.9227 4.46055 15.4403 4.29449 14.9189 4.29998'
-  + 'C14.398 4.30549 13.9106 4.48092 13.5683 4.78143C13.286 5.02931 13.0623 5.39527 13.0107 5.93084'
-  + 'L12.9999 6.17108V17.6877Z'
-
-const BRAIN_DETAIL_PATH = BRAIN_SILHOUETTE_PATH + BRAIN_FOLD_PATH
-
 // Fill grows bottom-up across the path's actual ink, not the full viewBox.
 const TOP = 2.3
 const BOTTOM = 21.7
 
-function HemisphereFill({ id, percent, side }) {
-  const known = typeof percent === 'number' && Number.isFinite(percent)
-  const clamped = known ? Math.min(100, Math.max(0, percent)) : 100
+function HemisphereFill({ percent, side, color }) {
+  const clamped = Math.min(100, Math.max(0, percent))
   const fillHeight = ((BOTTOM - TOP) * clamped) / 100
   const fillY = BOTTOM - fillHeight
   const x = side === 'left' ? 0 : 12
 
   return (
-    <clipPath id={id}>
-      <rect x={x} y={fillY} width="12" height={fillHeight} />
-    </clipPath>
+    <rect x={x} y={fillY} width="12" height={fillHeight} fill={color} />
   )
 }
 
 export default function BrainUsageIcon({
   leftPercent = null,
   rightPercent = null,
-  width = 26,
-  height = 26,
+  width = 30,
+  height = 30,
 }) {
-  // Base id unique to THIS rendered icon instance — see the id-collision
-  // note above. Every hemisphere's clipPath id is derived from it so two
-  // simultaneously-mounted chat panes never share one.
+  // Unique per rendered icon — see the id-collision note above. Multiple
+  // mounted chat panes must never resolve this fill to another icon's clip.
   const uid = useId()
-  const leftId = `${uid}-left`
-  const rightId = `${uid}-right`
+  const silhouetteId = `${uid}-silhouette`
   const leftKnown = typeof leftPercent === 'number' && Number.isFinite(leftPercent)
   const rightKnown = typeof rightPercent === 'number' && Number.isFinite(rightPercent)
-  const leftHalfId = `${uid}-half-left`
-  const rightHalfId = `${uid}-half-right`
 
   return (
     <svg
@@ -127,38 +87,29 @@ export default function BrainUsageIcon({
       viewBox="0 0 24 24"
       aria-hidden="true"
     >
-      <clipPath id={leftHalfId}><rect x="0" y="0" width="12" height="24" /></clipPath>
-      <clipPath id={rightHalfId}><rect x="12" y="0" width="12" height="24" /></clipPath>
+      <clipPath id={silhouetteId}>
+        <path d={BRAIN_SILHOUETTE_PATH} />
+      </clipPath>
+      <g clipPath={`url(#${silhouetteId})`}>
+        {leftKnown && (
+          <HemisphereFill
+            percent={leftPercent}
+            side="left"
+            color={PROVIDER_COLOR}
+          />
+        )}
+        {rightKnown && (
+          <HemisphereFill
+            percent={rightPercent}
+            side="right"
+            color={CONTEXT_COLOR}
+          />
+        )}
+      </g>
 
-      {/* Grey base — each half dimmed independently while its provider's
-          usage is unknown, since the two are unrelated data points. */}
-      <path d={BRAIN_SILHOUETTE_PATH} fill={GREY} opacity={leftKnown ? 1 : 0.58} clipPath={`url(#${leftHalfId})`} />
-      <path d={BRAIN_SILHOUETTE_PATH} fill={GREY} opacity={rightKnown ? 1 : 0.58} clipPath={`url(#${rightHalfId})`} />
-
-      {leftKnown && (
-        <>
-          <HemisphereFill id={leftId} percent={leftPercent} side="left" />
-          <path d={BRAIN_SILHOUETTE_PATH} fill={PURPLE} clipPath={`url(#${leftId})`} />
-        </>
-      )}
-      {rightKnown && (
-        <>
-          <HemisphereFill id={rightId} percent={rightPercent} side="right" />
-          <path d={BRAIN_SILHOUETTE_PATH} fill={ORANGE} clipPath={`url(#${rightId})`} />
-        </>
-      )}
-
-      {/* Provider meaning belongs to the solid fill, not to a few colored
-          internal lines; the original glyph remains as neutral structure. */}
-      <path
-        d={BRAIN_DETAIL_PATH}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="0.82"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        opacity="0.78"
-      />
+      {/* Canonical visible boundary. The SDK path supplies every lobe/fold;
+          the fill above only shows through its transparent spaces. */}
+      <Brain width="24" height="24" color="#fff" />
     </svg>
   )
 }
