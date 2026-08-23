@@ -9,7 +9,6 @@ test('first post-answer activity resumes only the follow mode that submitted it'
     kind: 'ANCHOR_AT',
     key: 'assistant-with-question',
     offset: 60,
-    questionSubmitViewportH: 600,
     questionSubmitBaseMode: follow,
   }
   const submission = { mode: heldMode, readerIntentVersion: 7 }
@@ -23,7 +22,7 @@ test('first post-answer activity resumes only the follow mode that submitted it'
     currentMode: follow,
     submission,
     currentReaderIntentVersion: 7,
-  }), follow, 'a viewport release that already restored follow remains stable')
+  }), follow, 'an already-restored follow remains stable')
 
   const readerHold = { kind: 'ANCHOR_AT', key: 'older-row', offset: 20 }
   assert.equal(modeAfterQuestionResponseStart({
@@ -44,7 +43,6 @@ test('post-answer activity keeps a pre-submit reading hold', () => {
     kind: 'ANCHOR_AT',
     key: 'assistant-with-question',
     offset: 60,
-    questionSubmitViewportH: 600,
     questionSubmitBaseMode: baseMode,
   }
   assert.equal(modeAfterQuestionResponseStart({

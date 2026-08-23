@@ -48,7 +48,8 @@ function installBrowserEnvironment({ observers = [], frames = null } = {}) {
     removeEventListener() {},
   }
   globalThis.ResizeObserver = class {
-    constructor() {
+    constructor(callback) {
+      this.callback = callback
       this.disconnected = false
       observers.push(this)
     }
@@ -231,7 +232,8 @@ test('nested controls cannot relatch the transcript while they own the input', (
 })
 
 test('question response resumes the exact follow intent captured at submit', () => {
-  const restoreBrowser = installBrowserEnvironment()
+  const observers = []
+  const restoreBrowser = installBrowserEnvironment({ observers })
   try {
     const { hook, listeners, scroll } = mountTailController('question-follow-owner')
     const target = { parentElement: scroll, closest: () => null }
@@ -243,7 +245,13 @@ test('question response resumes the exact follow intent captured at submit', () 
 
     const submission = hook.result.current.freezeQuestionSubmission()
     assert.equal(submission.mode.kind, 'ANCHOR_AT')
+    assert.equal(submission.mode.questionSubmitBaseMode.kind, 'FOLLOW_BOTTOM')
     assert.equal(scroll.dataset.scrollMode, 'ANCHOR_AT')
+
+    scroll.clientHeight = 620
+    observers[0].callback([{ target: scroll }])
+    assert.equal(scroll.dataset.scrollMode, 'ANCHOR_AT',
+      'keyboard close cannot release the submission before response activity')
 
     hook.result.current.resumeQuestionSubmissionOnResponse(submission)
     assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM',
