@@ -13,7 +13,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
 import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
-import { chatMessagesQueryKey } from '../../hooks/queries.js'
+import { chatMessagesQueryKey, settingsQueries } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode, {
   FOLLOW_STICK_BAND_PX,
@@ -44,6 +44,7 @@ import { hasSendablePayload } from './composerSubmission.js'
 import AgentContextInspector from './AgentContextInspector.jsx'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
 import ComposerPopover from './ComposerPopover.jsx'
+import BrainUsageButton from './BrainUsageButton.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
 import ProgressRail from './ProgressRail.jsx'
 import GoalPlanDetails from './GoalPlanDetails.jsx'
@@ -105,6 +106,7 @@ import {
   highlightSearchTerms,
 } from '../../lib/searchTermHighlight.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
+import { createFileDragHandlers } from './dragUpload.js'
 import useOpenAppCtaAutoDismiss from './hooks/useOpenAppCtaAutoDismiss.js'
 import {
   isModelSelectionRequiredFailure,
@@ -490,6 +492,8 @@ export default function ChatView({
   const [embeddedRunSignal, setEmbeddedRunSignal] = useState(
     EMPTY_CHAT_RUN_SIGNAL,
   )
+  const [fileDropActive, setFileDropActive] = useState(false)
+  const fileDragDepthRef = useRef(0)
   const [embeddedRunActive, setEmbeddedRunActive] = useState(false)
   // A counter is only a render wake-up; deadline elapsed is derived directly
   // from the current card's reset timestamp below, so a newly loaded card can
@@ -3837,6 +3841,14 @@ export default function ChatView({
     onDismissApp,
   })
 
+  const wasTurnActiveRef = useRef(turnActive)
+  useEffect(() => {
+    if (wasTurnActiveRef.current && !turnActive) {
+      settingsQueries.providerUsage.invalidate(queryClient)
+    }
+    wasTurnActiveRef.current = turnActive
+  }, [turnActive, queryClient])
+
   useEffect(() => {
     if (!turnActive) return
     // Ordinary live turns set this synchronously at their run-start seam. This
@@ -4370,11 +4382,27 @@ export default function ChatView({
     }
   }
 
+  const fileDragHandlers = createFileDragHandlers({
+    getDepth: () => fileDragDepthRef.current,
+    setDepth: depth => { fileDragDepthRef.current = depth },
+    setActive: setFileDropActive,
+    onFiles: handleComposerAddFiles,
+  })
+
   return (
     <div
       ref={chatRef}
       className={`chat${showEmpty || showLoadError ? ' chat--empty' : ''}`}
+      onDragEnter={fileDragHandlers.onDragEnter}
+      onDragOver={fileDragHandlers.onDragOver}
+      onDragLeave={fileDragHandlers.onDragLeave}
+      onDrop={fileDragHandlers.onDrop}
     >
+      {fileDropActive && (
+        <div className="chat__file-drop-target" aria-hidden="true">
+          <div className="chat__file-drop-card">Drop files to attach</div>
+        </div>
+      )}
       {/* Single polite live region — announces state transitions only.
           aria-atomic keeps the full phrase together for NVDA/VoiceOver. */}
       <div
@@ -4791,8 +4819,12 @@ export default function ChatView({
           messageHistory={messageHistory}
           provider={chatInfo?.provider}
           leftButtons={
-            <>
+            <BrainUsageButton usageEnabled={!embedded}>
+              {({ icon, ariaLabel }) => (
               <ComposerPopover
+                modelTriggerIcon={icon}
+                modelTriggerAriaLabel={ariaLabel}
+                triggerAriaLabel={embedded ? 'Attach files' : 'Attach files or view chat info'}
                 chatInfo={showPicker ? chatInfo : null}
                 chatId={chatId}
                 onAttachClick={() => attachTriggerRef.current?.()}
@@ -4824,7 +4856,8 @@ export default function ChatView({
                 onOpenSummary={() => setShowSummary(true)}
                 embedded={embedded}
               />
-            </>
+              )}
+            </BrainUsageButton>
           }
         />
       </div>
