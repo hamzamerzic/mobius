@@ -4323,6 +4323,9 @@ export default function Shell({ onInitialVisualReady }) {
           tab => tabModel.tabKey(tab) === tabMenu.tabKey,
         ) ?? -1
         const hasSiblingTabs = Boolean(menuPane && menuPane.tabs.length > 1)
+        const hasTabsToLeft = Boolean(
+          menuPane && menuTabIndex > 0,
+        )
         const hasTabsToRight = Boolean(
           menuPane && menuTabIndex >= 0 && menuTabIndex < menuPane.tabs.length - 1,
         )
@@ -4365,6 +4368,22 @@ export default function Shell({ onInitialVisualReady }) {
                     }}
                   >
                     Close all other tabs
+                  </button>
+                )}
+                {hasTabsToLeft && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="workspace__menu-item"
+                    onClick={() => {
+                      dispatchWorkspace({
+                        type: 'CLOSE_TABS_TO_LEFT',
+                        tabKey: tabMenu.tabKey,
+                      })
+                      closeTabMenu()
+                    }}
+                  >
+                    Close tabs to the left
                   </button>
                 )}
                 {hasTabsToRight && (

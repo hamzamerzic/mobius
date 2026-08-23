@@ -1149,6 +1149,49 @@ test('CLOSE_TABS_TO_RIGHT removes only later siblings and is undoable', () => {
   assert.equal(paneModel.workspaceReducer(closed, { type: 'UNDO_LAST' }).ws, ws)
 })
 
+test('CLOSE_TABS_TO_LEFT removes only earlier siblings and is undoable', () => {
+  const ws = paneModel.seedFromFlatTabs([
+    makeTab('chat', 'a'),
+    makeTab('app', 42),
+    makeTab('chat', 'c'),
+    makeTab('chat', 'd'),
+  ])
+  const paneId = ws.focusedPaneId
+  const start = paneModel.initialWorkspaceState(ws)
+  const closed = paneModel.workspaceReducer(start, {
+    type: 'CLOSE_TABS_TO_LEFT',
+    tabKey: 'chat:c',
+  })
+  assert.deepEqual(closed.ws.panes[paneId].tabs.map(tabKey), ['chat:c', 'chat:d'])
+  assert.equal(closed.ws.panes[paneId].activeTabKey, 'chat:d',
+    'a surviving active tab stays active')
+  assert.equal(closed.undo.toast, 'Closed tabs to the left')
+  assert.equal(paneModel.workspaceReducer(closed, {
+    type: 'CLOSE_TABS_TO_LEFT',
+    tabKey: 'chat:c',
+  }), closed, 'the first tab has no left-side action')
+  assert.equal(paneModel.workspaceReducer(closed, { type: 'UNDO_LAST' }).ws, ws)
+})
+
+test('closeTabsToLeft selects the menu tab when it closes the active tab and preserves other panes', () => {
+  let ws = paneModel.seedFromFlatTabs([
+    makeTab('chat', 'a'),
+    makeTab('chat', 'b'),
+    makeTab('chat', 'c'),
+  ])
+  const leftPane = ws.focusedPaneId
+  ws = paneModel.setActiveTab(ws, leftPane, 'chat:a')
+  ws = paneModel.splitPaneWithTab(ws, makeTab('app', 42), {
+    paneId: leftPane,
+    edge: 'right',
+  })
+  const closed = paneModel.closeTabsToLeft(ws, 'chat:b')
+  assert.deepEqual(closed.panes[leftPane].tabs.map(tabKey), ['chat:b', 'chat:c'])
+  assert.equal(closed.panes[leftPane].activeTabKey, 'chat:b')
+  assert.ok(paneModel.flatten(closed).map(tabKey).includes('app:42'))
+  assert.equal(paneModel.closeTabsToLeft(ws, 'chat:nope'), ws)
+})
+
 test('closeTabsToRight preserves a surviving active tab and other panes', () => {
   let ws = paneModel.seedFromFlatTabs([
     makeTab('chat', 'a'),
