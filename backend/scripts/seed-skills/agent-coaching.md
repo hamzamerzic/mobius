@@ -121,7 +121,7 @@ agents next time?**
 Do not ask questions already answered well in an earlier coaching record. Go
 deeper on new evidence instead of repeating a ritual.
 
-## 5. Verify, synthesize, and improve the owner
+## 5. Verify, synthesize, and improve the owning surface
 
 Coaching is testimony, not ground truth. Verify consequential claims against
 the transcript, filesystem, Git, tests, logs, app records, or current
