@@ -9,10 +9,13 @@ test('interactive chats require a model before sending', () => {
     showPicker: true,
     chatInfo: { effective: { model: null } },
   }), true)
+})
+
+test('a cold activation defers unknown model state to the authoritative send guard', () => {
   assert.equal(needsModelSelection({
     showPicker: true,
     chatInfo: null,
-  }), true)
+  }), false)
 })
 
 test('an explicit effective model lets the composer send', () => {

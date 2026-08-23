@@ -103,7 +103,11 @@ async function getToken(request) {
  * so callers don't have to plumb `testInfo` through every helper
  * signature. Falls back to a no-title POST outside a test scope.
  */
-export async function createTaggedChat(page, label = '') {
+export async function createTaggedChat(
+  page,
+  label = '',
+  { mockProvider = true } = {},
+) {
   let info = null
   try { info = test.info() } catch (_) { /* not in a test */ }
   const title = info
@@ -114,7 +118,7 @@ export async function createTaggedChat(page, label = '') {
   // explicit connected provider. Install that boundary before callers reload
   // or deep-link to the fixture chat; production correctly refuses to send on
   // a selected model whose provider is disconnected.
-  await installMockAgentProvider(page)
+  if (mockProvider) await installMockAgentProvider(page)
   const response = await page.request.post(`${BASE}/api/chats`, {
     headers: { Authorization: `Bearer ${token}` },
     data: title ? { title } : {},
