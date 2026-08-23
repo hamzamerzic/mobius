@@ -116,7 +116,7 @@ export async function createTaggedChat(page, label = '') {
     // Most browser tests exercise chat behavior after the first-send choice,
     // not the picker itself. Keep that prerequisite explicit in the shared
     // fixture now that production no longer inherits an SDK default.
-    const selected = await page.request.put(`${BASE}/api/chats/${result.id}`, {
+    const selected = await page.request.patch(`${BASE}/api/chats/${result.id}`, {
       headers: { Authorization: `Bearer ${token}` },
       data: {
         agent_settings_json: {
