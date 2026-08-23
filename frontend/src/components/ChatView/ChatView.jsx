@@ -6,6 +6,7 @@ import {
   useLayoutEffect,
   useCallback,
   useMemo,
+  useReducer,
 } from 'react'
 import { flushSync } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
@@ -66,7 +67,11 @@ import {
 import {
   isProviderSwitchBlocking,
 } from './providerSwitch.js'
-import { questionKey } from './questionKey.js'
+import { questionKey, lastQuestionKey } from './questionKey.js'
+import {
+  questionAnswerHandoffReady,
+  questionAnswerHandoffReducer,
+} from './questionAnswerHandoff.js'
 import { clearChatQuestionDrafts } from './questionDraft.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 import { isTouchPrimary } from '../../lib/pointerPrimary.js'
@@ -496,6 +501,18 @@ export default function ChatView({
   // restores it on reload and names the exact unanswered card that owns the
   // composer barrier.
   const [liveQuestionId, setLiveQuestionId] = useState(() => cached?.pending_question_id ?? null)
+  // Acceptance and response activity may commit in either order. One explicit
+  // reducer owns that handshake so neither boundary can move the card alone.
+  const [questionFollowHandoff, dispatchQuestionFollowHandoff] = useReducer(
+    questionAnswerHandoffReducer,
+    null,
+  )
+  const handleQuestionResponseStart = useCallback((responseQuestionKey) => {
+    dispatchQuestionFollowHandoff({
+      type: 'response_activity',
+      questionKey: responseQuestionKey,
+    })
+  }, [])
   // Runtime polling stays small, but a parked question is a transcript-owned
   // control. Keep its necessary detail refresh single-flight per exact owner;
   // the invariant below retries naturally after an honest fetch failure.
@@ -859,6 +876,7 @@ export default function ChatView({
     freezeForegroundReturn,
     freezeQuestionSubmission,
     freezeQueuedSubmission,
+    resumeQuestionSubmissionOnResponse,
     revealConversationTail,
     revealAnchor,
     reapplyActiveMode,
@@ -882,6 +900,20 @@ export default function ChatView({
     onCachedCoordinateReady: acceptCachedReadingCoordinate,
     ownsReadingPosition: !hidden,
   })
+
+  // Answer acceptance and response rendering are separate boundaries. Keep
+  // the exact submit anchor after the POST settles; only the first renderable
+  // activity for that same question releases a previously-followed card. This
+  // layout effect runs after the response DOM commits but before it paints, so
+  // FOLLOW begins with content rather than moving through blank tail room.
+  useLayoutEffect(() => {
+    if (!questionAnswerHandoffReady(questionFollowHandoff)) return
+    resumeQuestionSubmissionOnResponse(questionFollowHandoff.submission)
+    dispatchQuestionFollowHandoff({
+      type: 'released',
+      submission: questionFollowHandoff.submission,
+    })
+  }, [questionFollowHandoff, resumeQuestionSubmissionOnResponse])
 
   // Forward committed pane-geometry changes to the scroll controller. A new
   // projected height (divider commit, projection/mode flip, rotation) signals
@@ -1242,6 +1274,7 @@ export default function ChatView({
       promoteStreamToMessages({ keepTurnOpen: true })
     },
     onStreamEnd: ({ continues, promotedMessage } = {}) => {
+      dispatchQuestionFollowHandoff({ type: 'stream_ended' })
       if (embedded && continues === false) setEmbeddedRunActive(false)
       const continuation = continues ? queuedContinuationRef.current : null
       queuedContinuationRef.current = null
@@ -1361,6 +1394,7 @@ export default function ChatView({
       forgetSendIntent({ cidList: consumedCids })
     },
     onLiveQuestion: setLiveQuestionId,
+    onQuestionResponseStart: handleQuestionResponseStart,
     onSteeredIntoTurn: ({ ts, content, messages: steeredBatch }) => {
       // The steer's transcript split has COMMITTED (fired for both providers,
       // including when Stop is pressed with a queued message): the backend has
@@ -3050,9 +3084,23 @@ export default function ChatView({
     // A question-card answer resumes the SAME assistant row. Freeze the
     // currently visible message and its exact viewport offset synchronously,
     // before QuestionCard's pending state commits or the POST can resume live
-    // output. Staying in FOLLOW_BOTTOM here caused the card-to-stream handoff
-    // to drag the screen upward after Submit.
-    if (resolvedAnswers) freezeQuestionSubmission()
+    // output. Acceptance alone keeps this hold: the scroll owner may restore
+    // prior follow only when the first post-answer activity actually renders.
+    const questionSubmission = resolvedAnswers
+      ? freezeQuestionSubmission()
+      : null
+    const responseQuestionKey = resolvedAnswers
+      ? (questionId
+          ? `question_id:${questionId}`
+          : lastQuestionKey(latestItemsRef.current))
+      : null
+    if (resolvedAnswers) {
+      dispatchQuestionFollowHandoff({
+        type: 'submitted',
+        submission: questionSubmission,
+        questionKey: responseQuestionKey,
+      })
+    }
     // Block a simultaneous composer send synchronously, but do not paint the
     // whole chat as a new active turn until the answer POST commits. On a
     // parked/durable question that premature parent transition swaps the
@@ -3116,6 +3164,14 @@ export default function ChatView({
         // durable message list. Keep both render sources in agreement.
         patchQuestionAnswers(questionId, resolvedAnswers)
       }
+      // Acceptance and visible response activity are deliberately separate.
+      // Keep the card fixed through this answer-only commit; the stream hook
+      // dispatches response activity in the same React commit as the first
+      // visible continuation. The reducer composes either arrival order.
+      dispatchQuestionFollowHandoff({
+        type: keepsCurrentTurn ? 'accepted' : 'cancelled',
+        submission: questionSubmission,
+      })
       // `answer_delivered` resumes the SAME assistant turn. Keep its bridge
       // alive so terminal promotion replaces/extends the active row rather
       // than dropping the question and pre-answer output during the
@@ -3147,6 +3203,10 @@ export default function ChatView({
       // submitted while a live turn is parked keeps that live turn attached.
       // Deliberately keep the reader anchor: the failed card remains the retry
       // target, and an error-label reflow must not recreate live following.
+      dispatchQuestionFollowHandoff({
+        type: 'cancelled',
+        submission: questionSubmission,
+      })
       sendingRef.current = wasSending
       setSending(wasSending)
       setServerRunningState(wasServerRunning)
@@ -3472,6 +3532,7 @@ export default function ChatView({
         }
         return
       }
+      dispatchQuestionFollowHandoff({ type: 'cancelled' })
       disconnect({ clearStreaming: true })
       promoteStreamToMessages()
       setSending(false)
