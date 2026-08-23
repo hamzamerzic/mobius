@@ -45,6 +45,7 @@ import {
   clientLengthToLayout,
   clientPointToLayout,
 } from '../../lib/layoutSpace.js'
+import useModelSelectionPopover from './hooks/useModelSelectionPopover.js'
 
 export default function ComposerPopover({
   chatInfo,
@@ -72,7 +73,6 @@ export default function ComposerPopover({
   embedded = false,
   pending = false,
 }) {
-  const [open, setOpen] = useState(false)
   const wrapRef = useRef(null)
   const triggerRef = useRef(null)
   // Tracks whether the chat textarea was focused at the moment the
@@ -87,28 +87,15 @@ export default function ComposerPopover({
   // AFTER React commits — on iOS Safari the focus state can shift
   // between the click handler and the post-commit effect, leaving
   // the ref stale. Sync capture in onClick is reliable.
-  const wasInputFocusedRef = useRef(false)
-  const handledModelSelectionRequestRef = useRef(modelSelectionRequest)
+  const { open, setOpen, wasInputFocusedRef } = useModelSelectionPopover(
+    modelSelectionRequest,
+    composerInputRef,
+  )
   // Measured cap on the panel's height: the space above the trigger inside both
   // the chat pane (which clips with `overflow: hidden`) and the keyboard-shrunk
   // visible viewport. See composerPopoverHeight.js for why CSS viewport units
   // can't express either boundary.
   const [maxHeight, setMaxHeight] = useState(null)
-
-  useEffect(() => {
-    if (
-      !modelSelectionRequest
-      || handledModelSelectionRequestRef.current === modelSelectionRequest
-    ) return
-    handledModelSelectionRequestRef.current = modelSelectionRequest
-
-    // A submit-time nudge opens the same picker the + button owns. Preserve
-    // the textarea focus state just as a direct + tap would, so mobile keeps
-    // its keyboard and desktop keeps the draft cursor where the user left it.
-    const el = composerInputRef?.current
-    wasInputFocusedRef.current = document.activeElement === el
-    setOpen(true)
-  }, [composerInputRef, modelSelectionRequest])
 
   function preservePickerInputFocus(event) {
     event.preventDefault()

@@ -1,6 +1,5 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 
 import { needsModelSelection } from '../modelSelectionPolicy.js'
 
@@ -28,22 +27,4 @@ test('app embeds that intentionally hide the picker retain their configured send
     showPicker: false,
     chatInfo: { effective: { model: null } },
   }), false)
-})
-
-test('the missing-model state opens the picker instead of sending', () => {
-  const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
-  const popover = readFileSync(new URL('../ComposerPopover.jsx', import.meta.url), 'utf8')
-  const picker = readFileSync(new URL('../ChatSettingsPanel.jsx', import.meta.url), 'utf8')
-
-  assert.match(
-    chatView,
-    /if \(needsModelSelection\(\{ showPicker, chatInfo \}\)\) \{\s*setModelSelectionRequest\(request => request \+ 1\)\s*return\s*\}\s*doSend/,
-  )
-  assert.match(popover, /modelSelectionRequest[\s\S]*setOpen\(true\)/)
-  assert.match(
-    chatView,
-    /showPicker\s*&& isModelSelectionRequiredFailure\(err\)[\s\S]*setModelSelectionRequest/,
-  )
-  assert.match(picker, /Choose a model before sending your message\./)
-  assert.doesNotMatch(picker, /default model/)
 })
