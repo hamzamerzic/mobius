@@ -211,6 +211,8 @@ def test_proxy_surface_is_limited_to_declared_inference_routes(
     ("POST", "/v1/chat/completions"),
     ("POST", "/identity/oauth/start"),
     ("GET", "/identity"),
+    ("GET", "/v1/models?admin=true"),
+    ("GET", "/v1/models#admin"),
   ):
     with pytest.raises(FileNotFoundError):
       broker.proxy(method=method, path=path, body=b"{}", headers={})

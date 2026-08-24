@@ -15,13 +15,10 @@ import json
 import os
 import re
 import secrets
-import socket
 import socketserver
 import stat
 import threading
 import time
-import urllib.parse
-import uuid
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
@@ -90,10 +87,7 @@ def _atomic_root_write(path: Path, value: bytes) -> None:
       os.fsync(handle.fileno())
     os.replace(temp, path)
   finally:
-    try:
-      temp.unlink()
-    except FileNotFoundError:
-      pass
+    temp.unlink(missing_ok=True)
 
 
 def _prepare_private_dir() -> None:
@@ -326,17 +320,14 @@ class Broker:
   def retry_pending_once(self) -> bool:
     """Attempt one pending enrollment; delete only after success or expiry."""
     if self.state:
-      try:
-        PENDING_BOOTSTRAP_PATH.unlink()
-      except FileNotFoundError:
-        pass
+      PENDING_BOOTSTRAP_PATH.unlink(missing_ok=True)
       return True
     if not _private_file_exists(PENDING_BOOTSTRAP_PATH):
       return False
     try:
       receipt = PENDING_BOOTSTRAP_PATH.read_text(encoding="ascii").strip()
       claims = self._receipt_claims(receipt)
-    except (ValueError, UnicodeError, json.JSONDecodeError):
+    except (ValueError, UnicodeError):
       return False
     if claims.get("instance_id") != self.instance_id:
       return False
@@ -427,11 +418,7 @@ class Broker:
     body: bytes,
     headers: dict[str, str],
   ) -> httpx.Response:
-    split = urllib.parse.urlsplit(path)
-    route_path = split.path
-    if not route_path.startswith("/") or split.fragment:
-      raise FileNotFoundError("broker route not found")
-    route = INFERENCE_ROUTES.get((method, route_path)) if not split.query else None
+    route = INFERENCE_ROUTES.get((method, path))
     if route is None:
       raise FileNotFoundError("broker route not found")
     scope, audience = route
@@ -485,12 +472,12 @@ class _Handler(BaseHTTPRequestHandler):
     self.end_headers()
     self.wfile.write(body)
 
-  def _body(self, *, maximum: int = MAX_BODY) -> bytes:
+  def _body(self) -> bytes:
     try:
       length = int(self.headers.get("content-length", "0"))
     except ValueError as exc:
       raise ValueError("invalid content length") from exc
-    if length < 0 or length > maximum:
+    if length < 0 or length > MAX_BODY:
       raise ValueError("request body is too large")
     return self.rfile.read(length)
 
@@ -546,7 +533,7 @@ class _Handler(BaseHTTPRequestHandler):
       self._json(404, {"error": "broker route not found"})
     except PermissionError as exc:
       self._json(401, {"error": str(exc)})
-    except (ValueError, json.JSONDecodeError) as exc:
+    except ValueError as exc:
       self._json(400, {"error": str(exc)})
     except httpx.HTTPStatusError as exc:
       self._json(502, {"error": "central identity request failed", "status": exc.response.status_code})
@@ -572,10 +559,7 @@ def main() -> None:
     raise SystemExit("identity broker must run as root")
   broker = Broker()
   _prepare_socket_dir()
-  try:
-    SOCKET_PATH.unlink()
-  except FileNotFoundError:
-    pass
+  SOCKET_PATH.unlink(missing_ok=True)
   unix = _UnixServer(str(SOCKET_PATH), _Handler)
   unix.broker = broker  # type: ignore[attr-defined]
   unix.is_unix = True  # type: ignore[attr-defined]
@@ -614,10 +598,7 @@ def main() -> None:
     unix.server_close()
     tcp.server_close()
     broker.close()
-    try:
-      SOCKET_PATH.unlink()
-    except FileNotFoundError:
-      pass
+    SOCKET_PATH.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
