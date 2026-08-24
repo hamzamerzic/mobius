@@ -779,6 +779,40 @@ def resolve_default_provider(
   return provider_id
 
 
+def provider_of_model(model: str | None) -> str | None:
+  """The provider a model id belongs to, or None for unknown/blank ids."""
+  if not isinstance(model, str) or not model:
+    return None
+  for provider_id, model_ids in KNOWN_MODELS.items():
+    if model in model_ids:
+      return provider_id
+  return None
+
+
+def default_provider_for_new_chat(
+  data_dir: str,
+  configured_provider: str | None = None,
+) -> str:
+  """Provider a NEW chat should start on.
+
+  There is no separate provider selection in the UI — the owner picks a model,
+  and the provider is implied by it. `Owner.provider` and the global default
+  `model` are two independent last-writer-wins cells, so when several chats run
+  at once they drift apart (one chat's provider write + another chat's model
+  write) and a new chat could be born on a provider whose remembered model
+  belongs to the OTHER family — resolving to no model at all.
+
+  Make provider follow the single source of truth the picker writes: the last
+  selected model. Only when no model has been remembered yet (the genuine first
+  run) do we fall back to the stored provider, and the picker prompts.
+  """
+  model = _load_agent_settings(data_dir).get("model")
+  prov = provider_of_model(model)
+  if prov is not None and prov in PROVIDERS:
+    return prov
+  return resolve_default_provider(data_dir, configured_provider)
+
+
 def get_provider(provider_id: str | None = None) -> BaseProvider:
   """Returns a provider by ID, falling back to the default."""
   return PROVIDERS.get(provider_id or DEFAULT_PROVIDER, PROVIDERS[DEFAULT_PROVIDER])

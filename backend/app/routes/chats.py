@@ -873,7 +873,11 @@ def create_chat(
 
   owner = db.query(models.Owner).first()
   data_dir = get_settings().data_dir
-  provider = providers.resolve_default_provider(
+  # Provider follows the last-selected model (the single source of truth the
+  # picker writes) so a new chat always starts on the family of the model it
+  # will actually use — never a provider whose remembered model belongs to the
+  # other family.
+  provider = providers.default_provider_for_new_chat(
     data_dir, owner.provider if owner else None,
   )
 

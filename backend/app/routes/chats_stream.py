@@ -41,7 +41,7 @@ from app.chat_visibility import coerce_agent_settings
 from app.providers import (
   _load_agent_settings,
   effective_agent_settings,
-  resolve_default_provider,
+  default_provider_for_new_chat,
 )
 from app.runner_registry import RunnerKind, registry
 from app.config import get_settings
@@ -117,7 +117,10 @@ def _next_execution_provider(db: Session, chat: models.Chat) -> str:
     and not is_draining()
   ):
     owner = db.query(models.Owner).first()
-    return resolve_default_provider(
+    # Provider follows the last-selected model, matching new-chat creation, so a
+    # pristine chat's first send can't re-diverge onto a family whose remembered
+    # model belongs to the other provider.
+    return default_provider_for_new_chat(
       get_settings().data_dir, owner.provider if owner else None,
     )
   return provider

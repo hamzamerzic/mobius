@@ -85,6 +85,64 @@ def test_effective_settings_has_no_model_until_manual_pick(tmp_path):
   assert result["effort"] == "medium"
 
 
+def test_new_chat_provider_follows_last_selected_model(tmp_path):
+  """A new chat's provider follows the remembered model's family, so it can't
+  be born on a provider whose model belongs to the OTHER family. The stored
+  provider (which can drift when many chats run at once) is ignored while a
+  model is remembered."""
+  from app.providers import default_provider_for_new_chat
+
+  shared = tmp_path / "shared"
+  shared.mkdir()
+  # Last-selected model is a Claude one; the drifted stored provider is codex.
+  (shared / "agent-settings.json").write_text(
+    json.dumps({"model": "claude-opus-4-8"})
+  )
+  assert default_provider_for_new_chat(str(tmp_path), "codex") == "claude"
+
+  # And the reverse: a remembered Codex model wins over a stale claude provider.
+  (shared / "agent-settings.json").write_text(
+    json.dumps({"model": "gpt-5.6-sol"})
+  )
+  assert default_provider_for_new_chat(str(tmp_path), "claude") == "codex"
+
+
+def test_new_chat_provider_falls_back_to_stored_on_first_run(tmp_path):
+  """With no model ever selected, provider comes from the stored value and the
+  picker prompts on first send (the one legitimate no-model case)."""
+  from app.providers import default_provider_for_new_chat
+
+  shared = tmp_path / "shared"
+  shared.mkdir()
+  (shared / "agent-settings.json").write_text(json.dumps({}))
+  assert default_provider_for_new_chat(str(tmp_path), "codex") == "codex"
+  # And nothing resolves a model, so admission still asks for a pick.
+  assert effective_agent_settings(
+    str(tmp_path), None, provider="codex",
+  )["model"] is None
+
+
+def test_created_chat_provider_follows_remembered_model_over_drift(
+  client, auth, db,
+):
+  """End to end: a drifted owner.provider must not birth a mismatched chat.
+  With a Codex model remembered but owner.provider stuck on claude, a new chat
+  starts on codex so it resolves to that remembered model instead of nothing."""
+  from app import models
+
+  _write_global_settings({"model": "gpt-5.6-sol", "effort": "high"})
+  owner = db.query(models.Owner).first()
+  owner.provider = "claude"
+  db.commit()
+
+  created = client.post(
+    "/api/chats", headers=auth, json={"title": "fresh"},
+  ).json()
+  db.expire_all()
+  row = db.query(models.Chat).filter(models.Chat.id == created["id"]).first()
+  assert row.provider == "codex"
+
+
 def test_patch_chat_writes_override(client, auth, chat):
   """PATCH /chats/{id} sets agent_settings_json and returns effective."""
   _write_global_settings({"model": "default-model"})
