@@ -81,24 +81,22 @@ test('mobile messages preserve native text selection and its action menu', () =>
     'messages must not suppress the native selection action menu')
 })
 
-test('web tool activity uses the assistant reading width', () => {
+test('activity surfaces use their intended width and compact status type', () => {
   const css = stripComments(chatCss)
   const desktopRule = css.match(/@media\s*\(min-width:\s*720px\)\s*\{\s*\.chat__tools\s*\{[^}]*\}/)?.[0] || ''
+  const chatRule = css.match(/\.chat\s*\{[^}]*\}/)?.[0] || ''
+  const goalRailRule = css.match(/\.chat__progress-rail\s*\{[^}]*\}/)?.[0] || ''
+  const waitTextRule = (css.match(/\.chat__wait-text\s*\{[^}]*\}/g) || [])
+    .find(rule => /font-size:/.test(rule)) || ''
 
   assert.match(desktopRule, /width:\s*min\(100%,\s*720px\)/,
     'tool activity should grow to the assistant reading measure on web')
-})
-
-test('Waiting descriptions share the Goal rail text size', () => {
-  const css = stripComments(chatCss)
-  const waitTextRule = (css.match(/\.chat__wait-text\s*\{[^}]*\}/g) || [])
-    .find(rule => /font-size:/.test(rule)) || ''
-  const goalRailRule = css.match(/\.chat__progress-rail\s*\{[^}]*\}/)?.[0] || ''
-
-  assert.match(waitTextRule, /font-size:\s*12px/,
-    'the Waiting description should use the compact Goal text size')
-  assert.match(goalRailRule, /font-size:\s*12px/,
-    'the Goal rail remains the reference size for above-composer status UI')
+  assert.match(chatRule, /--chat-status-font-size:\s*12px/,
+    'above-composer status surfaces should share one compact type token')
+  assert.match(goalRailRule, /font-size:\s*var\(--chat-status-font-size\)/,
+    'the Goal rail should use the shared status type token')
+  assert.match(waitTextRule, /font-size:\s*var\(--chat-status-font-size\)/,
+    'Waiting descriptions should use the shared status type token')
 })
 
 test('message references use a bounded responsive two-column grid', () => {
