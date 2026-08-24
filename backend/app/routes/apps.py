@@ -1366,7 +1366,9 @@ async def create_conflict_resolver_chat(
         )
 
     title = f"Resolve {app.name} update conflict"
-    provider = providers.resolve_default_provider(
+    # Provider follows the last-selected model (the single source of truth),
+    # matching owner chat creation.
+    provider = providers.owner_default_provider(
       get_settings().data_dir, owner.provider if owner else None,
     )
     chat = models.Chat(

@@ -839,11 +839,14 @@ async def provider_status(
   for any registered provider, not just Claude. `authenticated` remains as a
   compatibility alias; neither field performs a remote token probe.
   """
-  from app.providers import get_provider
-  provider = get_provider(owner.provider)
+  from app.providers import get_provider, owner_default_provider
+  # The active provider is the one the last-selected model implies (the single
+  # source of truth), so this status matches the provider chats will actually use.
+  provider_id = owner_default_provider(get_settings().data_dir, owner.provider)
+  provider = get_provider(provider_id)
   error = provider.check_auth(get_settings().data_dir)
   return {
-    "provider": owner.provider or "claude",
+    "provider": provider_id,
     "provider_name": provider.name,
     "configured": error is None,
     "authenticated": error is None,
