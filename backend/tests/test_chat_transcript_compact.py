@@ -614,6 +614,7 @@ def test_runtime_route_does_not_select_transcript_json(
     "pending_messages": [],
     "pending_question_id": None,
     "updated_at": created.json()["updated_at"],
+    "waits": [],
   }
   chat_select = next(
     statement

@@ -1714,6 +1714,10 @@ export default function Shell({ onInitialVisualReady }) {
     setChatRunSignals(prev => bumpChatRunSignal(prev, chatId, 'chat_run_started'))
   }, [])
 
+  const markChatRunReconcile = useCallback((chatId) => {
+    setChatRunSignals(prev => bumpChatRunSignal(prev, chatId, 'chat_run_reconcile'))
+  }, [])
+
   const markChatRunFinished = useCallback((chatId) => {
     setChatRunSignals(prev => bumpChatRunSignal(prev, chatId, 'chat_run_finished'))
   }, [])
@@ -2476,6 +2480,15 @@ export default function Shell({ onInitialVisualReady }) {
         // refreshing avoids stale offline markers and missing background rows.
         void invalidateShellListCache('chats').then(refreshChats)
       }
+    } else if (ev.type === 'chat_wait_changed') {
+      if (ev.chatId) {
+        // Waits are durable chat state, not a running turn. Reconcile the
+        // visible ChatView immediately so its chip cannot depend on a later
+        // run-finished refresh, and refresh the compact list projection so
+        // Recents shows the same state across tabs and reconnects.
+        markChatRunReconcile(ev.chatId)
+        void invalidateShellListCache('chats').then(refreshChats)
+      }
     } else if (ev.type === 'chat_run_started') {
       if (ev.chatId) {
         // Capture drawer membership BEFORE the mark* projections below: those
@@ -2570,7 +2583,7 @@ export default function Shell({ onInitialVisualReady }) {
     applyChatRenameEvent,
     confirmAppDeleted, confirmAppIdentityIsLive, confirmAppRecovered,
     confirmChatDeleted, confirmChatIdentityIsLive, confirmChatRecovered,
-    loadTheme, markChatRunActivity, markChatRunFinished,
+    loadTheme, markChatRunActivity, markChatRunFinished, markChatRunReconcile,
     markChatOwnerInput, markChatRunState, markStreamingEnd, markStreamingStart,
     onNotificationCreated, placeInWorkspace, queryClient,
     refreshApps, refreshChats, warmAppCode,

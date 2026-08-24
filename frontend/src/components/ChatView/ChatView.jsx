@@ -48,6 +48,7 @@ import BrainUsageButton from './BrainUsageButton.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
 import ProgressRail from './ProgressRail.jsx'
 import GoalPlanDetails from './GoalPlanDetails.jsx'
+import WaitingChip from './WaitingChip.jsx'
 import ActiveAssistantSurface from './ActiveAssistantSurface.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import ContributionReviewCard from './ContributionReviewCard.jsx'
@@ -556,6 +557,24 @@ export default function ChatView({
   const [activeGoalObjective, setActiveGoalObjective] = useState(
     () => compactGoalObjective(cached?.activeGoalObjective),
   )
+  const [armedWaits, setArmedWaits] = useState(() => cached?.waits || [])
+  const handleCancelWait = useCallback(async (waitId) => {
+    setArmedWaits(prev => {
+      const next = prev.filter(wait => wait.id !== waitId)
+      // Keep the persisted cache in step so a remount doesn't resurrect the
+      // cancelled chip from stale cached waits.
+      updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
+        waits: next,
+      })
+      return next
+    })
+    try {
+      await apiFetch(`/chat-waits/${waitId}/cancel`, { method: 'POST' })
+    } catch {
+      // Server state restores the chip on the next detail read if cancellation
+      // did not commit.
+    }
+  }, [chatId, queryClient])
   const [activeGoalPlan, setActiveGoalPlan] = useState(null)
   const setActiveGoalState = useCallback((objective) => {
     const compactObjective = compactGoalObjective(objective)
@@ -587,6 +606,10 @@ export default function ChatView({
     setActiveGoalObjective(
       compactGoalObjective(runtime?.activeGoalObjective),
     )
+    // ChatView instances can be reused as a pane changes chats. Reset to the
+    // destination's cached waits immediately so the previous chat's promise
+    // never flashes while the authoritative detail read catches up.
+    setArmedWaits(Array.isArray(runtime?.waits) ? runtime.waits : [])
   }, [chatId, queryClient])
 
   useEffect(() => {
@@ -1071,11 +1094,13 @@ export default function ChatView({
       )
       setActiveGoalObjective(runtimeGoalObjective)
       setLiveQuestionId(data.pending_question_id || null)
+      if (Array.isArray(data.waits)) setArmedWaits(data.waits)
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
         activeGoalObjective: runtimeGoalObjective,
         pending_messages: data.pending_messages || [],
         pending_question_id: data.pending_question_id || null,
+        waits: data.waits || [],
       })
       // Reconcile pending queue against authoritative server state.
       // hydrate() already preserves truly optimistic/in-flight local rows
@@ -1184,11 +1209,13 @@ export default function ChatView({
       setActiveGoalObjective(runtimeGoalObjective)
       const pendingQuestionId = runtime.pendingQuestionId
       setLiveQuestionId(pendingQuestionId)
+      if (Array.isArray(data.waits)) setArmedWaits(data.waits)
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
         activeGoalObjective: runtimeGoalObjective,
         pending_messages: serverPending,
         pending_question_id: pendingQuestionId,
+        waits: data.waits || [],
       })
       // Don't let the fallback poll add/clobber the queue while a turn is live
       // (localAuthoritative, above) — the optimistic queue + confirmQueued
@@ -4772,6 +4799,9 @@ export default function ChatView({
           resetKey={activeGoalPlan?.root_run_id || visibleGoalObjective || 'build-progress'}
           ariaLabel={visibleGoalObjective ? 'Goal progress' : 'Build progress'}
         />
+        {!turnActive && armedWaits.length > 0 && (
+          <WaitingChip waits={armedWaits} onCancel={handleCancelWait} />
+        )}
         <ConnectionStatus
           error={connectionError}
           reconnecting={reconnecting}

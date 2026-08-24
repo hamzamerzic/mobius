@@ -20,6 +20,7 @@ from app.database import SessionLocal
 
 
 RESTART_BACKLOG_DRAIN_INTERVAL_SECS = 2.0
+CHAT_WAIT_SWEEP_INTERVAL_SECS = 30.0
 
 
 class RuntimeSettings(Protocol):
@@ -188,6 +189,17 @@ class RuntimeSupervisors:
             "writer supervisor tick failed: %s", exc, exc_info=True,
           )
 
+    async def chat_wait_loop():
+      from app.chat_waits import sweep_due_waits
+      while True:
+        await asyncio.sleep(CHAT_WAIT_SWEEP_INTERVAL_SECS)
+        try:
+          await sweep_due_waits()
+        except asyncio.CancelledError:
+          raise
+        except Exception as exc:
+          self.log.error("chat-wait sweep failed: %s", exc, exc_info=True)
+
     async def browser_profile_loop():
       await asyncio.sleep(300)
       while True:
@@ -273,6 +285,7 @@ class RuntimeSupervisors:
 
     self._spawn("wedged-marker-sweep", wedged_marker_loop())
     self._spawn("reset-park-sweep", reset_park_loop())
+    self._spawn("chat-wait-sweep", chat_wait_loop())
     self._spawn("writer-supervisor", writer_supervisor_loop())
     self._spawn("browser-profile-quota", browser_profile_loop())
     self._spawn("agent-scratch-retention", agent_scratch_loop())

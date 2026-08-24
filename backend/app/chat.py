@@ -329,6 +329,23 @@ def _restart_manual_hold_for_chat(db: Session, chat_id: str) -> bool:
   )
 
 
+def programmatic_start_blocked(db: Session, chat_id: str) -> bool:
+  """Whether a product wake (delegation result, wait resume) must queue
+  instead of starting a turn.
+
+  A limit-parked or restart-held chat has no live process, so
+  ``is_chat_running`` reads False — but a fresh ``StartTurn`` supersedes the
+  parked row as if the owner resumed the chat themselves, silently destroying
+  the park's promised auto-resume. Machine wakes are not owner intent: they
+  append to ``pending_messages``, which the park's own resume path promotes
+  after the interrupted turn settles (or the owner's manual Resume releases).
+  """
+  return (
+    _parked_until_for_chat(db, chat_id) is not None
+    or _restart_manual_hold_for_chat(db, chat_id)
+  )
+
+
 def forget_chat(chat_id: str) -> None:
   """Drops any per-chat bookkeeping so a deleted chat doesn't leak.
 
