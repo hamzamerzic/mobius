@@ -2029,6 +2029,53 @@ function makeEmbedAuthorizationHandoff({ mint, post, onAttemptError = () => {}, 
 }
 const EMBED_BOOTSTRAP_TIMEOUT_MS = 15e3;
 function makeChat({ appId, getToken, storage }) {
+	const CONTROL_TIMEOUT_MS = 2e4;
+	let controlSequence = 0;
+	const pendingControls = /* @__PURE__ */ new Map();
+	let controlListening = false;
+	function cleanControlText(value, maximum = 256) {
+		return typeof value === "string" ? value.trim().slice(0, maximum) : "";
+	}
+	function onControlMessage(event) {
+		if (event.origin !== window.location.origin || event.source !== window.parent) return;
+		const message = event.data;
+		if (!message || message.type !== "moebius:chat-control-result") return;
+		const pending = pendingControls.get(message.requestId);
+		if (!pending) return;
+		pendingControls.delete(message.requestId);
+		clearTimeout(pending.timeout);
+		if (message.ok === true) pending.resolve(message.result);
+		else pending.reject(new Error(cleanControlText(message.error, 500) || "Chat control failed."));
+	}
+	function ensureControlListener() {
+		if (controlListening || typeof window === "undefined") return;
+		window.addEventListener("message", onControlMessage);
+		controlListening = true;
+	}
+	function requestChatControl(action, chatId) {
+		const id = cleanControlText(chatId, 128);
+		if (!id) return Promise.reject(/* @__PURE__ */ new Error("window.mobius.chat: chat id is required"));
+		if (typeof window === "undefined" || !window.parent || window.parent === window) return Promise.reject(/* @__PURE__ */ new Error("window.mobius.chat: trusted host is unavailable"));
+		ensureControlListener();
+		const requestId = `chat-control:${Date.now().toString(36)}:${(++controlSequence).toString(36)}`;
+		return new Promise((resolve, reject) => {
+			const timeout = setTimeout(() => {
+				pendingControls.delete(requestId);
+				reject(/* @__PURE__ */ new Error("Möbius did not answer the chat control request."));
+			}, CONTROL_TIMEOUT_MS);
+			pendingControls.set(requestId, {
+				resolve,
+				reject,
+				timeout
+			});
+			window.parent.postMessage({
+				type: "moebius:chat-control",
+				requestId,
+				action,
+				chatId: id
+			}, window.location.origin);
+		});
+	}
 	async function appChatFetch(url, init = {}) {
 		return fetchWithAppToken(getToken, url, init);
 	}
@@ -2519,6 +2566,18 @@ function makeChat({ appId, getToken, storage }) {
 		};
 	};
 	chat.start = startChat;
+	chat.list = listChats;
+	chat.status = (chatId) => requestChatControl("status", chatId);
+	chat.stop = (chatId) => requestChatControl("stop", chatId);
+	chat._destroy = () => {
+		if (controlListening && typeof window !== "undefined") window.removeEventListener("message", onControlMessage);
+		controlListening = false;
+		for (const pending of pendingControls.values()) {
+			clearTimeout(pending.timeout);
+			pending.reject(/* @__PURE__ */ new Error("Chat controls were replaced."));
+		}
+		pendingControls.clear();
+	};
 	return chat;
 }
 
@@ -3852,6 +3911,7 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 		_runtimeContext.signal?._destroy?.();
 		_runtimeContext.storage?._destroy?.();
 		_runtimeContext.capabilities?._destroy?.();
+		_runtimeContext.chat?._destroy?.();
 	}
 	const tokenRef = { current: getToken };
 	const scopedToken = async (options) => {
@@ -3866,6 +3926,11 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 	});
 	const signal = makeSignal(appId, storage, appInstanceId);
 	const capabilities = makeCapabilities({ declarations: capabilityContract?.runtime || {} });
+	const chat = makeChat({
+		appId,
+		getToken: scopedToken,
+		storage
+	});
 	const api = {
 		appId,
 		get online() {
@@ -3889,11 +3954,7 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 		createUseDocument: (React) => createUseDocument(storage, React),
 		signal,
 		capabilities,
-		chat: makeChat({
-			appId,
-			getToken: scopedToken,
-			storage
-		}),
+		chat,
 		nav: makeNav(),
 		split: makeSplit(),
 		immersive: makeImmersive({ appId }),
@@ -3906,6 +3967,7 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 		storage,
 		signal,
 		capabilities,
+		chat,
 		api
 	};
 	storage._drain();

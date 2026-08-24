@@ -98,6 +98,9 @@ function appFrameRequestUrl(appId, version, frameRev) {
 //      for the swap (a first-render throw aborts the commit; promoting on
 //      that lie would unmount the working frame for a dead one).
 //
+//   Host chat control: {type:'moebius:chat-control', requestId, action,
+//      chatId} frame → host, answered by moebius:chat-control-result. The host
+//      verifies immutable app ownership before exposing status or Stop.
 //   2b. {type: 'moebius:frame-error', appId}               frame → parent
 //      Fired by the frame on a TERMINAL load failure (bad import, no
 //      token, no default export, init timeout) instead of (2). Parent
@@ -904,7 +907,38 @@ const AppCanvas = forwardRef(function AppCanvas({
       // request, so no host needs to rediscover iframe identity.
       const hostRequest = appHostRequest(msg)
       if (hostRequest && onHostRequest) {
-        onHostRequest(appId, hostRequest)
+        if (hostRequest.type !== 'moebius:chat-control') {
+          onHostRequest(appId, hostRequest)
+          return
+        }
+        const responseTarget = e.source
+        const responseOrigin = e.origin === 'null' ? '*' : e.origin
+        const respond = (payload) => {
+          try { responseTarget?.postMessage(payload, responseOrigin) } catch { /* retired frame */ }
+        }
+        try {
+          Promise.resolve(onHostRequest(appId, hostRequest)).then(
+            result => respond({
+              type: 'moebius:chat-control-result',
+              requestId: hostRequest.requestId,
+              ok: true,
+              result: result ?? null,
+            }),
+            error => respond({
+              type: 'moebius:chat-control-result',
+              requestId: hostRequest.requestId,
+              ok: false,
+              error: error?.message || 'Chat control failed.',
+            }),
+          )
+        } catch (error) {
+          respond({
+            type: 'moebius:chat-control-result',
+            requestId: hostRequest.requestId,
+            ok: false,
+            error: error?.message || 'Chat control failed.',
+          })
+        }
         return
       }
 

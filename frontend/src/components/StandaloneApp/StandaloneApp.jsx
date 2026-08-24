@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
-import { api, BASE } from '../../api/client.js'
+import { api, BASE, jsonOrThrow } from '../../api/client.js'
 import { appQueries } from '../../hooks/queries.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import { stageComposerHandoff } from '../ChatView/composerDraft.js'
@@ -18,6 +18,7 @@ import {
   standaloneAppVersion,
 } from '../../lib/standaloneBoot.js'
 import { readableAppDiagnostic } from '../../lib/appDiagnostic.js'
+import { makeAppChatController } from '../../lib/appChatControl.js'
 import {
   MAX_STANDALONE_HISTORY_ENTRIES,
   readStandaloneHistoryEntries,
@@ -54,6 +55,13 @@ export default function StandaloneApp({ initialApp }) {
   })
   const navEntriesRef = useRef(readStandaloneHistoryEntries(history.state))
   const localPopRef = useRef(false)
+  const appChatControllerRef = useRef(null)
+  if (!appChatControllerRef.current) {
+    appChatControllerRef.current = makeAppChatController({
+      chats: api.chats,
+      readJson: jsonOrThrow,
+    })
+  }
 
   const refreshApp = useCallback(async ({ apply = false } = {}) => {
     const rows = await queryClient.fetchQuery({
@@ -191,7 +199,10 @@ export default function StandaloneApp({ initialApp }) {
   }, [])
 
   const onHostRequest = useCallback((_appId, request) => {
-    void (async () => {
+    const run = async () => {
+      if (request.type === 'moebius:chat-control') {
+        return appChatControllerRef.current(initialApp.id, request)
+      }
       if (request.type === 'moebius:open-app') {
         window.location.href = shellUrl({ app: request.appId, intent: request.intent })
         return
@@ -214,11 +225,16 @@ export default function StandaloneApp({ initialApp }) {
         stageComposerHandoff(chat.id, request.draft, { autoSend: request.autoSend })
         window.location.href = shellUrl({ chat: chat.id })
       }
-    })().catch(error => captureCrash(
+      return null
+    }
+    const outcome = run()
+    if (request.requestId) return outcome
+    void outcome.catch(error => captureCrash(
       initialApp.id,
       `Möbius couldn't complete that request. ${readableAppDiagnostic(error)}`,
       null,
     ))
+    return undefined
   }, [captureCrash, initialApp.id])
 
   const refreshCrash = useCallback(() => {
