@@ -168,6 +168,33 @@ async function sendMessage(page, text) {
 }
 
 test.describe('shell update — apply on idle, SW on a leash', () => {
+  test('ordinary same-origin reload skips the document-wide view transition', async ({ page }) => {
+    await setup(page, {
+      streamRoute: route => route.fulfill(fulfillStream(sse([{ type: 'done' }]))),
+      systemBody: sse([{ type: 'system_stream_open' }]),
+    })
+    await page.evaluate(() => {
+      sessionStorage.removeItem('shell-reload')
+      sessionStorage.removeItem('__ordinary_navigation_transition')
+      window.addEventListener('pageswap', event => {
+        if (!event.viewTransition) {
+          sessionStorage.setItem('__ordinary_navigation_transition', 'unsupported')
+          return
+        }
+        event.viewTransition.ready.then(
+          () => sessionStorage.setItem('__ordinary_navigation_transition', 'retained'),
+          () => sessionStorage.setItem('__ordinary_navigation_transition', 'skipped'),
+        )
+      }, { once: true })
+    })
+
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await page.waitForFunction(() => (
+      sessionStorage.getItem('__ordinary_navigation_transition') === 'skipped'
+    ))
+    await expect(page.locator('html[data-shell-reload-transition]')).toHaveCount(0)
+  })
+
   test('an unfinished question turn survives a hidden-page shell update', async ({ page }) => {
     // The chat stream parks on a question without `done`, so the active turn
     // remains unfinished. shell_rebuilt arrives on the GLOBAL system stream,

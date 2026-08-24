@@ -200,7 +200,13 @@
       function hasShellReload() {
         try { return !!sessionStorage.getItem('shell-reload'); } catch (e) { return false; }
       }
-      if (hasShellReload()) root.setAttribute('data-shell-reload-transition', 'incoming');
+      function supportsShellReloadTransition() {
+        return typeof document.startViewTransition === 'function'
+          && 'onpageswap' in window;
+      }
+      if (hasShellReload() && supportsShellReloadTransition()) {
+        root.setAttribute('data-shell-reload-transition', 'incoming');
+      }
 
       // The at-rule is document-wide, but only the controlled shell replacement
       // may retain pixels. Every unrelated cross-document navigation keeps its

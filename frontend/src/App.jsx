@@ -13,6 +13,7 @@ import { startInstallPromptCapture } from './lib/installPrompt.js'
 import { readInstallPass, withoutInstallPass } from './lib/installPassUrl.js'
 import { safeReturnPath } from './lib/safeReturnPath.js'
 import { readStandaloneBoot } from './lib/standaloneBoot.js'
+import { shellReloadNavigationTransitionIsActive } from './lib/shellReloadNavigationTransition.js'
 
 // These flows are mutually exclusive. Keep setup, login, the full shell, and
 // the opaque embed out of one another's startup path; first boot should not
@@ -365,8 +366,8 @@ function StartupError({ title, message, retrying = false, onRetry }) {
 
 function removeSplash() {
   const splash = document.getElementById('splash')
-  const shellReloadTransition = document.documentElement.hasAttribute(
-    'data-shell-reload-transition',
+  const shellReloadTransition = shellReloadNavigationTransitionIsActive(
+    document.documentElement,
   )
   if (shellReloadTransition) {
     // The outgoing document is still the visible view-transition layer. Drop
