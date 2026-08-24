@@ -70,8 +70,8 @@ function HemisphereFill({ percent, side, color }) {
 export default function BrainUsageIcon({
   leftPercent = null,
   rightPercent = null,
-  width = 30,
-  height = 30,
+  width = 32,
+  height = 32,
 }) {
   // Unique per rendered icon — see the id-collision note above. Multiple
   // mounted chat panes must never resolve this fill to another icon's clip.
@@ -99,11 +99,11 @@ export default function BrainUsageIcon({
         height="26"
         filterUnits="userSpaceOnUse"
       >
-        {/* The SDK brain is scaled from 24 to 30px here. Its dense curves read
+        {/* The SDK brain is scaled from 24 to 32px here. Its dense curves read
             slightly heavier than the 24px microphone at the nominal 2px
             weight, so this small optical correction goes just beyond the
             mathematical match without returning to the earlier thin pass. */}
-        <feMorphology in="SourceGraphic" operator="erode" radius="0.22" />
+        <feMorphology in="SourceGraphic" operator="erode" radius="0.28" />
       </filter>
       <g clipPath={`url(#${silhouetteId})`}>
         {leftKnown && (

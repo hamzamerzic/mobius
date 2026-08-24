@@ -1,17 +1,18 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { mostConstrainedRemainingPercent } from '../../components/SettingsView/providerUsage.js'
+import { weeklyUsagePercent } from '../../components/SettingsView/providerUsage.js'
 
 
-test('the most constrained usage window is typed data, not a display label', () => {
-  assert.equal(mostConstrainedRemainingPercent({
+test('weekly usage follows typed window meaning, not display labels or other limits', () => {
+  assert.equal(weeklyUsagePercent({
     state: 'ready',
     windows: [
-      { label: 'Renamed short window', used_percent: 20 },
-      { label: 'Additional allowance', used_percent: 75 },
+      { kind: 'other', label: 'Weekly', used_percent: 20 },
+      { kind: 'weekly', label: 'Renamed allowance', used_percent: 58 },
+      { kind: 'other', label: 'Extra usage', used_percent: 75 },
     ],
-  }), 25)
-  assert.equal(mostConstrainedRemainingPercent({ state: 'ready', windows: [] }), null)
-  assert.equal(mostConstrainedRemainingPercent({ state: 'unavailable' }), null)
+  }), 58)
+  assert.equal(weeklyUsagePercent({ state: 'ready', windows: [] }), null)
+  assert.equal(weeklyUsagePercent({ state: 'unavailable' }), null)
 })

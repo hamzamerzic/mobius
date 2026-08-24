@@ -1,7 +1,7 @@
 import { chatQueries, settingsQueries } from '../../hooks/queries.js'
 import BrainUsageIcon from './BrainUsageIcon.jsx'
-import { mostConstrainedRemainingPercent } from '../SettingsView/providerUsage.js'
-import { contextUsedPercent, usedPercentFromRemaining } from './brainUsage.js'
+import { weeklyUsagePercent } from '../SettingsView/providerUsage.js'
+import { contextTokenCounts, contextUsedPercent, formatTokenCount } from './brainUsage.js'
 
 const PROVIDER_LABELS = {
   claude: 'Claude',
@@ -25,10 +25,12 @@ export default function BrainUsageButton({
     providerSessionId,
     { enabled: usageEnabled },
   )
-  const remainingPercent = providerUsageQuery.isLoading
+  const leftPercent = providerUsageQuery.isLoading
     ? null
-    : mostConstrainedRemainingPercent(providerUsageQuery.data)
-  const leftPercent = usedPercentFromRemaining(remainingPercent)
+    : weeklyUsagePercent(providerUsageQuery.data)
+  const contextTokens = contextUsageQuery.isLoading
+    ? null
+    : contextTokenCounts(contextUsageQuery.data)
   const rightPercent = contextUsageQuery.isLoading
     ? null
     : contextUsedPercent(contextUsageQuery.data)
@@ -36,11 +38,11 @@ export default function BrainUsageButton({
 
   const usageSummary = [
     leftPercent === null
-      ? `${providerLabel} allowance used: unknown`
-      : `${providerLabel} allowance used: ${Math.round(leftPercent)}%`,
-    rightPercent === null
+      ? `${providerLabel} weekly usage: unknown`
+      : `${providerLabel} weekly usage: ${Math.round(leftPercent)}%`,
+    contextTokens === null || rightPercent === null
       ? 'Context used: unknown'
-      : `Context used: ${Math.round(rightPercent)}%; ${Math.round(100 - rightPercent)}% remains before compaction`,
+      : `Context used: ${formatTokenCount(contextTokens.used)} of ${formatTokenCount(contextTokens.maximum)} tokens (${Math.round(rightPercent)}%); ${Math.round(100 - rightPercent)}% remains before compaction`,
   ].join(' · ')
 
   return children({
@@ -49,8 +51,9 @@ export default function BrainUsageButton({
     providerUsage: {
       provider,
       providerLabel,
-      usedPercent: leftPercent,
-      contextUsedPercent: rightPercent,
+      weeklyUsagePercent: leftPercent,
+      contextTokensUsed: contextTokens?.used ?? null,
+      contextTokensMaximum: contextTokens?.maximum ?? null,
     },
   })
 }

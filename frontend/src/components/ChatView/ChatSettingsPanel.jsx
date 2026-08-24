@@ -91,6 +91,7 @@ import {
   visibleProviderModels,
 } from '../../lib/providerAvailability.js'
 import { detailToMessage } from '../../lib/errorDetail.js'
+import { formatTokenCount } from './brainUsage.js'
 import './ChatSettingsPanel.css'
 
 /** Claude product mark — four-petal flower / starburst silhouette,
@@ -625,21 +626,30 @@ export default function ChatSettingsPanel({
 
   const currentProviderConfigured = availability.configuredProviders.has(draftProvider)
   const currentProviderLabel = PROVIDER_INFO[draftProvider]?.label || draftProvider
+  const weeklyUsageLabel = typeof providerUsage?.weeklyUsagePercent === 'number'
+    ? `${Math.round(providerUsage.weeklyUsagePercent)}% weekly usage`
+    : 'Weekly usage'
+  const contextUsageLabel = (
+    typeof providerUsage?.contextTokensUsed === 'number'
+    && typeof providerUsage?.contextTokensMaximum === 'number'
+  )
+    ? `${formatTokenCount(providerUsage.contextTokensUsed)} / ${formatTokenCount(providerUsage.contextTokensMaximum)} tokens`
+    : 'Context'
   return (
     <div className="csp">
       <div className="csp__heading">
         <div className="csp__label">Model</div>
         <div
           className="csp__usage-key"
-          aria-label="Brain fill shows allowance and context consumed"
+          aria-label="Brain fill shows weekly usage and context tokens consumed"
         >
           <span className="csp__usage-key-item">
             <span className="csp__usage-key-line csp__usage-key-line--provider" aria-hidden="true" />
-            <span>{typeof providerUsage?.usedPercent === 'number' ? `${Math.round(providerUsage.usedPercent)}% used` : 'Usage'}</span>
+            <span>{weeklyUsageLabel}</span>
           </span>
           <span className="csp__usage-key-item">
             <span className="csp__usage-key-line csp__usage-key-line--context" aria-hidden="true" />
-            <span>{typeof providerUsage?.contextUsedPercent === 'number' ? `${Math.round(providerUsage.contextUsedPercent)}% context` : 'Context'}</span>
+            <span>{contextUsageLabel}</span>
           </span>
         </div>
       </div>

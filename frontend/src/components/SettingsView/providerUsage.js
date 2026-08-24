@@ -43,11 +43,9 @@ export function visibleUsageWindows(snapshot) {
     .slice(0, 4)
 }
 
-export function mostConstrainedRemainingPercent(snapshot) {
+export function weeklyUsagePercent(snapshot) {
   if (snapshot?.state !== 'ready' || !Array.isArray(snapshot.windows)) return null
-  const used = snapshot.windows
-    .map(window => Number(window?.used_percent))
-    .filter(Number.isFinite)
-  if (used.length === 0) return null
-  return 100 - Math.max(...used.map(clampUsagePercent))
+  const weekly = snapshot.windows.find(window => window?.kind === 'weekly')
+  const used = Number(weekly?.used_percent)
+  return Number.isFinite(used) ? clampUsagePercent(used) : null
 }
