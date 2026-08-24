@@ -409,8 +409,8 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | `streamReducers.js` | Stream-event reducers |
 | `resolveStopResend.js` | Stop → collapse-queue → re-send logic |
 | `chatRuntimeState.js` | Pure queue/stream branch helpers (`canFastForwardQueue`, referenced by the steer contract below) |
-| `streamPromotion.js` | Pure helpers sealing live stream items into durable assistant messages on promote/steer (`promoteAssistantStream`, `streamItemsHaveRenderableContent`) — ChatView owns *when* promotion happens, this owns *how* |
-| `streamSnapshotCache.js` | Versioned `sessionStorage` cache of the visible streaming items (the R4 leave-and-return restore) |
+| `streamPromotion.js` | Pure helpers sealing live stream items into the exact identity-owned durable assistant row on promote/steer (`promoteAssistantStream`, `streamItemsHaveRenderableContent`) — ChatView owns *when* promotion happens, this owns *how* |
+| `streamSnapshotCache.js` | Versioned `sessionStorage` cache of the visible streaming items plus their assistant-message identity (the R4 leave-and-return restore) |
 | `msgText.js` | Strips `<agent_experience>` blocks + the hidden attachment manifest from message text |
 | `useStreamConnection.js` | SSE connection, text buffering, typewriter drain, sleep/wake reconnect |
 | `useScrollMode.js` | Scroll-mode state machine |
@@ -791,6 +791,13 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   text block in event order, without hiding, duplicating, or reordering them. Only a
   recovered answer whose POST returns `started` creates a new hidden continuation.
   Switching sources preserves the active row's anchor identity and writes no scroll.
+  One durable assistant-message `id` follows every current segment from the run-start
+  live stub through sink snapshots/control events, `live_assistant`, the settled
+  transcript, SSE/session cache, active rendering, and terminal promotion. The same
+  id updates exactly that row even when later same-turn control rows follow it; a new
+  id appends at the tail. A steer seals one id and rotates to the next. Timestamp,
+  role, and content inference are reserved for id-less rolling history and may never
+  cross a later visible turn or a different explicit id.
 - **R6a — Exact steer replay is one continuous answer.** A committed steer stamps
   every inserted owner row with durable `steered: true` provenance. That marker,
   not transcript adjacency or fuzzy content overlap, is the sole authority for

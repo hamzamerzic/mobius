@@ -1527,7 +1527,9 @@ def test_claude_steer_cut_event_is_published_at_the_seal_not_at_http_arrival(
   # HTTP arrival publishes NOTHING on the deferred path: the response body is
   # the display signal. Publishing the cut here re-based the client's stream
   # too early.
-  assert [e.get("type") for e in bc.event_log] == ["text"]
+  assert [e.get("type") for e in bc.event_log] == [
+    "assistant_identity", "text",
+  ]
 
   async def _drive_runner():
     # The rest of A1 streams AFTER arrival — the duplication window.
@@ -1562,6 +1564,12 @@ def test_claude_steer_cut_event_is_published_at_the_seal_not_at_http_arrival(
   # The cut names the DURABLE rows the split committed, so the client inserts
   # the same identity the transcript now holds.
   cut = bc.event_log[cut_positions[0]]
+  assert cut["assistant_message_id"] == "run-cut-order"
+  assert cut["next_assistant_message_id"] == "run-cut-order:assistant:1"
+  assert cut["sealed_items"] == [{
+    "type": "text", "content": "A1 first A1 rest",
+  }]
+  assert cut["items"] == []
   steered_row = [m for m in _read_chat(chat_id).messages if m["role"] == "user"][-1]
   assert cut["messages"] == [{
     "role": "user",
@@ -1577,6 +1585,7 @@ def test_claude_steer_cut_event_is_published_at_the_seal_not_at_http_arrival(
     ("assistant", "A1 first A1 rest"),
     ("user", "Q2"),
   ]
+  assert _read_chat(chat_id).messages[1]["id"] == "run-cut-order"
 
 
 def test_codex_steer_publishes_cut_from_handle_owned_settlement(
@@ -1617,8 +1626,12 @@ def test_codex_steer_publishes_cut_from_handle_owned_settlement(
   assert body["pending_messages"] == []
 
   bc = get_broadcast(chat_id)
-  assert [e.get("type") for e in bc.event_log] == ["steered_into_turn"]
+  assert [e.get("type") for e in bc.event_log] == [
+    "assistant_identity", "steered_into_turn",
+  ]
   cut = [e for e in bc.event_log if e.get("type") == "steered_into_turn"][0]
+  assert cut["assistant_message_id"] == "run-codex-cut"
+  assert cut["next_assistant_message_id"] == "run-codex-cut:assistant:1"
   assert [m["content"] for m in cut["messages"]] == ["Q2"]
   assert [m["steered"] for m in cut["messages"]] == [True]
   # The owning sink sealed A1 and appended Q2 before publishing.

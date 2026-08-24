@@ -783,12 +783,9 @@ export default function ChatView({
   const hadMessagesRef = useRef((cached?.messages?.length ?? 0) > 0)
   const promotedRef = useRef(false)
   const activeAssistantDataKeyRef = useRef(null)
-  // Bridge-partial gating decides whether the next promote REPLACES
-  // the kept DB partial (in-flight turn whose snapshot we mounted
-  // on top of) or APPENDS a fresh assistant message. The captured
-  // ts is sticky on first mount; markBridged() retires the gate
-  // after the first promote so subsequent turns always append.
-  // See hooks/useBridgePartial.js for the ts-based design.
+  // Current promotion is owned by the stream's durable assistant id. This
+  // sticky mount bridge is the id-less rolling-data fallback: its captured ts
+  // may identify the kept DB partial until markBridged() retires the gate.
   const [bridgeMountInputs, setBridgeMountInputs] = useState(() => ({
     runningAtMount: !!cached?.running,
     lastMsgAtMount: cached?.messages?.length
@@ -1288,6 +1285,8 @@ export default function ChatView({
   const {
     streamItems,
     latestItemsRef,
+    streamAssistantMessageId,
+    latestAssistantMessageIdRef,
     isStreaming,
     isStreamingRef,
     connectionError,
@@ -1430,7 +1429,13 @@ export default function ChatView({
     },
     onLiveQuestion: setLiveQuestionId,
     onQuestionResponseStart: handleQuestionResponseStart,
-    onSteeredIntoTurn: ({ ts, content, messages: steeredBatch }) => {
+    onSteeredIntoTurn: ({
+      ts,
+      content,
+      messages: steeredBatch,
+      assistantMessageId,
+      sealedItems,
+    }) => {
       // The steer's transcript split has COMMITTED (fired for both providers,
       // including when Stop is pressed with a queued message): the backend has
       // sealed the assistant text streamed up to the split, persisted the user
@@ -1471,7 +1476,11 @@ export default function ChatView({
         })
       const pinCid = cidOf(steeredMessages[0])
       const pinIntent = takeSendIntent(pinCid)
-      promoteStreamToMessages({ keepTurnOpen: true })
+      promoteStreamToMessages({
+        keepTurnOpen: true,
+        items: sealedItems,
+        assistantMessageId,
+      })
       const steeredIsFirstUser = isFirstVisibleUserMessage()
       // Arm the scroll mode BEFORE rendering the steered row. EventSource
       // callbacks are outside React's synthetic event layer, and query-cache
@@ -1740,21 +1749,25 @@ export default function ChatView({
   // Snapshot stream into a permanent message. Idempotent — both
   // handleStop and onStreamEnd may call this.
   //
-  // REPLACE if the last message in `prev` is already an assistant
-  // message — that's the DB partial we kept on mount when returning
-  // mid-stream (see fetch effect). Promoting alongside the partial
-  // would duplicate the in-flight content in the final transcript.
-  // APPEND otherwise (the normal first-time send path: `prev` ends in
-  // a user message, the assistant message hasn't been committed yet).
+  // The durable assistant id replaces exactly its owned row wherever it sits;
+  // a new id appends. Id-less rolling data can still use the guarded mount-ts
+  // bridge so returning mid-stream does not duplicate the kept DB partial.
   function promoteStreamToMessages({
     keepTurnOpen = false,
     followingMessages = [],
+    items: explicitItems = null,
+    assistantMessageId: explicitAssistantMessageId = undefined,
   } = {}) {
     const following = Array.isArray(followingMessages)
       ? followingMessages.filter(Boolean)
       : []
     if (promotedRef.current && !keepTurnOpen && following.length === 0) return
-    const items = latestItemsRef.current
+    const items = Array.isArray(explicitItems)
+      ? explicitItems
+      : latestItemsRef.current
+    const assistantMessageId = explicitAssistantMessageId === undefined
+      ? latestAssistantMessageIdRef.current
+      : explicitAssistantMessageId
     if (items.length === 0 && following.length === 0) return
     // A steer can cut over before the assistant emitted any real output — the
     // only buffered item is an empty/whitespace token. Sealing it would leave a
@@ -1770,12 +1783,9 @@ export default function ChatView({
     }
     promotedRef.current = true
 
-    // Decide REPLACE-vs-APPEND against the captured mounted partial.
-    // Usually that partial is still the last message. Fast-forward is the
-    // exception: it inserts a steered user row below the still-live partial,
-    // and the active stream continues after that row. The bridge must still
-    // replace the original partial by ts instead of appending duplicated
-    // assistant text below the steered row.
+    // Supply the historical bridge candidate as a fallback only. The promotion
+    // helper uses assistantMessageId first and refuses this ts if a different
+    // explicit id or a later visible turn proves it stale.
     const bridgeIdx = bridgeHook.findBridgeIndex(messagesRef.current)
     const trailingIdx = bridgeIdx >= 0 ? -1 : findTrailingAssistantPartialIndex(messagesRef.current)
     const bridgeTs = bridgeIdx >= 0
@@ -1796,6 +1806,7 @@ export default function ChatView({
       retiredItemsRef: retiredAssistantItemsRef,
       paintedItems: streamItems,
       promotedItems: items,
+      assistantMessageId,
       bridgeTs,
       followingMessages: following,
       commitMessages,
@@ -4140,11 +4151,13 @@ export default function ChatView({
     turnActive,
     messages,
     streamItems,
+    streamAssistantMessageId,
     liveItemsRetired: retiredAssistantItemsRef.current === streamItems,
     findBridgeIndex: bridgeHook.findBridgeIndex,
   }), [
     bridgeMountInputs,
     messages,
+    streamAssistantMessageId,
     streamItems,
     turnActive,
   ])
@@ -4335,12 +4348,11 @@ export default function ChatView({
   // partial's durable key, while a live-first answer keeps its absolute
   // transcript-position alias even if a related DB partial arrives later.
   //
-  // Fast-forward can insert a user row AFTER the mounted partial while the
-  // stream remains live. Therefore bridge identity is ts-based across the
-  // full message list, not "last message only." For multi-turn flow (no
-  // bridge), the previous assistant is rendered alongside the streaming
-  // <li> (different turns). The live row therefore uses the absolute index its
-  // eventual durable row will occupy, not the previous assistant's key.
+  // Fast-forward can insert a user row after the mounted partial while the
+  // stream remains live. Explicit assistant identity keeps that row stable
+  // across the split; the mount-ts bridge exists only for id-less history. For
+  // multi-turn flow with no mirror, the prior assistant and current stream are
+  // different rows, so the live row uses its eventual absolute index.
   const streamingDataKey = chooseActiveAssistantDataKey({
     latched: activeAssistantDataKeyRef.current,
     mirroredMsg: activeMirrorMsg,

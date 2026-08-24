@@ -40,7 +40,7 @@ test('active DB, live deltas, and reconnect snapshots share one assistant surfac
   )
   assert.match(
     streamHookSource,
-    /seededByServerSnapshot[\s\S]*event\.type === 'steered_into_turn'[\s\S]*if \(!seededByServerSnapshot\) catchUpItems = \[\]/,
+    /seededByServerSnapshot[\s\S]*event\.type === 'steered_into_turn'[\s\S]*if \(!seededByServerSnapshot\) \{[\s\S]*catchUpItems = Array\.isArray\(event\.items\)/,
     'a reconnect snapshot already sits after prior steer cuts and must retain its continuation',
   )
 })

@@ -11,6 +11,7 @@ import {
   continuationRowsFromPromotedMessage,
   isContinuationMessage,
   isOwnerUserMessage,
+  startsFollowingTurn,
   jumpToLatestShown,
   openAppCtaViewModel,
   previewReadyAnnouncement,
@@ -61,6 +62,11 @@ test('automatic and manual continuations are product markers, not owner messages
   assert.equal(isOwnerUserMessage(marker), false)
   assert.equal(isOwnerUserMessage({ role: 'user', content: 'hello' }), true)
   assert.equal(isOwnerUserMessage({ role: 'user', hidden: true }), false)
+  // A continuation marker is still a turn boundary even though it is not an
+  // owner message — this is what releases the mount bridge after auto-resume.
+  assert.equal(startsFollowingTurn(marker), true)
+  assert.equal(startsFollowingTurn({ role: 'user', content: 'hello' }), true)
+  assert.equal(startsFollowingTurn({ role: 'assistant', content: 'reply' }), false)
 })
 
 test('the initial pageshow cannot retire a fast first-send pin', () => {

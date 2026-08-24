@@ -45,6 +45,7 @@ import secrets
 import sys
 import threading
 import time
+import uuid
 from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass, field
 
@@ -52,6 +53,7 @@ from sqlalchemy import select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from app import models, schemas
+from app.chat_message_identity import assistant_message_index
 from app.chat_titles import first_message_title
 from app.json_safety import json_safe
 from app.events import (
@@ -1509,7 +1511,11 @@ class ChatWriterActor:
       # not promote the queue / schedule a continuation on a write that never
       # landed.
       outcome = self._finalize_required(
-        db, cmd.chat_id, cmd.snapshot, cmd.thinking_stashes,
+        db,
+        cmd.chat_id,
+        cmd.snapshot,
+        cmd.thinking_stashes,
+        run_token=cmd.run_token,
       )
       if outcome is not _WriteOutcome.APPLIED:
         raise _PersistFailed(f"Finalize did not persist ({outcome.value})")
@@ -1641,7 +1647,13 @@ class ChatWriterActor:
     return outcome
 
   def _finalize_required(
-    self, db, chat_id: str, snapshot: dict, thinking_stashes: list | None = None,
+    self,
+    db,
+    chat_id: str,
+    snapshot: dict,
+    thinking_stashes: list | None = None,
+    *,
+    run_token: str = "",
   ):
     """Force-complete tool blocks and write the terminal assistant message.
 
@@ -1667,9 +1679,16 @@ class ChatWriterActor:
     chat.pending_question_id = None
     if thinking_stashes:
       self._stage_thinking_stashes(db, thinking_stashes)
-    outcome = finalize_response_outcome(
-      db, chat_id, snapshot.get("blocks") or []
-    )
+    terminal_snapshot = copy.deepcopy(snapshot)
+    if not isinstance(terminal_snapshot, dict):
+      return _WriteOutcome.NOOP
+    # Current sinks stamp the exact assistant-segment identity. Setup-time
+    # failures can finalize before a sink exists, so fall back to the physical
+    # run identity there. Never rebuild a terminal message from blocks: doing
+    # so discards the identity that owns its durable row.
+    if terminal_snapshot.get("id") is None and run_token:
+      terminal_snapshot["id"] = run_token
+    outcome = finalize_response_outcome(db, chat_id, terminal_snapshot)
     if outcome is _WriteOutcome.NOOP:
       # The sink only submits Finalize with non-empty blocks, so a NOOP here
       # means the row had nothing to finalize onto. Distinguish two causes: a
@@ -2202,6 +2221,7 @@ class ChatWriterActor:
     # queue are already in memory. Streaming snapshots can then update only the
     # small live value without rereading the historical JSON blob.
     chat.live_assistant = {
+      "id": cmd.run_token,
       "role": "assistant",
       "blocks": [],
       "ts": next_message_ts(existing + pending),
@@ -2682,6 +2702,7 @@ class ChatWriterActor:
     chat.messages = existing + stored_messages
     chat.pending_messages = remaining_pending
     chat.live_assistant = {
+      "id": cmd.run_token,
       "role": "assistant",
       "blocks": [],
       "ts": next_message_ts(
@@ -2986,8 +3007,9 @@ class ChatWriterActor:
         and isinstance(live.get("blocks"), list)
         and live["blocks"]
       ):
-        if messages and messages[-1].get("role") == "assistant":
-          messages[-1] = live
+        live_index = assistant_message_index(messages, live)
+        if live_index >= 0:
+          messages[live_index] = live
         else:
           messages.append(live)
 
@@ -2995,8 +3017,23 @@ class ChatWriterActor:
       if not isinstance(note, dict) or note.get("type") != "error":
         raise _PersistFailed("RecoverWedgedRun requires an error block")
 
-      if messages and messages[-1].get("role") == "assistant":
-        previous = messages[-1]
+      recovery_identity = (
+        live
+        if isinstance(live, dict) and live.get("id") is not None
+        else {"id": cmd.run_token}
+      )
+      recovery_index = assistant_message_index(messages, recovery_identity)
+      if (
+        recovery_index < 0
+        and messages
+        and messages[-1].get("role") == "assistant"
+        and messages[-1].get("id") is None
+      ):
+        # Rolling upgrade only: an id-less tail may be the same physical run.
+        # A different explicit id is a different row and must never be patched.
+        recovery_index = len(messages) - 1
+      if recovery_index >= 0:
+        previous = messages[recovery_index]
         blocks = copy.deepcopy(previous.get("blocks") or [])
         finalize_blocks(blocks)
         # Keep unanswered question cards as the terminal affordance.  The
@@ -3014,14 +3051,24 @@ class ChatWriterActor:
         else:
           blocks.append(note)
         recovered = build_assistant_message(blocks)
+        recovered["id"] = (
+          previous.get("id")
+          or cmd.run_token
+          or f"assistant-{uuid.uuid4().hex}"
+        )
         recovered["ts"] = (
           previous.get("ts")
           if previous.get("ts") is not None
-          else next_message_ts(messages[:-1] + list(chat.pending_messages or []))
+          else next_message_ts(
+            messages[:recovery_index]
+            + messages[recovery_index + 1:]
+            + list(chat.pending_messages or [])
+          )
         )
-        messages[-1] = recovered
+        messages[recovery_index] = recovered
       else:
         recovered = build_assistant_message([note])
+        recovered["id"] = cmd.run_token or f"assistant-{uuid.uuid4().hex}"
         recovered["ts"] = next_message_ts(
           messages + list(chat.pending_messages or [])
         )
@@ -3936,13 +3983,15 @@ def _apply_last_assistant_message(db, chat_id: str, message: dict):
   if not chat or not chat.messages:
     return _WriteOutcome.NOOP
   msgs = list(chat.messages)
-  if msgs and msgs[-1].get("role") == "assistant":
+  assistant_index = assistant_message_index(msgs, message)
+  if assistant_index >= 0:
     # Carry answers forward: apply_answers_to_last_question writes
     # them here; the runner rebuilds from assistant_blocks (no
     # answers), so merge keyed by question_block_key to avoid wiping
     # them on writeback. Multi-question turns are supported.
     existing_answers_by_key = {}
-    for ob in msgs[-1].get("blocks") or []:
+    existing_message = msgs[assistant_index]
+    for ob in existing_message.get("blocks") or []:
       if ob.get("type") == "question" and ob.get("answers"):
         existing_answers_by_key[question_block_key(ob)] = ob["answers"]
     for nb in message.get("blocks") or []:
@@ -3958,7 +4007,7 @@ def _apply_last_assistant_message(db, chat_id: str, message: dict):
     # question/answer bug). Preserve the existing message's ts across
     # every streaming replace so the id stays stable for the whole turn;
     # backfill one only if an older, tsless message is being updated.
-    message["ts"] = msgs[-1].get("ts")
+    message["ts"] = existing_message.get("ts")
     if message["ts"] is None:
       # Backfilling an older, tsless assistant message. Allocate against
       # persisted messages EXCLUDING msgs[-1] (it's the tsless one being
@@ -3970,17 +4019,24 @@ def _apply_last_assistant_message(db, chat_id: str, message: dict):
       # unions in chat.messages), so the two allocators can't hand out the
       # same ms.
       message["ts"] = next_message_ts(
-        msgs[:-1] + list(chat.pending_messages or [])
+        msgs[:assistant_index]
+        + msgs[assistant_index + 1:]
+        + list(chat.pending_messages or [])
       )
-    msgs[-1] = message
+    msgs[assistant_index] = message
   else:
     # First write of this turn's assistant message — stamp a ts greater
     # than every persisted AND queued message so the bridge gate and the
     # frontend's ts-keyed rendering get a stable, collision-free id.
-    live_ts = (
-      chat.live_assistant.get("ts")
-      if isinstance(chat.live_assistant, dict) else None
+    live = chat.live_assistant if isinstance(chat.live_assistant, dict) else None
+    message_id = message.get("id")
+    live_id = live.get("id") if live is not None else None
+    same_live_segment = (
+      message_id is None
+      or live_id is None
+      or str(message_id) == str(live_id)
     )
+    live_ts = live.get("ts") if live is not None and same_live_segment else None
     message["ts"] = live_ts or next_message_ts(
       msgs + list(chat.pending_messages or [])
     )
@@ -4029,7 +4085,16 @@ def update_live_assistant(
   if not isinstance(snapshot, dict):
     return True
   state = None
-  answer_source = existing
+  answer_source = None
+  if existing is not None:
+    snapshot_id = snapshot.get("id")
+    existing_id = existing.get("id")
+    if (
+      snapshot_id is None
+      or existing_id is None
+      or str(snapshot_id) == str(existing_id)
+    ):
+      answer_source = existing
   if existing is None:
     # QuestionCommit intentionally clears the live field after merging the
     # barrier into history. The first resumed snapshot reads that trailing
@@ -4038,9 +4103,12 @@ def update_live_assistant(
       select(Chat.messages, Chat.pending_messages).where(Chat.id == chat_id)
     ).first()
     messages = list(state[0] or []) if state is not None else []
-    if messages and messages[-1].get("role") == "assistant":
-      answer_source = messages[-1]
+    assistant_index = assistant_message_index(messages, snapshot)
+    if assistant_index >= 0:
+      answer_source = messages[assistant_index]
   if answer_source is not None:
+    if snapshot.get("id") is None and answer_source.get("id") is not None:
+      snapshot["id"] = answer_source["id"]
     snapshot["ts"] = answer_source.get("ts")
     existing_answers = {
       question_block_key(block): block["answers"]
@@ -4074,21 +4142,25 @@ def update_live_assistant(
   return _commit_or_rollback(db)
 
 
-def finalize_response_outcome(db, chat_id: str, assistant_blocks: list):
+def finalize_response_outcome(db, chat_id: str, assistant_message: dict):
   """End-of-response cleanup, returning a `_WriteOutcome`.
 
   Empty blocks -> NOOP (no terminal state to write); otherwise force-complete
-  the tool blocks and delegate to `_apply_last_assistant_message`, which
-  distinguishes APPLIED / NOOP (missing row, empty transcript) / DROPPED.  A
-  must-persist `Finalize` raises on anything but APPLIED so it never acks
-  success on a write that did not land.
+  the tool blocks on the complete assistant snapshot and delegate to
+  `_apply_last_assistant_message`, which distinguishes APPLIED / NOOP (missing
+  row, empty transcript) / DROPPED. Preserving the complete snapshot is
+  load-bearing: its `id` owns the exact durable row. A must-persist `Finalize`
+  raises on anything but APPLIED so it never acks success on a write that did
+  not land.
   """
-  if not assistant_blocks:
+  if not isinstance(assistant_message, dict):
+    return _WriteOutcome.NOOP
+  terminal_message = copy.deepcopy(assistant_message)
+  assistant_blocks = terminal_message.get("blocks")
+  if not isinstance(assistant_blocks, list) or not assistant_blocks:
     return _WriteOutcome.NOOP
   finalize_blocks(assistant_blocks)
-  return _apply_last_assistant_message(
-    db, chat_id, build_assistant_message(assistant_blocks)
-  )
+  return _apply_last_assistant_message(db, chat_id, terminal_message)
 
 
 def apply_answers_to_last_question(

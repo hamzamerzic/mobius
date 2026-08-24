@@ -1161,6 +1161,13 @@ def test_no_connected_agent_streams_and_persists_guidance(
   # remove or replace it explicitly to guarantee the auth-error precondition.
   from app import auth as auth_mod
 
+  # The container's identity broker can expose a host-connected provider even
+  # when this test removes local credential files. Pin the product precondition
+  # instead of inheriting the developer machine's live connection state.
+  monkeypatch.setattr(
+    chat_mod, "authenticated_provider_ids", lambda _data_dir: [],
+  )
+
   creds = (
     pathlib.Path(os.environ["DATA_DIR"]) / "cli-auth" / "claude"
     / ".credentials.json"
@@ -1234,6 +1241,10 @@ def test_no_connected_agent_promotes_queued_message(monkeypatch):
   the guidance finalizes first, then the queued row gets a fresh run token."""
   from app import auth as auth_mod
 
+  monkeypatch.setattr(
+    chat_mod, "authenticated_provider_ids", lambda _data_dir: [],
+  )
+
   for creds in (
     pathlib.Path(os.environ["DATA_DIR"]) / "cli-auth" / "claude"
     / ".credentials.json",
@@ -1298,6 +1309,10 @@ def test_no_connected_agent_stopped_during_metrics_preserves_successor_sink(
   publishing obsolete guidance.
   """
   from app import auth as auth_mod
+
+  monkeypatch.setattr(
+    chat_mod, "authenticated_provider_ids", lambda _data_dir: [],
+  )
 
   for creds in (
     pathlib.Path(os.environ["DATA_DIR"]) / "cli-auth" / "claude"
