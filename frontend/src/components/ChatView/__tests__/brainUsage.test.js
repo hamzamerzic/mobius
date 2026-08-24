@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import {
   contextTokenCounts,
@@ -7,6 +8,8 @@ import {
   formatRoundedTokenCount,
   modelContextTokenCounts,
 } from '../brainUsage.js'
+
+const chatViewSource = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 
 test('context gauge measures the latest model call against its context window', () => {
   assert.equal(contextUsedPercent({
@@ -41,4 +44,12 @@ test('a new chat starts at zero against the selected model context', () => {
     { used: 0, maximum: 258_400 },
   )
   assert.equal(modelContextTokenCounts(registry, 'codex', 'missing'), null)
+})
+
+test('the brain reads the selected model from canonical chat runtime state', () => {
+  assert.match(chatViewSource, /model=\{chatInfo\?\.effective\?\.model\}/)
+  assert.doesNotMatch(
+    chatViewSource,
+    /model=\{chatInfo\?\.effective_agent_settings\?\.model\}/,
+  )
 })
