@@ -36,6 +36,7 @@ from datetime import timedelta
 from sqlalchemy.orm import Session
 
 from app import models
+from app.config import get_settings
 from app.continuations import WAIT_RESULT_MESSAGE_KIND
 from app.timeutil import now_naive_utc
 
@@ -255,7 +256,7 @@ async def _run_check(command: str, *, wait_id: str | None = None) -> tuple[int, 
 
   proc = await asyncio.create_subprocess_shell(
     command,
-    cwd="/data",
+    cwd=get_settings().data_dir,
     stdout=asyncio.subprocess.PIPE,
     stderr=asyncio.subprocess.STDOUT,
     # Own process group so a timeout kill reaps the whole pipeline, not just
