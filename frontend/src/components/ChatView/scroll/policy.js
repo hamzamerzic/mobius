@@ -251,7 +251,7 @@ export function modeForScrollTransition(previousMode, proposedMode, event) {
  * Gesture timing blocks work during the active handoff; the monotonic reader
  * generation prevents work captured before a later gesture from regaining
  * authority when that timing gate eventually opens; live touch contact holds
- * ownership even after the timing gate closes (contract R5, v1.23).
+ * ownership even after the timing gate closes (contract R5, v1.24).
  */
 export function scrollAuthorityAllowsCommit({
   capturedVersion,
@@ -307,7 +307,7 @@ export function terminalLayoutAuthority({
 
 /** Layout observers may own scrollTop only outside the gesture-intent window
  * AND while no touch pointer is physically on the transcript (contract R5,
- * v1.23). Input events precede the browser's first `scroll` event; without the
+ * v1.24). Input events precede the browser's first `scroll` event; without the
  * timing gate, a streaming ResizeObserver can re-pin/follow in that gap and
  * throw the reader back before onScroll has a chance to stamp ANCHOR_AT.
  * Without the contact gate, a finger resting on the glass mid-gesture — a

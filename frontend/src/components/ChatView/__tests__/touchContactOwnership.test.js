@@ -8,7 +8,7 @@ import {
   terminalLayoutAuthority,
 } from '../scroll/policy.js'
 
-// Contract R5, v1.23 — physical touch contact is itself reader ownership.
+// Contract R5, v1.24 — physical touch contact is itself reader ownership.
 // Owner-reported failure (2026-08-22): while a reply streamed, the chat moved
 // under a finger that was still on the glass. Root cause: gesture ownership
 // was keyed to timers and scroll events only. A reading pause longer than the
@@ -30,7 +30,7 @@ test('live touch contact blocks layout ownership even after the timing gate open
   assert.equal(layoutMayOwnScroll(0, 5_000, true), false)
   // Same instant without contact releases as before.
   assert.equal(layoutMayOwnScroll(0, 5_000, false), true)
-  // Omitted contact keeps the pre-v1.23 call shape working (desktop paths).
+  // Omitted contact keeps the pre-v1.24 call shape working (desktop paths).
   assert.equal(layoutMayOwnScroll(0, 5_000), true)
   // Contact plus a pending input window is doubly blocked.
   assert.equal(layoutMayOwnScroll(Number.POSITIVE_INFINITY, 5_000, true), false)
