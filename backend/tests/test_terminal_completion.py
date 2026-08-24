@@ -1379,7 +1379,7 @@ def test_auth_error_cleanup_when_another_provider_is_connected(monkeypatch):
   )
   _seed_run("rt-12-auth", "t12-auth-error")
   monkeypatch.setattr(
-    chat_mod, "authenticated_provider_ids", lambda _data_dir: ["codex"],
+    chat_mod.PROVIDERS["codex"], "check_auth", lambda _data_dir: None,
   )
 
   chat_mod.mark_starting("t12-auth-error")
