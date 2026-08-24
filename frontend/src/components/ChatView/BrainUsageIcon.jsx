@@ -99,7 +99,7 @@ export default function BrainUsageIcon({
         height="26"
         filterUnits="userSpaceOnUse"
       >
-        <feMorphology in="SourceGraphic" operator="erode" radius="0.24" />
+        <feMorphology in="SourceGraphic" operator="erode" radius="0.12" />
       </filter>
       <g clipPath={`url(#${silhouetteId})`}>
         {leftKnown && (
