@@ -16,7 +16,6 @@ from typing import Any
 import httpx
 
 from app import providers
-from app.runtime_identity import broker_request
 
 log = logging.getLogger(__name__)
 
@@ -223,73 +222,6 @@ def normalize_codex_usage(
   }
 
 
-def _units(raw: Any) -> float | None:
-  if isinstance(raw, bool):
-    return None
-  try:
-    value = float(raw)
-  except (TypeError, ValueError):
-    return None
-  return value if value >= 0 else None
-
-
-def _first_units(source: dict[str, Any], keys: tuple[str, ...]) -> float | None:
-  for key in keys:
-    value = _units(source.get(key))
-    if value is not None:
-      return value
-  return None
-
-
-def normalize_mobius_usage(payload: Any) -> dict[str, Any]:
-  """Normalize the subscription's API-credit balance into one gauge."""
-  source = payload if isinstance(payload, dict) else {}
-  balance = source.get("balance")
-  balance = balance if isinstance(balance, dict) else source
-
-  used_percent = _used_percent(
-    balance.get("used_percent", balance.get("usedPercent"))
-  )
-  if used_percent is None:
-    remaining = _first_units(balance, ("spendable_units", "remaining_units"))
-    used = _first_units(balance, ("used_units", "spent_units", "consumed_units"))
-    total = _first_units(
-      balance,
-      ("total_units", "granted_units", "credit_limit_units", "limit_units"),
-    )
-    if total is None:
-      grants = balance.get("grants")
-      if isinstance(grants, list):
-        grant_totals = [
-          _first_units(
-            grant,
-            ("original_units", "granted_units", "amount_units", "total_units"),
-          )
-          for grant in grants
-          if isinstance(grant, dict)
-        ]
-        known_totals = [value for value in grant_totals if value is not None]
-        if known_totals:
-          total = sum(known_totals)
-    if total is None and used is not None and remaining is not None:
-      total = used + remaining
-    if used is None and total is not None and remaining is not None:
-      used = max(0, total - remaining)
-    if used is not None and total is not None and total > 0:
-      used_percent = _used_percent((used / total) * 100)
-
-  window = (
-    _window("api_credits", "api_credits", "API credits", used_percent, None)
-    if used_percent is not None else None
-  )
-  return {
-    "state": "ready" if window is not None else "unavailable",
-    "plan_label": "Möbius subscription",
-    "windows": [window] if window is not None else [],
-    "credit_balance": None,
-  }
-
-
 async def _fetch_claude_usage(data_dir: str) -> dict[str, Any]:
   subscription_type = providers.claude_subscription_type(data_dir)
   token = await providers.claude_access_token(data_dir)
@@ -382,11 +314,6 @@ async def _fetch_codex_usage(data_dir: str) -> dict[str, Any]:
   return normalize_codex_usage(raw, plan_type=_codex_plan_type(account))
 
 
-async def _fetch_mobius_usage() -> dict[str, Any]:
-  payload = await broker_request("GET", "/v1/balance", timeout=5.0)
-  return normalize_mobius_usage(payload)
-
-
 def _unavailable(plan_label: str | None = None) -> dict[str, Any]:
   return {
     "state": "unavailable",
@@ -410,19 +337,14 @@ async def _provider_snapshot(provider_id: str, data_dir: str) -> dict[str, Any]:
       return await _fetch_claude_usage(data_dir)
     if provider_id == "codex":
       return await _fetch_codex_usage(data_dir)
-    if provider_id == "mobius":
-      return await _fetch_mobius_usage()
   except Exception as exc:  # best-effort read; Settings must still open
     log.warning("%s plan usage unavailable: %s", provider_id, exc)
-    if provider_id == "mobius":
-      plan = "Möbius subscription"
-    else:
-      subscription = (
-        providers.claude_subscription_type(data_dir)
-        if provider_id == "claude"
-        else providers.codex_subscription_type(data_dir)
-      )
-      plan = plan_label(subscription)
+    subscription = (
+      providers.claude_subscription_type(data_dir)
+      if provider_id == "claude"
+      else providers.codex_subscription_type(data_dir)
+    )
+    plan = plan_label(subscription)
     return _unavailable(plan)
   return _unavailable()
 

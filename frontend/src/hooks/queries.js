@@ -21,11 +21,10 @@ const providerUsageKey = (provider) => [...providerUsageRootKey, provider]
 const appsKey = ['apps']
 const chatsKey = ['chats']
 const chatCurrentUsageRootKey = ['chat-current-usage']
-const chatCurrentUsageKey = (chatId, provider, providerSessionId) => [
+const chatCurrentUsageKey = (chatId, provider) => [
   ...chatCurrentUsageRootKey,
   chatId,
   provider,
-  providerSessionId,
 ]
 const providersStatusKey = ['auth', 'providers', 'status']
 const modelRegistryKey = ['models', 'registry']
@@ -145,33 +144,24 @@ async function fetchChatMessages(chatId, { signal } = {}) {
 
 async function fetchChatCurrentUsage(
   chatId,
-  provider,
-  providerSessionId,
   { signal } = {},
 ) {
-  const res = await api.chats.currentUsage(chatId, {
-    provider,
-    providerSessionId,
-    signal,
-  })
+  const res = await api.chats.currentUsage(chatId, { signal })
   return jsonOrThrow(res, 'current chat usage fetch failed:')
 }
 
 function useChatCurrentUsageQuery(
   chatId,
   provider,
-  providerSessionId,
   { enabled = true } = {},
 ) {
   return useQuery({
-    queryKey: chatCurrentUsageKey(chatId, provider, providerSessionId),
+    queryKey: chatCurrentUsageKey(chatId, provider),
     queryFn: context => fetchChatCurrentUsage(
       chatId,
-      provider,
-      providerSessionId,
       context,
     ),
-    enabled: enabled && Boolean(chatId && provider && providerSessionId),
+    enabled: enabled && Boolean(chatId && provider),
     staleTime: 60_000,
     retry: 0,
   })

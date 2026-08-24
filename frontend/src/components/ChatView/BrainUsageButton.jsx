@@ -19,7 +19,6 @@ export default function BrainUsageButton({
   usageEnabled = true,
   chatId = null,
   provider = null,
-  providerSessionId = null,
   model = null,
 }) {
   const providerUsageQuery = settingsQueries.providerUsage.useQuery(provider, {
@@ -28,21 +27,23 @@ export default function BrainUsageButton({
   const contextUsageQuery = chatQueries.currentUsage.useQuery(
     chatId,
     provider,
-    providerSessionId,
     { enabled: usageEnabled },
   )
   const modelRegistryQuery = modelQueries.registry.useQuery({
-    enabled: usageEnabled && !providerSessionId && Boolean(provider && model),
+    enabled: usageEnabled && Boolean(provider && model),
   })
   const allowance = providerUsageQuery.isLoading
-    ? providerAllowance(provider, null)
-    : providerAllowance(provider, providerUsageQuery.data)
+    ? providerAllowance(null)
+    : providerAllowance(providerUsageQuery.data)
   const leftPercent = allowance.usedPercent
-  const liveContextTokens = contextUsageQuery.isLoading
+  const liveContextTokens = (
+    contextUsageQuery.isLoading
+    || contextUsageQuery.data?.provider !== provider
+  )
     ? null
     : contextTokenCounts(contextUsageQuery.data)
   const contextTokens = liveContextTokens || (
-    !providerSessionId && !modelRegistryQuery.isLoading
+    !modelRegistryQuery.isLoading
       ? modelContextTokenCounts(modelRegistryQuery.data, provider, model)
       : null
   )

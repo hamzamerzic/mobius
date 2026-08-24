@@ -43,9 +43,9 @@ export function visibleUsageWindows(snapshot) {
     .slice(0, 4)
 }
 
-export function providerAllowance(provider, snapshot) {
-  const kind = provider === 'mobius' ? 'api_credits' : 'weekly'
-  const label = kind === 'api_credits' ? 'API credits usage' : 'Weekly usage'
+export function providerAllowance(snapshot) {
+  const kind = 'weekly'
+  const label = 'Weekly usage'
   if (snapshot?.state !== 'ready' || !Array.isArray(snapshot.windows)) {
     return { kind, label, usedPercent: null }
   }

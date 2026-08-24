@@ -4875,7 +4875,6 @@ export default function ChatView({
               usageEnabled={!embedded}
               chatId={chatId}
               provider={chatInfo?.provider}
-              providerSessionId={chatInfo?.session_id}
               model={chatInfo?.effective?.model}
             >
               {({ icon, ariaLabel, providerUsage }) => (

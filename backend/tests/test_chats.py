@@ -231,6 +231,8 @@ def test_current_chat_usage_is_bounded_to_selected_provider_session(
   client, auth, chat, db,
 ):
   now = datetime.now(UTC)
+  chat.provider = "codex"
+  chat.session_id = "thread-current"
   db.add_all([
     models.ChatRun(
       id="older-thread",
@@ -266,10 +268,6 @@ def test_current_chat_usage_is_bounded_to_selected_provider_session(
 
   response = client.get(
     f"/api/chats/{chat.id}/usage/current",
-    params={
-      "provider": "codex",
-      "provider_session_id": "thread-current",
-    },
     headers=auth,
   )
 
@@ -287,17 +285,13 @@ def test_current_chat_usage_returns_unknown_for_a_fresh_session(
 ):
   response = client.get(
     f"/api/chats/{chat.id}/usage/current",
-    params={
-      "provider": "claude",
-      "provider_session_id": "session-without-a-turn",
-    },
     headers=auth,
   )
 
   assert response.status_code == 200
   assert response.json() == {
     "provider": "claude",
-    "provider_session_id": "session-without-a-turn",
+    "provider_session_id": None,
     "input_tokens": None,
     "context_window": None,
   }
