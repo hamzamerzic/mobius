@@ -1124,8 +1124,12 @@ for _broker_wait in $(seq 1 50); do
   sleep 0.1
 done
 if [ "$_identity_broker_ready" -ne 1 ]; then
-  echo "FATAL: identity broker did not become ready" >&2
-  exit 1
+  # The broker is an optional subscription component. If it cannot start
+  # (missing dependency, /run not writable, or takes longer than 5 s),
+  # degrade the Möbius subscription to unavailable rather than blocking the
+  # whole instance. MobiusProvider.check_auth catches the connection error
+  # and returns a "not linked" status; all other providers are unaffected.
+  echo "WARNING: identity broker did not become ready; the Möbius subscription will be unavailable" >&2
 fi
 
 # Root-owned half of the ordinary Settings restart handshake. The app publishes

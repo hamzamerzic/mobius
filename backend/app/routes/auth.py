@@ -867,12 +867,16 @@ async def providers_status(
   providers instead of guessing. `configured` is the durable semantic field;
   `authenticated` is retained for compatibility with installed mini-apps.
   """
+  from starlette.concurrency import run_in_threadpool
   from app.providers import PROVIDERS, provider_requirement_error
   data_dir = get_settings().data_dir
   out = {}
   for pid, provider in PROVIDERS.items():
     requirement_error = provider_requirement_error(provider, db)
-    error = requirement_error or provider.check_auth(data_dir)
+    # check_auth may perform blocking I/O (e.g. MobiusProvider probes the
+    # local broker over a Unix socket). Run it off the event loop so a slow
+    # broker or central service cannot stall the ASGI worker for other callers.
+    error = requirement_error or await run_in_threadpool(provider.check_auth, data_dir)
     out[pid] = {
       "name": provider.name,
       "configured": error is None,
@@ -884,7 +888,7 @@ async def providers_status(
     if pid == "mobius" and requirement_error is None:
       if error is None:
         try:
-          out[pid]["trial"] = provider.trial_status()
+          out[pid]["trial"] = await run_in_threadpool(provider.trial_status)
         except Exception:
           out[pid]["trial"] = None
   return out
