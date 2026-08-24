@@ -53,6 +53,8 @@ from app.deps import Principal
 _CONTRIBUTION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _PUSH_RETRIES = 3
 _PUSH_RETRY_BASE_SECONDS = 0.5
+_PR_VISIBILITY_RETRIES = 3
+_PR_VISIBILITY_RETRY_BASE_SECONDS = 0.5
 
 def _require_github_access_principal(
   principal: Principal, db: Session
@@ -1252,35 +1254,41 @@ def _find_existing_pr(
     "--json", "url,headRefName,headRefOid,headRepositoryOwner",
     "--limit", "10",
   ))
-  try:
-    proc = _git_ops._gh(
-      repo,
-      *args,
-      check=False,
-    )
-  except (subprocess.TimeoutExpired, OSError):
-    return None
-  if proc.returncode != 0:
-    return None
-  try:
-    rows = json.loads(proc.stdout or "[]")
-  except ValueError:
-    return None
-  if isinstance(rows, list):
-    for row in rows:
-      if not isinstance(row, dict):
-        continue
-      owner = row.get("headRepositoryOwner")
-      owner_login = owner.get("login") if isinstance(owner, dict) else ""
-      if str(owner_login or "").casefold() != expected_owner.casefold():
-        continue
-      if str(row.get("headRefName") or "") != branch:
-        continue
-      if str(row.get("headRefOid") or "") != expected_head_sha:
-        continue
-      url = row.get("url")
-      if isinstance(url, str) and url.startswith("https://github.com/"):
-        return url
+  # A successful branch update can precede the matching PR metadata by a few
+  # seconds. Repeat only this read-only exact-head proof; never repeat the push
+  # or PR creation that led here.
+  for attempt in range(_PR_VISIBILITY_RETRIES):
+    try:
+      proc = _git_ops._gh(
+        repo,
+        *args,
+        check=False,
+      )
+    except (subprocess.TimeoutExpired, OSError):
+      proc = None
+    rows = None
+    if proc is not None and proc.returncode == 0:
+      try:
+        rows = json.loads(proc.stdout or "[]")
+      except ValueError:
+        pass
+    if isinstance(rows, list):
+      for row in rows:
+        if not isinstance(row, dict):
+          continue
+        owner = row.get("headRepositoryOwner")
+        owner_login = owner.get("login") if isinstance(owner, dict) else ""
+        if str(owner_login or "").casefold() != expected_owner.casefold():
+          continue
+        if str(row.get("headRefName") or "") != branch:
+          continue
+        if str(row.get("headRefOid") or "") != expected_head_sha:
+          continue
+        url = row.get("url")
+        if isinstance(url, str) and url.startswith("https://github.com/"):
+          return url
+    if attempt + 1 < _PR_VISIBILITY_RETRIES:
+      time.sleep(_PR_VISIBILITY_RETRY_BASE_SECONDS * (2 ** attempt))
   return None
 
 

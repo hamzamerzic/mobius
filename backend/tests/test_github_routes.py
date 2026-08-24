@@ -2783,6 +2783,7 @@ def test_submit_contribution_keeps_accepted_pr_open_on_label_transport_failure(
     ("launch-error", "match"),
     ("timeout", "absent"),
     ("launch-error", "absent"),
+    ("timeout", "stale-head"),
     ("timeout", "wrong-head"),
     ("timeout", "wrong-owner"),
   ],
@@ -2790,7 +2791,7 @@ def test_submit_contribution_keeps_accepted_pr_open_on_label_transport_failure(
 def test_submit_contribution_recovers_ambiguous_create_by_exact_pushed_head(
   client, owner_token, monkeypatch, failure_kind, existing_mode,
 ):
-  """A lost create response probes once and never creates a second PR."""
+  """A lost create response retries exact reads and never creates twice."""
   create_failure = (
     subprocess.TimeoutExpired(["gh", "pr", "create"], timeout=30)
     if failure_kind == "timeout"
@@ -2854,6 +2855,7 @@ def test_submit_contribution_recovers_ambiguous_create_by_exact_pushed_head(
     "app.github_contributions._push_topic_branch",
     lambda *_args, **_kwargs: None,
   )
+  monkeypatch.setattr("app.github_contributions.time.sleep", lambda _seconds: None)
 
   git_calls = []
 
@@ -2874,7 +2876,12 @@ def test_submit_contribution_recovers_ambiguous_create_by_exact_pushed_head(
     if args[:2] == ("pr", "list"):
       if existing_mode == "absent":
         return _cp("[]")
-      found_head = head if existing_mode != "wrong-head" else "c" * 40
+      recovery_probe = sum(
+        call[:2] == ("pr", "list") and "all" not in call
+        for call in gh_calls
+      )
+      stale = existing_mode == "stale-head" and recovery_probe == 1
+      found_head = head if existing_mode != "wrong-head" and not stale else "c" * 40
       return _cp(json.dumps([{
         "url": "https://github.com/mobius-os/app-demo/pull/42",
         "headRefName": "fix/demo-polish",
@@ -2910,7 +2917,12 @@ def test_submit_contribution_recovers_ambiguous_create_by_exact_pushed_head(
   ]
   assert len(creates) == 1, "an ambiguous response must never trigger a second create"
   assert len(preflights) == 1
-  assert len(probes) == 1
+  expected_probes = (
+    1 if existing_mode == "match"
+    else 2 if existing_mode == "stale-head"
+    else 3
+  )
+  assert len(probes) == expected_probes
   assert creates[0][-2:] == ("--base", "main")
   assert "url,headRefName,headRefOid,headRepositoryOwner" in probes[0]
   assert probes[0][probes[0].index("--head") + 1] == "fix/demo-polish"
@@ -2922,7 +2934,7 @@ def test_submit_contribution_recovers_ambiguous_create_by_exact_pushed_head(
     (Path(get_settings().data_dir) / "apps" / str(app_id) /
      "contributions" / f"{record_id}.json").read_text()
   )
-  if existing_mode == "match":
+  if existing_mode in {"match", "stale-head"}:
     assert response.status_code == 200, response.text
     assert response.json()["url"].endswith("/pull/42")
     assert stored["status"] == "open"
