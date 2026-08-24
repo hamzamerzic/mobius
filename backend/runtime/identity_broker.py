@@ -643,6 +643,7 @@ class Broker:
     forwarded = {
       "Authorization": f"Bearer {capability}",
       "Accept": headers.get("accept", "*/*"),
+      "Accept-Encoding": "identity",
       "Content-Type": headers.get("content-type", "application/json"),
       "X-Mobius-Request-Id": request_id,
     }

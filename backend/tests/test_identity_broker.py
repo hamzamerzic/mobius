@@ -249,7 +249,7 @@ def test_loopback_surface_cannot_reach_identity_contribution_or_generic_targets(
     )
 
 
-def test_proxy_uses_streaming_httpx_send_and_never_forwards_caller_target(
+def test_proxy_streams_identity_encoding_and_never_forwards_caller_target(
   broker, monkeypatch,
 ):
   seen = {}
@@ -280,12 +280,16 @@ def test_proxy_uses_streaming_httpx_send_and_never_forwards_caller_target(
   monkeypatch.setattr(broker, "_capability", lambda **_kwargs: "one-use")
   response = broker.proxy(
     method="GET", path="/v1/models", body=b"",
-    headers={"x-forwarded-host": "attacker.example"},
+    headers={
+      "accept-encoding": "gzip",
+      "x-forwarded-host": "attacker.example",
+    },
     allow_contributions=False,
   )
   try:
     assert seen["url"] == broker_module.GATEWAY_BASE_URL + "/v1/models"
     assert seen["stream"] is True
+    assert seen["kwargs"]["headers"]["Accept-Encoding"] == "identity"
     assert "attacker.example" not in json.dumps(seen)
     assert response.read() == b"event: done\n\n"
   finally:
