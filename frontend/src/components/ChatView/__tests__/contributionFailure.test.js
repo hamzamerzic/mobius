@@ -18,20 +18,16 @@ test('a failed send still explains itself after the card is reloaded', () => {
   })
 })
 
-test('this attempt outranks the failure stored before it', () => {
-  const failure = submitFailure(
-    { ...READY, last_submit_error: 'stale reason', last_submit_error_detail: 'old' },
-    { attempt: { message: 'fresh reason', detail: 'new' } },
+test('render-only arguments cannot override the durable ledger failure', () => {
+  const record = {
+    ...READY,
+    last_submit_error: 'durable reason',
+    last_submit_error_detail: 'durable detail',
+  }
+  assert.deepEqual(
+    submitFailure(record, { attempt: { message: 'local reason' }, sending: true }),
+    { message: 'durable reason', detail: 'durable detail' },
   )
-
-  assert.deepEqual(failure, { message: 'fresh reason', detail: 'new' })
-})
-
-test('a send in flight never shows the previous attempt as its own result', () => {
-  const record = { ...READY, last_submit_error: 'the last attempt failed' }
-
-  assert.equal(submitFailure(record, { sending: true }), null)
-  assert.notEqual(submitFailure(record, { sending: false }), null)
 })
 
 test('a record that never failed shows nothing', () => {

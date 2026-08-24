@@ -5,15 +5,15 @@ import { api } from '../../api/client.js'
 import { appQueries } from '../../hooks/queries.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 import {
-  autopilotOnSend,
   contributeApp as findContributeApp,
   contributeAppId,
-  contributeLabel,
+  contributionReviewIntent,
   diffStatSummary,
   isHorizontalSwipe,
   passedDismissThreshold,
-  payoffLine,
   rememberReviewItemDismissed,
+  reviewDestinationLabel,
+  reviewItemIntent,
   reviewPanelSummary,
   statusLabel,
   submitFailure,
@@ -52,64 +52,17 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
     wasActive.current = turnActive
   }, [turnActive, queryClient, queryKey])
 
-  // The server remains authoritative, but a successful item leaves this
-  // composer surface immediately rather than waiting for its ledger refetch.
-  const [contributedItems, setContributedItems] = useState([])
   // Dismissals are persisted, so this only forces the re-render; the stored
   // decision is what actually filters the list.
   const [dismissRevision, setDismissRevision] = useState(0)
 
   const storage = typeof localStorage !== 'undefined' ? localStorage : null
-  // Remove a successful single record locally before the ledger refetch
-  // returns. Stack review items never send from chat and stay untouched.
-  const pendingItems = visibleReviewItems(data, storage).filter(
-    item => item.kind !== 'record'
-      || !contributedItems.some(done => done.id === item.record.id),
-  )
+  const pendingItems = visibleReviewItems(data, storage)
   const panel = reviewPanelSummary(pendingItems.length)
   const grouped = panel.count > 1
   void dismissRevision
   if (!appId) return null
   if (panel.count === 0) return null
-
-  async function submit(record) {
-    try {
-      const res = await api.contributions.submit(appId, record.id, {
-        autopilot: autopilotOnSend(data),
-      })
-      const body = await res.json().catch(() => null)
-      if (!res.ok) {
-        const detail = body?.detail
-        const message = typeof detail === 'string' ? detail : detail?.message
-        return {
-          failure: {
-            message: typeof message === 'string' && message
-              ? message
-              : 'Could not contribute this. Open Contribute for the details.',
-            detail: typeof detail?.detail === 'string' ? detail.detail : '',
-          },
-        }
-      }
-      return { contributed: true }
-    } catch {
-      return {
-        failure: {
-          message: 'Could not reach the server. Nothing was contributed.',
-          detail: '',
-        },
-      }
-    } finally {
-      queryClient.invalidateQueries({ queryKey, exact: true })
-    }
-  }
-
-  function rememberContributed(recordId) {
-    setContributedItems(items => (
-      items.some(item => item.id === recordId)
-        ? items
-        : [...items, { id: recordId }]
-    ))
-  }
 
   return (
     <div
@@ -127,12 +80,11 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
               {panel.copy}
             </div>
           </div>
-          <span className="contrib-card-stack__count">{panel.count}</span>
         </div>
       )}
       {pendingItems.map(item => {
         const onOpenContribute = contributeApp && onOpenApp
-          ? () => onOpenApp(contributeApp, { final: true })
+          ? (intent) => onOpenApp(contributeApp, { final: true, intent })
           : null
         const onDismiss = () => {
           rememberReviewItemDismissed(item, storage)
@@ -153,10 +105,6 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
           <ReviewRow
             key={item.id}
             record={record}
-            autopilot={autopilotOnSend(data)}
-            showPayoff={!grouped}
-            onSubmit={submit}
-            onContributed={rememberContributed}
             onOpenContribute={onOpenContribute}
             onDismiss={onDismiss}
           />
@@ -260,14 +208,14 @@ function useSwipeToDismiss(onDismiss) {
 
 
 function StackReviewRow({ item, onOpenContribute, onDismiss }) {
-  const [open, setOpen] = useState(false)
   const cardRef = useSwipeToDismiss(onDismiss)
   const total = Number(item.stack?.total) || item.records.length
   const name = item.stack?.name || 'This improvement'
+  const intent = reviewItemIntent(item)
 
   return (
     <div ref={cardRef} className="contrib-card contrib-card--stack">
-      <div className="contrib-card__badge">
+      <div className="contrib-card__topline">
         <span>Review together</span>
         <button
           type="button"
@@ -281,86 +229,38 @@ function StackReviewRow({ item, onOpenContribute, onDismiss }) {
       <p className="contrib-card__summary">
         {name} is ready as a {total}-part contribution stack.
       </p>
-      <p className="contrib-card__meta">
-        {item.repo} · {item.records.length} linked layer{item.records.length === 1 ? '' : 's'}
-      </p>
+      {item.repo ? <p className="contrib-card__meta">{item.repo}</p> : null}
       <p className="contrib-card__payoff">
-        The layers build on each other and are reviewed in order.
+        Contribute keeps the layers in order and opens one decision.
       </p>
       <div className="contrib-card__actions">
         <button
           type="button"
           className="contrib-card__send"
-          disabled={!onOpenContribute}
-          onClick={onOpenContribute}
+          disabled={!onOpenContribute || !intent}
+          onClick={() => onOpenContribute?.(intent)}
         >
-          Review in Contribute
-        </button>
-        <button
-          type="button"
-          className="contrib-card__toggle"
-          aria-expanded={open}
-          onClick={() => setOpen(value => !value)}
-        >
-          {open ? 'Hide layers' : 'Layers'}
+          Review stack in Contribute
         </button>
       </div>
-      {open && (
-        <div className="contrib-card__details">
-          <ol className="contrib-card__layers">
-            {item.records.map((record, index) => (
-              <li key={record.id}>
-                <span>{record.stack?.position || index + 1}. {record.title}</span>
-                {record.summary && <p>{record.summary}</p>}
-              </li>
-            ))}
-          </ol>
-        </div>
-      )}
     </div>
   )
 }
 
 function ReviewRow({
-  record, autopilot, showPayoff, onSubmit, onContributed,
-  onOpenContribute, onDismiss,
+  record, onOpenContribute, onDismiss,
 }) {
-  const [open, setOpen] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const [attempt, setAttempt] = useState(null)
-  // Each row owns its own in-flight guard. That keeps sibling rows independent
-  // while closing the same-frame double-click window for this record.
-  const activeSendRef = useRef(false)
   const diffStat = diffStatSummary(record.diff_stat)
   const submitting = record.status === 'submitting'
   const cardRef = useSwipeToDismiss(onDismiss)
-  const failure = submitFailure(record, { attempt, sending: busy || submitting })
-
-  async function send() {
-    if (activeSendRef.current) return
-    activeSendRef.current = true
-    setBusy(true)
-    setAttempt(null)
-    let outcome
-    try {
-      outcome = await onSubmit(record)
-    } finally {
-      activeSendRef.current = false
-      setBusy(false)
-    }
-    if (outcome?.failure) {
-      setAttempt(outcome.failure)
-    } else if (outcome?.contributed) {
-      onContributed(record.id)
-    }
-  }
+  const failure = submitFailure(record)
+  const intent = contributionReviewIntent(record)
 
   return (
     <div ref={cardRef} className="contrib-card">
-      {/* Header band, then what it is, then the actions. The band also carries
-          dismissal, so the swipe has a visible, pointer- and keyboard-reachable
-          equivalent rather than being a touch-only secret. */}
-      <div className="contrib-card__badge">
+      {/* The quiet status row also carries dismissal, so the swipe has a visible,
+          pointer- and keyboard-reachable equivalent. */}
+      <div className="contrib-card__topline">
         <span>{statusLabel(record)}</span>
         <button
           type="button"
@@ -375,23 +275,19 @@ function ReviewRow({
         {record.summary || record.title || 'An improvement is ready to contribute'}
       </p>
 
-      <p className="contrib-card__meta">
-        {record.repo}
-        {diffStat ? <span> · {diffStat}</span> : null}
-      </p>
-
-      {showPayoff && !failure && !submitting && (
-        <p className="contrib-card__payoff">{payoffLine(record)}</p>
-      )}
-      {autopilot && !failure && !submitting && (
+      {(record.repo || diffStat) ? (
         <p className="contrib-card__meta">
-          Möbius will also handle review feedback after you contribute.
+          {record.repo}
+          {record.repo && diffStat ? <span> · </span> : null}
+          {diffStat ? <span>{diffStat}</span> : null}
         </p>
-      )}
-      {/* One sentence says what happened; the transcript that proves it stays
-          collapsed next to it, so the card explains without shouting plumbing
-          at someone who only needs to know nothing was published. */}
-      {failure && <p className="contrib-card__error">{failure.message}</p>}
+      ) : null}
+
+      <p className={failure ? 'contrib-card__error' : 'contrib-card__payoff'}>
+        {failure?.message || (submitting
+          ? 'Contribute is sending this now; its live status is attached to the review.'
+          : 'Open the exact review to inspect the change and decide what happens next.')}
+      </p>
       {failure?.detail && (
         <details className="contrib-card__failure-detail">
           <summary>What blocked it</summary>
@@ -403,63 +299,12 @@ function ReviewRow({
         <button
           type="button"
           className="contrib-card__send"
-          disabled={busy || submitting}
-          onClick={send}
+          disabled={!onOpenContribute || !intent}
+          onClick={() => onOpenContribute?.(intent)}
         >
-          {submitting || busy ? 'Contributing…' : contributeLabel(record)}
+          {reviewDestinationLabel(record)}
         </button>
-        <button
-          type="button"
-          className="contrib-card__toggle"
-          aria-expanded={open}
-          onClick={() => setOpen(value => !value)}
-        >
-          {open ? 'Hide details' : 'Details'}
-        </button>
-        {/* A failed submit may reveal a server-side change after this ready
-            card loaded. Contribute owns that repair path. */}
-        {failure && onOpenContribute && (
-          <button
-            type="button"
-            className="contrib-card__toggle"
-            onClick={onOpenContribute}
-          >
-            Open Contribute
-          </button>
-        )}
       </div>
-
-      {open && (
-        <div className="contrib-card__details">
-          {record.title && (
-            <p className="contrib-card__detail-title">{record.title}</p>
-          )}
-          {record.branch && (
-            <p className="contrib-card__detail-line">Branch {record.branch}</p>
-          )}
-          {record.labels?.length > 0 && (
-            <p className="contrib-card__detail-line">
-              Labels {record.labels.join(', ')}
-            </p>
-          )}
-          {record.files?.length > 0 && (
-            <>
-              <p className="contrib-card__detail-label">Files</p>
-              <ul className="contrib-card__files">
-                {record.files.map(file => <li key={file}>{file}</li>)}
-              </ul>
-            </>
-          )}
-          {record.body_draft && (
-            <>
-              <p className="contrib-card__detail-label">
-                The exact text that will be published
-              </p>
-              <pre className="contrib-card__body">{record.body_draft}</pre>
-            </>
-          )}
-        </div>
-      )}
     </div>
   )
 }
