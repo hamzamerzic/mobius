@@ -180,6 +180,28 @@ def test_goal_intent_and_latest_objective_scan_durable_history():
   assert _latest_goal_objective(changed_subject) is None
 
 
+def test_goal_controls_ignore_the_server_upload_manifest():
+  manifest = (
+    "\n\n[Files in this session:\n"
+    "- image.png → /data/chats/example/uploads/image.png "
+    "(image/png, 257 KB)]"
+  )
+  assert _goal_objective("/goal ship it" + manifest) == "ship it"
+  assert _chat_has_goal_intent([
+    schemas.ChatMessage(role="user", content="/goal ship it" + manifest),
+  ])
+  assert _goal_resume_requested(SimpleNamespace(messages=[
+    {"role": "user", "content": "continue" + manifest, "kind": "auto_continuation"},
+  ]), "continue" + manifest)
+
+  bracketed_name = (
+    "\n\n[Files in this session:\n"
+    "- chart[final].png → /data/chats/example/uploads/chart[final].png "
+    "(image/png, 257 KB)]"
+  )
+  assert _goal_objective("/goal ship it" + bracketed_name) == "ship it"
+
+
 def test_legacy_goal_migration_requires_a_durable_resume_intent():
   assert _goal_resume_requested(SimpleNamespace(messages=[
     {"role": "assistant", "blocks": [{"type": "error", "resumable": True}]},

@@ -73,6 +73,7 @@ from app.chat_logging import (
   get_logger as _get_logger,
   safe_commit as _safe_commit,
 )
+from app.goal_commands import is_goal_continue
 from app.chat_writer import (
   AppendPending,
   Barrier,
@@ -3977,7 +3978,7 @@ async def _run_chat_impl_with_db(
   goal_objective = _goal_objective(raw_user_message)
   goal_clear = _goal_clear_requested(raw_user_message)
   goal_mode = _chat_has_goal_intent(messages)
-  goal_continue = (raw_user_message or "").strip().lower() == "continue"
+  goal_continue = is_goal_continue(raw_user_message or "")
   question_checkpoint = None
   if settings.ensure_chat_note and chat_id:
     async def question_checkpoint() -> None:
