@@ -66,12 +66,17 @@ test('primary actions reuse one mounted glyph stack', () => {
   assert.match(
     chatInputBar,
     /<ArrowUp className="chat__action-glyph chat__action-glyph--send" width=\{24\} height=\{24\} \/>/,
-    'Send uses the same 24px SDK glyph scale as the microphone so their 2-unit weights match',
+    'Send keeps the same 24px SDK glyph scale as the microphone',
   )
   assert.match(
     chatInputBar,
     /<Mic width=\{24\} height=\{24\} \/>/,
     'the microphone remains the composer glyph-weight reference',
+  )
+  assert.match(
+    chatCss,
+    /\.chat__action-glyph--send path\s*\{[^}]*stroke:\s*currentColor[^}]*stroke-width:\s*0\.24/,
+    'Send receives the small optical weight correction owned by its SDK path',
   )
   assert.match(
     chatInputBar,
