@@ -293,7 +293,9 @@ export function makeChat({ appId, getToken, storage }) {
   }
 
   function onControlMessage(event) {
-    if (event.origin !== window.location.origin || event.source !== window.parent) return
+    // Mini-app frames have an opaque (`null`) origin. The direct parent window
+    // is the trust boundary; request ids correlate replies to this runtime.
+    if (event.source !== window.parent) return
     const message = event.data
     if (!message || message.type !== 'moebius:chat-control-result') return
     const pending = pendingControls.get(message.requestId)
@@ -329,7 +331,7 @@ export function makeChat({ appId, getToken, storage }) {
         requestId,
         action,
         chatId: id,
-      }, window.location.origin)
+      }, '*')
     })
   }
 

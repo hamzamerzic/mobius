@@ -2037,7 +2037,7 @@ function makeChat({ appId, getToken, storage }) {
 		return typeof value === "string" ? value.trim().slice(0, maximum) : "";
 	}
 	function onControlMessage(event) {
-		if (event.origin !== window.location.origin || event.source !== window.parent) return;
+		if (event.source !== window.parent) return;
 		const message = event.data;
 		if (!message || message.type !== "moebius:chat-control-result") return;
 		const pending = pendingControls.get(message.requestId);
@@ -2073,7 +2073,7 @@ function makeChat({ appId, getToken, storage }) {
 				requestId,
 				action,
 				chatId: id
-			}, window.location.origin);
+			}, "*");
 		});
 	}
 	async function appChatFetch(url, init = {}) {

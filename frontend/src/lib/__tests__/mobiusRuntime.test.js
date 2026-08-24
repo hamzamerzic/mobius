@@ -170,11 +170,14 @@ test('chat.start rejects an empty first turn before creating a chat', async () =
   )
 })
 
-test('chat status and stop use correlated trusted-host controls', async () => {
+test('chat status and stop cross the opaque frame boundary through the trusted parent', async () => {
   await withFakeWindow(async ({ window, parent }) => {
+    window.location.origin = 'null'
     const chat = makeChat({ appId: 80, getToken: async () => 'app-token', storage: null })
     const statusPromise = chat.status('chat-cycle')
-    const statusRequest = parent.messages.at(-1).data
+    const statusEnvelope = parent.messages.at(-1)
+    const statusRequest = statusEnvelope.data
+    assert.equal(statusEnvelope.origin, '*')
     assert.equal(statusRequest.type, 'moebius:chat-control')
     assert.equal(statusRequest.action, 'status')
     assert.equal(statusRequest.chatId, 'chat-cycle')
@@ -182,19 +185,27 @@ test('chat status and stop use correlated trusted-host controls', async () => {
       type: 'moebius:chat-control-result',
       requestId: statusRequest.requestId,
       ok: true,
+      result: { running: false },
+    }, { origin: 'https://untrusted.test', source: {} })
+    window.emit({
+      type: 'moebius:chat-control-result',
+      requestId: statusRequest.requestId,
+      ok: true,
       result: { running: true },
-    })
+    }, { origin: 'https://mobius.test' })
     assert.deepEqual(await statusPromise, { running: true })
 
     const stopPromise = chat.stop('chat-cycle')
-    const stopRequest = parent.messages.at(-1).data
+    const stopEnvelope = parent.messages.at(-1)
+    const stopRequest = stopEnvelope.data
+    assert.equal(stopEnvelope.origin, '*')
     assert.equal(stopRequest.action, 'stop')
     window.emit({
       type: 'moebius:chat-control-result',
       requestId: stopRequest.requestId,
       ok: true,
       result: { stopped: true },
-    })
+    }, { origin: 'https://mobius.test' })
     assert.deepEqual(await stopPromise, { stopped: true })
     chat._destroy()
   })
