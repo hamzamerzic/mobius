@@ -2355,9 +2355,10 @@
   opacity: 0;
 }
 
-/* ArrowUp and Mic share a 24px SDK box, but the arrow's long straight edges
-   read optically lighter than the microphone's curved 2-unit bands. Add a
-   hairline around the existing SDK path rather than enlarging the glyph. */
+/* ArrowUp keeps its established 24px SDK box, but its long straight edges read
+   optically light. Add a hairline around the existing path rather than
+   enlarging the glyph. The idle microphone owns its lighter 22px treatment in
+   ComposerMicIcon. */
 .chat__action-glyph--send path {
   stroke: currentColor;
   stroke-width: 0.24;

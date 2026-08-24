@@ -4,10 +4,10 @@
  * consumed on the left and current context consumed on the right.
  *
  * The visible boundary is the actual installed SDK <Brain>, not a redrawn
- * approximation. Only its outer contour is repeated locally as a clip for
- * the colored liquid beneath it. The SDK's transparent lobe spaces reveal
- * that fill; a subtle morphology filter reduces the glyph's visual weight
- * so it matches the composer's other muted action icons.
+ * approximation. Only its outer contour is repeated locally as an inset mask
+ * for the colored liquid beneath it. The mask ends at the visible outline's
+ * inner edge, so the SDK's transparent lobe spaces reveal the fill without a
+ * purple/orange halo escaping around the outside of the brain.
  *
  * Left hemisphere = selected provider's allowance used (purple).
  * Right hemisphere = context window used (orange).
@@ -17,7 +17,7 @@
  * transparent/half colored. `null` (not loaded / unavailable) stays
  * transparent instead of guessing.
  *
- * clipPath ids MUST be unique per rendered instance (via `useId()`), not a
+ * Mask/filter ids MUST be unique per rendered instance (via `useId()`), not a
  * static string. Möbius routinely keeps more than one chat pane mounted at
  * once (background/companion panes), so a static id collided across
  * instances — the browser resolves `url(#id)` to the FIRST matching element
@@ -26,8 +26,8 @@
  * for every instance, clipping the colored fill to nothing everywhere and
  * leaving only the grey base visible. Caught by comparing computed styles
  * (fill + visibility both correct) against actual painted pixels (grey
- * only) in a live screenshot — the mismatch only makes sense as a clip-path
- * id collision.
+ * only) in a live screenshot — the mismatch only makes sense as an SVG
+ * resource-id collision.
  */
 
 import { useId } from 'react'
@@ -35,10 +35,17 @@ import { Brain } from '@openai/apps-sdk-ui/components/Icon'
 
 const PROVIDER_COLOR = 'var(--accent)'
 const CONTEXT_COLOR = '#d97757'
+const DEFAULT_SIZE = 38
+// The partner's artifact reference used the pre-v4 middle treatment: eroding
+// 0.25 units from the SDK glyph's nominal 2-unit bands. The matching fill inset
+// below meets that visible inner edge without letting color escape the brain.
+const OUTLINE_EROSION_RADIUS = 0.25
+const NOMINAL_BOUNDARY_WIDTH = 2
+const FILL_INSET = NOMINAL_BOUNDARY_WIDTH - OUTLINE_EROSION_RADIUS
 
 // Full brain silhouette, both lobes in one contour. Bounding box is roughly
-// x:[2.3, 21.7] y:[2.3, 21.7] in the 24x24 viewBox — centered, so a clip at
-// x=12 splits it evenly.
+// x:[2.3, 21.7] y:[2.3, 21.7] in the 24x24 viewBox — centered, so the two
+// fill rectangles split it evenly at x=12.
 const BRAIN_SILHOUETTE_PATH = 'M14.8974 2.29998C15.8303 2.29013 16.802 2.58194 17.5566 3.22577'
   + 'C18.1589 3.73967 18.5845 4.44761 18.7451 5.31073C20.0159 5.68745 21.0027 6.50113 21.4482 7.6037'
   + 'C21.8952 8.70995 21.7263 9.93091 20.9902 10.9914C21.5775 11.9456 21.7666 13.1257 21.6757 14.2189'
@@ -70,13 +77,13 @@ function HemisphereFill({ percent, side, color }) {
 export default function BrainUsageIcon({
   leftPercent = null,
   rightPercent = null,
-  width = 32,
-  height = 32,
+  width = DEFAULT_SIZE,
+  height = DEFAULT_SIZE,
 }) {
   // Unique per rendered icon — see the id-collision note above. Multiple
-  // mounted chat panes must never resolve this fill to another icon's clip.
+  // mounted chat panes must never resolve this fill to another icon's mask.
   const uid = useId()
-  const silhouetteId = `${uid}-silhouette`
+  const fillMaskId = `${uid}-fill-mask`
   const outlineFilterId = `${uid}-outline`
   const leftKnown = typeof leftPercent === 'number' && Number.isFinite(leftPercent)
   const rightKnown = typeof rightPercent === 'number' && Number.isFinite(rightPercent)
@@ -88,9 +95,23 @@ export default function BrainUsageIcon({
       viewBox="0 0 24 24"
       aria-hidden="true"
     >
-      <clipPath id={silhouetteId}>
-        <path d={BRAIN_SILHOUETTE_PATH} />
-      </clipPath>
+      <mask
+        id={fillMaskId}
+        maskUnits="userSpaceOnUse"
+        x="0"
+        y="0"
+        width="24"
+        height="24"
+      >
+        <rect width="24" height="24" fill="black" />
+        <path
+          d={BRAIN_SILHOUETTE_PATH}
+          fill="white"
+          stroke="black"
+          strokeWidth={FILL_INSET * 2}
+          strokeLinejoin="round"
+        />
+      </mask>
       <filter
         id={outlineFilterId}
         x="-1"
@@ -99,13 +120,13 @@ export default function BrainUsageIcon({
         height="26"
         filterUnits="userSpaceOnUse"
       >
-        {/* The SDK brain is scaled from 24 to 32px here. Eroding its nominal
-            2px outline by 0.1px per edge leaves an optical stroke near 1.8px:
-            about 25% heavier than the previous 1.44px pass while preserving
-            enough transparent lobe area for the gauges to read. */}
-        <feMorphology in="SourceGraphic" operator="erode" radius="0.1" />
+        <feMorphology
+          in="SourceGraphic"
+          operator="erode"
+          radius={OUTLINE_EROSION_RADIUS}
+        />
       </filter>
-      <g clipPath={`url(#${silhouetteId})`}>
+      <g mask={`url(#${fillMaskId})`}>
         {leftKnown && (
           <HemisphereFill
             percent={leftPercent}
