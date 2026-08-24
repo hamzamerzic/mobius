@@ -45,7 +45,7 @@
  * ║      Without it, tapping × steals focus → iOS collapses kb.      ║
  * ║                                                                  ║
  * ║   4. ICONS COME FROM THE APPS-SDK-UI PACKAGE                     ║
- * ║      Primary action: `ArrowUp` (22) for send, `Mic` (24), and    ║
+ * ║      Primary action: `ArrowUp` (24) for send, `Mic` (24), and    ║
  * ║      `Stop` (28). The package ships these — don't substitute     ║
  * ║      hand-rolled paths.                                          ║
  * ║                                                                  ║
@@ -140,7 +140,7 @@ import {
 function PrimaryActionGlyphs({ action }) {
   return (
     <span className={`chat__action-glyphs chat__action-glyphs--${action}`} aria-hidden="true">
-      <ArrowUp className="chat__action-glyph chat__action-glyph--send" width={22} height={22} />
+      <ArrowUp className="chat__action-glyph chat__action-glyph--send" width={24} height={24} />
       <DoubleChevronRight className="chat__action-glyph chat__action-glyph--steer" width={20} height={20} />
       <Stop className="chat__action-glyph chat__action-glyph--stop" width={28} height={28} />
     </span>

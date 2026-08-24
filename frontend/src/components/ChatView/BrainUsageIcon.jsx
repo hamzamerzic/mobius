@@ -99,7 +99,10 @@ export default function BrainUsageIcon({
         height="26"
         filterUnits="userSpaceOnUse"
       >
-        <feMorphology in="SourceGraphic" operator="erode" radius="0.12" />
+        {/* The SDK brain is scaled from 24 to 30px here. Its nominal 2-unit
+            glyph weight would become 2.5px; eroding 0.2 units from each edge
+            leaves a 2px rendered boundary, matching the 24px SDK microphone. */}
+        <feMorphology in="SourceGraphic" operator="erode" radius="0.2" />
       </filter>
       <g clipPath={`url(#${silhouetteId})`}>
         {leftKnown && (
