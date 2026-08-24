@@ -91,6 +91,31 @@ MODEL_EFFORT_LEVELS: dict[str, list[str]] = {
   "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
 }
 
+# Usable input context before the provider runtime compacts. The live Codex
+# catalog overrides these values below; the exact map keeps empty chats honest
+# when discovery is offline. Claude's model endpoint does not publish a
+# context field, so its documented per-model limits live at this adapter seam.
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+  "claude-fable-5": 1_000_000,
+  "claude-opus-5": 1_000_000,
+  "claude-opus-4-8": 1_000_000,
+  "claude-opus-4-7": 1_000_000,
+  "claude-opus-4-6": 1_000_000,
+  "claude-sonnet-5": 1_000_000,
+  "claude-sonnet-4-7-20251215": 1_000_000,
+  "claude-sonnet-4-6": 1_000_000,
+  "claude-opus-4-5-20251001": 200_000,
+  "claude-sonnet-4-5-20251001": 200_000,
+  "claude-haiku-4-5-20251001": 200_000,
+  "gpt-5.6-sol": 258_400,
+  "gpt-5.6-terra": 258_400,
+  "gpt-5.6-luna": 258_400,
+  "gpt-5.5": 258_400,
+  "gpt-5.4": 258_400,
+  "gpt-5.4-mini": 258_400,
+  "gpt-5.3-codex-spark": 121_600,
+}
+
 # Curated first-run model visibility. The registry remains broader so an
 # existing chat can keep rendering an older saved model and the owner can
 # reveal any hidden row from Settings. An explicit owner preference (including
@@ -848,6 +873,8 @@ def _fallback_models(provider_id: str) -> list[dict[str, Any]]:
       "available": True,
       **({"effort_levels": MODEL_EFFORT_LEVELS[mid]}
          if mid in MODEL_EFFORT_LEVELS else {}),
+      **({"context_window": MODEL_CONTEXT_WINDOWS[mid]}
+         if mid in MODEL_CONTEXT_WINDOWS else {}),
     }
     for mid in KNOWN_MODELS.get(provider_id, [])
   ]
@@ -888,6 +915,7 @@ def _live_model_entries(
     metadata = live_by_id.get(model_id, {})
     label = metadata.get("label")
     efforts = metadata.get("effort_levels")
+    context_window = metadata.get("context_window")
     if not isinstance(label, str) or not label.strip():
       label = model_id
     else:
@@ -902,6 +930,14 @@ def _live_model_entries(
       entry["effort_levels"] = efforts
     elif model_id in MODEL_EFFORT_LEVELS:
       entry["effort_levels"] = MODEL_EFFORT_LEVELS[model_id]
+    if (
+      isinstance(context_window, (int, float))
+      and not isinstance(context_window, bool)
+      and context_window > 0
+    ):
+      entry["context_window"] = round(context_window)
+    elif model_id in MODEL_CONTEXT_WINDOWS:
+      entry["context_window"] = MODEL_CONTEXT_WINDOWS[model_id]
     entries.append(entry)
   return entries
 
@@ -1171,6 +1207,27 @@ def _codex_model_slug(entry: Any) -> str | None:
   return slug if isinstance(slug, str) else None
 
 
+def _catalog_context_window(raw: Any) -> int | None:
+  """Return the catalog's usable pre-compaction input window."""
+  if not isinstance(raw, dict):
+    return None
+  context_window = raw.get("context_window")
+  if (
+    not isinstance(context_window, (int, float))
+    or isinstance(context_window, bool)
+    or context_window <= 0
+  ):
+    return None
+  effective_percent = raw.get("effective_context_window_percent")
+  if (
+    isinstance(effective_percent, (int, float))
+    and not isinstance(effective_percent, bool)
+    and 0 < effective_percent <= 100
+  ):
+    context_window *= effective_percent / 100
+  return round(context_window)
+
+
 def _codex_model_entries_from_payload(payload: Any) -> list[dict[str, Any]]:
   """Extract picker metadata from raw Codex catalog JSON.
 
@@ -1201,6 +1258,9 @@ def _codex_model_entries_from_payload(payload: Any) -> list[dict[str, Any]]:
     ]
     if efforts:
       entry["effort_levels"] = efforts
+    context_window = _catalog_context_window(raw)
+    if context_window is not None:
+      entry["context_window"] = context_window
     entries.append(entry)
   return entries
 

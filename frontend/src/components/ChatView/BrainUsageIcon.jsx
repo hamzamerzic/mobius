@@ -99,11 +99,11 @@ export default function BrainUsageIcon({
         height="26"
         filterUnits="userSpaceOnUse"
       >
-        {/* The SDK brain is scaled from 24 to 32px here. Its dense curves read
-            slightly heavier than the 24px microphone at the nominal 2px
-            weight, so this small optical correction goes just beyond the
-            mathematical match without returning to the earlier thin pass. */}
-        <feMorphology in="SourceGraphic" operator="erode" radius="0.28" />
+        {/* The SDK brain is scaled from 24 to 32px here. Eroding its nominal
+            2px outline by 0.1px per edge leaves an optical stroke near 1.8px:
+            about 25% heavier than the previous 1.44px pass while preserving
+            enough transparent lobe area for the gauges to read. */}
+        <feMorphology in="SourceGraphic" operator="erode" radius="0.1" />
       </filter>
       <g clipPath={`url(#${silhouetteId})`}>
         {leftKnown && (

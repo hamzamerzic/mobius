@@ -83,8 +83,33 @@ def test_normalize_codex_usage_reads_primary_secondary_and_credits():
   assert snapshot["credit_balance"] == "18.50 credits"
 
 
+def test_normalize_mobius_usage_reads_api_credit_consumption():
+  from app.provider_usage import normalize_mobius_usage
+
+  snapshot = normalize_mobius_usage({
+    "balance": {
+      "spendable_units": 650_000,
+      "granted_units": 2_000_000,
+    },
+  })
+
+  assert snapshot["state"] == "ready"
+  assert snapshot["plan_label"] == "Möbius subscription"
+  assert snapshot["windows"] == [{
+    "id": "api_credits",
+    "kind": "api_credits",
+    "label": "API credits",
+    "used_percent": 67.5,
+    "resets_at": None,
+  }]
+
+
 def test_normalizers_report_unavailable_without_inventing_limits():
-  from app.provider_usage import normalize_claude_usage, normalize_codex_usage
+  from app.provider_usage import (
+    normalize_claude_usage,
+    normalize_codex_usage,
+    normalize_mobius_usage,
+  )
 
   claude = normalize_claude_usage({}, subscription_type="pro")
   codex = normalize_codex_usage({"rate_limits": {}}, plan_type="team")
@@ -98,6 +123,12 @@ def test_normalizers_report_unavailable_without_inventing_limits():
   assert codex == {
     "state": "unavailable",
     "plan_label": "Team plan",
+    "windows": [],
+    "credit_balance": None,
+  }
+  assert normalize_mobius_usage({"balance": {"spendable_units": 500}}) == {
+    "state": "unavailable",
+    "plan_label": "Möbius subscription",
     "windows": [],
     "credit_balance": None,
   }

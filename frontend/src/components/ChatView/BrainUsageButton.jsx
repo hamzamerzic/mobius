@@ -1,7 +1,12 @@
-import { chatQueries, settingsQueries } from '../../hooks/queries.js'
+import { chatQueries, modelQueries, settingsQueries } from '../../hooks/queries.js'
 import BrainUsageIcon from './BrainUsageIcon.jsx'
-import { weeklyUsagePercent } from '../SettingsView/providerUsage.js'
-import { contextTokenCounts, contextUsedPercent, formatTokenCount } from './brainUsage.js'
+import { providerAllowance } from '../SettingsView/providerUsage.js'
+import {
+  contextTokenCounts,
+  contextUsedPercent,
+  formatRoundedTokenCount,
+  modelContextTokenCounts,
+} from './brainUsage.js'
 
 const PROVIDER_LABELS = {
   claude: 'Claude',
@@ -15,6 +20,7 @@ export default function BrainUsageButton({
   chatId = null,
   provider = null,
   providerSessionId = null,
+  model = null,
 }) {
   const providerUsageQuery = settingsQueries.providerUsage.useQuery(provider, {
     enabled: usageEnabled && Boolean(provider),
@@ -25,24 +31,36 @@ export default function BrainUsageButton({
     providerSessionId,
     { enabled: usageEnabled },
   )
-  const leftPercent = providerUsageQuery.isLoading
-    ? null
-    : weeklyUsagePercent(providerUsageQuery.data)
-  const contextTokens = contextUsageQuery.isLoading
+  const modelRegistryQuery = modelQueries.registry.useQuery({
+    enabled: usageEnabled && !providerSessionId && Boolean(provider && model),
+  })
+  const allowance = providerUsageQuery.isLoading
+    ? providerAllowance(provider, null)
+    : providerAllowance(provider, providerUsageQuery.data)
+  const leftPercent = allowance.usedPercent
+  const liveContextTokens = contextUsageQuery.isLoading
     ? null
     : contextTokenCounts(contextUsageQuery.data)
-  const rightPercent = contextUsageQuery.isLoading
+  const contextTokens = liveContextTokens || (
+    !providerSessionId && !modelRegistryQuery.isLoading
+      ? modelContextTokenCounts(modelRegistryQuery.data, provider, model)
+      : null
+  )
+  const rightPercent = contextTokens === null
     ? null
-    : contextUsedPercent(contextUsageQuery.data)
+    : contextUsedPercent({
+      input_tokens: contextTokens.used,
+      context_window: contextTokens.maximum,
+    })
   const providerLabel = PROVIDER_LABELS[provider] || 'Current model'
 
   const usageSummary = [
     leftPercent === null
-      ? `${providerLabel} weekly usage: unknown`
-      : `${providerLabel} weekly usage: ${Math.round(leftPercent)}%`,
+      ? `${providerLabel} ${allowance.label.toLowerCase()}: unknown`
+      : `${providerLabel} ${allowance.label.toLowerCase()}: ${Math.round(leftPercent)}%`,
     contextTokens === null || rightPercent === null
       ? 'Context used: unknown'
-      : `Context used: ${formatTokenCount(contextTokens.used)} of ${formatTokenCount(contextTokens.maximum)} tokens (${Math.round(rightPercent)}%); ${Math.round(100 - rightPercent)}% remains before compaction`,
+      : `Context used: ${formatRoundedTokenCount(contextTokens.used)} of ${formatRoundedTokenCount(contextTokens.maximum)} tokens (${Math.round(rightPercent)}%); ${Math.round(100 - rightPercent)}% remains before compaction`,
   ].join(' · ')
 
   return children({
@@ -51,7 +69,9 @@ export default function BrainUsageButton({
     providerUsage: {
       provider,
       providerLabel,
-      weeklyUsagePercent: leftPercent,
+      allowanceKind: allowance.kind,
+      allowanceLabel: allowance.label,
+      allowanceUsedPercent: leftPercent,
       contextTokensUsed: contextTokens?.used ?? null,
       contextTokensMaximum: contextTokens?.maximum ?? null,
     },

@@ -91,7 +91,7 @@ import {
   visibleProviderModels,
 } from '../../lib/providerAvailability.js'
 import { detailToMessage } from '../../lib/errorDetail.js'
-import { formatTokenCount } from './brainUsage.js'
+import { formatRoundedTokenCount } from './brainUsage.js'
 import './ChatSettingsPanel.css'
 
 /** Claude product mark — four-petal flower / starburst silhouette,
@@ -626,14 +626,14 @@ export default function ChatSettingsPanel({
 
   const currentProviderConfigured = availability.configuredProviders.has(draftProvider)
   const currentProviderLabel = PROVIDER_INFO[draftProvider]?.label || draftProvider
-  const weeklyUsageLabel = typeof providerUsage?.weeklyUsagePercent === 'number'
-    ? `${Math.round(providerUsage.weeklyUsagePercent)}% weekly usage`
-    : 'Weekly usage'
+  const allowanceUsageLabel = typeof providerUsage?.allowanceUsedPercent === 'number'
+    ? `${Math.round(providerUsage.allowanceUsedPercent)}% ${providerUsage.allowanceLabel.toLowerCase()}`
+    : (providerUsage?.allowanceLabel || 'Usage')
   const contextUsageLabel = (
     typeof providerUsage?.contextTokensUsed === 'number'
     && typeof providerUsage?.contextTokensMaximum === 'number'
   )
-    ? `${formatTokenCount(providerUsage.contextTokensUsed)} / ${formatTokenCount(providerUsage.contextTokensMaximum)} tokens`
+    ? `${formatRoundedTokenCount(providerUsage.contextTokensUsed)} / ${formatRoundedTokenCount(providerUsage.contextTokensMaximum)} tokens`
     : 'Context'
   return (
     <div className="csp">
@@ -641,11 +641,11 @@ export default function ChatSettingsPanel({
         <div className="csp__label">Model</div>
         <div
           className="csp__usage-key"
-          aria-label="Brain fill shows weekly usage and context tokens consumed"
+          aria-label="Brain fill shows provider allowance and context tokens consumed"
         >
           <span className="csp__usage-key-item">
             <span className="csp__usage-key-line csp__usage-key-line--provider" aria-hidden="true" />
-            <span>{weeklyUsageLabel}</span>
+            <span>{allowanceUsageLabel}</span>
           </span>
           <span className="csp__usage-key-item">
             <span className="csp__usage-key-line csp__usage-key-line--context" aria-hidden="true" />

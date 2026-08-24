@@ -4876,6 +4876,7 @@ export default function ChatView({
               chatId={chatId}
               provider={chatInfo?.provider}
               providerSessionId={chatInfo?.session_id}
+              model={chatInfo?.effective_agent_settings?.model}
             >
               {({ icon, ariaLabel, providerUsage }) => (
               <ComposerPopover

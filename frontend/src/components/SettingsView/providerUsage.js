@@ -43,9 +43,17 @@ export function visibleUsageWindows(snapshot) {
     .slice(0, 4)
 }
 
-export function weeklyUsagePercent(snapshot) {
-  if (snapshot?.state !== 'ready' || !Array.isArray(snapshot.windows)) return null
-  const weekly = snapshot.windows.find(window => window?.kind === 'weekly')
-  const used = Number(weekly?.used_percent)
-  return Number.isFinite(used) ? clampUsagePercent(used) : null
+export function providerAllowance(provider, snapshot) {
+  const kind = provider === 'mobius' ? 'api_credits' : 'weekly'
+  const label = kind === 'api_credits' ? 'API credits usage' : 'Weekly usage'
+  if (snapshot?.state !== 'ready' || !Array.isArray(snapshot.windows)) {
+    return { kind, label, usedPercent: null }
+  }
+  const window = snapshot.windows.find(candidate => candidate?.kind === kind)
+  const used = Number(window?.used_percent)
+  return {
+    kind,
+    label,
+    usedPercent: Number.isFinite(used) ? clampUsagePercent(used) : null,
+  }
 }

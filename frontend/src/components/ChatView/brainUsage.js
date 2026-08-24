@@ -23,8 +23,22 @@ export function contextTokenCounts(snapshot) {
   }
 }
 
-export function formatTokenCount(value) {
-  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value)
+export function modelContextTokenCounts(registry, provider, model) {
+  const models = registry?.[provider]
+  if (!Array.isArray(models) || typeof model !== 'string') return null
+  const entry = models.find(candidate => candidate?.id === model)
+  const maximum = entry?.context_window
+  if (typeof maximum !== 'number' || !Number.isFinite(maximum) || maximum <= 0) {
+    return null
+  }
+  return { used: 0, maximum: Math.round(maximum) }
+}
+
+export function formatRoundedTokenCount(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return ''
+  if (Math.abs(value) < 500) return '0'
+  const thousands = Math.round(value / 1_000)
+  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(thousands)}k`
 }
 
 export function contextUsedPercent(snapshot) {
