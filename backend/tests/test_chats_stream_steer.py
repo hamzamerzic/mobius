@@ -213,6 +213,7 @@ def test_steers_into_live_codex_turn_when_flag_on(
   assert roles == ["user", "assistant", "user"]
   assert chat.messages[-1]["content"] == "actually use blue"
   assert chat.messages[-1]["role"] == "user"
+  assert chat.messages[-1]["steered"] is True
 
   # A `steered_into_turn` event was broadcast for the inline render.
   bc = get_broadcast(chat_id)
@@ -227,6 +228,7 @@ def test_steers_into_live_codex_turn_when_flag_on(
       "ts": chat.messages[-1]["ts"],
       "cid": cid_of(chat.messages[-1]),
       "content": "actually use blue",
+      "steered": True,
     }
   ]
 
@@ -1566,7 +1568,9 @@ def test_claude_steer_cut_event_is_published_at_the_seal_not_at_http_arrival(
     "ts": steered_row["ts"],
     "cid": cid_of(steered_row),
     "content": "Q2",
+    "steered": True,
   }]
+  assert steered_row["steered"] is True
   # And A1 really was sealed at the boundary the cut names.
   assert [(m["role"], m.get("content")) for m in _read_chat(chat_id).messages] == [
     ("user", "Q1"),
@@ -1616,12 +1620,14 @@ def test_codex_steer_publishes_cut_from_handle_owned_settlement(
   assert [e.get("type") for e in bc.event_log] == ["steered_into_turn"]
   cut = [e for e in bc.event_log if e.get("type") == "steered_into_turn"][0]
   assert [m["content"] for m in cut["messages"]] == ["Q2"]
+  assert [m["steered"] for m in cut["messages"]] == [True]
   # The owning sink sealed A1 and appended Q2 before publishing.
   assert [(m["role"], m.get("content")) for m in _read_chat(chat_id).messages] == [
     ("user", "Q1"),
     ("assistant", "A1"),
     ("user", "Q2"),
   ]
+  assert _read_chat(chat_id).messages[-1]["steered"] is True
   assert sink.assistant_blocks == []
 
 

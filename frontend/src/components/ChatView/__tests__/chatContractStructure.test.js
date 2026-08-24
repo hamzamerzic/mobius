@@ -33,7 +33,7 @@ test('owner contract keeps question anchors through responsive geometry', () => 
     new URL('../../../../../ARCHITECTURE.md', import.meta.url),
     'utf8',
   )
-  assert.match(architecture, /Owner-authoritative contract — v1\.22 \(2026-08-23\)/)
+  assert.match(architecture, /Owner-authoritative contract — v1\.23 \(2026-08-24\)/)
   assert.match(
     architecture,
     /In-message question Submit begins \| any \| transient `ANCHOR_AT` over the prior mode/,

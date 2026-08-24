@@ -2417,6 +2417,12 @@ class ChatWriterActor:
     stored_messages: list[dict] = []
     for raw_msg in raw_user_msgs:
       new_msg = dict(raw_msg)
+      # This provenance is part of the durable transcript contract, not a UI
+      # hint.  A normal Q1/A1/Q2/A2 exchange is indistinguishable from a
+      # mid-turn steer after reload unless the committed Q2 row names the
+      # boundary.  The renderer may then join an exact provider replay without
+      # guessing from content alone; every non-steer row fails closed.
+      new_msg["steered"] = True
       key = ensure_user_cid(new_msg)
       if key is not None and key in seen_cids:
         log.warning(

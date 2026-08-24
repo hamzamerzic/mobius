@@ -168,6 +168,7 @@ def steered_into_turn_event(stored_messages: list[dict]) -> dict:
         "ts": msg.get("ts"),
         "cid": cid_of(msg),
         "content": msg.get("content", ""),
+        "steered": True,
         **({"attachments": msg.get("attachments")} if msg.get("attachments") else {}),
       }
       for msg in stored_messages

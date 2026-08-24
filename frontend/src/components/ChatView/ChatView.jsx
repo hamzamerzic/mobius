@@ -120,6 +120,10 @@ import {
   deriveActiveAssistantSelection,
 } from './activeAssistantSelection.js'
 import {
+  projectSettledSteerContinuations,
+  sealedAssistantBeforeSteer,
+} from './steerContinuity.js'
+import {
   answerKeepsCurrentTurn,
   builtAppPulseDecision,
   canFastForwardQueue,
@@ -1461,6 +1465,7 @@ export default function ChatView({
             content: m?.content || '',
             ts: tsv,
             cid: m?.cid ?? null,
+            steered: true,
             ...(m?.attachments ? { attachments: m.attachments } : {}),
           }
         })
@@ -4343,6 +4348,13 @@ export default function ChatView({
     hasLivePayload: hasLiveAssistantPayload,
     appendIndex: offset + messages.length,
   })
+  const activeSteerContinuationIndex = activeMirrorMsgIdx >= 0
+    ? activeMirrorMsgIdx
+    : messages.length
+  const sealedSteerAssistant = sealedAssistantBeforeSteer(
+    messages,
+    activeSteerContinuationIndex,
+  )
   useLayoutEffect(() => {
     if (!turnActive) {
       activeAssistantDataKeyRef.current = null
@@ -4401,9 +4413,13 @@ export default function ChatView({
   ).map(item => item.key === 'goal' && activeGoalPlan
     ? { ...item, details: <GoalPlanDetails plan={activeGoalPlan} /> }
     : item)
+  const displayedMessages = useMemo(
+    () => projectSettledSteerContinuations(messages),
+    [messages],
+  )
   let lastVisibleMessageIndex = -1
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (!messages[i].hidden) {
+  for (let i = displayedMessages.length - 1; i >= 0; i -= 1) {
+    if (!displayedMessages[i].hidden) {
       lastVisibleMessageIndex = i
       break
     }
@@ -4540,7 +4556,7 @@ export default function ChatView({
             non-empty chat, including after unmount/remount. Keep the list's
             elastic min-height out of the spacer formula at all times. */}
         <ul className="chat__list" style={{ minHeight: 0 }}>
-          {messages.map((msg, i) => {
+          {displayedMessages.map((msg, i) => {
             if (msg.hidden) return null
             const continuationMarker = isContinuationMessage(msg)
             const isLastMsg = i === lastVisibleMessageIndex
@@ -4680,6 +4696,7 @@ export default function ChatView({
               // ", in progress" — instead of settling early. Source selection
               // still gates resume/question routing above (review 2026-07-17).
               isStreaming={activeAssistantIsStreaming || turnActive}
+              sealedSteerAssistant={sealedSteerAssistant}
             />
           )}
 
