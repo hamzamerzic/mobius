@@ -21,6 +21,7 @@ import useNavigation, { deepLink } from '../../hooks/useNavigation.js'
 import useContextMenuOutsideDismiss from '../../hooks/useContextMenuOutsideDismiss.js'
 import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
 import { captureLayoutSpace, clientPointToLayout } from '../../lib/layoutSpace.js'
+import { makeAppChatController } from '../../lib/appChatControl.js'
 import { parseNotificationTarget } from '../../lib/notificationTarget.js'
 import { recordClientError } from '../../lib/errorLog.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
@@ -815,6 +816,14 @@ export default function Shell({ onInitialVisualReady }) {
   // re-registering every mounted AppCanvas message listener.
   const appsRef = useRef(apps)
   useEffect(() => { appsRef.current = apps }, [apps])
+  const appChatControllerRef = useRef(null)
+  if (!appChatControllerRef.current) {
+    appChatControllerRef.current = makeAppChatController({
+      knownChats: () => chatsRef.current,
+      chats: api.chats,
+      readJson: jsonOrThrow,
+    })
+  }
   // Latest-`newChat` ref so the stable handleAppError can start a fresh chat
   // for a crash report without depending on newChat's identity (newChat is a
   // per-render function declaration with volatile inputs — chats, streaming,
@@ -2047,8 +2056,11 @@ export default function Shell({ onInitialVisualReady }) {
   // AppCanvas owns exact-window attribution and wire-format narrowing for
   // every frame request. This callback owns the workspace outcome only, so the
   // standalone host and workspace cannot drift into separate message routers.
-  const handleAppHostRequest = useCallback((_appId, request) => {
-    void (async () => {
+  const handleAppHostRequest = useCallback((appId, request) => {
+    return (async () => {
+      if (request.type === 'moebius:chat-control') {
+        return appChatControllerRef.current(appId, request)
+      }
       if (request.type === 'moebius:new-chat') {
         await newChatRef.current?.({
           draft: request.draft || undefined,

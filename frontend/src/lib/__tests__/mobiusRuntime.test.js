@@ -170,6 +170,84 @@ test('chat.start rejects an empty first turn before creating a chat', async () =
   )
 })
 
+test('chat status and stop cross the opaque frame boundary through the trusted parent', async () => {
+  await withFakeWindow(async ({ window, parent }) => {
+    window.location.origin = 'null'
+    const chat = makeChat({ appId: 80, getToken: async () => 'app-token', storage: null })
+    const statusPromise = chat.status('chat-cycle')
+    const statusEnvelope = parent.messages.at(-1)
+    const statusRequest = statusEnvelope.data
+    assert.equal(statusEnvelope.origin, '*')
+    assert.equal(statusRequest.type, 'moebius:chat-control')
+    assert.equal(statusRequest.action, 'status')
+    assert.equal(statusRequest.chatId, 'chat-cycle')
+    window.emit({
+      type: 'moebius:chat-control-result',
+      requestId: statusRequest.requestId,
+      ok: true,
+      result: { running: false },
+    }, { origin: 'https://untrusted.test', source: {} })
+    window.emit({
+      type: 'moebius:chat-control-result',
+      requestId: statusRequest.requestId,
+      ok: true,
+      result: { running: true },
+    }, { origin: 'https://mobius.test' })
+    assert.deepEqual(await statusPromise, { running: true })
+
+    const stopPromise = chat.stop('chat-cycle')
+    const stopEnvelope = parent.messages.at(-1)
+    const stopRequest = stopEnvelope.data
+    assert.equal(stopEnvelope.origin, '*')
+    assert.equal(stopRequest.action, 'stop')
+    window.emit({
+      type: 'moebius:chat-control-result',
+      requestId: stopRequest.requestId,
+      ok: true,
+      result: { stopped: true },
+    }, { origin: 'https://mobius.test' })
+    assert.deepEqual(await stopPromise, { stopped: true })
+    chat._destroy()
+  })
+})
+
+test('chat controls reject direct top-level use without starting a timeout', async () => {
+  const previousWindow = globalThis.window
+  const fakeWindow = {
+    location: { origin: 'https://mobius.test' },
+    addEventListener() {},
+    removeEventListener() {},
+  }
+  fakeWindow.parent = fakeWindow
+  globalThis.window = fakeWindow
+  try {
+    const chat = makeChat({ appId: 80, getToken: async () => 'app-token', storage: null })
+    await assert.rejects(chat.status('chat-cycle'), /trusted host is unavailable/)
+    chat._destroy()
+  } finally {
+    globalThis.window = previousWindow
+  }
+})
+
+test('chat list exposes only the calling app chat index', async () => {
+  const previousFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url) => {
+    calls.push(url)
+    return new Response(JSON.stringify([{ id: 'cycle-chat' }]), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+  try {
+    const chat = makeChat({ appId: 80, getToken: async () => 'app-token', storage: null })
+    assert.deepEqual(await chat.list({ scope: 'contribute-cycle' }), [{ id: 'cycle-chat' }])
+    assert.deepEqual(calls, ['/api/app-chats?scope=contribute-cycle'])
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})
+
 async function withFakeWindow(fn) {
   const previousWindow = globalThis.window
   const listeners = new Set()
