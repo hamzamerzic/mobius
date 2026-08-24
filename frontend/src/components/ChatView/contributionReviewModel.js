@@ -1,7 +1,7 @@
 // Pure model for the chat's contribution review card (view in
-// ContributionReviewCard.jsx). The card is a compact doorway into Contribute,
-// not a second publishing workflow: Contribute owns the complete review,
-// confirmation, and recovery surface for every prepared record.
+// ContributionReviewCard.jsx). The card keeps the reviewed happy path in the
+// conversation where the work happened and opens Contribute for deeper review,
+// stacks, or recovery. Both surfaces call the same platform-owned mutations.
 
 // The ledger lives in the Contribute app's storage, so the card resolves that
 // app by slug. Not installed → nothing staged → the card never renders.
@@ -24,6 +24,34 @@ export function actionableRecords(payload) {
   return (payload?.records || []).filter(
     record => ACTIONABLE_STATUSES.has(record?.status),
   )
+}
+
+/** Why direct publication is unavailable, or null when the exact review can send. */
+export function sendBlocker(record, { connected } = {}) {
+  if (!record || record.status !== 'prepared') return null
+  if (record.stack || record.is_stack) {
+    return 'Review and send this linked set together in Contribute.'
+  }
+  if (connected === false) return 'Connect GitHub in Contribute before sending.'
+  if (record.quality_review_ready !== true) {
+    return 'Finish the exact agent review before sending.'
+  }
+  if (record.review?.state === 'ready') return null
+  return record.review?.message
+    || 'Refresh this review in Contribute before sending.'
+}
+
+/** Match Contribute's default follow-up grant for a newly opened PR. */
+export function autopilotOnSend(payload) {
+  return payload?.autopilot_available === true
+    && payload.autopilot_default !== false
+}
+
+/** Copy for the one public action represented by this prepared record. */
+export function publicationAction(record) {
+  return record?.action === 'pr_update'
+    ? { label: 'Update PR', busyLabel: 'Updating PR', progress: 'Updating the reviewed pull request…' }
+    : { label: 'Send PR', busyLabel: 'Sending PR', progress: 'Opening the reviewed pull request…' }
 }
 
 // The platform repository remains useful in tests and record grouping, but the
@@ -53,7 +81,10 @@ export function statusLabel(record) {
     return 'Needs attention'
   }
   if (record?.stack || record?.is_stack) return 'Review together'
-  return 'Ready in Contribute'
+  if (record?.quality_review_ready === true && record?.review?.state === 'ready') {
+    return record?.action === 'pr_update' ? 'Ready to update' : 'Ready to send'
+  }
+  return 'Review ready'
 }
 
 export function reviewDestinationLabel(record) {
@@ -81,8 +112,9 @@ export function diffStatSummary(value) {
  * A send that failed is a fact about the record, not about this render, so the
  * compact doorway still explains it after a reload. Contribute owns retrying.
  */
-export function submitFailure(record) {
-  const source = {
+export function submitFailure(record, { attempt = null, sending = false } = {}) {
+  if (sending) return null
+  const source = attempt || {
     message: record?.last_submit_error,
     detail: record?.last_submit_error_detail,
   }

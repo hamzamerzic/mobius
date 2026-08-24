@@ -1,5 +1,5 @@
-/* Compact review handoff above the composer. The card is a doorway into the
-   exact Contribute decision, not a second review or publishing surface. */
+/* Compact reviewed action above the composer. The happy path can publish here;
+   deeper review, grouped work, and recovery open the exact Contribute item. */
 
 .contrib-card-stack,
 .contrib-card {
@@ -113,6 +113,7 @@
 
 .contrib-card__dismiss:focus-visible,
 .contrib-card__send:focus-visible,
+.contrib-card__review:focus-visible,
 .contrib-card__failure-detail > summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -187,11 +188,13 @@
 
 .contrib-card__actions {
   display: flex;
+  align-items: center;
+  gap: 8px;
   margin-top: 2px;
 }
 
 .contrib-card__send {
-  width: 100%;
+  flex: 1;
   min-height: 42px;
   padding: 0 14px;
   border: 0;
@@ -218,6 +221,39 @@
   background: var(--surface2);
   color: var(--muted);
   cursor: default;
+}
+
+.contrib-card__review {
+  flex: none;
+  min-height: 42px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+@media (hover: hover) {
+  .contrib-card__review:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text) 7%, transparent);
+    color: var(--text);
+  }
+}
+
+.contrib-card__review:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.contrib-card__progress {
+  margin: -2px 0 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
 }
 
 @media (max-width: 560px) {

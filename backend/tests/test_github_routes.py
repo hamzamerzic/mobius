@@ -4473,6 +4473,269 @@ def test_submit_contribution_rolls_back_unready_record(
   assert "last_submit_error" in stored
 
 
+def _prepared_existing_pr_update(app_id: int, record_id: str) -> dict:
+  repo_path = (
+    Path(get_settings().data_dir) / "contrib" / record_id / "worktree"
+  )
+  (repo_path / ".git").mkdir(parents=True)
+  head = "a" * 40
+  record = {
+    "id": record_id,
+    "type": "pr",
+    "repo": "mobius-os/app-demo",
+    "status": "prepared",
+    "title": "Refine the existing contribution",
+    "branch": "feat/existing-review",
+    "number": 58,
+    "url": "https://github.com/mobius-os/app-demo/pull/58",
+    "head_repository": "octocat/app-demo",
+    "submitted_at": "2026-08-20T12:00:00Z",
+    "plan": {
+      "action": "pr_update",
+      "repo": "mobius-os/app-demo",
+      "title": "Refine the existing contribution",
+      "body_draft": "## Summary\n\nRefines the open contribution.",
+      "branch": "feat/existing-review",
+      "repo_path": str(repo_path),
+      "base_sha": "b" * 40,
+      "head_sha": head,
+      "diff_sha256": "d" * 64,
+    },
+    "quality_review": {
+      "state": "all_clear",
+      "reviewed_head_sha": head,
+      "reviewed_at": "2026-08-24T18:00:00Z",
+    },
+  }
+  _write_contribution(app_id, record_id, record, "reviewed diff")
+  return record
+
+
+def test_existing_pr_update_uses_owner_approved_exact_target(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  record_id = "existing-pr-update"
+  original = _prepared_existing_pr_update(app_id, record_id)
+  calls = []
+
+  monkeypatch.setattr(
+    github_routes,
+    "_autopilot_live_target_error",
+    lambda repo, number, head_repo, branch: calls.append(
+      ("target", repo, number, head_repo, branch)
+    ) or None,
+  )
+
+  def submit(record, diff_path, *, expected_existing_pr_number=None, **_kwargs):
+    calls.append(("submit", record["status"], expected_existing_pr_number, diff_path.name))
+    return (
+      "https://github.com/mobius-os/app-demo/pull/58",
+      58,
+      {"last_submit_push_sha": record["plan"]["head_sha"]},
+    )
+
+  monkeypatch.setattr(github_routes, "_submit_prepared_pr", submit)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/update-existing",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={},
+  )
+
+  assert response.status_code == 200, response.text
+  updated = response.json()["record"]
+  assert updated["status"] == "open"
+  assert updated["number"] == 58
+  assert updated["submitted_at"] == original["submitted_at"]
+  assert updated["last_submit_push_sha"] == original["plan"]["head_sha"]
+  assert updated["last_updated_pr_at"]
+  assert calls == [
+    (
+      "target", "mobius-os/app-demo", 58,
+      "octocat/app-demo", "feat/existing-review",
+    ),
+    ("submit", "submitting", 58, f"{record_id}.diff"),
+  ]
+
+
+def test_existing_pr_update_stays_successful_if_followup_metadata_fails(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  record_id = "existing-pr-update-metadata-failure"
+  original = _prepared_existing_pr_update(app_id, record_id)
+  monkeypatch.setattr(
+    github_routes,
+    "_autopilot_live_target_error",
+    lambda *_args: None,
+  )
+  monkeypatch.setattr(
+    github_routes,
+    "_submit_prepared_pr",
+    lambda record, _diff_path, **_kwargs: (
+      "https://github.com/mobius-os/app-demo/pull/58",
+      58,
+      {"last_submit_push_sha": record["plan"]["head_sha"]},
+    ),
+  )
+
+  def fail_metadata(*_args, **_kwargs):
+    raise RuntimeError("metadata down")
+
+  monkeypatch.setattr(
+    "app.contribution_autopilot.refresh_granted_head",
+    fail_metadata,
+  )
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/update-existing",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={},
+  )
+
+  assert response.status_code == 200, response.text
+  updated = response.json()["record"]
+  assert updated["status"] == "open"
+  assert updated["submitted_at"] == original["submitted_at"]
+  assert updated["last_submit_push_sha"] == original["plan"]["head_sha"]
+
+
+def test_existing_pr_update_rechecks_target_before_any_push(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  record_id = "existing-pr-drifted"
+  _prepared_existing_pr_update(app_id, record_id)
+  pushed = []
+  monkeypatch.setattr(
+    github_routes,
+    "_autopilot_live_target_error",
+    lambda *_args: "The live branch moved.",
+  )
+  monkeypatch.setattr(
+    github_routes,
+    "_submit_prepared_pr",
+    lambda *_args, **_kwargs: pushed.append(True),
+  )
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/update-existing",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={},
+  )
+
+  assert response.status_code == 409, response.text
+  detail = response.json()["detail"]
+  assert "changed since this update was prepared" in detail["message"]
+  assert detail["detail"] == "The live branch moved."
+  assert detail["record"]["status"] == "prepared"
+  assert pushed == []
+
+
+def test_existing_pr_update_is_distinct_from_new_pr_send(
+  client, owner_token,
+):
+  app_id, app_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  record_id = "existing-pr-wrong-action"
+  _prepared_existing_pr_update(app_id, record_id)
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/submit",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+
+  assert response.status_code == 400
+  assert "supports pull requests" in response.json()["detail"]
+
+
+def test_prepared_pr_update_cannot_start_a_new_autopilot_round(
+  client, owner_token,
+):
+  from app import contribution_autopilot
+  from app.database import SessionLocal
+
+  app_id, app_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  record_id = "prepared-update-autopilot-guard"
+  record = _prepared_existing_pr_update(app_id, record_id)
+  session = SessionLocal()
+  try:
+    contribution_autopilot.stamp_grant(
+      session,
+      app_id,
+      record_id,
+      head_sha=record["plan"]["head_sha"],
+      target_repo=record["repo"],
+      target_pr_number=record["number"],
+      target_head_repository=record["head_repository"],
+      target_branch=record["branch"],
+      target_repo_path=record["plan"]["repo_path"],
+    )
+  finally:
+    session.close()
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/respond",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={"attention": {"key": "review:late-event"}},
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json()["status"] == "not_granted"
+  session = SessionLocal()
+  try:
+    row = contribution_autopilot.get_row(session, app_id, record_id)
+    assert row is not None
+    assert row.state == "idle"
+  finally:
+    session.close()
+
+
+def test_chat_projection_marks_exact_reviewed_pr_updates_sendable(
+  client, owner_token, monkeypatch,
+):
+  app_id, app_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  record_id = "existing-pr-chat-card"
+  record = _prepared_existing_pr_update(app_id, record_id)
+  record["chat_id"] = "chat-existing-update"
+  _write_contribution(app_id, record_id, record, "reviewed diff")
+  monkeypatch.setattr(
+    github_routes,
+    "_inspect_prepared_review",
+    lambda record, _diff_path, _github_state: {
+      "id": record["id"],
+      "state": "ready",
+      "code": "ready",
+      "message": "Still matches the exact source you reviewed.",
+    },
+  )
+
+  response = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-existing-update",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+
+  assert response.status_code == 200, response.text
+  projected = response.json()["records"][0]
+  assert projected["action"] == "pr_update"
+  assert projected["quality_review_ready"] is True
+  assert projected["review"]["state"] == "ready"
+
+
 # --- contribution CI feedback loop (checks refresh + classification) ---
 
 

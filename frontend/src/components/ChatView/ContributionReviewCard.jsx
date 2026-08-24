@@ -5,16 +5,19 @@ import { api } from '../../api/client.js'
 import { appQueries } from '../../hooks/queries.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 import {
+  autopilotOnSend,
   contributeApp as findContributeApp,
   contributeAppId,
   contributionReviewIntent,
   diffStatSummary,
   isHorizontalSwipe,
   passedDismissThreshold,
+  publicationAction,
   rememberReviewItemDismissed,
   reviewDestinationLabel,
   reviewItemIntent,
   reviewPanelSummary,
+  sendBlocker,
   statusLabel,
   submitFailure,
   visibleReviewItems,
@@ -55,14 +58,59 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
   // Dismissals are persisted, so this only forces the re-render; the stored
   // decision is what actually filters the list.
   const [dismissRevision, setDismissRevision] = useState(0)
+  // A successful public action leaves this compact surface immediately rather
+  // than waiting for the authoritative ledger refetch to finish.
+  const [publishedItems, setPublishedItems] = useState([])
 
   const storage = typeof localStorage !== 'undefined' ? localStorage : null
-  const pendingItems = visibleReviewItems(data, storage)
+  const pendingItems = visibleReviewItems(data, storage).filter(
+    item => item.kind !== 'record'
+      || !publishedItems.some(done => done.id === item.record.id),
+  )
   const panel = reviewPanelSummary(pendingItems.length)
   const grouped = panel.count > 1
   void dismissRevision
   if (!appId) return null
   if (panel.count === 0) return null
+
+  async function publish(record) {
+    try {
+      const response = await api.contributions.publish(appId, record, {
+        autopilot: autopilotOnSend(data),
+      })
+      const body = await response.json().catch(() => null)
+      if (!response.ok) {
+        const detail = body?.detail
+        const message = typeof detail === 'string' ? detail : detail?.message
+        return {
+          failure: {
+            message: typeof message === 'string' && message
+              ? message
+              : 'Could not send this pull request. Open Contribute for details.',
+            detail: typeof detail?.detail === 'string' ? detail.detail : '',
+          },
+        }
+      }
+      return { published: true }
+    } catch {
+      return {
+        failure: {
+          message: 'Could not reach the server. Nothing was sent.',
+          detail: '',
+        },
+      }
+    } finally {
+      queryClient.invalidateQueries({ queryKey, exact: true })
+    }
+  }
+
+  function rememberPublished(recordId) {
+    setPublishedItems(items => (
+      items.some(item => item.id === recordId)
+        ? items
+        : [...items, { id: recordId }]
+    ))
+  }
 
   return (
     <div
@@ -105,6 +153,9 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
           <ReviewRow
             key={item.id}
             record={record}
+            connected={data?.connected !== false}
+            onPublish={publish}
+            onPublished={rememberPublished}
             onOpenContribute={onOpenContribute}
             onDismiss={onDismiss}
           />
@@ -248,13 +299,33 @@ function StackReviewRow({ item, onOpenContribute, onDismiss }) {
 }
 
 function ReviewRow({
-  record, onOpenContribute, onDismiss,
+  record, connected, onPublish, onPublished, onOpenContribute, onDismiss,
 }) {
+  const [sending, setSending] = useState(false)
+  const [attemptFailure, setAttemptFailure] = useState(null)
   const diffStat = diffStatSummary(record.diff_stat)
   const submitting = record.status === 'submitting'
   const cardRef = useSwipeToDismiss(onDismiss)
-  const failure = submitFailure(record)
+  const failure = submitFailure(record, {
+    attempt: attemptFailure,
+    sending: sending || submitting,
+  })
   const intent = contributionReviewIntent(record)
+  const blocker = sendBlocker(record, { connected })
+  const action = publicationAction(record)
+
+  async function publish() {
+    if (sending || blocker || typeof onPublish !== 'function') return
+    setSending(true)
+    setAttemptFailure(null)
+    try {
+      const outcome = (await onPublish(record)) || {}
+      if (outcome.published) onPublished?.(record.id)
+      else if (outcome.failure) setAttemptFailure(outcome.failure)
+    } finally {
+      setSending(false)
+    }
+  }
 
   return (
     <div ref={cardRef} className="contrib-card">
@@ -286,7 +357,7 @@ function ReviewRow({
       <p className={failure ? 'contrib-card__error' : 'contrib-card__payoff'}>
         {failure?.message || (submitting
           ? 'Contribute is sending this now; its live status is attached to the review.'
-          : 'Open the exact review to inspect the change and decide what happens next.')}
+          : blocker || 'The exact reviewed change is ready for your approval.')}
       </p>
       {failure?.detail && (
         <details className="contrib-card__failure-detail">
@@ -296,15 +367,42 @@ function ReviewRow({
       )}
 
       <div className="contrib-card__actions">
-        <button
-          type="button"
-          className="contrib-card__send"
-          disabled={!onOpenContribute || !intent}
-          onClick={() => onOpenContribute?.(intent)}
-        >
-          {reviewDestinationLabel(record)}
-        </button>
+        {!blocker && !submitting ? (
+          <>
+            <button
+              type="button"
+              className="contrib-card__send"
+              disabled={sending}
+              aria-busy={sending}
+              onClick={publish}
+            >
+              {sending ? action.busyLabel : action.label}
+            </button>
+            <button
+              type="button"
+              className="contrib-card__review"
+              disabled={!onOpenContribute || !intent || sending}
+              onClick={() => onOpenContribute?.(intent)}
+            >
+              Review
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            className="contrib-card__send"
+            disabled={!onOpenContribute || !intent}
+            onClick={() => onOpenContribute?.(intent)}
+          >
+            {reviewDestinationLabel(record)}
+          </button>
+        )}
       </div>
+      {sending ? (
+        <p className="contrib-card__progress" role="status" aria-live="polite">
+          {action.progress}
+        </p>
+      ) : null}
     </div>
   )
 }

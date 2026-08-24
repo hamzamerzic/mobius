@@ -616,13 +616,27 @@ export const api = {
     }),
     restart: () => apiFetch('/platform/restart', { method: 'POST' }),
   },
-  // The chat's contribution review card is a read-only projection of the same
-  // ledger Contribute owns. Public actions stay in Contribute's selected review
-  // surface rather than growing a second workflow above the composer.
+  // The chat card is a compact projection of the same reviewed ledger Contribute
+  // owns. Its direct action calls the same guarded routes as the app; the card
+  // never pushes or talks to GitHub itself.
   contributions: {
     forChat: (appId, chatId) => apiFetch(
       `/github/contributions/${appId}/for-chat/${encodeURIComponent(chatId)}`,
     ),
+    publish: (appId, record, { autopilot = false } = {}) => {
+      const update = record?.action === 'pr_update'
+      const action = update ? 'update-existing' : 'submit'
+      return apiFetch(
+        `/github/contributions/${appId}/${encodeURIComponent(record.id)}/${action}`,
+        {
+          method: 'POST',
+          body: JSON.stringify(update ? {} : {
+            autopilot,
+            submitter: 'chat-review-card',
+          }),
+        },
+      )
+    },
   },
   push: {
     vapidKey: () => apiFetch('/push/vapid-key'),

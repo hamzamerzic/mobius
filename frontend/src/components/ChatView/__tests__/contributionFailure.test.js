@@ -18,15 +18,24 @@ test('a failed send still explains itself after the card is reloaded', () => {
   })
 })
 
-test('render-only arguments cannot override the durable ledger failure', () => {
+test('a new in-flight attempt suppresses a stale durable failure', () => {
   const record = {
     ...READY,
     last_submit_error: 'durable reason',
     last_submit_error_detail: 'durable detail',
   }
-  assert.deepEqual(
+  assert.equal(
     submitFailure(record, { attempt: { message: 'local reason' }, sending: true }),
-    { message: 'durable reason', detail: 'durable detail' },
+    null,
+  )
+})
+
+test('the current attempt wins until the ledger refresh arrives', () => {
+  assert.deepEqual(
+    submitFailure(READY, {
+      attempt: { message: 'current reason', detail: 'current detail' },
+    }),
+    { message: 'current reason', detail: 'current detail' },
   )
 })
 

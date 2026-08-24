@@ -6,6 +6,7 @@ import {
   DISMISS_DX_PX,
   PLATFORM_REPO,
   actionableRecords,
+  autopilotOnSend,
   contributeApp,
   contributeAppId,
   contributionReviewIntent,
@@ -14,12 +15,14 @@ import {
   isDismissed,
   isHorizontalSwipe,
   passedDismissThreshold,
+  publicationAction,
   rememberDismissed,
   rememberReviewItemDismissed,
   reviewDestinationLabel,
   reviewItemIntent,
   reviewItems,
   reviewPanelSummary,
+  sendBlocker,
   statusLabel,
   visibleReviewItems,
   visibleRecords,
@@ -98,7 +101,14 @@ test('record identities become opaque review intents, never routes', () => {
 })
 
 test('status and destination copy describe the next Contribute view', () => {
-  assert.equal(statusLabel({ status: 'prepared' }), 'Ready in Contribute')
+  assert.equal(statusLabel({ status: 'prepared' }), 'Review ready')
+  assert.equal(statusLabel({
+    status: 'prepared', quality_review_ready: true, review: { state: 'ready' },
+  }), 'Ready to send')
+  assert.equal(statusLabel({
+    status: 'prepared', action: 'pr_update', quality_review_ready: true,
+    review: { state: 'ready' },
+  }), 'Ready to update')
   assert.equal(statusLabel({ status: 'prepared', stack: { id: 'demo' } }), 'Review together')
   assert.equal(statusLabel({ status: 'submitting' }), 'Publishing')
   assert.equal(statusLabel({ status: 'prepared', last_submit_error: 'failed' }), 'Needs attention')
@@ -113,6 +123,31 @@ test('status and destination copy describe the next Contribute view', () => {
     reviewDestinationLabel({ status: 'prepared', last_submit_error: 'failed' }),
     'Resolve in Contribute',
   )
+})
+
+test('direct send requires the exact reviewed happy path', () => {
+  const ready = {
+    id: 'ready', status: 'prepared', quality_review_ready: true,
+    review: { state: 'ready' },
+  }
+  assert.equal(sendBlocker(ready, { connected: true }), null)
+  assert.match(sendBlocker({ ...ready, quality_review_ready: false }), /exact agent review/)
+  assert.match(sendBlocker({ ...ready, review: { state: 'needs_refresh', message: 'Moved' } }), /Moved/)
+  assert.match(sendBlocker({ ...ready, is_stack: true }), /linked set/)
+  assert.match(sendBlocker(ready, { connected: false }), /Connect GitHub/)
+  assert.equal(sendBlocker({ ...ready, status: 'submitting' }), null)
+
+  assert.deepEqual(publicationAction(ready), {
+    label: 'Send PR', busyLabel: 'Sending PR',
+    progress: 'Opening the reviewed pull request…',
+  })
+  assert.deepEqual(publicationAction({ ...ready, action: 'pr_update' }), {
+    label: 'Update PR', busyLabel: 'Updating PR',
+    progress: 'Updating the reviewed pull request…',
+  })
+  assert.equal(autopilotOnSend({ autopilot_available: true }), true)
+  assert.equal(autopilotOnSend({ autopilot_available: true, autopilot_default: false }), false)
+  assert.equal(autopilotOnSend({ autopilot_available: false }), false)
 })
 
 test('multiple independent items share one centered bounded panel', () => {
@@ -176,14 +211,20 @@ test('the grouped panel uses one stable explanation instead of redundant counts'
   }
 })
 
-test('chat cards are read-only and expose one action into Contribute', () => {
-  assert.doesNotMatch(clientSrc, /submitter:\s*'chat-review-card'/)
-  assert.doesNotMatch(cardSrc, /api\.contributions\.submit/)
+test('chat cards keep direct send and exact review on the same guarded routes', () => {
+  assert.match(clientSrc, /submitter:\s*'chat-review-card'/)
+  assert.match(clientSrc, /record\?\.action === 'pr_update'/)
+  assert.match(clientSrc, /update-existing/)
+  assert.match(cardSrc, /api\.contributions\.publish\(appId, record/)
+  assert.match(cardSrc, /sending:\s*sending \|\| submitting/)
+  assert.match(cardSrc, /\{sending \? action\.busyLabel : action\.label\}/)
+  assert.match(cardSrc, />\s*Review\s*</)
   assert.doesNotMatch(cardSrc, /body_draft|record\.files|The exact text that will be published/)
-  assert.doesNotMatch(cardSrc, /Contribute this improvement|Open Contribute|>Details<|>Layers</)
+  assert.doesNotMatch(cardSrc, /Contribute this improvement|>Details<|>Layers</)
   assert.match(cardSrc, /onOpenApp\(contributeApp, \{ final: true, intent \}\)/)
   assert.match(cardSrc, /contributionReviewIntent\(record\)/)
-  assert.match(cardCss, /\.contrib-card__send\s*\{[\s\S]*?width:\s*100%;[\s\S]*?min-height:\s*42px;/)
+  assert.match(cardCss, /\.contrib-card__send\s*\{[\s\S]*?flex:\s*1;[\s\S]*?min-height:\s*42px;/)
+  assert.match(cardCss, /\.contrib-card__review\s*\{[\s\S]*?min-height:\s*42px;/)
   assert.doesNotMatch(cardCss, /border-left:\s*2px/)
 })
 

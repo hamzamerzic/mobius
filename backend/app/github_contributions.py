@@ -450,6 +450,7 @@ def _cleanup_terminal_staging_checkout(record: dict) -> bool:
 def _claim_record(
   *, app_id: int, record_id: str, db: Session, expected_nonce: str | None,
   submitter: str = "contribute-button",
+  expected_action: str = "pr",
 ) -> tuple[dict, Path, Path]:
   record_path, diff_path = _record_paths(app_id, record_id)
   _recheck_submit_app(db, app_id, expected_nonce)
@@ -477,10 +478,14 @@ def _claim_record(
       status_code=409,
       detail="This older contribution needs agent review before it can submit.",
     )
-  if plan.get("action") != "pr" or record.get("type") != "pr":
+  if plan.get("action") != expected_action or record.get("type") != "pr":
     raise HTTPException(
       status_code=400,
-      detail="Direct approval currently supports pull requests.",
+      detail=(
+        "Direct approval currently supports pull requests."
+        if expected_action == "pr"
+        else "This approval action no longer matches the prepared PR update."
+      ),
     )
   if isinstance(plan.get("stack"), dict):
     raise HTTPException(
@@ -999,6 +1004,37 @@ def _mark_submit_success(
     next_record["number"] = number
   next_record.pop("last_submit_error", None)
   next_record.pop("last_submit_error_detail", None)
+  _write_record(record_path, next_record)
+  return next_record
+
+
+def _mark_existing_pr_update_success(
+  *,
+  record_path: Path,
+  record: dict,
+  pr_url: str,
+  number: int,
+  record_patch: dict | None = None,
+) -> dict:
+  """Settle an owner-approved fast-forward of an already-open PR.
+
+  Keep the original submission timestamp: this action updates one existing
+  public request rather than opening a new one. The reviewed update timestamp
+  gives the ledger an exact lifecycle witness without inventing a second PR.
+  """
+  now = _now_iso()
+  next_record = {
+    **record,
+    **(record_patch or {}),
+    "status": "open",
+    "url": pr_url,
+    "number": number,
+    "updated_at": now,
+    "last_updated_pr_at": now,
+  }
+  next_record.pop("last_submit_error", None)
+  next_record.pop("last_submit_error_detail", None)
+  next_record.pop("last_submit_error_code", None)
   _write_record(record_path, next_record)
   return next_record
 
