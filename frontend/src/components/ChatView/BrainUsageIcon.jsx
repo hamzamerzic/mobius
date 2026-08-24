@@ -3,11 +3,11 @@
  * bottom-up gauges behind its transparent lobes: selected-provider allowance
  * consumed on the left and current context consumed on the right.
  *
- * The visible white boundary is the actual installed SDK <Brain>, not a
- * redrawn approximation. Only its outer contour is repeated locally as a
- * clip for the colored liquid beneath it. The SDK's transparent lobe spaces
- * reveal that fill while its own thick white perimeter, folds, and center
- * split remain untouched.
+ * The visible boundary is the actual installed SDK <Brain>, not a redrawn
+ * approximation. Only its outer contour is repeated locally as a clip for
+ * the colored liquid beneath it. The SDK's transparent lobe spaces reveal
+ * that fill; a subtle morphology filter reduces the glyph's visual weight
+ * so it matches the composer's other muted action icons.
  *
  * Left hemisphere = selected provider's allowance used (purple).
  * Right hemisphere = context window used (orange).
@@ -33,7 +33,7 @@
 import { useId } from 'react'
 import { Brain } from '@openai/apps-sdk-ui/components/Icon'
 
-const PROVIDER_COLOR = '#8b5cf6'
+const PROVIDER_COLOR = 'var(--accent)'
 const CONTEXT_COLOR = '#d97757'
 
 // Full brain silhouette, both lobes in one contour. Bounding box is roughly
@@ -77,6 +77,7 @@ export default function BrainUsageIcon({
   // mounted chat panes must never resolve this fill to another icon's clip.
   const uid = useId()
   const silhouetteId = `${uid}-silhouette`
+  const outlineFilterId = `${uid}-outline`
   const leftKnown = typeof leftPercent === 'number' && Number.isFinite(leftPercent)
   const rightKnown = typeof rightPercent === 'number' && Number.isFinite(rightPercent)
 
@@ -90,6 +91,16 @@ export default function BrainUsageIcon({
       <clipPath id={silhouetteId}>
         <path d={BRAIN_SILHOUETTE_PATH} />
       </clipPath>
+      <filter
+        id={outlineFilterId}
+        x="-1"
+        y="-1"
+        width="26"
+        height="26"
+        filterUnits="userSpaceOnUse"
+      >
+        <feMorphology in="SourceGraphic" operator="erode" radius="0.24" />
+      </filter>
       <g clipPath={`url(#${silhouetteId})`}>
         {leftKnown && (
           <HemisphereFill
@@ -109,7 +120,9 @@ export default function BrainUsageIcon({
 
       {/* Canonical visible boundary. The SDK path supplies every lobe/fold;
           the fill above only shows through its transparent spaces. */}
-      <Brain width="24" height="24" color="#fff" />
+      <g filter={`url(#${outlineFilterId})`}>
+        <Brain width="24" height="24" color="var(--muted)" />
+      </g>
     </svg>
   )
 }
