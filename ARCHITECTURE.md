@@ -544,7 +544,7 @@ installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.22 (2026-08-23).** This section is the
+**Owner-authoritative contract — v1.23 (2026-08-24).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -791,6 +791,26 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   text block in event order, without hiding, duplicating, or reordering them. Only a
   recovered answer whose POST returns `started` creates a new hidden continuation.
   Switching sources preserves the active row's anchor identity and writes no scroll.
+- **R6a — Exact steer replay is one continuous answer.** A committed steer stamps
+  every inserted owner row with durable `steered: true` provenance. That marker,
+  not transcript adjacency or fuzzy content overlap, is the sole authority for
+  joining presentation across the boundary. When the first post-steer text block
+  starts with the complete sealed pre-steer text exactly, the repeated raw prefix
+  remains stored but only its unseen suffix renders below the owner row. While the
+  turn is active, a growing new text block that is itself still an exact prefix of
+  the sealed text stays provisionally hidden; the first mismatch immediately
+  reveals the complete accumulated block. A settled shorter response, an ordinary
+  send, multiple sealed text blocks, a tool/question/error before the continuation,
+  or a cut inside an open Markdown/container construct all fail closed and render
+  the post-steer response intact. A plain-text cut may split a word at any
+  Unicode grapheme boundary, but never splits a character reference. Literal
+  Markdown that later input could reinterpret also fails closed, so a
+  cut decision cannot reverse while the continuation grows. Leading thinking
+  remains visible, while thinking and tool blocks are
+  never compared, trimmed, reordered, or hidden by this rule. The same projection
+  consumes Claude and Codex's shared committed cut,
+  survives refresh/reconnect without rewriting `Chat.messages`, and changes no
+  message identity or scroll mode.
 The transition table is intentionally exhaustive; adding a new send or lifecycle
 path means routing it through the same entries rather than inventing another rule:
 
