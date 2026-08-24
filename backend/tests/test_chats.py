@@ -280,6 +280,40 @@ def test_current_chat_usage_is_bounded_to_selected_provider_session(
   }
 
 
+def test_current_chat_usage_reads_normalized_claude_call_occupancy(
+  client, auth, chat, db,
+):
+  chat.provider = "claude"
+  chat.session_id = "claude-session-current"
+  db.add(models.ChatRun(
+    id="selected-claude-session",
+    chat_id=chat.id,
+    status="completed",
+    provider="claude",
+    provider_session_id="claude-session-current",
+    model_context_window=200_000,
+    usage_json={
+      "provider": "claude",
+      "latest_model_input_tokens": 123_456,
+    },
+    started_at=datetime.now(UTC),
+  ))
+  db.commit()
+
+  response = client.get(
+    f"/api/chats/{chat.id}/usage/current",
+    headers=auth,
+  )
+
+  assert response.status_code == 200
+  assert response.json() == {
+    "provider": "claude",
+    "provider_session_id": "claude-session-current",
+    "input_tokens": 123_456,
+    "context_window": 200_000,
+  }
+
+
 def test_current_chat_usage_returns_unknown_for_a_fresh_session(
   client, auth, chat,
 ):
