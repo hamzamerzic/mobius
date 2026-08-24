@@ -29,6 +29,16 @@ PROVIDERS_LIST = {
 }
 
 
+def test_evolve_is_a_valid_background_provider(tmp_path):
+  out = bg.resolve_background_agents(
+    str(tmp_path),
+    {"primary": {"provider": "mobius", "model": "inkling", "effort": "high"}},
+  )
+  assert out["primary"] == {
+    "provider": "mobius", "model": "inkling", "effort": "high",
+  }
+
+
 def test_system_only_uses_providers_list(tmp_path):
   _write_global(tmp_path, PROVIDERS_LIST)
   out = bg.resolve_background_agents(str(tmp_path), None)

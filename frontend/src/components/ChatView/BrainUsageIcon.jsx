@@ -14,10 +14,10 @@
  * 24-wide viewBox) rather than by splitting the path — simpler and exactly
  * as precise, since a clip only needs a straight edge.
  *
- * Left hemisphere = Codex (purple), right hemisphere = Claude (orange) —
- * this mirrors PROVIDER_ORDER in ChatSettingsPanel.jsx (`['codex', 'claude']`,
- * codex first/left) and Claude's own brand mark color (warm clay/orange), so
- * the pairing reads naturally rather than being arbitrary.
+ * Left hemisphere = Codex (purple), right hemisphere = Claude (orange). These
+ * are the two connected coding subscriptions that publish quota windows;
+ * Möbius Evolve exposes its trial state in Settings instead of inventing a
+ * third quota slice. Claude's own brand mark uses the same warm clay/orange.
  *
  * Each hemisphere fills bottom-up: `leftPercent`/`rightPercent` (0-100) is
  * the remaining fraction of whichever rate-limit window (5-hour or weekly —

@@ -118,6 +118,15 @@
 }
 [data-theme="light"] .csp-row__icon { border-color: rgba(15, 18, 25, 0.10); }
 
+.csp__mobius-logo {
+  display: block;
+  width: 20px;
+  height: 20px;
+  background: currentColor;
+  -webkit-mask: url('/icons/notification-badge.svg') center / contain no-repeat;
+  mask: url('/icons/notification-badge.svg') center / contain no-repeat;
+}
+
 /* Claude's own mark color (matches the composer's usage-gauge icon, which
    uses the same orange for Claude's hemisphere) instead of the plain
    theme-text tint every other provider logo uses. */

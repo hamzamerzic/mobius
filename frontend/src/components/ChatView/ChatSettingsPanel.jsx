@@ -9,10 +9,11 @@
  * ║   FOUR LOAD-BEARING CONTRACTS — read before refactoring          ║
  * ║                                                                  ║
  * ║   1. PER-PROVIDER EFFORT MEMORY                                  ║
- * ║      The Codex and Claude effort enums DO NOT MAP across         ║
- * ║      providers. Codex `medium` is roughly Claude `low`. So       ║
- * ║      each provider remembers its OWN last-picked effort via      ║
- * ║      `effort_by_provider: { codex, claude }` in agent_settings.  ║
+ * ║      Provider effort enums DO NOT MAP across one another.        ║
+ * ║      Codex `medium` is roughly Claude `low`. Each provider       ║
+ * ║      remembers its OWN last-picked effort via                    ║
+ * ║      `effort_by_provider: { codex, claude, mobius }` in          ║
+ * ║      `agent_settings`.                                           ║
  * ║      Switching providers swaps the active `effort` to that       ║
  * ║      provider's last value (fallback: current effort).           ║
  * ║      Picking effort writes BOTH `effort` (active) and the        ║
@@ -20,7 +21,9 @@
  * ║                                                                  ║
  * ║      Enum reference:                                             ║
  * ║        Codex (6): none / minimal / low / medium / high / xhigh   ║
- * ║        Claude (5):           low / medium / high / xhigh / max   ║
+ * ║        Claude (6): low / medium / high / xhigh / max /           ║
+ * ║                    ultracode                                     ║
+ * ║        Möbius (5): minimal / low / medium / high / max           ║
  * ║      Runners forward the value as-is; an out-of-enum effort      ║
  * ║      surfaces as a 400 at turn time, not at PATCH (consistent    ║
  * ║      with the platform's "reversibility over prevention"         ║
@@ -56,13 +59,14 @@
  * ║   pills, NOT a chip group. The slider was explicitly chosen      ║
  * ║   over chips by the user; an earlier proposed revert to chips    ║
  * ║   was rejected. Each provider's slider has its own length        ║
- * ║   (6 stops for Codex, 5 for Claude). `findIndex` defaults to     ║
+ * ║   (6 stops for Codex and Claude, 5 for Möbius). `findIndex`      ║
+ * ║   defaults to                                                    ║
  * ║   0 when the persisted value isn't in the provider's enum, so    ║
  * ║   a cross-provider effort carryover renders gracefully.          ║
  * ║                                                                  ║
- * ║   The provider logo SVGs are inlined — the apps-sdk-ui icon     ║
- * ║   set ships UI glyphs, not vendor brand marks. Paths come        ║
- * ║   from Simple-Icons + the mobius-design-iter prototype.          ║
+ * ║   Provider logos stay custom because the apps-sdk-ui icon set    ║
+ * ║   ships UI glyphs, not vendor brand marks. Möbius reuses the     ║
+ * ║   shell's Android notification silhouette as a CSS mask.         ║
  * ║                                                                  ║
  * ╚══════════════════════════════════════════════════════════════════╝
  */
@@ -128,6 +132,14 @@ function OpenAILogo() {
 }
 
 
+/** Möbius provider mark — the same silhouette Android uses for the shell's
+ *  monochrome notification badge. CSS masks it with the surrounding semantic
+ *  color so it follows the shell's off-white/light-theme ink automatically. */
+function MobiusLogo() {
+  return <span className="csp__mobius-logo" aria-hidden="true" />
+}
+
+
 /** Provider metadata used by the row renderer. Effort levels are
  *  scoped to each provider since the two SDKs publish different
  *  enumerations:
@@ -154,6 +166,18 @@ function OpenAILogo() {
  *  ChatSettingsPanel: a single track with N stops, the selected
  *  one filled, the long-form label rendered next to the track. */
 export const PROVIDER_INFO = {
+  mobius: {
+    id: 'mobius',
+    label: 'Möbius subscription',
+    Logo: MobiusLogo,
+    efforts: [
+      { value: 'minimal', label: 'Minimal' },
+      { value: 'low', label: 'Low' },
+      { value: 'medium', label: 'Medium' },
+      { value: 'high', label: 'High' },
+      { value: 'max', label: 'Max' },
+    ],
+  },
   codex: {
     id: 'codex',
     label: 'OpenAI Codex',
@@ -184,7 +208,10 @@ export const PROVIDER_INFO = {
     ],
   },
 }
-export const PROVIDER_ORDER = ['codex', 'claude']
+// Keep the app-owned Möbius subscription after the user's connected coding
+// subscriptions. This order is shared by the chat picker, Manage models, and
+// background-agent defaults so those surfaces cannot drift.
+export const PROVIDER_ORDER = ['codex', 'claude', 'mobius']
 
 
 /** Resolves the displayed model list for `providerId` from the live

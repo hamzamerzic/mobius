@@ -1134,12 +1134,11 @@ async def patch_chat(
     target_provider = body.provider
     new_model = agent_settings_patch.get("model")
     if target_provider is None and new_model:
-      from app.providers import _model_belongs_to_other_provider
+      from app.providers import _known_model_provider
       current_provider = chat.provider or "claude"
-      if _model_belongs_to_other_provider(new_model, current_provider):
-        target_provider = (
-          "codex" if current_provider == "claude" else "claude"
-        )
+      inferred_provider = _known_model_provider(new_model)
+      if inferred_provider and inferred_provider != current_provider:
+        target_provider = inferred_provider
 
     if new_model:
       from app.providers import _model_belongs_to_other_provider
@@ -1186,20 +1185,23 @@ async def patch_chat(
           "handoff so the incoming provider can continue its context."
         ),
       )
-    if target_provider is not None and target_provider in ("claude", "codex"):
+    if target_provider is not None:
       # Reject a switch to a disconnected provider — the picker may
       # have raced ahead of /auth/providers/status, or the user may
       # be on stale state. Without this check the PATCH would succeed
       # silently and then every subsequent message turn would fail
       # auth, leaving the user confused. 409 surfaces the real
       # problem at pick-time.
-      from app.providers import get_provider
+      from app.providers import get_provider, provider_requirement_error
       candidate = get_provider(target_provider)
-      auth_error = candidate.check_auth(get_app_settings().data_dir)
+      requirement_error = provider_requirement_error(candidate, db)
+      auth_error = requirement_error or candidate.check_auth(
+        get_app_settings().data_dir
+      )
       if auth_error is not None:
         raise HTTPException(
           status_code=409,
-          detail=(
+          detail=requirement_error or (
             f"{candidate.name} is not connected. "
             "Open Settings to connect, then try again."
           ),
@@ -2034,7 +2036,9 @@ async def _compact_chat_locked(
     )
   data_dir = get_settings().data_dir
   candidate = providers.get_provider(body.provider)
-  auth_error = candidate.check_auth(data_dir)
+  auth_error = providers.provider_requirement_error(candidate, db)
+  if auth_error is None:
+    auth_error = candidate.check_auth(data_dir)
   if auth_error is not None:
     raise HTTPException(status_code=409, detail=auth_error)
 
@@ -2503,7 +2507,7 @@ def create_app_chat(
   provider = body.provider or providers.resolve_default_provider(
     data_dir, owner.provider if owner else None,
   )
-  if provider not in ("claude", "codex"):
+  if provider not in providers.PROVIDER_NAMES:
     raise HTTPException(status_code=422, detail=f"unknown provider: {provider}")
   if body.model and providers._model_belongs_to_other_provider(
     body.model, provider,
@@ -2591,7 +2595,7 @@ async def patch_app_chat(
         detail="The selected model does not belong to that provider.",
       )
     if body.provider is not None:
-      if body.provider not in ("claude", "codex"):
+      if body.provider not in providers.PROVIDER_NAMES:
         raise HTTPException(
           status_code=422, detail=f"unknown provider: {body.provider}"
         )

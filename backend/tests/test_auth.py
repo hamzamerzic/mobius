@@ -379,6 +379,29 @@ def test_providers_status_accepts_app_token(client, auth):
   assert "configured" in body["claude"]
   assert "authenticated" in body["claude"]
   assert body["claude"]["configured"] is body["claude"]["authenticated"]
+  assert body["mobius"]["available"] is False
+  assert body["mobius"]["configured"] is False
+
+
+def test_mobius_provider_is_available_only_with_identity_app_installed(
+  client, auth,
+):
+  from app import models
+  from app.database import SessionLocal
+
+  absent = client.get("/api/auth/providers/status", headers=auth).json()
+  assert absent["mobius"]["available"] is False
+
+  app = create_local_app(
+    client, auth, name="Möbius · You", description="Account",
+  )
+  with SessionLocal() as session:
+    row = session.query(models.App).filter(models.App.id == app["id"]).one()
+    row.slug = "identity"
+    session.commit()
+
+  installed = client.get("/api/auth/providers/status", headers=auth).json()
+  assert installed["mobius"]["available"] is True
 
 
 def test_provider_status_exposes_configured_with_legacy_alias(client, auth):
@@ -532,7 +555,7 @@ def test_providers_models_returns_known_models_on_missing_creds(
   r = client.get("/api/auth/providers/models", headers=auth)
   assert r.status_code == 200
   body = r.json()
-  assert set(body) == {"claude", "codex"}
+  assert set(body) == {"claude", "codex", "mobius"}
   claude_ids = [m["id"] for m in body["claude"]]
   assert claude_ids == [
     "claude-fable-5", "claude-sonnet-5",
@@ -544,6 +567,7 @@ def test_providers_models_returns_known_models_on_missing_creds(
   ]
   assert set(claude_ids) == DEFAULT_VISIBLE_MODELS["claude"]
   assert set(codex_ids) == DEFAULT_VISIBLE_MODELS["codex"]
+  assert [m["id"] for m in body["mobius"]] == ["inkling"]
   # Claude rows carry a tier derived from the id.
   by_id = {m["id"]: m for m in body["claude"]}
   assert by_id["claude-opus-4-8"]["name"] == "claude-opus-4-8"

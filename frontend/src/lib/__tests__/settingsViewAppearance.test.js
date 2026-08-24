@@ -57,6 +57,18 @@ test('provider-dependent settings stay unavailable until a provider is connected
   assert.match(view, /configuredProviders=\{configuredProviders\}/)
 })
 
+test('Möbius subscription is app-owned and follows Codex and Claude', () => {
+  assert.match(view, /const mobiusAvailable = providerStatusQuery\.data\?\.mobius\?\.available === true/)
+  assert.match(
+    view,
+    /name="OpenAI Codex"[\s\S]*name="Claude Code"[\s\S]*\{mobiusAvailable && \([\s\S]*name="Möbius subscription"/,
+  )
+  assert.match(view, /Sign in from Möbius · You to activate your trial\./)
+  assert.match(view, /actionLabel="Open Möbius · You"/)
+  assert.match(view, /onOpenApp\?\.\('identity'\)/)
+  assert.doesNotMatch(view, /Claim trial|connectMobius|startLogin\(\)/)
+})
+
 test('new provider connections use the curated unattended defaults', () => {
   assert.match(view, /claude: 'claude-opus-4-8'/)
   assert.match(view, /codex: 'gpt-5\.6-terra'/)

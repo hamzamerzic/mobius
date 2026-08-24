@@ -1445,13 +1445,15 @@ def _install_request_user_input_handler(
   )
 
 
-def _publish_codex_context_compaction(bc: Any, chat_id: str) -> None:
+def _publish_codex_context_compaction(
+  bc: Any, chat_id: str, provider_id: str = "codex",
+) -> None:
   """Make provider-native compaction visible without affecting the turn."""
   log.info("Codex context compacted for chat %s", chat_id)
   try:
     bc.publish({
       "type": "context_compacted",
-      "provider": "codex",
+      "provider": provider_id,
     })
   except Exception:
     # Visibility must never interfere with the provider's own compaction or
@@ -1483,6 +1485,7 @@ async def run_codex_sdk_turn(
   fallback_goal_objective: str | None = None,
   run_policy=None,
   connector_plan=None,
+  provider_id: str = "codex",
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -1521,10 +1524,10 @@ async def run_codex_sdk_turn(
   # Admission and effective settings normally reject a cross-provider model
   # before this boundary. Stay strict for legacy/corrupt callers too: silently
   # substituting a provider model makes the picker contract untruthful.
-  from app.providers import _model_belongs_to_other_provider
-  if model and _model_belongs_to_other_provider(model, "codex"):
+  from app.providers import _model_belongs_to_other_provider, get_provider
+  if model and _model_belongs_to_other_provider(model, provider_id):
     raise ValueError(
-      f"Selected model {model!r} does not belong to provider 'codex'."
+      f"Selected model {model!r} does not belong to provider {provider_id!r}."
     )
 
   # Reasoning effort comes from Codex's live per-model catalog. The generated
@@ -1542,7 +1545,9 @@ async def run_codex_sdk_turn(
         effort_str,
       )
 
-  reasoning_summary = _reasoning_summary_setting(sdk)
+  reasoning_summary = (
+    None if provider_id == "mobius" else _reasoning_summary_setting(sdk)
+  )
 
   # Compute the constitution snapshot for BOTH thread_start and thread_resume.
   # chat.py passes the SAME immutable per-chat system_prompt snapshot on every
@@ -1601,6 +1606,7 @@ async def run_codex_sdk_turn(
     allow_multi_agent=not delegated,
     allow_goals=not delegated and needs_goal_control,
   )
+  config_overrides.extend(get_provider(provider_id).codex_config_overrides())
   launch_args = _codex_app_server_launch_args(codex_bin, config_overrides)
   config_kwargs: dict[str, Any] = dict(
     codex_bin=codex_bin,
@@ -2202,7 +2208,7 @@ async def run_codex_sdk_turn(
         if isinstance(payload, sdk["ItemCompletedNotification"]):
           item = payload.item.root if hasattr(payload.item, "root") else payload.item
           if isinstance(item, sdk["ContextCompactionThreadItem"]):
-            _publish_codex_context_compaction(bc, chat_id)
+            _publish_codex_context_compaction(bc, chat_id, provider_id)
             continue
           if isinstance(item, sdk["AgentMessageThreadItem"]):
             completed_message_phases.append(_agent_message_phase(item, sdk))
@@ -2256,7 +2262,7 @@ async def run_codex_sdk_turn(
         if isinstance(payload, sdk["ContextCompactedNotification"]):
           # Compatibility for older app-server releases. Current v2 servers
           # expose compaction as a ContextCompactionThreadItem instead.
-          _publish_codex_context_compaction(bc, chat_id)
+          _publish_codex_context_compaction(bc, chat_id, provider_id)
           continue
 
         ratelimit_cls = sdk.get("AccountRateLimitsUpdatedNotification")

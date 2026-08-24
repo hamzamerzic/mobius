@@ -588,6 +588,40 @@ def test_patch_model_only_with_cross_provider_model_switches_provider(
   assert refreshed.provider == "codex"
 
 
+def test_mobius_model_inference_requires_owning_app(
+  client, auth, chat, db, monkeypatch,
+):
+  from app import providers
+
+  monkeypatch.setattr(
+    providers.MobiusProvider, "check_auth", lambda self, data_dir: None,
+  )
+  absent = client.patch(
+    f"/api/chats/{chat.id}",
+    headers=auth,
+    json={"agent_settings_json": {"model": "inkling"}},
+  )
+  assert absent.status_code == 409
+  assert "Möbius · You" in absent.json()["detail"]
+
+  db.add(models.App(
+    slug="identity",
+    source_dir="/tmp/mobius-tests/identity",
+    name="Möbius · You",
+    description="Account",
+    jsx_source="export default () => null",
+  ))
+  db.commit()
+  selected = client.patch(
+    f"/api/chats/{chat.id}",
+    headers=auth,
+    json={"agent_settings_json": {"model": "inkling"}},
+  )
+  assert selected.status_code == 200, selected.json()
+  assert selected.json()["provider"] == "mobius"
+  assert selected.json()["agent_settings_json"]["model"] == "inkling"
+
+
 def test_patch_cannot_bypass_handoff_after_assistant_turn(
   client, auth, chat, db, monkeypatch,
 ):

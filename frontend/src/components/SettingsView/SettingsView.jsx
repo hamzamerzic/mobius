@@ -65,12 +65,14 @@ const PLATFORM_APPLY_STATES = new Set([
   'restart_needed', 'activation_needed', 'up_to_date', 'conflict', 'rolled_back',
 ])
 const PROVIDER_CHOICES = [
-  { id: 'claude', label: 'Claude Code' },
   { id: 'codex', label: 'OpenAI Codex' },
+  { id: 'claude', label: 'Claude Code' },
+  { id: 'mobius', label: 'Möbius subscription' },
 ]
 const DEFAULT_BACKGROUND_MODELS = {
   claude: 'claude-opus-4-8',
   codex: 'gpt-5.6-terra',
+  mobius: 'inkling',
 }
 
 function defaultEffort(provider) {
@@ -343,6 +345,7 @@ async function shellDocumentReady() {
 export default function SettingsView({
   onThemeChange,
   onOpenChat,
+  onOpenApp,
   focusTarget = null,
   active = true,
   refreshToken = 0,
@@ -430,6 +433,27 @@ export default function SettingsView({
   const providerAvailability = resolveProviderAvailability(providerStatusQuery)
   const configuredProviders = providerAvailability.configuredProviders
   const codexAuthenticated = configuredProviders.has('codex')
+  const mobiusAvailable = providerStatusQuery.data?.mobius?.available === true
+  const mobiusAuthenticated = configuredProviders.has('mobius')
+  const mobiusTrial = providerStatusQuery.data?.mobius?.trial
+  const mobiusRemainingUnits = Number(mobiusTrial?.balance?.spendable_units)
+  const mobiusRemaining = Number.isFinite(mobiusRemainingUnits)
+    ? `$${(mobiusRemainingUnits / 1_000_000).toFixed(2)} remaining`
+    : 'Trial balance unavailable'
+  const mobiusExpiryRaw = mobiusTrial?.trial_expires_at
+    || mobiusTrial?.account?.trial_expires_at
+    || mobiusTrial?.balance?.grants?.find(grant => grant?.kind === 'trial')?.expires_at
+  const mobiusExpiryTime = Date.parse(mobiusExpiryRaw || '')
+  const mobiusHasExpiry = Number.isFinite(mobiusExpiryTime)
+  const mobiusExpiryLabel = mobiusHasExpiry
+    ? new Intl.DateTimeFormat(undefined, {
+        year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC',
+      }).format(new Date(mobiusExpiryTime))
+    : ''
+  const mobiusExpired = mobiusHasExpiry && mobiusExpiryTime <= Date.now()
+  const mobiusTrialSubtitle = mobiusAuthenticated
+    ? `${mobiusRemaining}. ${mobiusExpired ? 'Expired' : 'Expires'} ${mobiusExpiryLabel || 'after the trial period'}.`
+    : 'Sign in from Möbius · You to activate your trial.'
   // Live-probed CLI versions (null when the CLI isn't installed or
   // didn't respond). Read-only — updates happen via the agent, not here.
   const claudeVersion = settingsQuery.data?.claude_version
@@ -832,6 +856,9 @@ export default function SettingsView({
     setExpandedAuth(prev => prev === 'codex' ? null : prev)
     setExpandedUsage(prev => ({ ...prev, codex: !prev.codex }))
   }, [])
+  const openMobiusYou = useCallback(() => {
+    onOpenApp?.('identity')
+  }, [onOpenApp])
   const onProviderConnected = useCallback(async (provider) => {
     const providersBefore = authProvidersAtStartRef.current || configuredProviders
     const newlyConnected = !providersBefore.has(provider)
@@ -1606,6 +1633,24 @@ export default function SettingsView({
                     onDone={onClaudeAuthDone}
                   />
                 </ProviderRow>
+
+                {mobiusAvailable && (
+                  <ProviderRow
+                    name="Möbius subscription"
+                    connected={mobiusAuthenticated}
+                    subtitle={mobiusTrialSubtitle}
+                    statusNode={(
+                      <StatusDot color={mobiusAuthenticated && !mobiusExpired ? '--green' : '--muted'}>
+                        {mobiusAuthenticated
+                          ? (mobiusExpired ? 'Trial expired' : 'Trial active')
+                          : 'Sign in from Möbius · You'}
+                      </StatusDot>
+                    )}
+                    expanded={false}
+                    actionLabel="Open Möbius · You"
+                    onToggleExpand={openMobiusYou}
+                  />
+                )}
 
                 <ProviderRow
                   name="Chat model"

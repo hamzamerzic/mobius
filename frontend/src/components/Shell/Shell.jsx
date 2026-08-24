@@ -4204,6 +4204,7 @@ export default function Shell({ onInitialVisualReady }) {
               <SettingsView
                 onThemeChange={loadTheme}
                 onOpenChat={selectChat}
+                onOpenApp={openAppWithIntent}
                 focusTarget={settingsFocusTarget}
                 active={settingsFullBleed || !!settingsPaned}
                 refreshToken={settingsRefreshToken}

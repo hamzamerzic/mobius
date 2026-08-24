@@ -75,6 +75,13 @@ KNOWN_MODELS = {
     "gpt-5.4-mini",
     "gpt-5.3-codex-spark",
   ],
+  "mobius": ["inkling"],
+}
+
+MODEL_LABELS = {
+  # Public product name. Keep the stable wire id so existing chats and the
+  # signed compute contract survive a display-name change without migration.
+  "inkling": "Evolve",
 }
 
 
@@ -89,8 +96,19 @@ MODEL_EFFORT_LEVELS: dict[str, list[str]] = {
   "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
   "gpt-5.6-terra": ["low", "medium", "high", "xhigh", "max", "ultra"],
   "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
+  # The subscription currently exposes one product model with a graduated
+  # effort scale. Future product tiers belong here under their public names.
+  "inkling": ["minimal", "low", "medium", "high", "max"],
 }
 
+# Runtime recovery defaults are intentionally independent of picker order.
+# A stale or mismatched saved value must not silently opt an unattended retry
+# into subscription usage.
+DEFAULT_MODELS = {
+  "claude": "claude-opus-4-8",
+  "codex": "gpt-5.6-sol",
+  "mobius": "inkling",
+}
 # Curated first-run model visibility. The registry remains broader so an
 # existing chat can keep rendering an older saved model and the owner can
 # reveal any hidden row from Settings. An explicit owner preference (including
@@ -108,6 +126,7 @@ DEFAULT_VISIBLE_MODEL_ORDER: dict[str, tuple[str, ...]] = {
     "gpt-5.6-luna",
     "gpt-5.5",
   ),
+  "mobius": ("inkling",),
 }
 DEFAULT_VISIBLE_MODELS: dict[str, frozenset[str]] = {
   provider_id: frozenset(models)
@@ -119,6 +138,7 @@ DEFAULT_VISIBLE_MODELS: dict[str, frozenset[str]] = {
 DEFAULT_BACKGROUND_MODELS = {
   "claude": "claude-opus-4-8",
   "codex": "gpt-5.6-terra",
+  "mobius": "inkling",
 }
 
 # Initial effort when no global default exists. Aligns with the
@@ -165,16 +185,23 @@ def remove_legacy_global_auto_resume_setting(data_dir: str) -> bool:
     return write_agent_settings(data_dir, settings)
 
 
+def _known_model_provider(model: str) -> str | None:
+  """Return the unique registered provider that owns a known model id."""
+  owners = [
+    provider_id for provider_id, models in KNOWN_MODELS.items()
+    if model in models
+  ]
+  return owners[0] if len(owners) == 1 else None
+
+
 def _model_belongs_to_other_provider(model: str, provider: str) -> bool:
   """True when `model` is a KNOWN model for some OTHER provider.
   Use this to reject cross-provider mismatches without blocking
   unknown / future model names — the SDK is the authority on what
   it accepts; we only intercept the specific failure mode of
-  sending a Codex model to Claude or vice versa."""
-  for p, models in KNOWN_MODELS.items():
-    if p != provider and model in models:
-      return True
-  return False
+  sending one provider's model to another."""
+  owner = _known_model_provider(model)
+  return owner is not None and owner != provider
 
 
 def _load_agent_settings(data_dir: str) -> dict:
@@ -520,6 +547,11 @@ class BaseProvider:
   cli_cmd: str = ""
   # Subdirectory under /data/cli-auth/ where credentials are stored.
   auth_dir: str = ""
+  runtime_kind: Literal["claude_sdk", "codex_sdk"] | None = None
+  # App-owned providers stay unavailable unless their owning app is installed.
+  # None keeps ordinary credential-backed providers independent of app state.
+  required_app_slug: str | None = None
+  required_app_label: str | None = None
 
   def check_auth(self, data_dir: str) -> str | None:
     """Returns an error message if not authenticated, None if ok."""
@@ -552,6 +584,9 @@ class BaseProvider:
     """
     raise NotImplementedError
 
+  def codex_config_overrides(self) -> list[str]:
+    return []
+
 
 class ClaudeProvider(BaseProvider):
   """Claude Code via the Anthropic Agent SDK.
@@ -565,6 +600,7 @@ class ClaudeProvider(BaseProvider):
   name = "Claude Code"
   cli_cmd = "claude"
   auth_dir = "claude"
+  runtime_kind = "claude_sdk"
 
   def check_auth(self, data_dir):
     creds = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
@@ -686,6 +722,7 @@ class CodexProvider(BaseProvider):
   name = "Codex"
   cli_cmd = "codex"
   auth_dir = "codex"
+  runtime_kind = "codex_sdk"
 
   def check_auth(self, data_dir):
     creds = Path(data_dir) / "cli-auth" / "codex" / "auth.json"
@@ -725,13 +762,125 @@ class CodexProvider(BaseProvider):
     return env
 
 
+class MobiusProvider(BaseProvider):
+  """The Möbius subscription, transported only through the local root broker."""
+
+  name = "Möbius subscription"
+  cli_cmd = "codex"
+  auth_dir = "mobius"
+  runtime_kind = "codex_sdk"
+  required_app_slug = "identity"
+  required_app_label = "Möbius · You"
+
+  @staticmethod
+  def _socket_path() -> str:
+    return os.environ.get(
+      "MOBIUS_IDENTITY_BROKER_SOCKET",
+      "/run/mobius-identity-broker.sock",
+    )
+
+  @staticmethod
+  def _catalog_path() -> Path:
+    # Möbius intentionally owns the public product catalog instead of exposing
+    # implementation model names. The context cap also bounds trial exposure.
+    return Path(__file__).with_name("mobius_codex_models.json").resolve()
+
+  def _identity(self) -> dict[str, Any]:
+    import httpx
+    transport = httpx.HTTPTransport(uds=self._socket_path())
+    with httpx.Client(transport=transport, timeout=3.0) as client:
+      response = client.get("http://broker/identity")
+      response.raise_for_status()
+      value = response.json()
+    return value if isinstance(value, dict) else {}
+
+  def trial_status(self) -> dict[str, Any]:
+    import httpx
+    transport = httpx.HTTPTransport(uds=self._socket_path())
+    with httpx.Client(transport=transport, timeout=5.0) as client:
+      response = client.get("http://broker/v1/balance")
+      response.raise_for_status()
+      value = response.json()
+    if not isinstance(value, dict):
+      raise ValueError("invalid trial status")
+    return value
+
+  def check_auth(self, data_dir: str) -> str | None:
+    del data_dir
+    try:
+      if self._identity().get("linked") is True:
+        return None
+    except Exception:
+      pass
+    return (
+      "Your Möbius subscription is not linked. Sign in from Möbius · You "
+      "to activate your trial."
+    )
+
+  def codex_config_overrides(self) -> list[str]:
+    quote = json.dumps
+    return [
+      'model="inkling"',
+      'model_provider="mobius_trial"',
+      f"model_catalog_json={quote(str(self._catalog_path()))}",
+      'model_providers.mobius_trial.name="Möbius subscription"',
+      'model_providers.mobius_trial.base_url="http://127.0.0.1:8765/v1"',
+      'model_providers.mobius_trial.env_key="MOBIUS_LOCAL_BROKER_KEY"',
+      'model_providers.mobius_trial.wire_api="responses"',
+      "model_providers.mobius_trial.request_max_retries=0",
+      "model_providers.mobius_trial.stream_max_retries=0",
+      "features.enable_request_compression=false",
+      "features.remote_compaction_v2=false",
+      "features.apps=false",
+      "features.plugins=false",
+      "features.multi_agent=false",
+      "features.multi_agent_v2.enabled=false",
+      "include_apps_instructions=false",
+      "include_collaboration_mode_instructions=false",
+      'web_search="disabled"',
+      'shell_environment_policy.exclude=["MOBIUS_LOCAL_BROKER_KEY"]',
+    ]
+
+  def build_env(
+    self,
+    base_env: dict[str, str],
+    data_dir: str,
+    chat_id: str | None = None,
+  ) -> dict[str, str]:
+    env = dict(base_env)
+    secret_keys = {
+      key for key in env
+      if key.endswith(("_API_KEY", "_API_TOKEN", "_AUTH_TOKEN"))
+    }
+    for key in secret_keys | {
+      "OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CONFIG_DIR",
+    }:
+      env[key] = ""
+    config_dir = Path(data_dir) / "cli-auth" / "mobius"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write(
+      config_dir / "config.toml",
+      "\n".join(self.codex_config_overrides()) + "\n",
+    )
+    env["CODEX_HOME"] = str(config_dir)
+    # Codex requires an env-key value for custom providers. This is a local
+    # protocol marker, not a credential; the broker ignores Authorization from
+    # the unprivileged client and obtains one-use capabilities itself.
+    env["MOBIUS_LOCAL_BROKER_KEY"] = "local-broker"
+    if chat_id:
+      env["AGENT_BROWSER_SESSION"] = f"chat-{chat_id}"
+    return env
+
+
 # Registry of available providers, keyed by ID.
 PROVIDERS: dict[str, BaseProvider] = {
+  "mobius": MobiusProvider(),
   "claude": ClaudeProvider(),
   "codex": CodexProvider(),
 }
 
-ProviderName = Literal["claude", "codex"]
+ProviderName = Literal["claude", "codex", "mobius"]
 PROVIDER_NAMES: frozenset[str] = frozenset(PROVIDERS)
 
 # The default provider when none is configured.
@@ -740,7 +889,46 @@ DEFAULT_PROVIDER = "claude"
 # When the stored provider is still the historical default but is not
 # authenticated, prefer a connected provider over showing a dead default.
 # Codex is first because the setup wizard leads with it for new installs.
+# The app-owned subscription never silently replaces a user's connected coding
+# provider. It becomes selectable after Möbius · You is installed and linked.
 CONNECTED_DEFAULT_ORDER = ("codex", "claude")
+
+
+def provider_runtime_kind(
+  provider: str | BaseProvider | None,
+) -> Literal["claude_sdk", "codex_sdk"] | None:
+  instance = PROVIDERS.get(provider) if isinstance(provider, str) else provider
+  explicit = getattr(instance, "runtime_kind", None)
+  if explicit in ("claude_sdk", "codex_sdk"):
+    return explicit
+  # Compatibility for lightweight provider doubles and installed extensions
+  # written before runtime_kind became an explicit adapter field.
+  name = getattr(instance, "name", "")
+  if name == "Claude Code":
+    return "claude_sdk"
+  if name == "Codex":
+    return "codex_sdk"
+  return None
+
+
+def provider_requirement_error(
+  provider: str | BaseProvider | None,
+  db: Any,
+) -> str | None:
+  """Return the unmet app-ownership requirement for one provider, if any."""
+  instance = PROVIDERS.get(provider) if isinstance(provider, str) else provider
+  slug = getattr(instance, "required_app_slug", None)
+  if not slug:
+    return None
+  from app import models
+  installed = db.query(models.App.id).filter(
+    models.App.slug == slug,
+    models.App.deleted_at.is_(None),
+  ).first() is not None
+  if installed:
+    return None
+  label = getattr(instance, "required_app_label", None) or slug
+  return f"Install {label} to use {getattr(instance, 'name', 'this provider')}."
 
 
 def authenticated_provider_ids(data_dir: str) -> list[str]:
@@ -843,7 +1031,7 @@ def _fallback_models(provider_id: str) -> list[dict[str, Any]]:
   return [
     {
       "id": mid,
-      "label": mid,
+      "label": MODEL_LABELS.get(mid, mid),
       "provider": provider_id,
       "available": True,
       **({"effort_levels": MODEL_EFFORT_LEVELS[mid]}
@@ -878,11 +1066,14 @@ def _live_model_entries(
   # a mirror of one catalog response. Keep them available even when a provider
   # temporarily omits an older-but-still-supported alias (Sonnet 4.6 / GPT-5.5)
   # from discovery, then append every genuinely live extra in provider order.
-  preferred = DEFAULT_VISIBLE_MODEL_ORDER.get(provider_id, ())
-  ordered_ids = list(preferred)
-  ordered_ids.extend(
-    model_id for model_id in live_by_id if model_id not in preferred
-  )
+  if provider_id == "mobius":
+    ordered_ids = [mid for mid in KNOWN_MODELS["mobius"] if mid in live_by_id]
+  else:
+    preferred = DEFAULT_VISIBLE_MODEL_ORDER.get(provider_id, ())
+    ordered_ids = list(preferred)
+    ordered_ids.extend(
+      model_id for model_id in live_by_id if model_id not in preferred
+    )
   entries: list[dict[str, Any]] = []
   for model_id in ordered_ids:
     metadata = live_by_id.get(model_id, {})
@@ -1283,6 +1474,24 @@ async def _fetch_provider_models(
     return await _fetch_claude_models(data_dir)
   if provider_id == "codex":
     return await _fetch_codex_models(data_dir)
+  if provider_id == "mobius":
+    import httpx
+    async with httpx.AsyncClient(timeout=5.0) as client:
+      response = await client.get("http://127.0.0.1:8765/v1/models")
+      response.raise_for_status()
+      payload = response.json()
+    rows = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+      raise RuntimeError("Möbius subscription model catalog has an invalid response")
+    return [
+      {
+        "id": row["id"],
+        "label": MODEL_LABELS[row["id"]],
+        "effort_levels": MODEL_EFFORT_LEVELS[row["id"]],
+      }
+      for row in rows
+      if isinstance(row, dict) and row.get("id") in KNOWN_MODELS["mobius"]
+    ]
   return []
 
 

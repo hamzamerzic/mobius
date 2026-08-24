@@ -832,6 +832,7 @@ async def provider_code(
 @router.get("/provider/status")
 async def provider_status(
   owner: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
 ):
   """Checks whether the active provider has local credentials configured.
 
@@ -839,9 +840,11 @@ async def provider_status(
   for any registered provider, not just Claude. `authenticated` remains as a
   compatibility alias; neither field performs a remote token probe.
   """
-  from app.providers import get_provider
+  from app.providers import get_provider, provider_requirement_error
   provider = get_provider(owner.provider)
-  error = provider.check_auth(get_settings().data_dir)
+  error = provider_requirement_error(provider, db)
+  if error is None:
+    error = provider.check_auth(get_settings().data_dir)
   return {
     "provider": owner.provider or "claude",
     "provider_name": provider.name,
@@ -854,6 +857,7 @@ async def provider_status(
 @router.get("/providers/status")
 async def providers_status(
   _: models.Owner = Depends(get_owner_app_or_chat_embed_for_models),
+  db: Session = Depends(get_db),
 ):
   """Returns local credential status for ALL registered providers.
 
@@ -863,17 +867,26 @@ async def providers_status(
   providers instead of guessing. `configured` is the durable semantic field;
   `authenticated` is retained for compatibility with installed mini-apps.
   """
-  from app.providers import PROVIDERS
+  from app.providers import PROVIDERS, provider_requirement_error
   data_dir = get_settings().data_dir
   out = {}
   for pid, provider in PROVIDERS.items():
-    error = provider.check_auth(data_dir)
+    requirement_error = provider_requirement_error(provider, db)
+    error = requirement_error or provider.check_auth(data_dir)
     out[pid] = {
       "name": provider.name,
       "configured": error is None,
       "authenticated": error is None,
       "error": error,
     }
+    if provider.required_app_slug:
+      out[pid]["available"] = requirement_error is None
+    if pid == "mobius" and requirement_error is None:
+      if error is None:
+        try:
+          out[pid]["trial"] = provider.trial_status()
+        except Exception:
+          out[pid]["trial"] = None
   return out
 
 
