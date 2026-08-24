@@ -39,7 +39,6 @@ KEY_PATH = PRIVATE_DIR / "instance-ed25519.pem"
 STATE_PATH = PRIVATE_DIR / "identity.json"
 INSTANCE_PATH = PRIVATE_DIR / "instance-id"
 PENDING_BOOTSTRAP_PATH = PRIVATE_DIR / "pending-enrollment.jwt"
-OAUTH_STATE_PATH = PRIVATE_DIR / "oauth-states.json"
 SOCKET_PATH = Path(
   os.environ.get(
     "MOBIUS_IDENTITY_BROKER_SOCKET",
@@ -58,115 +57,19 @@ GATEWAY_BASE_URL = os.environ.get(
   # authenticate every exact gateway route.
   "MOBIUS_AGENT_GATEWAY_URL", "https://www.mobius.you"
 ).rstrip("/")
-CONTRIBUTION_BASE_URL = os.environ.get(
-  "MOBIUS_CONTRIBUTION_RELAY_URL", IDENTITY_BASE_URL
-).rstrip("/")
-COMMUNITY_BASE_URL = os.environ.get(
-  "MOBIUS_COMMUNITY_REGISTRY_URL", IDENTITY_BASE_URL
-).rstrip("/")
 MAX_BODY = 2_000_000
-MAX_CONTRIBUTION_BODY = 3_000_000
-MAX_COMMUNITY_PUBLICATION_BODY = 8_000_000
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$")
 INSTANCE_RE = re.compile(r"^mob_[A-Za-z0-9_-]{3,160}$")
-OAUTH_STATE_RE = re.compile(r"^[A-Za-z0-9_-]{32,256}$")
 
-# Declarative public forwarding policy. Package integrations extend this map or
-# the narrowly patterned contribution reader below; callers never supply a
-# target URL, audience, or arbitrary upstream path.
+# Declarative inference forwarding policy. Callers never supply a target URL,
+# audience, or arbitrary upstream path.
 INFERENCE_ROUTES = {
-  ("GET", "/v1/models"): ("models:read", "mobius-agent-gateway", "gateway"),
-  ("GET", "/v1/balance"): ("balance:read", "mobius-agent-gateway", "gateway"),
+  ("GET", "/v1/models"): ("models:read", "mobius-agent-gateway"),
+  ("GET", "/v1/balance"): ("balance:read", "mobius-agent-gateway"),
   ("POST", "/v1/responses"): (
-    "inference:responses", "mobius-agent-gateway", "gateway"
+    "inference:responses", "mobius-agent-gateway"
   ),
 }
-
-_COMMUNITY_ROUTES = (
-  ("GET", re.compile(r"/v1/community/apps"), "community:read"),
-  ("GET", re.compile(r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}"), "community:read"),
-  (
-    "GET",
-    re.compile(
-      r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/revisions/"
-      r"[A-Za-z0-9_:-]{8,200}"
-    ),
-    "community:read",
-  ),
-  ("POST", re.compile(r"/v1/community/apps"), "community:publish"),
-  ("POST", re.compile(r"/v1/community/publications"), "community:publish"),
-  (
-    "PUT",
-    re.compile(r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/rating"),
-    "community:rate",
-  ),
-  (
-    "DELETE",
-    re.compile(r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/rating"),
-    "community:rate",
-  ),
-  (
-    "POST",
-    re.compile(
-      r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/revisions/"
-      r"[A-Za-z0-9_:-]{8,200}/comments"
-    ),
-    "community:comment",
-  ),
-  (
-    "DELETE",
-    re.compile(r"/v1/community/comments/[A-Za-z0-9_:-]{8,200}"),
-    "community:comment",
-  ),
-  (
-    "POST",
-    re.compile(r"/v1/community/comments/[A-Za-z0-9_:-]{8,200}/reports"),
-    "community:report",
-  ),
-  (
-    "POST",
-    re.compile(
-      r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/revisions/"
-      r"[A-Za-z0-9_:-]{8,200}/reviews"
-    ),
-    "community:review",
-  ),
-)
-
-
-def _community_scope(method: str, route_path: str, query: str) -> str | None:
-  scope = next(
-    (
-      declared_scope
-      for declared_method, pattern, declared_scope in _COMMUNITY_ROUTES
-      if method == declared_method and pattern.fullmatch(route_path)
-    ),
-    None,
-  )
-  if scope is None:
-    return None
-  if not query:
-    return scope
-  if method != "GET" or route_path != "/v1/community/apps":
-    return None
-  pairs = urllib.parse.parse_qsl(query, keep_blank_values=True)
-  allowed = {"q", "review_status", "limit", "offset"}
-  keys = [key for key, _value in pairs]
-  if any(key not in allowed for key in keys) or len(keys) != len(set(keys)):
-    return None
-  # Requiring the BFF's canonical sorted encoding makes the path digest stable
-  # and prevents equivalent query strings from becoming distinct capabilities.
-  if urllib.parse.urlencode(sorted(pairs)) != query:
-    return None
-  return scope
-
-
-def _request_body_limit(*, is_unix: bool, method: str, path: str) -> int:
-  if is_unix and method == "POST" and path == "/v1/contributions":
-    return MAX_CONTRIBUTION_BODY
-  if is_unix and method == "POST" and path == "/v1/community/publications":
-    return MAX_COMMUNITY_PUBLICATION_BODY
-  return MAX_BODY
 
 
 def _b64(value: bytes) -> str:
@@ -459,62 +362,6 @@ class Broker:
       stop.wait(delay)
       delay = min(60.0, delay * 2)
 
-  def save_oauth_state(self, value: dict[str, Any]) -> None:
-    required = {
-      "state", "owner", "verifier", "instance_id", "public_key_jwk",
-      "redirect_uri", "expires_at",
-    }
-    if (
-      set(value) != required
-      or not OAUTH_STATE_RE.fullmatch(str(value.get("state") or ""))
-      or value.get("instance_id") != self.instance_id
-      or not isinstance(value.get("expires_at"), (int, float))
-      or value["expires_at"] <= time.time()
-      or value["expires_at"] - time.time() > 600
-      or not isinstance(value.get("public_key_jwk"), dict)
-      or value["public_key_jwk"] != self.public_jwk()
-    ):
-      raise ValueError("invalid OAuth state")
-    with self.lock:
-      states = self._oauth_states()
-      states[value["state"]] = value
-      _atomic_root_write(
-        OAUTH_STATE_PATH,
-        json.dumps(states, sort_keys=True, separators=(",", ":")).encode(),
-      )
-
-  def consume_oauth_state(self, state: str) -> dict[str, Any] | None:
-    if not OAUTH_STATE_RE.fullmatch(state):
-      return None
-    with self.lock:
-      states = self._oauth_states()
-      value = states.pop(state, None)
-      _atomic_root_write(
-        OAUTH_STATE_PATH,
-        json.dumps(states, sort_keys=True, separators=(",", ":")).encode(),
-      )
-    if not isinstance(value, dict) or value.get("expires_at", 0) <= time.time():
-      return None
-    return value
-
-  def _oauth_states(self) -> dict[str, dict[str, Any]]:
-    if not _private_file_exists(OAUTH_STATE_PATH):
-      return {}
-    try:
-      value = json.loads(OAUTH_STATE_PATH.read_text(encoding="utf-8"))
-    except ValueError:
-      return {}
-    if not isinstance(value, dict):
-      return {}
-    now = time.time()
-    return {
-      key: item for key, item in value.items()
-      if OAUTH_STATE_RE.fullmatch(key)
-      and isinstance(item, dict)
-      and isinstance(item.get("expires_at"), (int, float))
-      and item["expires_at"] > now
-    }
-
   def _request_id(
     self, method: str, path: str, body: bytes, headers: dict[str, str]
   ) -> str:
@@ -537,7 +384,6 @@ class Broker:
     path: str,
     body: bytes,
     request_id: str,
-    idempotency_key: str = "",
   ) -> str:
     with self.lock:
       state = dict(self.state or {})
@@ -561,10 +407,6 @@ class Broker:
       "exp": now + 60,
       "audit_context": {"source": "runtime-broker"},
     }
-    if idempotency_key:
-      claims["idempotency_key_sha256"] = hashlib.sha256(
-        idempotency_key.encode("utf-8")
-      ).hexdigest()
     response = self.client.post(
       f"{IDENTITY_BASE_URL}/identity/capabilities",
       json={"assertion": self._sign(claims)},
@@ -584,53 +426,16 @@ class Broker:
     path: str,
     body: bytes,
     headers: dict[str, str],
-    allow_contributions: bool,
   ) -> httpx.Response:
     split = urllib.parse.urlsplit(path)
     route_path = split.path
     if not route_path.startswith("/") or split.fragment:
       raise FileNotFoundError("broker route not found")
-    declared = INFERENCE_ROUTES.get((method, route_path)) if not split.query else None
-    route = None
-    audience = ""
-    if declared is not None:
-      scope, audience, target_name = declared
-      route = (
-        scope,
-        GATEWAY_BASE_URL if target_name == "gateway" else "",
-        audience,
-      )
-    if route is None and allow_contributions:
-      if method == "POST" and route_path == "/v1/contributions" and not split.query:
-        route = (
-          "contribution:submit", CONTRIBUTION_BASE_URL,
-          "mobius-contribution-relay",
-        )
-      elif method == "GET" and re.fullmatch(
-        r"/v1/contributions/[A-Za-z0-9_-]{8,160}", route_path
-      ) and not split.query:
-        route = (
-          "contribution:read", CONTRIBUTION_BASE_URL,
-          "mobius-contribution-relay",
-        )
-      else:
-        community = _community_scope(method, route_path, split.query)
-        if community is not None:
-          route = (community, COMMUNITY_BASE_URL, "mobius-community-registry")
+    route = INFERENCE_ROUTES.get((method, route_path)) if not split.query else None
     if route is None:
       raise FileNotFoundError("broker route not found")
-    scope, target, audience = route
+    scope, audience = route
     request_id = self._request_id(method, path, body, headers)
-    idempotency_key = headers.get("idempotency-key", "")
-    if idempotency_key and not re.fullmatch(
-      r"[A-Za-z0-9][A-Za-z0-9._:-]{15,127}", idempotency_key
-    ):
-      raise ValueError("invalid idempotency key")
-    if method != "GET" and audience in {
-      "mobius-contribution-relay", "mobius-community-registry"
-    }:
-      if not idempotency_key:
-        raise ValueError("an idempotency key is required")
     capability = self._capability(
       audience=audience,
       scope=scope,
@@ -638,7 +443,6 @@ class Broker:
       path=path,
       body=body,
       request_id=request_id,
-      idempotency_key=idempotency_key,
     )
     forwarded = {
       "Authorization": f"Bearer {capability}",
@@ -650,11 +454,9 @@ class Broker:
     metadata = headers.get("x-codex-turn-metadata")
     if metadata:
       forwarded["x-codex-turn-metadata"] = metadata
-    if idempotency_key:
-      forwarded["Idempotency-Key"] = idempotency_key
     request = self.client.build_request(
       method,
-      target + path,
+      GATEWAY_BASE_URL + path,
       content=body if body else None,
       headers=forwarded,
       timeout=None if path == "/v1/responses" else 30.0,
@@ -698,7 +500,6 @@ class _Handler(BaseHTTPRequestHandler):
     path = self.path
     route_path = path.split("?", 1)[0]
     is_unix = bool(getattr(self.server, "is_unix", False))
-    body_limit = _request_body_limit(is_unix=is_unix, method=method, path=path)
     try:
       if is_unix and route_path.startswith("/identity") and path != route_path:
         raise FileNotFoundError("broker route not found")
@@ -716,27 +517,13 @@ class _Handler(BaseHTTPRequestHandler):
         subject = value.get("expected_subject") if isinstance(value, dict) else None
         self._json(200, broker.unlink(str(subject or "")))
         return
-      if is_unix and method == "POST" and path == "/identity/oauth/start":
-        value = json.loads(self._body())
-        if not isinstance(value, dict):
-          raise ValueError("OAuth state is required")
-        broker.save_oauth_state(value)
-        self._json(200, {"saved": True})
-        return
-      if is_unix and method == "POST" and path == "/identity/oauth/consume":
-        value = json.loads(self._body())
-        state = value.get("state") if isinstance(value, dict) else None
-        pending = broker.consume_oauth_state(str(state or ""))
-        self._json(200, {"pending": pending})
-        return
-      body = self._body(maximum=body_limit)
+      body = self._body()
       incoming = {key.lower(): value for key, value in self.headers.items()}
       upstream = broker.proxy(
         method=method,
         path=path,
         body=body,
         headers=incoming,
-        allow_contributions=is_unix,
       )
       try:
         self.send_response(upstream.status_code)
@@ -768,8 +555,6 @@ class _Handler(BaseHTTPRequestHandler):
 
   do_GET = _handle
   do_POST = _handle
-  do_PUT = _handle
-  do_DELETE = _handle
 
 
 class _UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
