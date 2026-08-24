@@ -1683,7 +1683,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--muted); /* CONTRACT: calm prose voice — regular UI font, NOT --mono; identifiers live in the expanded ToolBlock */
-  font-size: 12px;
+  font-size: 13px;
 }
 
 /* Liveness IS the label — a masked solid-text sweep (the sibling's chat-
@@ -3460,6 +3460,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text);
+  font-size: 12px;
 }
 
 .chat__wait-meta {

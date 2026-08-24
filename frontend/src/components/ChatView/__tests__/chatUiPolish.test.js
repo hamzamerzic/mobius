@@ -89,14 +89,14 @@ test('web tool activity uses the assistant reading width', () => {
     'tool activity should grow to the assistant reading measure on web')
 })
 
-test('activity labels share the Goal rail text size', () => {
+test('Waiting descriptions share the Goal rail text size', () => {
   const css = stripComments(chatCss)
-  const activityRule = (css.match(/\.chat__activity-label\s*\{[^}]*\}/g) || [])
+  const waitTextRule = (css.match(/\.chat__wait-text\s*\{[^}]*\}/g) || [])
     .find(rule => /font-size:/.test(rule)) || ''
   const goalRailRule = css.match(/\.chat__progress-rail\s*\{[^}]*\}/)?.[0] || ''
 
-  assert.match(activityRule, /font-size:\s*12px/,
-    'Monitor and other activity labels should use the compact Goal text size')
+  assert.match(waitTextRule, /font-size:\s*12px/,
+    'the Waiting description should use the compact Goal text size')
   assert.match(goalRailRule, /font-size:\s*12px/,
     'the Goal rail remains the reference size for above-composer status UI')
 })
