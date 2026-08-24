@@ -365,6 +365,17 @@ function StartupError({ title, message, retrying = false, onRetry }) {
 
 function removeSplash() {
   const splash = document.getElementById('splash')
+  const shellReloadTransition = document.documentElement.hasAttribute(
+    'data-shell-reload-transition',
+  )
+  if (shellReloadTransition) {
+    // The outgoing document is still the visible view-transition layer. Drop
+    // the incoming static cover before releasing that layer, so it fades
+    // directly onto Shell's stable destination instead of a blank theme frame.
+    splash?.remove()
+    window.__mobiusReleaseShellReloadTransition?.()
+    return
+  }
   if (splash) {
     // Drop pointer-events as we start the fade: the overlay is fixed at
     // z-index 9999 over the whole viewport and lingers ~400ms after opacity

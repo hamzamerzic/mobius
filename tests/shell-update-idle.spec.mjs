@@ -385,6 +385,95 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     )
   })
 
+  test('an aged apply and the next chat press share one painted destination handoff', async ({ page }) => {
+    let armApply
+    const armed = new Promise(resolve => { armApply = resolve })
+    await setup(page, {
+      streamRoute: route => route.fulfill(fulfillStream(sse([{ type: 'done' }]))),
+      systemRoute: oneShotSystemEventRoute('shell_apply_now', armed),
+    })
+    const target = await createTaggedChat(page, 'handoff-target')
+    const current = await createTaggedChat(page, 'handoff-current')
+    await page.goto(`${BASE}/shell/?chat=${current.id}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator(`[data-chat-id="${current.id}"][data-chat-surface="painted"]`)).toBeVisible({ timeout: 8000 })
+    await resetLoadCount(page)
+
+    await page.getByRole('button', { name: 'Toggle navigation' }).click()
+    const targetRow = page.locator(`[data-drawer-key="chat:${target.id}"]`)
+    await expect(targetRow).toBeVisible()
+
+    // Hold worker inspection so the test can place a fresh pointerdown inside
+    // the exact async gap that used to commit the old route before click.
+    await page.evaluate(() => {
+      const container = navigator.serviceWorker
+      let releaseInspection
+      const inspectionGate = new Promise(resolve => { releaseInspection = resolve })
+      const original = container.getRegistration.bind(container)
+      Object.defineProperty(container, 'getRegistration', {
+        configurable: true,
+        value: async () => {
+          await inspectionGate
+          return original()
+        },
+      })
+      window.__releaseShellInspection = releaseInspection
+      window.addEventListener('mobius:before-shell-reload', () => {
+        sessionStorage.setItem('__before_shell_reload_seen', '1')
+      })
+      window.addEventListener('pageswap', event => {
+        sessionStorage.setItem(
+          '__shell_reload_view_transition',
+          event.viewTransition ? 'yes' : 'no',
+        )
+      }, { once: true })
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        value: 'hidden',
+      })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+
+    armApply()
+    await page.waitForTimeout(7000)
+    expect(await loadCount(page)).toBe(0)
+
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        value: 'visible',
+      })
+      document.dispatchEvent(new Event('visibilitychange'))
+      document.documentElement.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        pointerType: 'touch',
+      }))
+      window.__releaseShellInspection()
+    })
+    await page.waitForFunction(
+      () => sessionStorage.getItem('__before_shell_reload_seen') === '1',
+      { timeout: 3000 },
+    )
+    // Let the first apply reach its final safety check. The press keeps it in
+    // this document; the click below then supplies the destination atomically.
+    await page.waitForTimeout(100)
+    expect(await loadCount(page)).toBe(0)
+
+    await targetRow.evaluate(element => element.click())
+    await page.waitForFunction(
+      () => Number(sessionStorage.getItem('__load_count') || '0') === 1,
+      { timeout: 8000 },
+    )
+    await expect(page.locator(
+      `[data-chat-id="${target.id}"][data-chat-surface="painted"]`,
+    )).toBeVisible({ timeout: 8000 })
+    expect(await page.evaluate(() => (
+      sessionStorage.getItem('__shell_reload_view_transition')
+    ))).toBe('yes')
+    await page.waitForTimeout(700)
+    expect(await page.locator('html[data-shell-reload-transition]').count()).toBe(0)
+    expect(await loadCount(page)).toBe(1)
+  })
+
   test('shell_apply_now on the global system stream while idle applies immediately', async ({ page }) => {
     // No turn is streaming; the global system stream delivers shell_apply_now at
     // load. Idle → immediate apply → one reload. Loop prevention is single

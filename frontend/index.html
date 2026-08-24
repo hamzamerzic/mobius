@@ -166,6 +166,69 @@
     } catch (e) {}
   } catch (e) {}
 })();</script>
+    <!-- A controlled shell handoff is a same-origin replace navigation rather
+         than reload(), so supporting browsers can retain the old painted root
+         while the new bundle restores the chosen destination. Ordinary links,
+         auth redirects, and Back/Forward explicitly skip this opt-in below. -->
+    <style data-mobius-shell-reload-transition>
+      @view-transition { navigation: auto; }
+      @keyframes mobius-shell-reload-reveal {
+        from { opacity: 1; }
+        to { opacity: 0; }
+      }
+      html[data-shell-reload-transition]::view-transition-group(root) {
+        animation: none;
+      }
+      html[data-shell-reload-transition]::view-transition-old(root) {
+        animation: mobius-shell-reload-reveal 140ms ease-out both paused;
+      }
+      html[data-shell-reload-transition]::view-transition-new(root) {
+        animation: none;
+        opacity: 0;
+      }
+      html[data-shell-reload-transition][data-shell-reload-ready]::view-transition-old(root) {
+        animation-play-state: running;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        html[data-shell-reload-transition]::view-transition-old(root) {
+          animation-duration: 1ms;
+        }
+      }
+    </style>
+    <script data-mobius-shell-reload-transition>(function () {
+      var root = document.documentElement;
+      function hasShellReload() {
+        try { return !!sessionStorage.getItem('shell-reload'); } catch (e) { return false; }
+      }
+      if (hasShellReload()) root.setAttribute('data-shell-reload-transition', 'incoming');
+
+      // The at-rule is document-wide, but only the controlled shell replacement
+      // may retain pixels. Every unrelated cross-document navigation keeps its
+      // ordinary browser semantics.
+      window.addEventListener('pageswap', function (event) {
+        if (!event.viewTransition) return;
+        if (hasShellReload()) {
+          // Mark the outgoing document before its root snapshot animates. The
+          // incoming document sets the same attribute above, so both halves of
+          // the cross-document transition share the controlled timing.
+          root.setAttribute('data-shell-reload-transition', 'outgoing');
+          return;
+        }
+        event.viewTransition.skipTransition();
+      });
+
+      // App releases this only after Shell reports a stable destination. The
+      // old root then fades directly to live React underneath; the static
+      // artwork-free theme cover never becomes the visible intermediate frame.
+      window.__mobiusReleaseShellReloadTransition = function () {
+        if (!root.hasAttribute('data-shell-reload-transition')) return;
+        root.setAttribute('data-shell-reload-ready', '');
+        setTimeout(function () {
+          root.removeAttribute('data-shell-reload-transition');
+          root.removeAttribute('data-shell-reload-ready');
+        }, 500);
+      };
+    })();</script>
   </head>
   <!-- Theme bg comes from var(--bg), set by the pre-paint script above. -->
   <body style="margin:0;background:var(--bg,#0d0d0d)">
@@ -215,6 +278,9 @@
             '. If it still won’t load, open Recovery from your deployment control panel.',
           )
           document.body.appendChild(d)
+          if (window.__mobiusReleaseShellReloadTransition) {
+            window.__mobiusReleaseShellReloadTransition()
+          }
         }
       }, 8000)
     </script>
