@@ -89,6 +89,18 @@ test('web tool activity uses the assistant reading width', () => {
     'tool activity should grow to the assistant reading measure on web')
 })
 
+test('activity labels share the Goal rail text size', () => {
+  const css = stripComments(chatCss)
+  const activityRule = (css.match(/\.chat__activity-label\s*\{[^}]*\}/g) || [])
+    .find(rule => /font-size:/.test(rule)) || ''
+  const goalRailRule = css.match(/\.chat__progress-rail\s*\{[^}]*\}/)?.[0] || ''
+
+  assert.match(activityRule, /font-size:\s*12px/,
+    'Monitor and other activity labels should use the compact Goal text size')
+  assert.match(goalRailRule, /font-size:\s*12px/,
+    'the Goal rail remains the reference size for above-composer status UI')
+})
+
 test('message references use a bounded responsive two-column grid', () => {
   const css = stripComments(chatCss)
   const sourcesRule = css.match(/\.chat__sources\s*\{[^}]*\}/)?.[0] || ''
