@@ -5,6 +5,7 @@
  */
 
 import { assistantAnchorKey } from '../../lib/chatDetailCache.js'
+import { startsFollowingTurn } from './chatRuntimeState.js'
 import { questionKey } from './questionKey.js'
 
 export function streamItemToBlock(item, { finalize = true } = {}) {
@@ -347,12 +348,12 @@ export function chooseActiveAssistantSurface(msg, items) {
 export function chooseActiveAssistantMirrorIndex({
   bridgeMsgIdx,
   trailingAssistantPartialIdx,
-  bridgeFollowedByVisibleUser = false,
+  bridgeFollowedByNewTurn = false,
   hasLivePayload,
   bridgeSurface,
   surface,
 }) {
-  if (bridgeMsgIdx >= 0 && !bridgeFollowedByVisibleUser) {
+  if (bridgeMsgIdx >= 0 && !bridgeFollowedByNewTurn) {
     // The mount bridge is captured before the authoritative chat fetch can
     // refresh an in-memory cache. If a new turn starts in that window, the
     // captured row can be the COMPLETED answer from the previous turn. Never
@@ -471,18 +472,52 @@ export function carryQuestionAnswers(blocks, existingBlocks = []) {
   })
 }
 
-export function promoteAssistantStream(messages, { items, bridgeTs = null }) {
+export function findAssistantPromotionIndex(
+  messages,
+  { assistantMessageId = null, bridgeTs = null } = {},
+) {
+  const source = Array.isArray(messages) ? messages : []
+  if (assistantMessageId) {
+    const target = String(assistantMessageId)
+    const exact = source.findIndex(message => (
+      message?.role === 'assistant'
+      && message.id != null
+      && String(message.id) === target
+    ))
+    if (exact >= 0) return exact
+  }
+  if (bridgeTs == null) return -1
+  const legacy = source.findIndex(message => (
+    message?.role === 'assistant' && message.ts === bridgeTs
+  ))
+  if (legacy < 0) return -1
+  if (!assistantMessageId) return legacy
+  // Rolling activation may pair an id-capable stream with a cached pre-id
+  // partial. Adopt it only while it is still the current turn. A durable id on
+  // the row, or any later visible turn boundary, proves it is not this stream.
+  if (source[legacy]?.id != null) return -1
+  if (source.slice(legacy + 1).some(startsFollowingTurn)) return -1
+  return legacy
+}
+
+
+export function promoteAssistantStream(
+  messages,
+  { items, assistantMessageId = null, bridgeTs = null },
+) {
   if (!Array.isArray(items) || items.length === 0) return messages
   const { content, blocks } = streamItemsToAssistantPayload(items)
 
-  const bridgeIdx = bridgeTs == null
-    ? -1
-    : messages.findIndex(m => m?.role === 'assistant' && m.ts === bridgeTs)
+  const bridgeIdx = findAssistantPromotionIndex(messages, {
+    assistantMessageId,
+    bridgeTs,
+  })
   const bridgedMsg = bridgeIdx >= 0 ? messages[bridgeIdx] : null
 
   if (bridgedMsg) {
     const merged = {
       ...bridgedMsg,
+      ...(assistantMessageId ? { id: assistantMessageId } : {}),
       content,
       blocks: carryQuestionAnswers(blocks, bridgedMsg.blocks || []),
     }
@@ -493,7 +528,12 @@ export function promoteAssistantStream(messages, { items, bridgeTs = null }) {
     ]
   }
 
-  return [...messages, { role: 'assistant', content, blocks }]
+  return [...messages, {
+    ...(assistantMessageId ? { id: assistantMessageId } : {}),
+    role: 'assistant',
+    content,
+    blocks,
+  }]
 }
 
 /**
@@ -508,13 +548,23 @@ export function promoteAssistantStream(messages, { items, bridgeTs = null }) {
  */
 export function promoteAssistantStreamWithFollowingMessages(
   messages,
-  { items, bridgeTs = null, followingMessages = [] },
+  {
+    items,
+    assistantMessageId = null,
+    bridgeTs = null,
+    followingMessages = [],
+  },
 ) {
   const source = Array.isArray(messages) ? messages : []
-  const bridgeIdx = bridgeTs == null
-    ? -1
-    : source.findIndex(m => m?.role === 'assistant' && m.ts === bridgeTs)
-  const promoted = promoteAssistantStream(source, { items, bridgeTs })
+  const bridgeIdx = findAssistantPromotionIndex(source, {
+    assistantMessageId,
+    bridgeTs,
+  })
+  const promoted = promoteAssistantStream(source, {
+    items,
+    assistantMessageId,
+    bridgeTs,
+  })
   const batch = Array.isArray(followingMessages)
     ? followingMessages.filter(Boolean)
     : []

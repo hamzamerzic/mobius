@@ -142,6 +142,40 @@ def test_reconcile_merges_bounded_live_snapshot_before_restart_note(db):
   assert row.messages[-1]["blocks"][-1]["type"] == "error"
 
 
+def test_reconcile_never_rewrites_a_different_identified_assistant(db):
+  _make_chat(
+    db,
+    "identity-recovery",
+    running=True,
+    messages=[
+      {"role": "user", "content": "older request", "ts": 1},
+      {
+        "id": "assistant-older",
+        "role": "assistant",
+        "content": "older answer",
+        "blocks": [{"type": "text", "content": "older answer"}],
+        "ts": 2,
+      },
+    ],
+    live_assistant={
+      "id": "rt-identity-recovery",
+      "role": "assistant",
+      "blocks": [],
+      "ts": 3,
+    },
+  )
+
+  assert chat_mod.reconcile_interrupted_chats(db) == ["identity-recovery"]
+
+  db.expire_all()
+  row = db.get(models.Chat, "identity-recovery")
+  assert len(row.messages) == 3
+  assert row.messages[1]["id"] == "assistant-older"
+  assert row.messages[1]["content"] == "older answer"
+  assert row.messages[2]["id"] == "rt-identity-recovery"
+  assert row.messages[2]["blocks"][-1]["type"] == "error"
+
+
 def test_reconcile_rebuilds_open_question_barrier_from_repaired_tail(db):
   """A pre-crash Finalize clear cannot orphan an unanswered card.
 

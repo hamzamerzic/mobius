@@ -42,6 +42,7 @@ from app.chat_transcript import materialized_messages
 from app.chat_event_sink import (
   ChatEventSink,
   active_sink_stream_snapshot,
+  get_active_sink,
   register_active_sink,
   unregister_active_sink,
 )
@@ -120,9 +121,12 @@ def test_active_sink_snapshot_is_frozen_and_broadcast_identity_keyed():
   register_active_sink(bc.chat_id, sink)
   try:
     snapshot = active_sink_stream_snapshot(bc.chat_id, bc)
-    assert snapshot == sink.assistant_blocks
-    assert snapshot is not sink.assistant_blocks
-    snapshot[0]["content"] = "changed by subscriber"
+    assert snapshot == {
+      "items": sink.assistant_blocks,
+      "assistant_message_id": sink.assistant_message_id,
+    }
+    assert snapshot["items"] is not sink.assistant_blocks
+    snapshot["items"][0]["content"] = "changed by subscriber"
     assert sink.assistant_blocks[0]["content"] == "hello"
     assert active_sink_stream_snapshot(
       bc.chat_id,
@@ -130,6 +134,20 @@ def test_active_sink_snapshot_is_frozen_and_broadcast_identity_keyed():
     ) is None
   finally:
     unregister_active_sink(bc.chat_id, sink)
+
+
+def test_active_sink_registry_tolerates_a_successor_without_stream_state():
+  """Identity-keyed teardown can register a successor before it has a sink.
+
+  The registry ownership primitive must still preserve that opaque successor;
+  assistant identity publication is additive only when stream state exists.
+  """
+  successor = object()
+  register_active_sink("opaque-successor", successor)
+  try:
+    assert get_active_sink("opaque-successor") is successor
+  finally:
+    unregister_active_sink("opaque-successor", successor)
 
 
 def test_task_progress_coalesces_by_task_id_in_log():
@@ -951,7 +969,10 @@ async def test_snapshot_stream_sends_reduced_items_plus_control_tail(
   monkeypatch.setattr(
     stream_mod,
     "active_sink_stream_snapshot",
-    lambda chat_id, broadcast: snapshot_items
+    lambda chat_id, broadcast: {
+      "items": snapshot_items,
+      "assistant_message_id": "assistant-snapshot",
+    }
       if chat_id == chat.id and broadcast is bc else None,
   )
   try:
@@ -970,7 +991,11 @@ async def test_snapshot_stream_sends_reduced_items_plus_control_tail(
       if line.startswith("data: ")
     ]
 
-    assert payloads[0] == {"type": "stream_snapshot", "items": snapshot_items}
+    assert payloads[0] == {
+      "type": "stream_snapshot",
+      "items": snapshot_items,
+      "assistant_message_id": "assistant-snapshot",
+    }
     replay_types = [event.get("type") for event in payloads]
     assert "build_phase" in replay_types
     assert "answers_applied" in replay_types

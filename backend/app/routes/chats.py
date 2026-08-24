@@ -452,10 +452,9 @@ def _chat_detail_response(
   running = is_chat_running(chat.id) or has_running_run(db, chat.id)
   live_snapshot = chat.live_assistant
   live_message = (
-    all_msgs[-1]
+    next((message for message in all_msgs if message is live_snapshot), None)
     if running
-    and all_msgs
-    and all_msgs[-1] is live_snapshot
+    and isinstance(live_snapshot, dict)
     else None
   )
   # A genuinely streaming assistant row must remain self-contained: the live

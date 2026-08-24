@@ -73,6 +73,65 @@ test('a durable pending question outranks a richer stale stream snapshot', () =>
   assert.equal(result.showActiveAssistantSurface, true)
 })
 
+test('a cached assistant identity followed by a newer turn is not current', () => {
+  const stale = {
+    id: 'assistant-before-restart',
+    role: 'assistant',
+    ts: 2,
+    blocks: [{ type: 'question', question_id: 'old-question', questions: [] }],
+  }
+  const current = {
+    id: 'assistant-after-restart',
+    role: 'assistant',
+    ts: 4,
+    blocks: [{ type: 'text', content: 'current reply' }],
+  }
+  const messages = [
+    { role: 'user', ts: 1, content: 'request' },
+    stale,
+    { role: 'user', ts: 3, kind: 'continuation', content: 'resume' },
+    current,
+  ]
+
+  const result = deriveActiveAssistantSelection({
+    turnActive: true,
+    messages,
+    streamItems: [{ type: 'question', question_id: 'old-question', questions: [] }],
+    streamAssistantMessageId: 'assistant-before-restart',
+    findBridgeIndex: () => 1,
+  })
+
+  assert.equal(result.activeMirrorMsg, current)
+  assert.equal(result.activeMirrorMsgIdx, 3)
+})
+
+
+test('same-turn hidden answer does not release the identified assistant row', () => {
+  const active = {
+    id: 'assistant-live',
+    role: 'assistant',
+    ts: 2,
+    blocks: [{ type: 'question', question_id: 'q1', questions: [] }],
+  }
+  const messages = [
+    { role: 'user', ts: 1, content: 'request' },
+    active,
+    { role: 'user', ts: 3, hidden: true, content: 'answer' },
+  ]
+
+  const result = deriveActiveAssistantSelection({
+    turnActive: true,
+    messages,
+    streamItems: [{ type: 'question', question_id: 'q1', questions: [] }],
+    streamAssistantMessageId: 'assistant-live',
+    findBridgeIndex: () => -1,
+  })
+
+  assert.equal(result.activeMirrorMsg, active)
+  assert.equal(result.activeMirrorMsgIdx, 1)
+})
+
+
 test('a source-rich promoted answer is not painted again from its retired live array', () => {
   const messages = [
     { role: 'user', content: 'initial request', ts: 1 },
