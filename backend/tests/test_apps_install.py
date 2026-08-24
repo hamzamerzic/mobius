@@ -4866,6 +4866,59 @@ def test_multifile_update_merges_local_sibling_edit(
   assert "<<<<<<<" not in merged
 
 
+def test_multifile_update_validates_published_tree_not_local_extensions(
+  client, auth, bypass_url_validation,
+):
+  """A clean update merge may retain a locally applied sibling module.
+
+  The upstream manifest cannot declare that local-only module. Source package
+  completeness therefore belongs to the exact fetched release tree, not the
+  later reconciled tree that is compiled and served.
+  """
+  base = "https://multi-local-extension.test/repo/"
+  r1 = _install_multi(
+    client, auth, base, MANIFEST_MULTI, JSX_IMPORTS_CARDS, CARDS_V1,
+  )
+  assert r1.status_code == 201, r1.text
+
+  data_dir = Path(get_settings().data_dir)
+  src = data_dir / "apps" / "multi-app"
+  local_index = (
+    "import { LOCAL_LABEL } from './local.js'\n" + JSX_IMPORTS_CARDS
+  ).replace(
+    "<div>{CARD_LABEL}</div>",
+    "<div>{CARD_LABEL}{LOCAL_LABEL}</div>",
+  )
+  (src / "index.jsx").write_text(local_index, encoding="utf-8")
+  (src / "local.js").write_text(
+    "export const LOCAL_LABEL = 'LOCAL_ONLY'\n", encoding="utf-8",
+  )
+  (src / "mobius.json").write_text(
+    json.dumps({
+      **MANIFEST_MULTI,
+      "source_files": ["cards.js", "local.js"],
+    }),
+    encoding="utf-8",
+  )
+
+  cards_v2 = CARDS_V1.replace("FOOTER_ORIGINAL", "FOOTER_UPSTREAM")
+  r2 = _install_multi(
+    client, auth, base,
+    {**MANIFEST_MULTI, "version": "2.0.0"}, JSX_IMPORTS_CARDS, cards_v2,
+  )
+
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "update"
+  assert r2.json()["divergence"] == "clean_merge"
+  assert (src / "index.jsx").read_text() == local_index
+  assert (src / "local.js").read_text() == (
+    "export const LOCAL_LABEL = 'LOCAL_ONLY'\n"
+  )
+  bundle = Path(r2.json()["compiled_path"]).read_text()
+  assert "LOCAL_ONLY" in bundle
+  assert "FOOTER_UPSTREAM" in (src / "cards.js").read_text()
+
+
 def test_singlefile_install_unchanged_without_source_files(
   client, auth, bypass_url_validation,
 ):
