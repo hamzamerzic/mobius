@@ -28,7 +28,12 @@ function fakeElement(fields = {}) {
   }
 }
 
-function installBrowserEnvironment({ observers = [], frames = null } = {}) {
+function installBrowserEnvironment({
+  observers = [],
+  frames = null,
+  windowListeners = null,
+  documentListeners = null,
+} = {}) {
   const previous = {
     window: globalThis.window,
     document: globalThis.document,
@@ -46,15 +51,19 @@ function installBrowserEnvironment({ observers = [], frames = null } = {}) {
     clear() { stored.clear() },
   }
   globalThis.window = {
-    addEventListener() {},
-    removeEventListener() {},
+    addEventListener(type, handler) { windowListeners?.set(type, handler) },
+    removeEventListener(type, handler) {
+      if (windowListeners?.get(type) === handler) windowListeners.delete(type)
+    },
     visualViewport: null,
   }
   globalThis.document = {
     activeElement: null,
     visibilityState: 'visible',
-    addEventListener() {},
-    removeEventListener() {},
+    addEventListener(type, handler) { documentListeners?.set(type, handler) },
+    removeEventListener(type, handler) {
+      if (documentListeners?.get(type) === handler) documentListeners.delete(type)
+    },
   }
   globalThis.ResizeObserver = class {
     constructor(callback) {
@@ -141,6 +150,43 @@ function mountTailController(chatId, overrides = {}) {
   }
   const hook = renderHook(useScrollMode, args)
   return { hook, listeners, scroll, list, assistant, args }
+}
+
+function scrollTraceHasEvent(eventName) {
+  return globalThis.window.__mobiusChatScrollTrace?.events
+    ?.some(({ event }) => event === eventName) || false
+}
+
+function installManualTimers() {
+  const previousSetTimeout = globalThis.setTimeout
+  const previousClearTimeout = globalThis.clearTimeout
+  const timers = new Map()
+  let timerId = 0
+  globalThis.setTimeout = (callback, delay) => {
+    timerId += 1
+    timers.set(timerId, { callback, delay })
+    return timerId
+  }
+  globalThis.clearTimeout = id => timers.delete(id)
+  const pending = delay => [...timers.entries()]
+    .filter(([, timer]) => timer.delay === delay)
+  const run = ([id, timer]) => {
+    timers.delete(id)
+    timer.callback()
+  }
+  return {
+    pending,
+    run,
+    runLatest(delay) {
+      const match = pending(delay).at(-1)
+      assert.ok(match, `expected a pending ${delay}ms timer`)
+      run(match)
+    },
+    restore() {
+      globalThis.setTimeout = previousSetTimeout
+      globalThis.clearTimeout = previousClearTimeout
+    },
+  }
 }
 
 
@@ -687,6 +733,132 @@ test('gesture-start diagnostics add no transcript measurement to the hot path', 
       'hot-path traces remain geometry-free',
     )
 
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('touch contact survives a controller reinstall and settles only after the last lift', () => {
+  const windowListeners = new Map()
+  const documentListeners = new Map()
+  const restoreBrowser = installBrowserEnvironment({
+    windowListeners,
+    documentListeners,
+  })
+  const timers = installManualTimers()
+
+  try {
+    const mounted = mountTailController('touch-contact-reinstall')
+    const { hook, listeners, scroll, args } = mounted
+    const target = { parentElement: scroll, closest: () => null }
+    globalThis.window.__mobiusChatScrollTrace = undefined
+
+    listeners.get('touchstart')({ touches: [{}, {}] })
+    listeners.get('pointerdown')({
+      type: 'pointerdown', pointerType: 'touch', button: 0, clientY: 220, target,
+    })
+    scroll.scrollTop -= 60
+    listeners.get('scroll')()
+    listeners.get('scrollend')()
+    assert.equal(
+      scrollTraceHasEvent('reader:scroll-settled'),
+      false,
+      'native scrollend cannot hand layout ownership back under live contact',
+    )
+
+    const nextMessages = [
+      ...args.messages,
+      { role: 'assistant', cid: 'assistant-next', content: 'More output' },
+    ]
+    args.messagesRef.current = nextMessages
+    hook.rerender({ ...args, messages: nextMessages })
+    assert.equal(typeof windowListeners.get('touchend'), 'function',
+      'window lift delivery remains installed after the controller is replaced')
+
+    windowListeners.get('touchend')({ touches: [{}] })
+    assert.equal(
+      scrollTraceHasEvent('reader:scroll-settled'),
+      false,
+      'lifting one of several fingers keeps reader ownership active',
+    )
+    windowListeners.get('touchend')({ touches: [] })
+    timers.runLatest(250)
+    assert.equal(
+      scrollTraceHasEvent('reader:scroll-settled'),
+      true,
+      'the quiet edge starts from the final lift and settles the inherited gesture',
+    )
+
+    hook.unmount()
+  } finally {
+    timers.restore()
+    restoreBrowser()
+  }
+})
+
+test('the no-scroll safety cap re-arms while a finger remains down', () => {
+  const frames = []
+  const restoreBrowser = installBrowserEnvironment({ frames })
+  const timers = installManualTimers()
+
+  try {
+    const { hook, listeners, scroll } = mountTailController('touch-no-scroll-cap')
+    const target = { parentElement: scroll, closest: () => null }
+    globalThis.window.__mobiusChatScrollTrace = undefined
+
+    listeners.get('touchstart')({ touches: [{}] })
+    listeners.get('pointerdown')({
+      type: 'pointerdown', pointerType: 'touch', button: 0, clientY: 220, target,
+    })
+    const firstCap = timers.pending(2000).at(-1)
+    assert.ok(firstCap, 'a no-scroll contact has one bounded safety cap')
+    timers.run(firstCap)
+    assert.ok(timers.pending(2000).length > 0,
+      'the cap re-arms instead of releasing live contact')
+    assert.equal(
+      scrollTraceHasEvent('reader:no-scroll-release'),
+      false,
+    )
+
+    listeners.get('touchend')({ touches: [] })
+    assert.ok(frames.length > 0, 'the final lift schedules the ordinary frame handoff')
+    while (frames.length) frames.shift()()
+    assert.equal(
+      scrollTraceHasEvent('reader:no-scroll-release'),
+      true,
+      'the no-scroll gesture releases only after contact ends',
+    )
+    hook.unmount()
+  } finally {
+    timers.restore()
+    restoreBrowser()
+  }
+})
+
+test('backgrounding clears a wedged contact and settles its dirty gesture', () => {
+  const documentListeners = new Map()
+  const restoreBrowser = installBrowserEnvironment({ documentListeners })
+  try {
+    const { hook, listeners, scroll } = mountTailController(
+      'touch-visibility-wedge',
+    )
+    const target = { parentElement: scroll, closest: () => null }
+    globalThis.window.__mobiusChatScrollTrace = undefined
+
+    listeners.get('touchstart')({ touches: [{}] })
+    listeners.get('pointerdown')({
+      type: 'pointerdown', pointerType: 'touch', button: 0, clientY: 220, target,
+    })
+    scroll.scrollTop -= 40
+    listeners.get('scroll')()
+    globalThis.document.visibilityState = 'hidden'
+    documentListeners.get('visibilitychange')()
+    assert.equal(
+      scrollTraceHasEvent('reader:scroll-settled'),
+      true,
+      'a lost lift cannot freeze layout ownership after the page is hidden',
+    )
     hook.unmount()
   } finally {
     restoreBrowser()
