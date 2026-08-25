@@ -366,9 +366,9 @@ export default function ComposerPopover({
                 <DollarCircle width={18} height={18} />
               </span>
               <span className="composer-popover__row-main">
-                <span className="composer-popover__row-title">Token usage &amp; cost</span>
+                <span className="composer-popover__row-title">Usage &amp; reported cost</span>
                 <span className="composer-popover__row-sub">
-                  Per-turn breakdown for this chat
+                  Per-turn tokens and provider-reported cost
                 </span>
               </span>
             </button>
