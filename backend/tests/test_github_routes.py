@@ -3717,6 +3717,212 @@ def test_direct_stack_layer_pushes_upstream_and_uses_reviewed_base(
   assert not any(call[:2] == ("repo", "fork") for call in gh_calls)
 
 
+def _existing_fork_submission(tmp_path, monkeypatch):
+  _write_token(login="octocat")
+  repo = tmp_path / "existing-fork-pr"
+  (repo / ".git").mkdir(parents=True)
+  branch = "feat/existing-review"
+  base = "b" * 40
+  head = "a" * 40
+  diff_text = "diff --git a/model.py b/model.py\n+reviewed\n"
+  diff_path = tmp_path / "existing.diff"
+  diff_path.write_text(diff_text)
+  record = {
+    "id": "existing-fork-pr",
+    "type": "pr",
+    "repo": "mobius-os/app-demo",
+    "status": "submitting",
+    "title": "Refine the existing contribution",
+    "branch": branch,
+    "plan": {
+      "action": "pr_update",
+      "repo": "mobius-os/app-demo",
+      "title": "Refine the existing contribution",
+      "body_draft": "Reviewed existing contribution update.",
+      "branch": branch,
+      "repo_path": str(repo),
+      "base_sha": base,
+      "head_sha": head,
+      "diff_sha256": hashlib.sha256(diff_text.encode()).hexdigest(),
+    },
+  }
+  monkeypatch.setattr(
+    "app.github_contributions.shutil.which", lambda name: f"/bin/{name}",
+  )
+  monkeypatch.setattr(
+    "app.github_contributions._safe_repo_path", lambda _raw: repo,
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git._assert_fresh",
+    lambda *_args, **_kwargs: (base, head, record["plan"]["diff_sha256"]),
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git._assert_clean_worktree", lambda *_args: None,
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git._assert_coauthor_trailer", lambda *_args: None,
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git._normalize_head_attribution",
+    lambda *_args, **_kwargs: {},
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git._assert_merges_with_upstream",
+    lambda *_args, **_kwargs: {
+      "last_submit_upstream_branch": "main",
+      "last_submit_upstream_sha": base,
+    },
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git._assert_upstream_push_permission",
+    lambda *_args: pytest.fail("a fork-backed PR must not push upstream"),
+  )
+  monkeypatch.setattr(
+    "app.github_contributions._push_branch",
+    lambda *_args: pytest.fail("a fork-backed PR must not push upstream"),
+  )
+
+  def fake_git(_repo, *args, check=True):
+    if args == ("rev-parse", "--abbrev-ref", "HEAD"):
+      return _cp(branch + "\n")
+    if args == ("rev-parse", "HEAD"):
+      return _cp(head + "\n")
+    return _cp("")
+
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+  return record, diff_path, branch, head
+
+
+def test_existing_pr_update_uses_its_verified_fork_destination(
+  tmp_path, monkeypatch,
+):
+  from app.routes.github import _submit_prepared_pr
+
+  record, diff_path, branch, head = _existing_fork_submission(
+    tmp_path, monkeypatch,
+  )
+  fork_calls = []
+  monkeypatch.setattr(
+    "app.github_contributions._ensure_owner_fork_remote",
+    lambda _repo, upstream, login: (
+      fork_calls.append((upstream, login)) or "octocat/app-demo"
+    ),
+  )
+  pushes = []
+  monkeypatch.setattr(
+    "app.github_contributions._push_topic_branch",
+    lambda _repo, pushed_branch, source: (
+      pushes.append((pushed_branch, source)) or None
+    ),
+  )
+  confirmations = []
+
+  def confirm(
+    _repo,
+    upstream,
+    login,
+    pushed_branch,
+    *,
+    expected_head_sha,
+    base_branch,
+    same_repo,
+  ):
+    confirmations.append((
+      upstream,
+      login,
+      pushed_branch,
+      expected_head_sha,
+      base_branch,
+      same_repo,
+    ))
+    return "https://github.com/mobius-os/app-demo/pull/58"
+
+  monkeypatch.setattr(
+    "app.github_contributions._find_existing_pr", confirm,
+  )
+
+  url, number, patch = _submit_prepared_pr(
+    record,
+    diff_path,
+    expected_existing_pr_number=58,
+    expected_existing_head_repository="octocat/app-demo",
+  )
+
+  assert url.endswith("/pull/58")
+  assert number == 58
+  assert fork_calls == [("mobius-os/app-demo", "octocat")]
+  assert pushes == [(branch, "HEAD")]
+  assert confirmations == [(
+    "mobius-os/app-demo",
+    "octocat",
+    branch,
+    head,
+    "main",
+    False,
+  )]
+  assert patch["head_repository"] == "octocat/app-demo"
+  assert patch["last_submit_push_sha"] == head
+  assert patch["last_pushed_branch"] == f"octocat:{branch}"
+
+
+def test_existing_pr_update_stops_if_verified_fork_remote_does_not_match(
+  tmp_path, monkeypatch,
+):
+  from app.routes.github import ContributionSubmitError, _submit_prepared_pr
+
+  record, diff_path, _branch, _head = _existing_fork_submission(
+    tmp_path, monkeypatch,
+  )
+  monkeypatch.setattr(
+    "app.github_contributions._ensure_owner_fork_remote",
+    lambda *_args, **_kwargs: "octocat/app-demo-1",
+  )
+  monkeypatch.setattr(
+    "app.github_contributions._push_topic_branch",
+    lambda *_args: pytest.fail("a mismatched fork must stop before push"),
+  )
+  monkeypatch.setattr(
+    "app.github_contributions._find_existing_pr",
+    lambda *_args, **_kwargs: pytest.fail("an unpushed branch cannot confirm"),
+  )
+
+  with pytest.raises(ContributionSubmitError) as err:
+    _submit_prepared_pr(
+      record,
+      diff_path,
+      expected_existing_pr_number=58,
+      expected_existing_head_repository="octocat/app-demo",
+    )
+
+  assert "no longer matches" in err.value.message
+  assert "Nothing was pushed" in err.value.message
+
+
+def test_existing_pr_update_rejects_an_unowned_head_repository(
+  tmp_path, monkeypatch,
+):
+  from app.routes.github import ContributionSubmitError, _submit_prepared_pr
+
+  record, diff_path, _branch, _head = _existing_fork_submission(
+    tmp_path, monkeypatch,
+  )
+  monkeypatch.setattr(
+    "app.github_contributions._ensure_owner_fork_remote",
+    lambda *_args, **_kwargs: pytest.fail("an unowned PR must stop before fork lookup"),
+  )
+
+  with pytest.raises(ContributionSubmitError) as err:
+    _submit_prepared_pr(
+      record,
+      diff_path,
+      expected_existing_pr_number=58,
+      expected_existing_head_repository="someone-else/app-demo",
+    )
+
+  assert "not owned by the connected GitHub account" in err.value.message
+  assert "Nothing was pushed" in err.value.message
+
+
 def test_land_contribution_stack_marks_every_layer_merged(
   client, owner_token, monkeypatch,
 ):
@@ -4542,8 +4748,21 @@ def test_existing_pr_update_uses_owner_approved_exact_target(
     ) or None,
   )
 
-  def submit(record, diff_path, *, expected_existing_pr_number=None, **_kwargs):
-    calls.append(("submit", record["status"], expected_existing_pr_number, diff_path.name))
+  def submit(
+    record,
+    diff_path,
+    *,
+    expected_existing_pr_number=None,
+    expected_existing_head_repository=None,
+    **_kwargs,
+  ):
+    calls.append((
+      "submit",
+      record["status"],
+      expected_existing_pr_number,
+      expected_existing_head_repository,
+      diff_path.name,
+    ))
     return (
       "https://github.com/mobius-os/app-demo/pull/58",
       58,
@@ -4569,7 +4788,10 @@ def test_existing_pr_update_uses_owner_approved_exact_target(
       "target", "mobius-os/app-demo", 58,
       "octocat/app-demo", "feat/existing-review",
     ),
-    ("submit", "submitting", 58, f"{record_id}.diff"),
+    (
+      "submit", "submitting", 58, "octocat/app-demo",
+      f"{record_id}.diff",
+    ),
   ]
 
 

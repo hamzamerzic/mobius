@@ -1591,6 +1591,7 @@ def _submit_prepared_pr(
   *,
   direct_base_branch: str | None = None,
   expected_existing_pr_number: int | None = None,
+  expected_existing_head_repository: str | None = None,
 ) -> tuple[str, int | None, dict]:
   if not shutil.which("git") or not shutil.which("gh"):
     raise ContributionSubmitError(
@@ -1612,6 +1613,24 @@ def _submit_prepared_pr(
   plan = record.get("plan") or {}
   upstream_repo = _git_ops._validate_repo_slug(plan.get("repo") or record.get("repo"))
   branch = _git_ops._validate_branch(plan.get("branch") or record.get("branch"))
+  existing_head_repository = None
+  if expected_existing_pr_number is not None:
+    if expected_existing_head_repository is None:
+      raise ContributionSubmitError(
+        "This existing pull request update is missing its verified head repository."
+      )
+    existing_head_repository = _git_ops._validate_repo_slug(
+      expected_existing_head_repository
+    )
+    if (
+      existing_head_repository.casefold() != upstream_repo.casefold()
+      and existing_head_repository.split("/", 1)[0].casefold()
+      != login.casefold()
+    ):
+      raise ContributionSubmitError(
+        "This pull request branch is not owned by the connected GitHub account. "
+        "Nothing was pushed."
+      )
   direct_base = (
     _git_ops._validate_branch(direct_base_branch) if direct_base_branch else None
   )
@@ -1725,6 +1744,15 @@ def _submit_prepared_pr(
         fork_slug = _ensure_owner_fork_remote(repo, upstream_repo, login)
       except ContributionSubmitError as exc:
         raise _git_ops._merge_error_patch(exc, record_patch) from exc
+      if (
+        existing_head_repository is not None
+        and fork_slug.casefold() != existing_head_repository.casefold()
+      ):
+        raise ContributionSubmitError(
+          "The connected GitHub fork no longer matches this pull request's "
+          "verified head repository. Nothing was pushed.",
+          record_patch=record_patch,
+        )
       record_patch = _git_ops._record_patch_with(record_patch, {"head_repository": fork_slug})
       push_source = "HEAD"
       last_push_error = _push_topic_branch(repo, branch, push_source)

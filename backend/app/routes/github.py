@@ -1497,6 +1497,7 @@ async def update_existing_contribution(
         claimed,
         diff_path,
         expected_existing_pr_number=number,
+        expected_existing_head_repository=head_repository,
       )
       if returned_number != number:
         raise ContributionSubmitError(
@@ -2729,6 +2730,7 @@ async def autopilot_update(
       pr_url, number, record_patch = await asyncio.to_thread(
         _submit_prepared_pr, record, diff_path,
         expected_existing_pr_number=int(row.target_pr_number),
+        expected_existing_head_repository=str(row.target_head_repository),
       )
   except ContributionSubmitError as exc:
     raise HTTPException(
