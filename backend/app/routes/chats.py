@@ -251,7 +251,10 @@ def _mirror_agent_defaults(
   settings_obj: dict,
 ) -> None:
   """Repair the best-effort defaults mirrored from a committed chat choice."""
-  patch = {}
+  # Keep the model's provider in the SAME atomic shared-file update. Live model
+  # discovery can expose ids outside KNOWN_MODELS, so model text alone is not a
+  # durable provider classifier.
+  patch = {"provider": provider_id}
   for key in ("model", "effort", "effort_by_provider"):
     value = settings_obj.get(key)
     if value is not None:
@@ -452,10 +455,9 @@ def _chat_detail_response(
   running = is_chat_running(chat.id) or has_running_run(db, chat.id)
   live_snapshot = chat.live_assistant
   live_message = (
-    all_msgs[-1]
+    next((message for message in all_msgs if message is live_snapshot), None)
     if running
-    and all_msgs
-    and all_msgs[-1] is live_snapshot
+    and isinstance(live_snapshot, dict)
     else None
   )
   # A genuinely streaming assistant row must remain self-contained: the live
@@ -873,7 +875,10 @@ def create_chat(
 
   owner = db.query(models.Owner).first()
   data_dir = get_settings().data_dir
-  provider = providers.resolve_default_provider(
+  # Provider follows the last-selected model (the single source of truth) so a
+  # new chat always starts on the family of the model it will actually use —
+  # never a provider whose remembered model belongs to the other family.
+  provider = providers.owner_default_provider(
     data_dir, owner.provider if owner else None,
   )
 
@@ -1134,12 +1139,11 @@ async def patch_chat(
     target_provider = body.provider
     new_model = agent_settings_patch.get("model")
     if target_provider is None and new_model:
-      from app.providers import _model_belongs_to_other_provider
+      from app.providers import _known_model_provider
       current_provider = chat.provider or "claude"
-      if _model_belongs_to_other_provider(new_model, current_provider):
-        target_provider = (
-          "codex" if current_provider == "claude" else "claude"
-        )
+      inferred_provider = _known_model_provider(new_model)
+      if inferred_provider and inferred_provider != current_provider:
+        target_provider = inferred_provider
 
     if new_model:
       from app.providers import _model_belongs_to_other_provider
@@ -1186,20 +1190,23 @@ async def patch_chat(
           "handoff so the incoming provider can continue its context."
         ),
       )
-    if target_provider is not None and target_provider in ("claude", "codex"):
+    if target_provider is not None:
       # Reject a switch to a disconnected provider — the picker may
       # have raced ahead of /auth/providers/status, or the user may
       # be on stale state. Without this check the PATCH would succeed
       # silently and then every subsequent message turn would fail
       # auth, leaving the user confused. 409 surfaces the real
       # problem at pick-time.
-      from app.providers import get_provider
+      from app.providers import get_provider, provider_requirement_error
       candidate = get_provider(target_provider)
-      auth_error = candidate.check_auth(get_app_settings().data_dir)
+      requirement_error = provider_requirement_error(candidate, db)
+      auth_error = requirement_error or candidate.check_auth(
+        get_app_settings().data_dir
+      )
       if auth_error is not None:
         raise HTTPException(
           status_code=409,
-          detail=(
+          detail=requirement_error or (
             f"{candidate.name} is not connected. "
             "Open Settings to connect, then try again."
           ),
@@ -1255,7 +1262,9 @@ async def patch_chat(
       and settings_obj
       and picker_settings_changed
     ):
-      mirror_patch = {}
+      # Model + provider are one picker choice. Persist them in one atomic
+      # shared-file update so concurrent chats cannot split the pair.
+      mirror_patch = {"provider": chat.provider}
       for key in ("model", "effort", "effort_by_provider"):
         value = settings_obj.get(key)
         if value is not None:
@@ -1722,6 +1731,7 @@ def get_chat_agent_context(
 @router.get("/{chat_id}/usage")
 def get_chat_usage(
   chat_id: str,
+  include_runs: bool = True,
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
@@ -1784,7 +1794,7 @@ def get_chat_usage(
         "usage": run.usage_json,
       }
       for run in runs
-    ],
+    ] if include_runs else [],
   }
 
 
@@ -2114,7 +2124,9 @@ async def _compact_chat_locked(
     )
   data_dir = get_settings().data_dir
   candidate = providers.get_provider(body.provider)
-  auth_error = candidate.check_auth(data_dir)
+  auth_error = providers.provider_requirement_error(candidate, db)
+  if auth_error is None:
+    auth_error = candidate.check_auth(data_dir)
   if auth_error is not None:
     raise HTTPException(status_code=409, detail=auth_error)
 
@@ -2580,10 +2592,10 @@ def create_app_chat(
 
   owner = db.query(models.Owner).first()
   data_dir = get_settings().data_dir
-  provider = body.provider or providers.resolve_default_provider(
+  provider = body.provider or providers.owner_default_provider(
     data_dir, owner.provider if owner else None,
   )
-  if provider not in ("claude", "codex"):
+  if provider not in providers.PROVIDER_NAMES:
     raise HTTPException(status_code=422, detail=f"unknown provider: {provider}")
   if body.model and providers._model_belongs_to_other_provider(
     body.model, provider,
@@ -2671,7 +2683,7 @@ async def patch_app_chat(
         detail="The selected model does not belong to that provider.",
       )
     if body.provider is not None:
-      if body.provider not in ("claude", "codex"):
+      if body.provider not in providers.PROVIDER_NAMES:
         raise HTTPException(
           status_code=422, detail=f"unknown provider: {body.provider}"
         )

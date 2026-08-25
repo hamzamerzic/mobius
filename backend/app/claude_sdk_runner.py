@@ -699,9 +699,10 @@ async def _seal_steer_split(bc, active_client, chat_id: str) -> None:
   finally finds an empty buffer and appends nothing to the turn it just killed.
 
   A1 is the sink's accumulated pre-interrupt content — complete once the turn
-  closes — so `split_for_steer` seals it as its own message, appends the steered
-  row(s) after it, and resets the sink so A2 lands fresh: reload order Q1, A1,
-  Q2, A2.
+  closes — so the sink's authoritative `commit_steer_cut` seals it as its own
+  identified message, appends the steered row(s), rotates the segment identity,
+  and publishes the exact A1/A2 snapshots in one operation. Older sink-like
+  test doubles retain the split-then-publish compatibility path below.
 
   This is the fix for the steer-merge: the route cannot know where A1 ends (at
   HTTP arrival A1 has not streamed yet, so a route-side split sealed an empty
@@ -721,7 +722,7 @@ async def _seal_steer_split(bc, active_client, chat_id: str) -> None:
 
   Durability contract (adversarial-review hardening):
   - The rows are snapshotted BEFORE the await and only the snapshotted count is
-    removed on success, so a second steer landing during `split_for_steer`'s
+    removed on success, so a second steer landing during the cut's
     actor round-trips is not wiped (it survives for the next call / the
     finally).
   - On a persistence FAILURE the buffer is left intact so the turn-end
@@ -734,6 +735,7 @@ async def _seal_steer_split(bc, active_client, chat_id: str) -> None:
   if not rows:
     return
   consume = list(active_client._steer_consume_cids)
+  commit_cut = getattr(bc, "commit_steer_cut", None)
   split = getattr(bc, "split_for_steer", None)
   # Resolve the client-facing publisher BEFORE committing anything. Take the
   # broadcast off the SINK rather than re-resolving it by chat_id: the cut
@@ -750,13 +752,13 @@ async def _seal_steer_split(bc, active_client, chat_id: str) -> None:
   raw_bc = getattr(bc, "bc", None)
   if raw_bc is not None and not callable(getattr(raw_bc, "publish", None)):
     raw_bc = None
-  if split is not None and raw_bc is None:
+  if commit_cut is None and split is not None and raw_bc is None:
     log.error(
       "steer split has no broadcast to publish the cut on chat_id=%s; "
       "the transcript will be split but the client stream cannot re-base "
       "until it refetches", chat_id,
     )
-  if split is None:
+  if commit_cut is None and split is None:
     # No live sink (legacy/test caller): there is no streamed A1 to seal
     # against and no way to persist here — drop the buffer.
     active_client._steer_user_msgs = active_client._steer_user_msgs[len(rows):]
@@ -765,7 +767,11 @@ async def _seal_steer_split(bc, active_client, chat_id: str) -> None:
     )
     return
   try:
-    stored_result = await split(rows, consume)
+    stored_result = (
+      await commit_cut(rows, consume)
+      if commit_cut is not None
+      else await split(rows, consume)
+    )
   except Exception:
     # Leave the buffer intact so the turn-end finally retries the write.
     log.exception(
@@ -778,6 +784,11 @@ async def _seal_steer_split(bc, active_client, chat_id: str) -> None:
   active_client._steer_consume_cids = (
     active_client._steer_consume_cids[len(consume):]
   )
+  # Current sinks own persistence, segment rotation, and publication as one
+  # operation. The remainder is rolling compatibility for older sink-like test
+  # doubles that expose only split_for_steer.
+  if commit_cut is not None:
+    return
   # Publish the cut now that A1 + Q2 are committed, on the broadcast resolved
   # above. No await separates the split from this publish, so no continuation
   # block can slip in front of it.

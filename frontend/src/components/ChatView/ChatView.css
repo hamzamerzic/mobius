@@ -103,6 +103,7 @@
      reserve for the chip tray when it caps its own growth. Changing it here
      keeps a pending attachment and a sent one the same square. */
   --attach-card: 96px;
+  --chat-status-font-size: 12px;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -2114,7 +2115,8 @@
 .chat__foot .chat__progress-step--toggle,
 .chat__foot .slash-menu,
 .chat__foot .chat__pill,
-.chat__foot .composer-plus { pointer-events: auto; }
+.chat__foot .composer-plus,
+.chat__foot .chat__usage-strip { pointer-events: auto; }
 
 /* One geometry-neutral stack for every control that floats above the measured
    footer. The safe default keeps transient-only controls clear of the composer.
@@ -2643,6 +2645,7 @@
    selected surface and the existing accent border for open state. */
 .chat__brain-usage {
   align-self: flex-end;
+  position: relative;
 }
 .chat__brain-usage:focus { outline: none; }
 .chat__brain-usage:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -2650,6 +2653,44 @@
   background-color: color-mix(in srgb, var(--surface2) 82%, transparent) !important;
   border-color: var(--accent);
   color: var(--text);
+}
+
+/* Always-visible cost/token readout directly above the composer — moved
+   here (from an overlay badge on the brain icon) so it has room for more
+   than one number and sits where the eye already lands after a turn
+   finishes. Deliberately understated: no border/background/pill, just
+   muted small text, consistent with "subtle" — this is ambient status, not
+   a call to action. */
+.chat__usage-strip-wrap {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 0 4px;
+  display: flex;
+}
+
+.chat__usage-strip {
+  border: 0;
+  background: none;
+  padding: 2px 6px;
+  margin: 0 0 2px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: color 0.12s, background 0.12s;
+}
+
+.chat__usage-strip:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface2) 60%, transparent);
+}
+
+.chat__usage-strip:focus { outline: none; }
+.chat__usage-strip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 /* ── Composer popover (Attach + Model picker) ────────── */
@@ -3309,7 +3350,7 @@
   border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on the frosted card */
   backdrop-filter: blur(16px) saturate(140%);
   -webkit-backdrop-filter: blur(16px) saturate(140%);
-  font-size: 12px;
+  font-size: var(--chat-status-font-size);
   line-height: 1.3;
   animation: progress-rail-in 0.22s ease both;
 }
@@ -3469,6 +3510,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text);
+  font-size: var(--chat-status-font-size);
 }
 
 .chat__wait-meta {

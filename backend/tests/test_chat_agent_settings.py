@@ -85,6 +85,110 @@ def test_effective_settings_has_no_model_until_manual_pick(tmp_path):
   assert result["effort"] == "medium"
 
 
+def test_new_chat_provider_follows_last_selected_model(tmp_path):
+  """A new chat's provider follows the remembered model's family, so it can't
+  be born on a provider whose model belongs to the OTHER family. The stored
+  provider (which can drift when many chats run at once) is ignored while a
+  model is remembered."""
+  from app.providers import owner_default_provider
+
+  shared = tmp_path / "shared"
+  shared.mkdir()
+  # Last-selected model is a Claude one; the drifted stored provider is codex.
+  (shared / "agent-settings.json").write_text(
+    json.dumps({"model": "claude-opus-4-8"})
+  )
+  assert owner_default_provider(str(tmp_path), "codex") == "claude"
+
+  # And the reverse: a remembered Codex model wins over a stale claude provider.
+  (shared / "agent-settings.json").write_text(
+    json.dumps({"model": "gpt-5.6-sol"})
+  )
+  assert owner_default_provider(str(tmp_path), "claude") == "codex"
+
+
+def test_new_chat_provider_follows_live_model_picker_pair(tmp_path):
+  """Live discovery is broader than KNOWN_MODELS. The provider persisted in
+  the same picker write keeps a newly released model usable without teaching
+  the backend its naming convention first."""
+  from app.providers import owner_default_provider
+
+  shared = tmp_path / "shared"
+  shared.mkdir()
+  (shared / "agent-settings.json").write_text(json.dumps({
+    "model": "future-catalog-id-with-no-family-prefix",
+    "provider": "codex",
+  }))
+  assert owner_default_provider(str(tmp_path), "claude") == "codex"
+
+
+def test_known_model_repairs_contradictory_picker_provider(tmp_path):
+  """A known model remains self-identifying if an old writer or manual edit
+  leaves a contradictory provider beside it."""
+  from app.providers import owner_default_provider
+
+  shared = tmp_path / "shared"
+  shared.mkdir()
+  (shared / "agent-settings.json").write_text(json.dumps({
+    "model": "claude-opus-4-8",
+    "provider": "codex",
+  }))
+  assert owner_default_provider(str(tmp_path), "codex") == "claude"
+
+
+def test_new_chat_provider_falls_back_to_stored_on_first_run(tmp_path):
+  """With no model ever selected, provider comes from the stored value and the
+  picker prompts on first send (the one legitimate no-model case)."""
+  from app.providers import owner_default_provider
+
+  shared = tmp_path / "shared"
+  shared.mkdir()
+  (shared / "agent-settings.json").write_text(json.dumps({}))
+  assert owner_default_provider(str(tmp_path), "codex") == "codex"
+  # And nothing resolves a model, so admission still asks for a pick.
+  assert effective_agent_settings(
+    str(tmp_path), None, provider="codex",
+  )["model"] is None
+
+
+def test_created_chat_provider_follows_remembered_model_over_drift(
+  client, auth, db,
+):
+  """End to end: a drifted owner.provider must not birth a mismatched chat.
+  With a Codex model remembered but owner.provider stuck on claude, a new chat
+  starts on codex so it resolves to that remembered model instead of nothing."""
+  from app import models
+
+  _write_global_settings({"model": "gpt-5.6-sol", "effort": "high"})
+  owner = db.query(models.Owner).first()
+  owner.provider = "claude"
+  db.commit()
+
+  created = client.post(
+    "/api/chats", headers=auth, json={"title": "fresh"},
+  ).json()
+  db.expire_all()
+  row = db.query(models.Chat).filter(models.Chat.id == created["id"]).first()
+  assert row.provider == "codex"
+
+
+def test_settings_view_provider_follows_remembered_model_over_drift(
+  client, auth, db,
+):
+  """GET /settings reports the provider the last-selected model implies, not a
+  drifted owner.provider, so the picker shows a consistent model + provider."""
+  from app import models
+
+  _write_global_settings({"model": "gpt-5.6-sol", "effort": "high"})
+  owner = db.query(models.Owner).first()
+  owner.provider = "claude"
+  db.commit()
+
+  body = client.get("/api/settings", headers=auth).json()
+  assert body["provider"] == "codex"
+  assert body["agent_settings"]["model"] == "gpt-5.6-sol"
+
+
 def test_patch_chat_writes_override(client, auth, chat):
   """PATCH /chats/{id} sets agent_settings_json and returns effective."""
   _write_global_settings({"model": "default-model"})
@@ -475,6 +579,7 @@ def test_patch_chat_provider_and_model_in_same_request(
   body = r.json()
   assert body["provider"] == "codex"
   assert body["agent_settings_json"] == {"model": "gpt-5.4-codex"}
+  assert _read_global_settings()["provider"] == "codex"
 
 
 def test_run_chat_passes_merged_settings_into_claude_sdk(
@@ -586,6 +691,40 @@ def test_patch_model_only_with_cross_provider_model_switches_provider(
   refreshed = db.query(models.Chat).filter(models.Chat.id == chat.id).first()
   assert refreshed.session_id is None
   assert refreshed.provider == "codex"
+
+
+def test_mobius_model_inference_requires_owning_app(
+  client, auth, chat, db, monkeypatch,
+):
+  from app import providers
+
+  monkeypatch.setattr(
+    providers.MobiusProvider, "check_auth", lambda self, data_dir: None,
+  )
+  absent = client.patch(
+    f"/api/chats/{chat.id}",
+    headers=auth,
+    json={"agent_settings_json": {"model": "inkling"}},
+  )
+  assert absent.status_code == 409
+  assert "Möbius · You" in absent.json()["detail"]
+
+  db.add(models.App(
+    slug="identity",
+    source_dir="/tmp/mobius-tests/identity",
+    name="Möbius · You",
+    description="Account",
+    jsx_source="export default () => null",
+  ))
+  db.commit()
+  selected = client.patch(
+    f"/api/chats/{chat.id}",
+    headers=auth,
+    json={"agent_settings_json": {"model": "inkling"}},
+  )
+  assert selected.status_code == 200, selected.json()
+  assert selected.json()["provider"] == "mobius"
+  assert selected.json()["agent_settings_json"]["model"] == "inkling"
 
 
 def test_patch_cannot_bypass_handoff_after_assistant_turn(

@@ -108,8 +108,11 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  * emitter AND the dispatch switch below in this file.
  *
  *   stream_snapshot       Server-reduced assistant items at the exact
- *                         subscription boundary { items }. Seeds reconnect
+ *                         subscription boundary
+ *                         { items, assistant_message_id }. Seeds reconnect
  *                         catch-up so prior deltas need not be replayed.
+ *   assistant_identity    Replay-safe row identity for a subscriber that
+ *                         attached before the sink could seed a snapshot.
  *   text                  Streamed assistant token chunk
  *                         { content }. Buffered + drained by rAF.
  *   text_boundary         Next text starts a fresh assistant block.
@@ -213,6 +216,8 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  *     | {type: 'error', message: string}
  *   >,
  *   latestItemsRef: React.MutableRefObject<Array<object>>,
+ *   streamAssistantMessageId: string | null,
+ *   latestAssistantMessageIdRef: React.MutableRefObject<string | null>,
  *   isStreaming: boolean,
  *   isStreamingRef: React.MutableRefObject<boolean>,
  *   connectionError: string | null,
@@ -252,10 +257,18 @@ export default function useStreamConnection(chatId, {
 }) {
   // sessionStorage reads and JSON parsing are synchronous. Lazy initialization
   // keeps them off every frame-paced render while a reply is revealing.
+  const initialStreamSnapshotRef = useRef(null)
+  if (initialStreamSnapshotRef.current === null) {
+    initialStreamSnapshotRef.current = readStoredStreamSnapshot(chatId)
+  }
   const [streamItems, _setStreamItems] = useState(
-    () => readStoredStreamSnapshot(chatId),
+    () => initialStreamSnapshotRef.current.items,
+  )
+  const [streamAssistantMessageId, _setStreamAssistantMessageId] = useState(
+    () => initialStreamSnapshotRef.current.assistantMessageId,
   )
   const latestItemsRef = useRef(streamItems)
+  const latestAssistantMessageIdRef = useRef(streamAssistantMessageId)
   // Snapshot of the last non-empty latestItemsRef value. Written every
   // time items become non-empty; never cleared by a reconnect reset.
   // On retry exhaustion we promote from this ref so the user sees the
@@ -297,6 +310,12 @@ export default function useStreamConnection(chatId, {
     latestItemsRef.current = next
     _setStreamItems(next)
     return next !== previous
+  }, [])
+
+  const setStreamAssistantMessageId = useCallback((value) => {
+    const next = typeof value === 'string' && value ? value : null
+    latestAssistantMessageIdRef.current = next
+    _setStreamAssistantMessageId(next)
   }, [])
 
   const publishQuestionResponseStart = useCallback((questionResponseKey) => {
@@ -402,7 +421,10 @@ export default function useStreamConnection(chatId, {
   const persistLatestStreamSnapshot = useCallback(() => {
     writeStoredStreamSnapshot(
       activeStreamChatIdRef.current,
-      latestItemsRef.current,
+      {
+        items: latestItemsRef.current,
+        assistantMessageId: latestAssistantMessageIdRef.current,
+      },
     )
   }, [])
 
@@ -640,6 +662,7 @@ export default function useStreamConnection(chatId, {
     // completed old-chat frame before the next effect changes the active id.
     persistLatestStreamSnapshot()
     setStreamItems([])
+    setStreamAssistantMessageId(null)
     textBufferRef.current = ''
     textBufferItemIdRef.current = null
     forceNewTextBlockRef.current = false
@@ -657,15 +680,18 @@ export default function useStreamConnection(chatId, {
     clearQuestionResponseTracking,
     disconnect,
     persistLatestStreamSnapshot,
+    setStreamAssistantMessageId,
     setStreamItems,
   ])
 
   useEffect(() => {
     activeStreamChatIdRef.current = chatId
     const stored = readStoredStreamSnapshot(chatId)
-    latestItemsRef.current = stored
-    lastGoodItemsRef.current = stored
-    _setStreamItems(stored)
+    latestItemsRef.current = stored.items
+    lastGoodItemsRef.current = stored.items
+    latestAssistantMessageIdRef.current = stored.assistantMessageId
+    _setStreamItems(stored.items)
+    _setStreamAssistantMessageId(stored.assistantMessageId)
   }, [chatId])
 
   // Persist only at lifecycle boundaries. Chat switches and unmounts use the
@@ -831,6 +857,7 @@ export default function useStreamConnection(chatId, {
         clearStoredStreamSnapshot(activeStreamChatIdRef.current)
         lastGoodItemsRef.current = []
         setStreamItems([])
+        setStreamAssistantMessageId(null)
         textBufferRef.current = ''
         textBufferItemIdRef.current = null
         forceNewTextBlockRef.current = false
@@ -867,6 +894,7 @@ export default function useStreamConnection(chatId, {
       // temporary blank/thinking state while a long catch-up replay is parsed.
       let isCatchUp = true
       let catchUpItems = []
+      let catchUpAssistantMessageId = null
       let seededByServerSnapshot = false
 
       const applyStreamItems = (updater) => {
@@ -904,6 +932,7 @@ export default function useStreamConnection(chatId, {
           clearStoredStreamSnapshot(activeStreamChatIdRef.current)
           _setStreamItems([])
         }
+        setStreamAssistantMessageId(catchUpAssistantMessageId)
         catchUpItems = []
         isCatchUp = false
         catchUpStartedRef.current = false
@@ -962,6 +991,26 @@ export default function useStreamConnection(chatId, {
             continue
           }
 
+          // A subscription snapshot normally establishes identity first. The
+          // event-level copy closes the smaller race where the broadcast is
+          // visible before its sink can seed that snapshot. A different id is
+          // never adopted implicitly: only the explicit steer cut below may
+          // rotate an already-owned assistant segment.
+          if (event.type !== 'stream_snapshot'
+              && event.type !== 'steered_into_turn') {
+            const eventMessageId = (
+              typeof event.assistant_message_id === 'string'
+              && event.assistant_message_id
+            ) || null
+            if (eventMessageId) {
+              if (isCatchUp && catchUpAssistantMessageId === null) {
+                catchUpAssistantMessageId = eventMessageId
+              } else if (!isCatchUp && latestAssistantMessageIdRef.current === null) {
+                setStreamAssistantMessageId(eventMessageId)
+              }
+            }
+          }
+
           if (event.type === 'catch_up_done') {
             catchUpItems = anchorReplayedThinking(
               catchUpItems,
@@ -984,11 +1033,17 @@ export default function useStreamConnection(chatId, {
               catchUpItems = Array.isArray(event.items)
                 ? event.items.filter(Boolean)
                 : []
+              catchUpAssistantMessageId = (
+                typeof event.assistant_message_id === 'string'
+                && event.assistant_message_id
+              ) || null
               seededByServerSnapshot = true
               textBufferRef.current = ''
               textBufferItemIdRef.current = null
               forceNewTextBlockRef.current = false
             }
+          } else if (event.type === 'assistant_identity') {
+            // Identity was adopted above; it has no renderable payload.
           } else if (event.type === 'text_boundary') {
             flushBuffer()
             forceNewTextBlockRef.current = true
@@ -1270,7 +1325,15 @@ export default function useStreamConnection(chatId, {
               // prior cut, so it contains only the current A2 surface; keep
               // that payload while the authoritative DB refresh restores the
               // sealed A1 + user rows this socket may have missed.
-              if (!seededByServerSnapshot) catchUpItems = []
+              if (!seededByServerSnapshot) {
+                catchUpItems = Array.isArray(event.items)
+                  ? event.items.filter(Boolean)
+                  : []
+                catchUpAssistantMessageId = (
+                  typeof event.next_assistant_message_id === 'string'
+                  && event.next_assistant_message_id
+                ) || null
+              }
               forceNewTextBlockRef.current = false
               // Dropping the replayed segment only reconstructs the transcript
               // if those DB rows are actually loaded, and this branch is exactly
@@ -1288,7 +1351,23 @@ export default function useStreamConnection(chatId, {
                 ts: event.ts ?? null,
                 content: event.content || '',
                 messages: Array.isArray(event.messages) ? event.messages : null,
+                assistantMessageId: event.assistant_message_id || null,
+                sealedItems: Array.isArray(event.sealed_items)
+                  ? event.sealed_items.filter(Boolean)
+                  : null,
+                nextAssistantMessageId: event.next_assistant_message_id || null,
+                items: Array.isArray(event.items)
+                  ? event.items.filter(Boolean)
+                  : [],
               })
+              // The callback seals A1 synchronously. Re-base the hook onto the
+              // server's A2 snapshot before any later deltas are reduced.
+              setStreamAssistantMessageId(
+                event.next_assistant_message_id || null,
+              )
+              setStreamItems(
+                Array.isArray(event.items) ? event.items.filter(Boolean) : [],
+              )
             }
           } else if (event.type === 'steer_delivery_failed') {
             // Admission succeeded, but the provider control channel never
@@ -1436,6 +1515,7 @@ export default function useStreamConnection(chatId, {
     commitRenderableStreamItems,
     disconnect,
     flushBuffer,
+    setStreamAssistantMessageId,
     setStreamItems,
     startDraining,
   ])
@@ -1495,6 +1575,7 @@ export default function useStreamConnection(chatId, {
       clearStoredStreamSnapshot(activeStreamChatIdRef.current)
       lastGoodItemsRef.current = []
       setStreamItems([])
+      setStreamAssistantMessageId(null)
       textBufferRef.current = ''
       textBufferItemIdRef.current = null
       setIsStreaming(true)
@@ -1638,6 +1719,7 @@ export default function useStreamConnection(chatId, {
         clearStoredStreamSnapshot(activeStreamChatIdRef.current)
         lastGoodItemsRef.current = []
         setStreamItems([])
+        setStreamAssistantMessageId(null)
         textBufferRef.current = ''
         textBufferItemIdRef.current = null
         forceNewTextBlockRef.current = false
@@ -1657,6 +1739,7 @@ export default function useStreamConnection(chatId, {
         clearStoredStreamSnapshot(activeStreamChatIdRef.current)
         lastGoodItemsRef.current = []
         setStreamItems([])
+        setStreamAssistantMessageId(null)
         textBufferRef.current = ''
         textBufferItemIdRef.current = null
         forceNewTextBlockRef.current = false
@@ -1690,7 +1773,11 @@ export default function useStreamConnection(chatId, {
     // backend/app/routes/chats_stream.py:121-131.)
     connectRef.current?.(true)
     return responseData || { status: 'started' }
-  }, [clearQuestionResponseTracking, setStreamItems])
+  }, [
+    clearQuestionResponseTracking,
+    setStreamAssistantMessageId,
+    setStreamItems,
+  ])
 
   // Reconnect on visibility change or network recovery, but ONLY
   // when we believe a stream is active (isStreamingRef). Idle chats
@@ -1811,6 +1898,7 @@ export default function useStreamConnection(chatId, {
     // fast-forwarded queued message.
     lastGoodItemsRef.current = []
     setStreamItems([])
+    setStreamAssistantMessageId(null)
     textBufferRef.current = ''
     textBufferItemIdRef.current = null
     forceNewTextBlockRef.current = false
@@ -1857,6 +1945,8 @@ export default function useStreamConnection(chatId, {
   return {
     streamItems,
     latestItemsRef,
+    streamAssistantMessageId,
+    latestAssistantMessageIdRef,
     isStreaming,
     isStreamingRef,
     connectionError,

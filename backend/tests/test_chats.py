@@ -226,6 +226,15 @@ def test_chat_usage_reports_totals_and_historic_coverage(
   assert measured["model_context_window"] == 200_000
   assert measured["usage"]["calculation"] == "thread_delta"
 
+  summary_response = client.get(
+    f"/api/chats/{chat.id}/usage?include_runs=false", headers=auth,
+  )
+  assert summary_response.status_code == 200
+  summary = summary_response.json()
+  assert summary["coverage"] == payload["coverage"]
+  assert summary["totals"] == payload["totals"]
+  assert summary["runs"] == []
+
 
 def test_current_chat_usage_is_bounded_to_selected_provider_session(
   client, auth, chat, db,

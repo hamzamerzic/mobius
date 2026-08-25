@@ -323,6 +323,28 @@ def test_link_complete_consumes_attempt_and_stores_encrypted_grant(
 ):
   granted = _app_auth(client, auth, granted=True)
   plain_token = "account-token-" + "x" * 40
+  broker_calls = []
+
+  async def broker_request(method, route, payload=None, *, timeout=10.0):
+    broker_calls.append((method, route, payload, timeout))
+    if (method, route) == ("GET", "/identity"):
+      return {
+        "linked": False,
+        "instance_id": "mob_self_test",
+        "public_key_jwk": {"kty": "OKP", "crv": "Ed25519", "x": "key"},
+        "key_thumbprint": "a" * 64,
+      }
+    assert (method, route) == ("POST", "/identity/enroll")
+    assert payload == {"receipt": "header.payload.signature"}
+    return {
+      "linked": True,
+      "subject": "usr_123",
+      "instance_id": "mob_self_test",
+    }
+
+  monkeypatch.setattr(
+    "app.routes.identity.runtime_identity_broker_request", broker_request,
+  )
 
   class Response:
     def __init__(self, status_code, body=None):
@@ -345,6 +367,11 @@ def test_link_complete_consumes_attempt_and_stores_encrypted_grant(
     async def post(self, url, **kwargs):
       assert url.endswith("/api/account-links/token")
       assert len(kwargs["json"]["code_verifier"]) >= 43
+      assert kwargs["json"]["runtime_identity"] == {
+        "instance_id": "mob_self_test",
+        "public_key_jwk": {"kty": "OKP", "crv": "Ed25519", "x": "key"},
+        "key_thumbprint": "a" * 64,
+      }
       return Response(200, {
         "access_token": plain_token,
         "token_type": "Bearer",
@@ -365,6 +392,7 @@ def test_link_complete_consumes_attempt_and_stores_encrypted_grant(
             "url": "https://example.com", "current": False,
           }],
         },
+        "enrollment_receipt": "header.payload.signature",
       })
 
     async def get(self, url, **kwargs):
@@ -392,6 +420,10 @@ def test_link_complete_consumes_attempt_and_stores_encrypted_grant(
   # show (the remote profile carries no creation date), so linked responses
   # must expose the UTC link instant.
   assert isinstance(body["linked_at"], str) and body["linked_at"].endswith("Z")
+  assert [call[:2] for call in broker_calls] == [
+    ("GET", "/identity"),
+    ("POST", "/identity/enroll"),
+  ]
 
   with SessionLocal() as session:
     assert session.query(models.IdentityLinkAttempt).count() == 0
@@ -433,6 +465,30 @@ def test_unlink_removes_local_link_when_remote_grant_is_already_gone(
     ))
     session.commit()
 
+  broker_calls = []
+
+  async def broker_request(method, route, payload=None, *, timeout=10.0):
+    broker_calls.append((method, route, payload, timeout))
+    if (method, route) == ("GET", "/identity"):
+      return {
+        "linked": True,
+        "subject": "usr_123",
+        "instance_id": "mob_self_test",
+        "key_thumbprint": "a" * 64,
+      }
+    assert (method, route) == ("POST", "/identity/unlink")
+    assert payload == {"expected_subject": "usr_123"}
+    return {
+      "linked": False,
+      "subject": None,
+      "instance_id": "mob_self_test",
+      "key_thumbprint": "a" * 64,
+    }
+
+  monkeypatch.setattr(
+    "app.routes.identity.runtime_identity_broker_request", broker_request,
+  )
+
   class Client:
     def __init__(self, *args, **kwargs):
       pass
@@ -445,12 +501,20 @@ def test_unlink_removes_local_link_when_remote_grant_is_already_gone(
 
     async def post(self, url, **kwargs):
       assert url == "https://www.mobius.you/api/account-links/revoke"
+      assert kwargs["json"] == {"runtime_identity": {
+        "instance_id": "mob_self_test",
+        "key_thumbprint": "a" * 64,
+      }}
       return type("Response", (), {"status_code": 401})()
 
   monkeypatch.setattr("app.routes.identity.httpx.AsyncClient", Client)
   response = client.delete("/api/identity/link", headers=granted)
 
   assert response.status_code == 204
+  assert [call[:2] for call in broker_calls] == [
+    ("GET", "/identity"),
+    ("POST", "/identity/unlink"),
+  ]
   with SessionLocal() as session:
     assert session.query(models.IdentityAccountLink).count() == 0
 
@@ -459,6 +523,21 @@ def test_link_completion_keeps_retry_state_when_host_response_is_lost(
   client, auth, monkeypatch,
 ):
   granted = _app_auth(client, auth, granted=True)
+
+  async def broker_request(method, route, payload=None, *, timeout=10.0):
+    assert (method, route, payload, timeout) == (
+      "GET", "/identity", None, 10.0,
+    )
+    return {
+      "linked": False,
+      "instance_id": "mob_self_test",
+      "public_key_jwk": {"kty": "OKP", "crv": "Ed25519", "x": "key"},
+      "key_thumbprint": "a" * 64,
+    }
+
+  monkeypatch.setattr(
+    "app.routes.identity.runtime_identity_broker_request", broker_request,
+  )
 
   class Client:
     def __init__(self, *args, **kwargs):

@@ -23,21 +23,25 @@ function makeStorage() {
   }
 }
 
-test('stream snapshots use the v2 key and ignore empty reconnect state', () => {
+test('stream snapshots keep assistant identity and ignore empty reconnect state', () => {
   const storage = makeStorage()
   const items = [{ type: 'text', content: 'partial' }]
+  const snapshot = { items, assistantMessageId: 'assistant-1' }
 
-  writeStoredStreamSnapshot('chat-a', items, storage)
-  writeStoredStreamSnapshot('chat-a', [], storage)
+  writeStoredStreamSnapshot('chat-a', snapshot, storage)
+  writeStoredStreamSnapshot('chat-a', { items: [] }, storage)
 
-  assert.deepEqual(readStoredStreamSnapshot('chat-a', storage), items)
+  assert.deepEqual(readStoredStreamSnapshot('chat-a', storage), snapshot)
   assert.equal(storage.map.has(streamSnapshotKey('chat-a')), true)
   assert.equal(storage.calls.set, 1)
 })
 
 test('clear removes the current snapshot', () => {
   const storage = makeStorage()
-  writeStoredStreamSnapshot('chat-a', [{ type: 'text', content: 'new' }], storage)
+  writeStoredStreamSnapshot('chat-a', {
+    items: [{ type: 'text', content: 'new' }],
+    assistantMessageId: 'assistant-2',
+  }, storage)
 
   clearStoredStreamSnapshot('chat-a', storage)
 
@@ -47,19 +51,21 @@ test('clear removes the current snapshot', () => {
 test('quota reclamation drops only regenerable stream snapshots', () => {
   const storage = makeStorage()
   storage.setItem('draft:chat-a', 'owner data')
-  storage.setItem(streamSnapshotKey('running-chat'), '[{"type":"text"}]')
+  storage.setItem(streamSnapshotKey('running-chat'), '{"items":[{"type":"text"}]}')
+  storage.setItem('chat-stream-items:v2:old-chat', '[{"type":"text"}]')
 
-  assert.equal(reclaimStoredStreamSnapshots(storage), 1)
+  assert.equal(reclaimStoredStreamSnapshots(storage), 2)
   assert.equal(storage.getItem('draft:chat-a'), 'owner data')
   assert.equal(storage.getItem(streamSnapshotKey('running-chat')), null)
 })
 
-test('read returns [] for corrupt or absent values', () => {
+test('read returns an empty identity-bearing state for corrupt or absent values', () => {
   const storage = makeStorage()
   storage.setItem(streamSnapshotKey('bad'), '{nope')
 
-  assert.deepEqual(readStoredStreamSnapshot('missing', storage), [])
-  assert.deepEqual(readStoredStreamSnapshot('bad', storage), [])
+  const empty = { items: [], assistantMessageId: null }
+  assert.deepEqual(readStoredStreamSnapshot('missing', storage), empty)
+  assert.deepEqual(readStoredStreamSnapshot('bad', storage), empty)
 })
 
 test('default cache is optional when an opaque sandbox denies sessionStorage', () => {
@@ -69,8 +75,12 @@ test('default cache is optional when an opaque sandbox denies sessionStorage', (
     get() { throw new DOMException('Blocked by opaque sandbox', 'SecurityError') },
   })
   try {
-    assert.deepEqual(readStoredStreamSnapshot('chat-a'), [])
-    assert.doesNotThrow(() => writeStoredStreamSnapshot('chat-a', [{ type: 'text' }]))
+    assert.deepEqual(readStoredStreamSnapshot('chat-a'), {
+      items: [], assistantMessageId: null,
+    })
+    assert.doesNotThrow(() => writeStoredStreamSnapshot('chat-a', {
+      items: [{ type: 'text' }], assistantMessageId: 'assistant-3',
+    }))
     assert.doesNotThrow(() => clearStoredStreamSnapshot('chat-a'))
   } finally {
     if (descriptor) Object.defineProperty(globalThis, 'sessionStorage', descriptor)

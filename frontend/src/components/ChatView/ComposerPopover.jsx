@@ -36,7 +36,7 @@
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { FileDocument, InfoCircle, Paperclip } from '@openai/apps-sdk-ui/components/Icon'
+import { DollarCircle, FileDocument, InfoCircle, Paperclip } from '@openai/apps-sdk-ui/components/Icon'
 import BrainUsageIcon from './BrainUsageIcon.jsx'
 import ChatSettingsPanel from './ChatSettingsPanel.jsx'
 import { popoverMaxHeight, nearestClipTop } from './composerPopoverHeight.js'
@@ -47,6 +47,7 @@ import {
   clientPointToLayout,
 } from '../../lib/layoutSpace.js'
 import useModelSelectionPopover from './hooks/useModelSelectionPopover.js'
+import useDiscardUnconfirmedSwitchOnPickerClose from './hooks/useDiscardUnconfirmedSwitchOnPickerClose.js'
 
 export default function ComposerPopover({
   chatInfo,
@@ -71,6 +72,7 @@ export default function ComposerPopover({
   modelSelectionRequest = 0,
   onOpenInspector,
   onOpenSummary,
+  onOpenUsage,
   embedded = false,
   pending = false,
   triggerIcon = null,
@@ -94,6 +96,11 @@ export default function ComposerPopover({
   const { open, setOpen, wasInputFocusedRef } = useModelSelectionPopover(
     modelSelectionRequest,
     composerInputRef,
+  )
+  useDiscardUnconfirmedSwitchOnPickerClose(
+    open,
+    providerSwitchState?.status,
+    chatId,
   )
   // Measured cap on the panel's height: the space above the trigger inside both
   // the chat pane (which clips with `overflow: hidden`) and the keyboard-shrunk
@@ -214,6 +221,11 @@ export default function ComposerPopover({
     onOpenSummary?.()
   }
 
+  function handleOpenUsage() {
+    setOpen(false)
+    onOpenUsage?.()
+  }
+
   function togglePopover() {
     const el = composerInputRef?.current
     const wasFocused = document.activeElement === el
@@ -320,6 +332,21 @@ export default function ComposerPopover({
                 <span className="composer-popover__row-title">What the agent knows</span>
                 <span className="composer-popover__row-sub">
                   System prompt and recent chats
+                </span>
+              </span>
+            </button>
+            <button
+              type="button"
+              className="composer-popover__row"
+              onClick={handleOpenUsage}
+            >
+              <span className="composer-popover__row-icon" aria-hidden="true">
+                <DollarCircle width={18} height={18} />
+              </span>
+              <span className="composer-popover__row-main">
+                <span className="composer-popover__row-title">Token usage &amp; cost</span>
+                <span className="composer-popover__row-sub">
+                  Per-turn breakdown for this chat
                 </span>
               </span>
             </button>

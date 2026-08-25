@@ -437,6 +437,19 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+    runtime: (chatId, options = {}) => apiFetch(
+      `/chats/${encodeURIComponent(chatId)}/runtime`,
+      options,
+    ),
+    goalPlan: (chatId, options = {}) => apiFetch(
+      `/chats/${encodeURIComponent(chatId)}/goal-plan`,
+      options,
+    ),
+    stop: (chatId, options = {}) => apiFetch('/chat/stop', {
+      ...options,
+      method: 'POST',
+      body: JSON.stringify({ chat_id: chatId }),
+    }),
     detail: (chatId, { limit, compact, anchor, signal, timeoutMs } = {}) => {
       const params = new URLSearchParams()
       if (limit !== undefined) params.set('limit', String(limit))
@@ -467,6 +480,12 @@ export const api = {
     ),
     recover: (chatId) => listAffectingMutation(
       'chats', `/chats/${chatId}/recover`, { method: 'POST' },
+    ),
+    usage: (chatId, options = {}) => apiFetch(
+      `/chats/${encodeURIComponent(chatId)}/usage`, options,
+    ),
+    usageSummary: (chatId, options = {}) => apiFetch(
+      `/chats/${encodeURIComponent(chatId)}/usage?include_runs=false`, options,
     ),
   },
   secureInputs: {

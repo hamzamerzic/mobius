@@ -1,26 +1,23 @@
 import { useLayoutEffect, useRef } from 'react'
 
 /**
- * Hook that decides whether the next persisted-message fetch should
- * REPLACE the existing last message (bridge an in-flight turn whose
- * partial we kept on mount) or APPEND a fresh assistant message
- * (a brand-new turn since mount).
+ * Legacy/mount-time fallback for deciding whether the next persisted-message
+ * fetch should replace an in-flight partial kept on mount or append a fresh
+ * assistant message.
  *
- * The decision is captured ONCE on mount as a ts (the unique
- * per-message timestamp persisted with every message) and then read
- * by ChatView's promoteStreamToMessages on each promote. After the
- * first promote calls markBridged(), subsequent promotes always
- * append.
+ * Current streams carry a durable assistant message id; active selection and
+ * promotion use that identity first. This hook deliberately retains the old
+ * timestamp bridge only for id-less stored data and the narrow first-paint
+ * mount handoff. Its caller must reject this fallback when a later visible
+ * turn or a different explicit id proves the candidate stale.
  *
- * Why ts-based, not role-based: messages have NO id field
- * (models.py:31 stores the messages array as a JSON column with
- * role/content/ts/blocks; routes/chats_stream.py:157-161 builds
- * messages with just those keys). The earlier role-based check
+ * Why the fallback is ts-based, not role-based: the earlier role-based check
  * ("last message is assistant") regressed when the parallel-agent
  * commit be32e58 started landing errors as the LAST message in a
  * chat — the assistant-role gate would still fire, bridging an
  * error message instead of appending a fresh assistant turn.
- * ts-based gating is stable: the kept-partial has a specific ts,
+ * Timestamp gating is stable inside the legacy path: the kept partial has a
+ * specific ts,
  * and any other last-message-ts (including error/system messages
  * persisted after mount) deterministically falls through to APPEND.
  *
@@ -39,9 +36,9 @@ import { useLayoutEffect, useRef } from 'react'
  * }}
  */
 export default function useBridgePartial({ runningAtMount, lastMsgAtMount }) {
-  // Captured at most ONCE per hook instance, the first time the
-  // arguments resolve to a "yes, bridge" state (running=true AND
-  // last message is an assistant message with a real ts). After
+  // Captured at most ONCE per hook instance, the first time the arguments
+  // resolve to a legacy bridge candidate (running=true AND last message is an
+  // assistant message with a real ts). After
   // that the captured ts is sticky — subsequent re-renders with
   // different args don't re-arm or clear the gate.
   //

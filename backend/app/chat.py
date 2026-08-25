@@ -13,6 +13,7 @@ import math
 import os
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -73,6 +74,7 @@ from app.chat_logging import (
   get_logger as _get_logger,
   safe_commit as _safe_commit,
 )
+from app.goal_commands import is_goal_continue
 from app.chat_writer import (
   AppendPending,
   Barrier,
@@ -103,10 +105,12 @@ from app.events import (
   finalize_blocks,
 )
 from app.providers import (
-  authenticated_provider_ids,
+  PROVIDERS,
   effective_agent_settings,
   get_provider,
   get_skill_path,
+  provider_requirement_error,
+  provider_runtime_kind,
 )
 from app.runner_registry import registry
 
@@ -696,8 +700,36 @@ def reconcile_startup_chats(
       # the danger-red error styling — a restart is a maintenance event, not
       # something the turn did wrong.
       err_block = _pause_note(note, kind="restart")
-      if msgs and msgs[-1].get("role") == "assistant":
-        blocks = list(msgs[-1].get("blocks") or [])
+      live_id = (
+        chat.live_assistant.get("id")
+        if isinstance(chat.live_assistant, dict) else None
+      )
+      recovery_message_id = live_id or (
+        restart_run.id if restart_run is not None else None
+      )
+      recovery_index = next((
+        index for index, message in enumerate(msgs)
+        if recovery_message_id is not None
+        and message.get("role") == "assistant"
+        and message.get("id") is not None
+        and str(message.get("id")) == str(recovery_message_id)
+      ), -1)
+      if (
+        recovery_index < 0
+        and msgs
+        and msgs[-1].get("role") == "assistant"
+        and (
+          recovery_message_id is None
+          or msgs[-1].get("id") is None
+        )
+      ):
+        # Rolling upgrade only: an id-less tail can be the interrupted row.
+        # If both rows have different explicit ids, the running segment is new
+        # and its restart note belongs at the transcript tail.
+        recovery_index = len(msgs) - 1
+      if recovery_index >= 0:
+        previous_message = msgs[recovery_index]
+        blocks = list(previous_message.get("blocks") or [])
         finalize_blocks(blocks)
         # A drain-gated restart (design §2.2) already wrote its own terminal
         # "paused for a platform update" note through the sink before the
@@ -784,16 +816,29 @@ def reconcile_startup_chats(
         # stable ts (the frontend bridge + React keys rely on it — a
         # ts-less message is dropped by useBridgePartial). Mirrors the
         # ts-carry in _update_last_assistant_message.
-        prev_ts = msgs[-1].get("ts")
-        msgs[-1] = build_assistant_message(blocks)
-        msgs[-1]["ts"] = (
-          prev_ts if prev_ts is not None else _next_message_ts(msgs[:-1])
+        prev_ts = previous_message.get("ts")
+        recovered_message = build_assistant_message(blocks)
+        recovered_message["id"] = (
+          previous_message.get("id")
+          or recovery_message_id
+          or f"assistant-{uuid.uuid4().hex}"
         )
+        recovered_message["ts"] = (
+          prev_ts
+          if prev_ts is not None
+          else _next_message_ts(
+            msgs[:recovery_index] + msgs[recovery_index + 1:]
+          )
+        )
+        msgs[recovery_index] = recovered_message
       else:
         # Process died before any assistant content persisted — surface
         # the interruption as a standalone assistant turn so the user
         # isn't left staring at their own unanswered message.
         new_msg = build_assistant_message([err_block])
+        new_msg["id"] = (
+          recovery_message_id or f"assistant-{uuid.uuid4().hex}"
+        )
         new_msg["ts"] = _next_message_ts(msgs)
         msgs.append(new_msg)
       # Preserve chat.pending_messages: closing the run leaves an idle queue
@@ -2978,7 +3023,7 @@ def _limit_exit(
 ) -> dict:
   """Classify a turn exit for limit parking and publish its error event.
 
-  One seam shared by all four SDK exits (claude/codex × success/except) so
+  One seam shared by every SDK exit (including Möbius through Codex) so
   the classification, the park-target parse, and the enriched error event
   can't drift apart. `runner_result` is None on an exception exit (classify
   by text only); on a terminal-result exit the structured
@@ -3977,7 +4022,7 @@ async def _run_chat_impl_with_db(
   goal_objective = _goal_objective(raw_user_message)
   goal_clear = _goal_clear_requested(raw_user_message)
   goal_mode = _chat_has_goal_intent(messages)
-  goal_continue = (raw_user_message or "").strip().lower() == "continue"
+  goal_continue = is_goal_continue(raw_user_message or "")
   question_checkpoint = None
   if settings.ensure_chat_note and chat_id:
     async def question_checkpoint() -> None:
@@ -4472,11 +4517,19 @@ async def _run_chat_impl_with_db(
     _build_resumed_context(chat_row)
     if (
       session_id
-      and provider.name in ("Claude Code", "Codex")
+      and provider_runtime_kind(provider) in ("claude_sdk", "codex_sdk")
       and (run_policy is None or run_policy.allow_session_reseed)
     )
     else None
   )
+
+  # App ownership is database state, so snapshot every provider requirement
+  # before releasing this turn's request session. Credential checks remain
+  # after close because they can perform local I/O and must not pin the pool.
+  provider_requirement_errors = {
+    candidate_id: provider_requirement_error(candidate, db)
+    for candidate_id, candidate in PROVIDERS.items()
+  }
 
   # Everything needed to launch the provider is now detached or copied into
   # plain values. Return this turn's checked-out connection before the
@@ -4492,7 +4545,9 @@ async def _run_chat_impl_with_db(
 
   # Pre-flight: check that provider credentials exist before invoking
   # the SDK runner. Without this, the SDK fails with a cryptic error.
-  auth_error = provider.check_auth(settings.data_dir)
+  auth_error = provider_requirement_errors.get(provider_id)
+  if auth_error is None:
+    auth_error = provider.check_auth(settings.data_dir)
   if auth_error:
     # A fresh install may intentionally finish setup without connecting an
     # agent; a returning owner's sole credential can also expire. When no
@@ -4504,7 +4559,12 @@ async def _run_chat_impl_with_db(
     # disconnected. If another provider is connected, this chat's selected
     # provider genuinely failed and the existing error path below remains the
     # honest response.
-    if not authenticated_provider_ids(settings.data_dir):
+    runnable_provider = any(
+      provider_requirement_errors.get(candidate_id) is None
+      and candidate.check_auth(settings.data_dir) is None
+      for candidate_id, candidate in PROVIDERS.items()
+    )
+    if not runnable_provider:
       await _record_run_metrics(
         chat_id=chat_id,
         run_token=run_token or "",
@@ -4556,8 +4616,9 @@ async def _run_chat_impl_with_db(
 
   # SDK dispatch: route both Claude and Codex through their official
   # Agent SDK runners.
-  is_claude = provider.name == "Claude Code"
-  is_codex = provider.name == "Codex"
+  runtime_kind = provider_runtime_kind(provider)
+  is_claude = runtime_kind == "claude_sdk"
+  is_codex = runtime_kind == "codex_sdk"
   if is_codex:
     log.info(
       "chat start chat_id=%s provider=%s session=%s msg_len=%d sdk=codex",
@@ -4604,6 +4665,7 @@ async def _run_chat_impl_with_db(
         goal_continue=goal_continue,
         fallback_goal_objective=fallback_goal_objective,
         run_policy=run_policy,
+        provider_id=provider_id,
         connector_plan=connector_turn_plan,
       )
       new_session_id = runner_result.get("session_id")

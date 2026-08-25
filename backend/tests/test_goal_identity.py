@@ -63,6 +63,31 @@ def test_plain_continue_keeps_a_completed_physical_run_with_unfinished_plan(
   ) == ("Ship it", "stable-goal")
 
 
+def test_plain_continue_with_upload_manifest_resumes_the_same_goal(db, chat):
+  db.add(models.ChatRun(
+    id="planned-upload-goal",
+    root_run_id="planned-upload-goal",
+    chat_id=chat.id,
+    status="completed",
+    provider="codex",
+    goal_objective="Ship it",
+    goal_id="stable-upload-goal",
+    goal_plan_json={
+      "tasks": [{"id": "prepare", "status": "pending"}],
+    },
+  ))
+  db.commit()
+
+  assert goal_identity_for_run_start(db, chat.id, {
+    "content": (
+      "continue\n\n"
+      "[Files in this session:\n"
+      "- image.png → /data/chats/example/uploads/image.png "
+      "(image/png, 257 KB)]"
+    ),
+  }) == ("Ship it", "stable-upload-goal")
+
+
 def test_semantic_recovery_skips_intervening_no_goal_run_for_unfinished_plan(
   db, chat,
 ):

@@ -13,11 +13,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
 import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
-import {
-  chatMessagesQueryKey,
-  chatQueries,
-  settingsQueries,
-} from '../../hooks/queries.js'
+import { chatMessagesQueryKey, chatQueries, settingsQueries } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode, {
   FOLLOW_STICK_BAND_PX,
@@ -47,6 +43,9 @@ import ChatInputBar from './ChatInputBar.jsx'
 import { hasSendablePayload } from './composerSubmission.js'
 import AgentContextInspector from './AgentContextInspector.jsx'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
+import ChatUsageInspector from './ChatUsageInspector.jsx'
+import ChatUsageStrip from './ChatUsageStrip.jsx'
+import { formatUsageAriaSummary } from './chatUsageFormat.js'
 import ComposerPopover from './ComposerPopover.jsx'
 import BrainUsageButton from './BrainUsageButton.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
@@ -94,6 +93,7 @@ import {
   chatCacheEntryState,
   chatDetailCacheValue,
   chatSnapshotMatchesRuntime,
+  shouldRefetchTranscriptForRuntime,
   mergeRecentMessagesIntoLoadedWindow,
   messageKey,
   messageMatchesKey,
@@ -334,6 +334,14 @@ export default function ChatView({
   onDisplayReady = null,
 }) {
   const queryClient = useQueryClient()
+  // Cheap per-chat token/cost summary for the always-visible composer badge
+  // and the full breakdown panel. Not fetched for embedded app-owned chats
+  // (matches BrainUsageButton's own usageEnabled gate) since the owner never
+  // sees the composer chrome there.
+  const chatUsageQuery = chatQueries.usageSummary.useQuery(chatId, {
+    enabled: !embedded && !!chatId,
+  })
+  const chatUsageAriaSummary = formatUsageAriaSummary(chatUsageQuery.data?.totals)
   const hiddenRef = useRef(hidden)
   hiddenRef.current = hidden
   // A drawer search may target a ChatView that is already mounted. Subscribe
@@ -538,6 +546,7 @@ export default function ChatView({
   // cards themselves use to publish the node being observed.
   const [showInspector, setShowInspector] = useState(false)
   const [showSummary, setShowSummary] = useState(false)
+  const [showUsage, setShowUsage] = useState(false)
   const [visibleMessageMetaKey, setVisibleMessageMetaKey] = useState(null)
   const messageMetaTimerRef = useRef(null)
   const [previewReadyStatus, setPreviewReadyStatus] = useState('')
@@ -787,12 +796,9 @@ export default function ChatView({
   const hadMessagesRef = useRef((cached?.messages?.length ?? 0) > 0)
   const promotedRef = useRef(false)
   const activeAssistantDataKeyRef = useRef(null)
-  // Bridge-partial gating decides whether the next promote REPLACES
-  // the kept DB partial (in-flight turn whose snapshot we mounted
-  // on top of) or APPENDS a fresh assistant message. The captured
-  // ts is sticky on first mount; markBridged() retires the gate
-  // after the first promote so subsequent turns always append.
-  // See hooks/useBridgePartial.js for the ts-based design.
+  // Current promotion is owned by the stream's durable assistant id. This
+  // sticky mount bridge is the id-less rolling-data fallback: its captured ts
+  // may identify the kept DB partial until markBridged() retires the gate.
   const [bridgeMountInputs, setBridgeMountInputs] = useState(() => ({
     runningAtMount: !!cached?.running,
     lastMsgAtMount: cached?.messages?.length
@@ -1196,6 +1202,21 @@ export default function ChatView({
         }
         return
       }
+      // A finalized reply can advance the durable transcript while this client
+      // holds a stale cache with no live turn to catch it up — a reply that
+      // landed while the tab was backgrounded, or one from another device. The
+      // mount path already trusts chatSnapshotMatchesRuntime to prove a cache
+      // current; reuse that same runtime read here so a foreground return that
+      // finds the version moved re-reads authoritatively instead of leaving the
+      // reply hidden until a full reload. A matching version does nothing.
+      if (shouldRefetchTranscriptForRuntime(
+        queryClient.getQueryData(chatMessagesQueryKey(chatId)),
+        data,
+        localAuthoritative,
+      )) {
+        await fetchMessages({ force: true, authoritative: true })
+        return runtime
+      }
       if (data.running) {
         setSending(true)
       } else if (serverPending.length === 0 && !localAuthoritative) {
@@ -1292,6 +1313,8 @@ export default function ChatView({
   const {
     streamItems,
     latestItemsRef,
+    streamAssistantMessageId,
+    latestAssistantMessageIdRef,
     isStreaming,
     isStreamingRef,
     connectionError,
@@ -1377,6 +1400,14 @@ export default function ChatView({
         }
         setPinnedSettleSeq(seq => seq + 1)
       }
+      // A finished turn (successful or not) may have persisted a new run
+      // with its own cost/token usage row. Cost isn't in this stream event
+      // (Claude only reports it in the terminal DB write, not the wire
+      // payload), so the always-visible usage badge stays correct by
+      // refetching the cheap per-chat summary here rather than threading a
+      // second usage-carrying event through the whole reducer pipeline.
+      chatQueries.usage.invalidate(queryClient, chatId)
+      chatQueries.usageSummary.invalidate(queryClient, chatId)
       onStreamEnd?.({ continues })
     },
     onSystemEvent: event => {
@@ -1434,7 +1465,13 @@ export default function ChatView({
     },
     onLiveQuestion: setLiveQuestionId,
     onQuestionResponseStart: handleQuestionResponseStart,
-    onSteeredIntoTurn: ({ ts, content, messages: steeredBatch }) => {
+    onSteeredIntoTurn: ({
+      ts,
+      content,
+      messages: steeredBatch,
+      assistantMessageId,
+      sealedItems,
+    }) => {
       // The steer's transcript split has COMMITTED (fired for both providers,
       // including when Stop is pressed with a queued message): the backend has
       // sealed the assistant text streamed up to the split, persisted the user
@@ -1475,7 +1512,11 @@ export default function ChatView({
         })
       const pinCid = cidOf(steeredMessages[0])
       const pinIntent = takeSendIntent(pinCid)
-      promoteStreamToMessages({ keepTurnOpen: true })
+      promoteStreamToMessages({
+        keepTurnOpen: true,
+        items: sealedItems,
+        assistantMessageId,
+      })
       const steeredIsFirstUser = isFirstVisibleUserMessage()
       // Arm the scroll mode BEFORE rendering the steered row. EventSource
       // callbacks are outside React's synthetic event layer, and query-cache
@@ -1744,21 +1785,25 @@ export default function ChatView({
   // Snapshot stream into a permanent message. Idempotent — both
   // handleStop and onStreamEnd may call this.
   //
-  // REPLACE if the last message in `prev` is already an assistant
-  // message — that's the DB partial we kept on mount when returning
-  // mid-stream (see fetch effect). Promoting alongside the partial
-  // would duplicate the in-flight content in the final transcript.
-  // APPEND otherwise (the normal first-time send path: `prev` ends in
-  // a user message, the assistant message hasn't been committed yet).
+  // The durable assistant id replaces exactly its owned row wherever it sits;
+  // a new id appends. Id-less rolling data can still use the guarded mount-ts
+  // bridge so returning mid-stream does not duplicate the kept DB partial.
   function promoteStreamToMessages({
     keepTurnOpen = false,
     followingMessages = [],
+    items: explicitItems = null,
+    assistantMessageId: explicitAssistantMessageId = undefined,
   } = {}) {
     const following = Array.isArray(followingMessages)
       ? followingMessages.filter(Boolean)
       : []
     if (promotedRef.current && !keepTurnOpen && following.length === 0) return
-    const items = latestItemsRef.current
+    const items = Array.isArray(explicitItems)
+      ? explicitItems
+      : latestItemsRef.current
+    const assistantMessageId = explicitAssistantMessageId === undefined
+      ? latestAssistantMessageIdRef.current
+      : explicitAssistantMessageId
     if (items.length === 0 && following.length === 0) return
     // A steer can cut over before the assistant emitted any real output — the
     // only buffered item is an empty/whitespace token. Sealing it would leave a
@@ -1774,12 +1819,9 @@ export default function ChatView({
     }
     promotedRef.current = true
 
-    // Decide REPLACE-vs-APPEND against the captured mounted partial.
-    // Usually that partial is still the last message. Fast-forward is the
-    // exception: it inserts a steered user row below the still-live partial,
-    // and the active stream continues after that row. The bridge must still
-    // replace the original partial by ts instead of appending duplicated
-    // assistant text below the steered row.
+    // Supply the historical bridge candidate as a fallback only. The promotion
+    // helper uses assistantMessageId first and refuses this ts if a different
+    // explicit id or a later visible turn proves it stale.
     const bridgeIdx = bridgeHook.findBridgeIndex(messagesRef.current)
     const trailingIdx = bridgeIdx >= 0 ? -1 : findTrailingAssistantPartialIndex(messagesRef.current)
     const bridgeTs = bridgeIdx >= 0
@@ -1800,6 +1842,7 @@ export default function ChatView({
       retiredItemsRef: retiredAssistantItemsRef,
       paintedItems: streamItems,
       promotedItems: items,
+      assistantMessageId,
       bridgeTs,
       followingMessages: following,
       commitMessages,
@@ -4145,11 +4188,13 @@ export default function ChatView({
     turnActive,
     messages,
     streamItems,
+    streamAssistantMessageId,
     liveItemsRetired: retiredAssistantItemsRef.current === streamItems,
     findBridgeIndex: bridgeHook.findBridgeIndex,
   }), [
     bridgeMountInputs,
     messages,
+    streamAssistantMessageId,
     streamItems,
     turnActive,
   ])
@@ -4340,12 +4385,11 @@ export default function ChatView({
   // partial's durable key, while a live-first answer keeps its absolute
   // transcript-position alias even if a related DB partial arrives later.
   //
-  // Fast-forward can insert a user row AFTER the mounted partial while the
-  // stream remains live. Therefore bridge identity is ts-based across the
-  // full message list, not "last message only." For multi-turn flow (no
-  // bridge), the previous assistant is rendered alongside the streaming
-  // <li> (different turns). The live row therefore uses the absolute index its
-  // eventual durable row will occupy, not the previous assistant's key.
+  // Fast-forward can insert a user row after the mounted partial while the
+  // stream remains live. Explicit assistant identity keeps that row stable
+  // across the split; the mount-ts bridge exists only for id-less history. For
+  // multi-turn flow with no mirror, the prior assistant and current stream are
+  // different rows, so the live row uses its eventual absolute index.
   const streamingDataKey = chooseActiveAssistantDataKey({
     latched: activeAssistantDataKeyRef.current,
     mirroredMsg: activeMirrorMsg,
@@ -4487,6 +4531,12 @@ export default function ChatView({
         <ChatSummaryViewer
           chatId={chatId}
           onClose={() => setShowSummary(false)}
+        />
+      )}
+      {!embedded && showUsage && (
+        <ChatUsageInspector
+          chatId={chatId}
+          onClose={() => setShowUsage(false)}
         />
       )}
       {showEmpty && (
@@ -4840,6 +4890,12 @@ export default function ChatView({
             focusComposer={() => focusComposerElement(inputRef.current)}
           />
         )}
+        {!embedded && (
+          <ChatUsageStrip
+            totals={chatUsageQuery.data?.totals}
+            onOpen={() => setShowUsage(true)}
+          />
+        )}
         <ChatInputBar
           chatId={chatId}
           input={input}
@@ -4881,7 +4937,9 @@ export default function ChatView({
               <ComposerPopover
                 triggerIcon={icon}
                 providerUsage={providerUsage}
-                triggerAriaLabel={embedded ? 'Attach files' : ariaLabel}
+                triggerAriaLabel={embedded
+                  ? 'Attach files'
+                  : `${ariaLabel}. ${chatUsageAriaSummary}`}
                 chatInfo={showPicker ? chatInfo : null}
                 chatId={chatId}
                 onAttachClick={() => attachTriggerRef.current?.()}
@@ -4911,6 +4969,7 @@ export default function ChatView({
                 modelSelectionRequest={modelSelectionRequest}
                 onOpenInspector={() => setShowInspector(true)}
                 onOpenSummary={() => setShowSummary(true)}
+                onOpenUsage={() => setShowUsage(true)}
                 embedded={embedded}
               />
               )}

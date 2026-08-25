@@ -32,6 +32,7 @@ from app.deps import (
   get_owner_or_app_with_railway_manage,
   reject_cross_site,
 )
+from app.runtime_identity import broker_request as runtime_identity_broker_request
 from app.timeutil import now_naive_utc
 
 router = APIRouter(
@@ -1026,10 +1027,28 @@ async def complete_link(
     db.commit()
     raise
   try:
+    runtime_identity = await runtime_identity_broker_request("GET", "/identity")
+  except (httpx.HTTPError, OSError, ValueError) as exc:
+    raise HTTPException(
+      502, "This Möbius could not prepare trial activation. Please try again."
+    ) from exc
+  runtime_linked = runtime_identity.get("linked") is True
+  runtime_request = None
+  if not runtime_linked:
+    runtime_request = {
+      "instance_id": runtime_identity.get("instance_id"),
+      "public_key_jwk": runtime_identity.get("public_key_jwk"),
+      "key_thumbprint": runtime_identity.get("key_thumbprint"),
+    }
+  try:
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
       response = await client.post(
         get_settings().mobius_account_origin + "/api/account-links/token",
-        json={"code": body.code, "code_verifier": verifier},
+        json={
+          "code": body.code,
+          "code_verifier": verifier,
+          **({"runtime_identity": runtime_request} if runtime_request else {}),
+        },
         headers={"Accept": "application/json"},
       )
   except httpx.HTTPError:
@@ -1055,6 +1074,34 @@ async def complete_link(
   ):
     raise HTTPException(502, "The Möbius account service returned an invalid account grant.")
   identity = _identity_contract(identity)
+  identity_subject = str((identity.get("profile") or {}).get("user_id") or "")
+  if runtime_linked:
+    if runtime_identity.get("subject") != identity_subject:
+      raise HTTPException(
+        409,
+        "This Möbius is linked to a different mobius.you account. Disconnect it before signing in again.",
+      )
+  else:
+    receipt = grant.get("enrollment_receipt") if isinstance(grant, dict) else None
+    if not isinstance(receipt, str) or receipt.count(".") != 2:
+      raise HTTPException(
+        502, "The Möbius account service did not activate this trial. Please try again."
+      )
+    try:
+      enrolled = await runtime_identity_broker_request(
+        "POST", "/identity/enroll", {"receipt": receipt}, timeout=30.0,
+      )
+    except (httpx.HTTPError, OSError, ValueError) as exc:
+      raise HTTPException(
+        502, "Your account signed in, but trial activation could not finish. Please try again."
+      ) from exc
+    if (
+      enrolled.get("linked") is not True
+      or enrolled.get("subject") != identity_subject
+    ):
+      raise HTTPException(
+        502, "The local trial identity could not be confirmed. Please try again."
+      )
   link = models.IdentityAccountLink(owner_id=owner.id)
   db.add(link)
   link.access_token_encrypted = _seal(token)
@@ -1092,10 +1139,23 @@ async def delete_link(
     db.commit()
     return Response(status_code=204)
   try:
+    runtime_identity = await runtime_identity_broker_request("GET", "/identity")
+  except (httpx.HTTPError, OSError, ValueError) as exc:
+    raise HTTPException(
+      502, "The local trial identity could not be reached; your link was kept."
+    ) from exc
+  runtime_request = None
+  if runtime_identity.get("linked") is True:
+    runtime_request = {
+      "instance_id": runtime_identity.get("instance_id"),
+      "key_thumbprint": runtime_identity.get("key_thumbprint"),
+    }
+  try:
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
       response = await client.post(
         get_settings().mobius_account_origin + "/api/account-links/revoke",
         headers={"Authorization": f"Bearer {token}"},
+        json={"runtime_identity": runtime_request} if runtime_request else {},
       )
   except httpx.HTTPError:
     raise HTTPException(
@@ -1103,6 +1163,21 @@ async def delete_link(
     )
   if response.status_code not in (204, 401):
     raise HTTPException(502, "The Möbius account service could not revoke this link.")
+  if runtime_request:
+    try:
+      unlinked = await runtime_identity_broker_request(
+        "POST",
+        "/identity/unlink",
+        {"expected_subject": runtime_identity.get("subject")},
+      )
+    except (httpx.HTTPError, OSError, ValueError) as exc:
+      raise HTTPException(
+        502, "The account was revoked, but local sign-out did not finish. Try again."
+      ) from exc
+    if unlinked.get("linked") is not False:
+      raise HTTPException(
+        502, "The account was revoked, but local sign-out did not finish. Try again."
+      )
   db.delete(link)
   db.commit()
   return Response(status_code=204)

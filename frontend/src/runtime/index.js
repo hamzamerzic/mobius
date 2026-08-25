@@ -162,6 +162,7 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
     _runtimeContext.signal?._destroy?.()
     _runtimeContext.storage?._destroy?.()
     _runtimeContext.capabilities?._destroy?.()
+    _runtimeContext.chat?._destroy?.()
   }
 
   const tokenRef = { current: getToken }
@@ -177,6 +178,7 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
   })
   const signal = makeSignal(appId, storage, appInstanceId)
   const capabilities = makeCapabilities({ declarations: capabilityContract?.runtime || {} })
+  const chat = makeChat({ appId, getToken: scopedToken, storage })
   const api = {
     appId,
     // Returns the probed reachability verdict (not raw navigator.onLine).
@@ -205,14 +207,14 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
     createUseDocument: (React) => createUseDocument(storage, React),
     signal,
     capabilities,
-    chat: makeChat({ appId, getToken: scopedToken, storage }),
+    chat,
     nav: makeNav(),
     split: makeSplit(),
     immersive: makeImmersive({ appId }),
     clipboard: makeClipboard(),
   }
   window.mobius = api
-  _runtimeContext = { identityKey, tokenRef, storage, signal, capabilities, api }
+  _runtimeContext = { identityKey, tokenRef, storage, signal, capabilities, chat, api }
   storage._drain()    // flush anything left from a previous offline session
   storage._drainSignals() // independently flush retained telemetry
   // Ask for durable storage so the offline mirror + queued blob writes survive

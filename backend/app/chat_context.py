@@ -20,6 +20,7 @@ from app.goal_commands import (
   goal_argument as _goal_argument,
   goal_clear_requested as _goal_clear_requested,
   goal_objective as _goal_objective,
+  is_goal_continue,
   is_goal_command as _is_goal_command,
 )
 
@@ -517,7 +518,7 @@ def _latest_goal_objective(
     if message.role != "user":
       continue
     content = message.content or ""
-    if content.strip().lower() == "continue":
+    if is_goal_continue(content):
       continue
     if _goal_clear_requested(content):
       return None
@@ -532,7 +533,7 @@ def _latest_goal_objective(
 
 def _goal_resume_requested(chat_row, text: str) -> bool:
   """Whether this ``continue`` is a recovery action rather than ordinary prose."""
-  if (text or "").strip().lower() != "continue" or chat_row is None:
+  if not is_goal_continue(text) or chat_row is None:
     return False
   durable = list(chat_row.messages or [])
   if not durable:

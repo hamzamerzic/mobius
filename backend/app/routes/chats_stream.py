@@ -41,7 +41,7 @@ from app.chat_visibility import coerce_agent_settings
 from app.providers import (
   _load_agent_settings,
   effective_agent_settings,
-  resolve_default_provider,
+  owner_default_provider,
 )
 from app.runner_registry import RunnerKind, registry
 from app.config import get_settings
@@ -117,7 +117,10 @@ def _next_execution_provider(db: Session, chat: models.Chat) -> str:
     and not is_draining()
   ):
     owner = db.query(models.Owner).first()
-    return resolve_default_provider(
+    # Provider follows the last-selected model, matching new-chat creation, so a
+    # pristine chat's first send can't re-diverge onto a family whose remembered
+    # model belongs to the other provider.
+    return owner_default_provider(
       get_settings().data_dir, owner.provider if owner else None,
     )
   return provider
@@ -1375,10 +1378,10 @@ async def stream_chat(
     # the queue with no await in between), so the catch-up burst still
     # captures exactly the events present when this subscriber attaches.
     catch_up, queue = bc.subscribe()
-    snapshot_items = (
+    snapshot_state = (
       active_sink_stream_snapshot(chat_id, bc) if snapshot else None
     )
-    if snapshot_items is not None:
+    if snapshot_state is not None:
       catch_up = [
         event for event in catch_up
         if event.get("type") in _SNAPSHOT_REPLAY_EVENT_TYPES
@@ -1397,8 +1400,8 @@ async def stream_chat(
     try:
       if not embed_session_active():
         return
-      if snapshot_items is not None:
-        yield _sse({"type": "stream_snapshot", "items": snapshot_items})
+      if snapshot_state is not None:
+        yield _sse({"type": "stream_snapshot", **snapshot_state})
       # Send all events buffered before this client connected.
       has_done = False
       for event in catch_up:

@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { compactionBrief } from '../compactionToolBlock.js'
+import {
+  compactionBrief,
+  compactionProviderLabel,
+} from '../compactionToolBlock.js'
 
 // The reframe (feedback item E) replaced the generic CompactChat tool block
 // with CompactionCard. The load-bearing contract these tests guard is that
@@ -23,4 +26,11 @@ test('compactionBrief reads the plain-text content', () => {
 test('compactionBrief returns empty string when there is nothing to show', () => {
   assert.equal(compactionBrief({ role: 'assistant', kind: 'compaction' }), '')
   assert.equal(compactionBrief({ kind: 'compaction', content: '   ' }), '')
+})
+
+test('compactionProviderLabel presents the public Evolve name', () => {
+  assert.equal(compactionProviderLabel({ to_provider: 'mobius' }), 'Möbius Evolve')
+  assert.equal(compactionProviderLabel({ provider: 'codex' }), 'OpenAI Codex')
+  assert.equal(compactionProviderLabel({ provider: 'custom' }), 'custom')
+  assert.equal(compactionProviderLabel({}), null)
 })

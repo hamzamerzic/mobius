@@ -365,3 +365,9 @@ def test_claude_fallback_context_matches_documented_model_limit():
   }
   assert by_id["claude-opus-4-8"]["context_window"] == 1_000_000
   assert by_id["claude-haiku-4-5-20251001"]["context_window"] == 200_000
+
+
+def test_mobius_effort_scale_uses_the_public_product_model():
+  assert providers.MODEL_EFFORT_LEVELS["inkling"] == [
+    "minimal", "low", "medium", "high", "max",
+  ]

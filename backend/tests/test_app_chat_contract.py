@@ -30,7 +30,9 @@ def test_app_token_can_create_and_send_to_own_chat(client, owner_token, db):
   # Create an app-owned chat.
   r = client.post(
     "/api/app-chats", json={
-      "title": "App conversation", "model": "claude-opus-4-8",
+      "title": "App conversation",
+      "provider": "claude",
+      "model": "claude-opus-4-8",
     },
     headers={"Authorization": f"Bearer {app_token}"},
   )
@@ -75,7 +77,7 @@ def test_app_chat_first_send_preserves_provider_selected_at_create(
 
   _, app_token = _make_app(client, owner_token, "provider-preserving-chat")
   monkeypatch.setattr(
-    chats_stream, "resolve_default_provider", lambda *_: "claude",
+    chats_stream, "owner_default_provider", lambda *_: "claude",
   )
 
   for sender_token in (app_token, owner_token):
@@ -121,7 +123,7 @@ def test_owner_chat_first_send_still_uses_latest_selected_provider(
   assert created.status_code == 200, created.text
   chat_id = created.json()["id"]
   monkeypatch.setattr(
-    chats_stream, "resolve_default_provider", lambda *_: "codex",
+    chats_stream, "owner_default_provider", lambda *_: "codex",
   )
   row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
   row.agent_settings_json = {"model": "gpt-5.6-sol"}
@@ -199,6 +201,7 @@ def test_app_chat_create_and_patch_store_custom_system_prompt(
     json={
       "title": "App conversation",
       "system_prompt": "You live inside the Notes app.",
+      "provider": "claude",
       "model": "claude-sonnet-4-6",
     },
     headers={"Authorization": f"Bearer {app_token}"},

@@ -64,6 +64,14 @@ def _seed_owner_and_creds():
   }), encoding="utf-8")
 
 
+def _disconnect_all_providers(monkeypatch):
+  """Pin the no-provider precondition at the registered adapter boundary."""
+  for provider in chat_mod.PROVIDERS.values():
+    monkeypatch.setattr(
+      provider, "check_auth", lambda _data_dir: "not connected",
+    )
+
+
 def _seed_chat(chat_id, messages=None, pending=None, running=None,
                session_id="sess", run_token=None):
   from datetime import UTC, datetime
@@ -1161,6 +1169,11 @@ def test_no_connected_agent_streams_and_persists_guidance(
   # remove or replace it explicitly to guarantee the auth-error precondition.
   from app import auth as auth_mod
 
+  # The container's identity broker can expose a host-connected provider even
+  # when this test removes local credential files. Pin the product precondition
+  # instead of inheriting the developer machine's live connection state.
+  _disconnect_all_providers(monkeypatch)
+
   creds = (
     pathlib.Path(os.environ["DATA_DIR"]) / "cli-auth" / "claude"
     / ".credentials.json"
@@ -1234,6 +1247,8 @@ def test_no_connected_agent_promotes_queued_message(monkeypatch):
   the guidance finalizes first, then the queued row gets a fresh run token."""
   from app import auth as auth_mod
 
+  _disconnect_all_providers(monkeypatch)
+
   for creds in (
     pathlib.Path(os.environ["DATA_DIR"]) / "cli-auth" / "claude"
     / ".credentials.json",
@@ -1298,6 +1313,8 @@ def test_no_connected_agent_stopped_during_metrics_preserves_successor_sink(
   publishing obsolete guidance.
   """
   from app import auth as auth_mod
+
+  _disconnect_all_providers(monkeypatch)
 
   for creds in (
     pathlib.Path(os.environ["DATA_DIR"]) / "cli-auth" / "claude"
@@ -1379,7 +1396,7 @@ def test_auth_error_cleanup_when_another_provider_is_connected(monkeypatch):
   )
   _seed_run("rt-12-auth", "t12-auth-error")
   monkeypatch.setattr(
-    chat_mod, "authenticated_provider_ids", lambda _data_dir: ["codex"],
+    chat_mod.PROVIDERS["codex"], "check_auth", lambda _data_dir: None,
   )
 
   chat_mod.mark_starting("t12-auth-error")
