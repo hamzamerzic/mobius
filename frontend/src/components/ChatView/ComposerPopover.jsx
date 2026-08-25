@@ -46,7 +46,7 @@ import {
   clientPointToLayout,
 } from '../../lib/layoutSpace.js'
 import useModelSelectionPopover from './hooks/useModelSelectionPopover.js'
-import { clearProviderSwitch } from './providerSwitch.js'
+import useDiscardUnconfirmedSwitchOnPickerClose from './hooks/useDiscardUnconfirmedSwitchOnPickerClose.js'
 
 export default function ComposerPopover({
   chatInfo,
@@ -99,19 +99,7 @@ export default function ComposerPopover({
   )
   const open = mode !== null
 
-  // Leaving the model picker with an unconfirmed cross-provider switch staged is
-  // a no-op: discard it so reopening the picker shows the current model, not a
-  // lingering "confirm?" for a model the owner picked but never confirmed. Only
-  // the staged `confirming` state is dropped — an in-flight `switching` or a
-  // committed `success` is left alone.
-  const prevModeRef = useRef(mode)
-  useEffect(() => {
-    const leftModelPicker = prevModeRef.current === 'model' && mode !== 'model'
-    prevModeRef.current = mode
-    if (leftModelPicker && providerSwitchState?.status === 'confirming') {
-      clearProviderSwitch(chatId)
-    }
-  }, [mode, providerSwitchState?.status, chatId])
+  useDiscardUnconfirmedSwitchOnPickerClose(mode, providerSwitchState?.status, chatId)
 
   // Measured cap on the panel's height: the space above the trigger inside both
   // the chat pane (which clips with `overflow: hidden`) and the keyboard-shrunk
