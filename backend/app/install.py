@@ -2424,6 +2424,7 @@ class ActivationPlan:
   """Source and manifest state selected by reconciliation for activation."""
 
   source_tree: dict[str, bytes]
+  published_source_tree: dict[str, bytes]
   static_assets: dict[str, bytes]
   dropped_source_paths: set[str]
   exec_paths: frozenset[str]
@@ -2528,7 +2529,12 @@ async def _activate_install_source(
       _check_source_completeness(
         app_name=str(manifest.get("name") or app.slug),
         manifest=manifest,
-        source_tree=plan.source_tree,
+        # Validate the published package against its own manifest, not the
+        # reconciled tree.  A clean update merge may legitimately retain
+        # locally applied sibling modules which the upstream manifest cannot
+        # declare; checking that merged tree makes every later synthetic
+        # fallback misdiagnose those preserved edits as a broken release.
+        source_tree=plan.published_source_tree,
         entry_key=plan.entry_key,
         static_dests=list(plan.static_assets),
         job_name=plan.job_name,
@@ -2720,6 +2726,10 @@ async def install_from_manifest(
     )
   if job_name and bundled_job is not None:
     source_tree[job_name] = bundled_job
+  # Keep the exact manifest-fetched package separate from the tree selected by
+  # Git reconciliation below. Source completeness is a publication contract;
+  # locally retained modules in a clean merge are outside that contract.
+  published_source_tree = dict(source_tree)
   repo_ref = (
     _derive_repo_ref(manifest_url) if manifest_url is not None else None
   )
@@ -3168,6 +3178,7 @@ async def install_from_manifest(
           manifest=manifest,
           plan=ActivationPlan(
             source_tree=source_tree,
+            published_source_tree=published_source_tree,
             static_assets=static_assets_fetched,
             dropped_source_paths=dropped_source_paths,
             exec_paths=exec_paths,

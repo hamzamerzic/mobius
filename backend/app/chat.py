@@ -13,6 +13,7 @@ import math
 import os
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -73,6 +74,7 @@ from app.chat_logging import (
   get_logger as _get_logger,
   safe_commit as _safe_commit,
 )
+from app.goal_commands import is_goal_continue
 from app.chat_writer import (
   AppendPending,
   Barrier,
@@ -698,8 +700,36 @@ def reconcile_startup_chats(
       # the danger-red error styling — a restart is a maintenance event, not
       # something the turn did wrong.
       err_block = _pause_note(note, kind="restart")
-      if msgs and msgs[-1].get("role") == "assistant":
-        blocks = list(msgs[-1].get("blocks") or [])
+      live_id = (
+        chat.live_assistant.get("id")
+        if isinstance(chat.live_assistant, dict) else None
+      )
+      recovery_message_id = live_id or (
+        restart_run.id if restart_run is not None else None
+      )
+      recovery_index = next((
+        index for index, message in enumerate(msgs)
+        if recovery_message_id is not None
+        and message.get("role") == "assistant"
+        and message.get("id") is not None
+        and str(message.get("id")) == str(recovery_message_id)
+      ), -1)
+      if (
+        recovery_index < 0
+        and msgs
+        and msgs[-1].get("role") == "assistant"
+        and (
+          recovery_message_id is None
+          or msgs[-1].get("id") is None
+        )
+      ):
+        # Rolling upgrade only: an id-less tail can be the interrupted row.
+        # If both rows have different explicit ids, the running segment is new
+        # and its restart note belongs at the transcript tail.
+        recovery_index = len(msgs) - 1
+      if recovery_index >= 0:
+        previous_message = msgs[recovery_index]
+        blocks = list(previous_message.get("blocks") or [])
         finalize_blocks(blocks)
         # A drain-gated restart (design §2.2) already wrote its own terminal
         # "paused for a platform update" note through the sink before the
@@ -786,16 +816,29 @@ def reconcile_startup_chats(
         # stable ts (the frontend bridge + React keys rely on it — a
         # ts-less message is dropped by useBridgePartial). Mirrors the
         # ts-carry in _update_last_assistant_message.
-        prev_ts = msgs[-1].get("ts")
-        msgs[-1] = build_assistant_message(blocks)
-        msgs[-1]["ts"] = (
-          prev_ts if prev_ts is not None else _next_message_ts(msgs[:-1])
+        prev_ts = previous_message.get("ts")
+        recovered_message = build_assistant_message(blocks)
+        recovered_message["id"] = (
+          previous_message.get("id")
+          or recovery_message_id
+          or f"assistant-{uuid.uuid4().hex}"
         )
+        recovered_message["ts"] = (
+          prev_ts
+          if prev_ts is not None
+          else _next_message_ts(
+            msgs[:recovery_index] + msgs[recovery_index + 1:]
+          )
+        )
+        msgs[recovery_index] = recovered_message
       else:
         # Process died before any assistant content persisted — surface
         # the interruption as a standalone assistant turn so the user
         # isn't left staring at their own unanswered message.
         new_msg = build_assistant_message([err_block])
+        new_msg["id"] = (
+          recovery_message_id or f"assistant-{uuid.uuid4().hex}"
+        )
         new_msg["ts"] = _next_message_ts(msgs)
         msgs.append(new_msg)
       # Preserve chat.pending_messages: closing the run leaves an idle queue
@@ -3979,7 +4022,7 @@ async def _run_chat_impl_with_db(
   goal_objective = _goal_objective(raw_user_message)
   goal_clear = _goal_clear_requested(raw_user_message)
   goal_mode = _chat_has_goal_intent(messages)
-  goal_continue = (raw_user_message or "").strip().lower() == "continue"
+  goal_continue = is_goal_continue(raw_user_message or "")
   question_checkpoint = None
   if settings.ensure_chat_note and chat_id:
     async def question_checkpoint() -> None:

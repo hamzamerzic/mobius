@@ -44,6 +44,7 @@ from app.continuations import (
   continuation_actor_label,
   is_continuation_message,
 )
+from app.chat_message_content import strip_upload_augmentation
 from app.secure_inputs import redact_reveal_markers
 
 # Per-excerpt char cap for the list view, and per-message char cap for
@@ -117,23 +118,6 @@ def scrub_secrets(text: str) -> str:
   for pattern, repl in _SECRET_PATTERNS:
     text = pattern.sub(repl, text)
   return text
-
-
-# The upload augmentation block appended to user content before storage
-# (chats_stream._content_with_uploads). Matches the literal opener
-# `[Files in this session:` through its closing bracket, across lines.
-# Stripped whole so absolute /data/ paths + filenames never reach an app.
-_UPLOAD_AUG_RE = re.compile(
-  r"\n*\[Files in this session:.*?\]", re.DOTALL
-)
-
-
-def strip_upload_augmentation(content: str) -> str:
-  """Removes the `[Files in this session: ...]` fs-path block from a
-  user message's stored content. No-op when absent."""
-  if not content:
-    return content
-  return _UPLOAD_AUG_RE.sub("", content).rstrip()
 
 
 def _assistant_text(blocks: list, content: str) -> str:

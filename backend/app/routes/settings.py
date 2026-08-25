@@ -256,7 +256,10 @@ def get_settings_view(
   """
   data_dir = get_app_settings().data_dir
   codex_creds = Path(data_dir) / "cli-auth" / "codex" / "auth.json"
-  provider = providers.resolve_default_provider(data_dir, owner.provider)
+  # The displayed current provider follows the last-selected model (the single
+  # source of truth), so the picker never shows a provider that disagrees with
+  # the model it would resolve.
+  provider = providers.owner_default_provider(data_dir, owner.provider)
   agent_settings = providers.effective_agent_settings(
     data_dir, None, provider
   )
@@ -313,6 +316,10 @@ def update_settings(
         current["skills_enabled"] = bool(body.skills_enabled)
       if body.agent_settings is not None:
         current.update(_agent_settings_payload(body.agent_settings))
+        if body.provider in providers.PROVIDERS:
+          # Legacy owner settings still submit provider + model together. Keep
+          # that picker choice atomic for live model ids outside KNOWN_MODELS.
+          current["provider"] = body.provider
       if body.background_agents is not None:
         provider = providers.resolve_default_provider(data_dir, owner.provider)
         existing = providers.background_agent_settings(data_dir, provider)

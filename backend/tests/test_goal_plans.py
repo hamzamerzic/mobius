@@ -262,6 +262,135 @@ def test_goal_promotion_rejects_browser_wrong_chat_and_terminal_run_tokens(
   assert "no longer active" in terminal.json()["detail"]
 
 
+def test_goal_promotion_rejects_delegation_and_app_scope_tokens(
+  client, owner_token, db,
+):
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  chat_id = client.post(
+    "/api/chats", json={"title": "Scoped"}, headers=owner_auth,
+  ).json()["id"]
+  db.add(models.ChatRun(
+    id="scoped-run", root_run_id="scoped-run", chat_id=chat_id,
+    status="running", provider="codex",
+  ))
+  app = models.App(
+    name="Delegate", description="", slug="goal-scope-app",
+    source_dir="/tmp/mobius-tests/goal-scope-app",
+    jsx_source="export default () => null", token_nonce="scope-nonce",
+  )
+  db.add(app)
+  db.commit()
+  db.refresh(app)
+
+  owner = db.query(models.Owner).first()
+  # (a) A delegated child holds a delegation-scope token; the promotion route
+  # requires the owner-scope agent-run bearer, so the server boundary refuses
+  # it before any writer work.
+  delegation_auth = {
+    "Authorization": "Bearer " + auth_mod.create_delegation_token(
+      "delegation-scope", app.id, chat_id, "scoped-run",
+      owner.username, owner.token_epoch,
+    )
+  }
+  delegated = client.post(
+    f"/api/chats/{chat_id}/goal",
+    json={"objective": "Delegated cannot promote"}, headers=delegation_auth,
+  )
+  assert delegated.status_code in (401, 403), delegated.text
+
+  # (b) A write-scope app token (app_id set) is likewise rejected: it is not
+  # the current owner agent run.
+  app_auth = {
+    "Authorization": "Bearer " + auth_mod.create_app_token(
+      app.id, owner.username, owner.token_epoch, "scope-nonce",
+    )
+  }
+  app_scoped = client.post(
+    f"/api/chats/{chat_id}/goal",
+    json={"objective": "App cannot promote"}, headers=app_auth,
+  )
+  assert app_scoped.status_code in (401, 403), app_scoped.text
+
+
+def test_promote_run_to_goal_rejects_a_terminal_run(client, owner_token, db):
+  from app import chat_writer
+
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  chat_id = client.post(
+    "/api/chats", json={"title": "Terminal"}, headers=owner_auth,
+  ).json()["id"]
+  db.add(models.ChatRun(
+    id="done-run", root_run_id="done-run", chat_id=chat_id,
+    status="completed", provider="codex",
+  ))
+  db.commit()
+
+  result = chat_writer.get_writer()._promote_run_to_goal(
+    db,
+    chat_writer.PromoteRunToGoal(
+      chat_id=chat_id, run_token="done-run", objective="Too late",
+    ),
+  )
+  assert isinstance(result, chat_writer.GoalPromotionRejected)
+  assert result.reason == "run_not_active"
+
+
+def test_promote_run_to_goal_rejects_a_superseded_run(client, owner_token, db):
+  from app import chat_writer
+
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  chat_id = client.post(
+    "/api/chats", json={"title": "Superseded"}, headers=owner_auth,
+  ).json()["id"]
+  now = datetime.now(UTC).replace(tzinfo=None)
+  db.add_all([
+    models.ChatRun(
+      id="prior-run", root_run_id="prior-run", chat_id=chat_id,
+      status="running", provider="codex",
+      started_at=now - timedelta(minutes=1),
+    ),
+    models.ChatRun(
+      id="newer-run", root_run_id="newer-run", chat_id=chat_id,
+      status="running", provider="codex", started_at=now,
+    ),
+  ])
+  db.commit()
+
+  result = chat_writer.get_writer()._promote_run_to_goal(
+    db,
+    chat_writer.PromoteRunToGoal(
+      chat_id=chat_id, run_token="prior-run", objective="Not current",
+    ),
+  )
+  assert isinstance(result, chat_writer.GoalPromotionRejected)
+  assert result.reason == "run_not_current"
+
+
+def test_promote_run_to_goal_rejects_a_missing_logical_root(
+  client, owner_token, db,
+):
+  from app import chat_writer
+
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  chat_id = client.post(
+    "/api/chats", json={"title": "Rootless"}, headers=owner_auth,
+  ).json()["id"]
+  db.add(models.ChatRun(
+    id="orphan-run", root_run_id="absent-root", chat_id=chat_id,
+    status="running", provider="codex",
+  ))
+  db.commit()
+
+  result = chat_writer.get_writer()._promote_run_to_goal(
+    db,
+    chat_writer.PromoteRunToGoal(
+      chat_id=chat_id, run_token="orphan-run", objective="No root",
+    ),
+  )
+  assert isinstance(result, chat_writer.GoalPromotionRejected)
+  assert result.reason == "logical_root_missing"
+
+
 def test_promotion_of_a_continuation_stamps_its_logical_root(
   client, owner_token, db,
 ):

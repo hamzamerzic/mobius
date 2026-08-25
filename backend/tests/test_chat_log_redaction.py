@@ -78,6 +78,16 @@ def test_strip_upload_augmentation_removes_fs_path_block():
   assert "/data/chats" not in stripped
 
 
+def test_strip_upload_augmentation_handles_brackets_in_filenames():
+  content = (
+    "summarize this\n\n"
+    "[Files in this session:\n"
+    "- chart[final].png → /data/chats/c/chart[final].png "
+    "(image/png, 9 KB)]"
+  )
+  assert r.strip_upload_augmentation(content) == "summarize this"
+
+
 def test_scrub_secrets_catches_jwt_key_and_bearer_shapes():
   assert "eyJ" not in r.scrub_secrets(
     "tok eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhIn0.SIGNATUREXYZ here"

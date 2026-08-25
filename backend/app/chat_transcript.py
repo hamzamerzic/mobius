@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from app.chat_message_identity import assistant_message_index
 from app.memory_recall import (
   RecallBinding,
   recall_from_command,
@@ -33,10 +34,11 @@ def materialized_messages(chat) -> list[dict]:
   # blank assistant row before the provider emits content.
   if not isinstance(blocks, list) or not blocks:
     return messages
-  if messages and messages[-1].get("role") == "assistant":
-    messages[-1] = live
-  else:
-    messages.append(live)
+  live_index = assistant_message_index(messages, live)
+  if live_index >= 0:
+    messages[live_index] = live
+    return messages
+  messages.append(live)
   return messages
 
 

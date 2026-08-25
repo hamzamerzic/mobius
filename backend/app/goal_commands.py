@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import re
 
+from app.chat_message_content import strip_upload_augmentation
+
 
 def _goal_match(text: str) -> re.Match[str] | None:
   """Match the same complete command boundary used by native dispatch."""
-  normalized = (text or "").lstrip("\n")
+  normalized = strip_upload_augmentation(text or "").lstrip("\n")
   return re.fullmatch(r"/goal(?:\s+([\s\S]*))?", normalized)
+
+
+def is_goal_continue(text: str) -> bool:
+  """Whether owner-visible text is the Goal resume control word."""
+  return strip_upload_augmentation(text or "").strip().lower() == "continue"
 
 
 def is_goal_command(text: str) -> bool:

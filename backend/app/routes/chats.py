@@ -251,7 +251,10 @@ def _mirror_agent_defaults(
   settings_obj: dict,
 ) -> None:
   """Repair the best-effort defaults mirrored from a committed chat choice."""
-  patch = {}
+  # Keep the model's provider in the SAME atomic shared-file update. Live model
+  # discovery can expose ids outside KNOWN_MODELS, so model text alone is not a
+  # durable provider classifier.
+  patch = {"provider": provider_id}
   for key in ("model", "effort", "effort_by_provider"):
     value = settings_obj.get(key)
     if value is not None:
@@ -452,10 +455,9 @@ def _chat_detail_response(
   running = is_chat_running(chat.id) or has_running_run(db, chat.id)
   live_snapshot = chat.live_assistant
   live_message = (
-    all_msgs[-1]
+    next((message for message in all_msgs if message is live_snapshot), None)
     if running
-    and all_msgs
-    and all_msgs[-1] is live_snapshot
+    and isinstance(live_snapshot, dict)
     else None
   )
   # A genuinely streaming assistant row must remain self-contained: the live
@@ -873,7 +875,10 @@ def create_chat(
 
   owner = db.query(models.Owner).first()
   data_dir = get_settings().data_dir
-  provider = providers.resolve_default_provider(
+  # Provider follows the last-selected model (the single source of truth) so a
+  # new chat always starts on the family of the model it will actually use —
+  # never a provider whose remembered model belongs to the other family.
+  provider = providers.owner_default_provider(
     data_dir, owner.provider if owner else None,
   )
 
@@ -1257,7 +1262,9 @@ async def patch_chat(
       and settings_obj
       and picker_settings_changed
     ):
-      mirror_patch = {}
+      # Model + provider are one picker choice. Persist them in one atomic
+      # shared-file update so concurrent chats cannot split the pair.
+      mirror_patch = {"provider": chat.provider}
       for key in ("model", "effort", "effort_by_provider"):
         value = settings_obj.get(key)
         if value is not None:
@@ -1724,6 +1731,7 @@ def get_chat_agent_context(
 @router.get("/{chat_id}/usage")
 def get_chat_usage(
   chat_id: str,
+  include_runs: bool = True,
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
@@ -1786,7 +1794,7 @@ def get_chat_usage(
         "usage": run.usage_json,
       }
       for run in runs
-    ],
+    ] if include_runs else [],
   }
 
 
@@ -2504,7 +2512,7 @@ def create_app_chat(
 
   owner = db.query(models.Owner).first()
   data_dir = get_settings().data_dir
-  provider = body.provider or providers.resolve_default_provider(
+  provider = body.provider or providers.owner_default_provider(
     data_dir, owner.provider if owner else None,
   )
   if provider not in providers.PROVIDER_NAMES:

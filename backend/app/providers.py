@@ -967,6 +967,66 @@ def resolve_default_provider(
   return provider_id
 
 
+def provider_of_model(model: str | None) -> str | None:
+  """The provider a model id belongs to, or None for unknown/blank ids."""
+  if not isinstance(model, str) or not model:
+    return None
+  for provider_id, model_ids in KNOWN_MODELS.items():
+    if model in model_ids:
+      return provider_id
+  return None
+
+
+def owner_default_provider(
+  data_dir: str,
+  configured_provider: str | None = None,
+) -> str:
+  """The provider from the owner's latest atomic picker choice.
+
+  There is no separate provider selection in the UI: the owner picks a model,
+  and the provider is implied by it. `Owner.provider` and the global default
+  `model` are two independent last-writer-wins cells, so when several chats run
+  at once they drift apart (one chat's provider write + another chat's model
+  write). Anything that reads `Owner.provider` as "the default provider" can then
+  disagree with the model — most visibly, a new chat born on a provider whose
+  remembered model belongs to the OTHER family resolves to no model at all.
+
+  The picker mirrors its model and provider together in one atomic shared-file
+  update. Known catalog models remain self-identifying, which lets this reader
+  repair an older or contradictory mirror. For a live-discovered model outside
+  the static failure-fallback catalog, the provider stored alongside that model
+  is authoritative instead of guessing from a model naming convention.
+
+  `Owner.provider` is demoted to a fallback used only on the genuine first run,
+  when no picker choice has been remembered yet. Every "default provider" reader
+  routes through here so no code path can produce a provider that disagrees with
+  the latest complete picker choice.
+
+  With no remembered model, this delegates to `resolve_default_provider`, which
+  keeps the fresh-owner contract (fall forward to a connected provider instead of
+  surfacing a disconnected default, so a codex-only setup never dead-ends on
+  Claude). The picker still prompts because no model resolves.
+
+  Background agents are deliberately NOT routed here: they carry their own
+  configured provider/model block, a separate selection from the interactive
+  last-used model.
+  """
+  settings = _load_agent_settings(data_dir)
+  model = settings.get("model")
+  prov = provider_of_model(model)
+  if prov is not None and prov in PROVIDERS:
+    return prov
+  mirrored_provider = settings.get("provider")
+  if (
+    isinstance(model, str)
+    and model.strip()
+    and mirrored_provider in PROVIDERS
+    and not _model_belongs_to_other_provider(model, mirrored_provider)
+  ):
+    return mirrored_provider
+  return resolve_default_provider(data_dir, configured_provider)
+
+
 def get_provider(provider_id: str | None = None) -> BaseProvider:
   """Returns a provider by ID, falling back to the default."""
   return PROVIDERS.get(provider_id or DEFAULT_PROVIDER, PROVIDERS[DEFAULT_PROVIDER])

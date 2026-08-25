@@ -14,6 +14,7 @@ import uuid
 from sqlalchemy.orm import Session
 
 from app import models
+from app.goal_commands import goal_objective, is_goal_continue
 
 
 def goal_identity_for_run_start(
@@ -22,11 +23,10 @@ def goal_identity_for_run_start(
   message: Mapping[str, Any] | None,
 ) -> tuple[str | None, str | None]:
   """Resolve objective + stable Goal identity before prior runs are closed."""
-  from app.chat_context import _goal_objective
   from app.continuations import is_continuation_message
 
   content = message.get("content") if message is not None else ""
-  objective = _goal_objective(content if isinstance(content, str) else "")
+  objective = goal_objective(content if isinstance(content, str) else "")
   if objective is not None:
     return objective, str(uuid.uuid4())
   from app.continuations import DELEGATION_RESULT_MESSAGE_KIND
@@ -72,7 +72,7 @@ def goal_identity_for_run_start(
     return None, None
   previous = latest_run(db, chat_id)
   semantic_continuation = is_continuation_message(message)
-  literal_continue = str(content or "").strip().lower() == "continue"
+  literal_continue = is_goal_continue(str(content or ""))
   if not semantic_continuation and not literal_continue:
     return None, None
   if (

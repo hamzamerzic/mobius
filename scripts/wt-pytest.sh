@@ -131,6 +131,9 @@ cd "$ROOT/backend" || exit 1
 # of the enclosing repo, and the app-git tests use explicit -C <tmp_path>.
 TEST_ENV=(env \
   GIT_CEILING_DIRECTORIES="$ROOT" \
+  DOMAIN=localhost \
+  FRONTEND_ORIGIN=http://localhost:5173 \
+  RAILWAY_PUBLIC_DOMAIN= \
   MOBIUS_TEST_RUNTIME=1 \
   MOEBIUS_SKIP_BOOTSTRAP=1 \
   API_BASE_URL=http://127.0.0.1:9 \

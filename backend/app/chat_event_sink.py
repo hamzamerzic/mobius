@@ -88,6 +88,17 @@ def _pause_note(
 def register_active_sink(chat_id: str, sink: "ChatEventSink") -> None:
   """Publish the live sink for `chat_id` so the steer route can reach it."""
   _active_sinks[chat_id] = sink
+  # A subscriber can attach in the short interval after the broadcast exists
+  # but before the sink is registered, so it cannot receive a subscription
+  # snapshot yet. Publish the same identity as a replay-safe control fact; a
+  # later subscriber gets it from the snapshot instead.
+  raw_bc = getattr(sink, "bc", None)
+  assistant_message_id = getattr(sink, "assistant_message_id", None)
+  if callable(getattr(raw_bc, "publish", None)) and assistant_message_id:
+    raw_bc.publish({
+      "type": "assistant_identity",
+      "assistant_message_id": assistant_message_id,
+    })
 
 
 def get_active_sink(chat_id: str) -> "ChatEventSink | None":
@@ -95,8 +106,8 @@ def get_active_sink(chat_id: str) -> "ChatEventSink | None":
   return _active_sinks.get(chat_id)
 
 
-def active_sink_stream_snapshot(chat_id: str, broadcast) -> list[dict] | None:
-  """Freeze the current assistant items for one snapshot-capable subscriber.
+def active_sink_stream_snapshot(chat_id: str, broadcast) -> dict | None:
+  """Freeze the current assistant segment for one snapshot-capable subscriber.
 
   The sink is the reduction authority for a running turn: every content event
   reaches ``assistant_blocks`` before it reaches the broadcast.  Pairing by
@@ -108,7 +119,10 @@ def active_sink_stream_snapshot(chat_id: str, broadcast) -> list[dict] | None:
   sink = get_active_sink(chat_id)
   if sink is None or sink.bc is not broadcast:
     return None
-  return copy.deepcopy(sink.assistant_blocks)
+  return {
+    "items": copy.deepcopy(sink.assistant_blocks),
+    "assistant_message_id": sink.assistant_message_id,
+  }
 
 
 def unregister_active_sink(chat_id: str, sink: "ChatEventSink") -> None:
@@ -142,7 +156,14 @@ def active_sink_memory_diagnostics(*, include_payloads: bool = True) -> list[dic
   return diagnostics
 
 
-def steered_into_turn_event(stored_messages: list[dict]) -> dict:
+def steered_into_turn_event(
+  stored_messages: list[dict],
+  *,
+  assistant_message_id: str | None = None,
+  sealed_items: list[dict] | None = None,
+  next_assistant_message_id: str | None = None,
+  items: list[dict] | None = None,
+) -> dict:
   """Build the `steered_into_turn` SSE payload for a batch of steered rows.
 
   `steered_into_turn` is the AUTHORITATIVE CUT and the client's ONLY "seal the
@@ -177,6 +198,16 @@ def steered_into_turn_event(stored_messages: list[dict]) -> dict:
     # single steered row.
     "ts": stored_messages[-1].get("ts"),
     "content": stored_messages[-1].get("content", ""),
+    **(
+      {"assistant_message_id": assistant_message_id}
+      if assistant_message_id else {}
+    ),
+    **({"sealed_items": copy.deepcopy(sealed_items)} if sealed_items is not None else {}),
+    **(
+      {"next_assistant_message_id": next_assistant_message_id}
+      if next_assistant_message_id else {}
+    ),
+    **({"items": copy.deepcopy(items)} if items is not None else {}),
   }
 
 
@@ -280,6 +311,14 @@ class ChatEventSink:
     # `(chat_id, run_token)`. `""` for a tokenless legacy/test caller —
     # the actor tolerates an empty token (its own key).
     self.run_token = run_token
+    # One identity follows this assistant segment through the live stub,
+    # snapshots, SSE reconnects, terminal persistence, and browser promotion.
+    # The first segment reuses the durable physical-run id; a steer rotates to
+    # a run-scoped segment id after sealing the prior one.
+    self._assistant_segment = 0
+    self.assistant_message_id = (
+      run_token or f"assistant-{uuid.uuid4().hex}"
+    )
     self.assistant_blocks: list = []
     self.session_id: str | None = None
     self.cost_usd: float | None = None
@@ -321,10 +360,15 @@ class ChatEventSink:
       )
 
   def _deferred_snapshot(
-    self, blocks: list, *, complete_all: bool = False,
+    self,
+    blocks: list,
+    *,
+    complete_all: bool = False,
+    assistant_message_id: str | None = None,
   ) -> tuple[dict, list[StashThinkingTrace]]:
     """Build a bounded transcript snapshot plus its full-text sidecars."""
     snapshot = copy.deepcopy(build_assistant_message(blocks))
+    snapshot["id"] = assistant_message_id or self.assistant_message_id
     stashes: list[StashThinkingTrace] = []
     for source, persisted in zip(
       [b for b in blocks if b.get("type") != "text_boundary"],
@@ -745,6 +789,13 @@ class ChatEventSink:
     before Q2 on reload (card 166).
     """
     self._steering = True
+    sealed_message_id = self.assistant_message_id
+    self._assistant_segment += 1
+    self.assistant_message_id = (
+      f"{self.run_token}:assistant:{self._assistant_segment}"
+      if self.run_token
+      else f"assistant-{uuid.uuid4().hex}"
+    )
     try:
       sealed_blocks = self.assistant_blocks
       # Reset BEFORE the first await so the continuation accumulates into a
@@ -762,7 +813,9 @@ class ChatEventSink:
         and blocks_have_renderable_content(sealed_blocks)
       ):
         snapshot, stashes = self._deferred_snapshot(
-          sealed_blocks, complete_all=True,
+          sealed_blocks,
+          complete_all=True,
+          assistant_message_id=sealed_message_id,
         )
         ack = get_writer().submit(
           Finalize(
@@ -782,6 +835,8 @@ class ChatEventSink:
           # self.assistant_blocks (the reset list); prepend the sealed content
           # so the combined snapshot is complete.
           self.assistant_blocks = sealed_blocks + self.assistant_blocks
+          self.assistant_message_id = sealed_message_id
+          self._assistant_segment -= 1
           raise
       user_msgs = user_msg if isinstance(user_msg, list) else [user_msg]
       ack = get_writer().submit(
@@ -808,6 +863,8 @@ class ChatEventSink:
     has acknowledged the steering input.
     """
     user_msgs = user_msg if isinstance(user_msg, list) else [user_msg]
+    sealed_items = copy.deepcopy(self.assistant_blocks)
+    sealed_message_id = self.assistant_message_id
     stored_result = await self.split_for_steer(
       user_msgs, consume_pending_cids,
     )
@@ -819,7 +876,13 @@ class ChatEventSink:
     if not isinstance(stored_messages, list) or not stored_messages:
       stored_messages = user_msgs
     try:
-      self.bc.publish(steered_into_turn_event(stored_messages))
+      self.bc.publish(steered_into_turn_event(
+        stored_messages,
+        assistant_message_id=sealed_message_id,
+        sealed_items=sealed_items,
+        next_assistant_message_id=self.assistant_message_id,
+        items=self.assistant_blocks,
+      ))
     except Exception:
       # The transcript cut already committed. A lost notification must not be
       # reported as a delivery failure (which would falsely claim the rows are

@@ -3,6 +3,7 @@ const REQUEST_TYPES = new Set([
   'moebius:open-chat',
   'moebius:open-app',
   'moebius:open-settings',
+  'moebius:chat-control',
 ])
 
 /**
@@ -33,6 +34,22 @@ export function appHostRequest(message) {
       type: message.type,
       appId: message.appId,
       intent: typeof message.intent === 'string' ? message.intent : '',
+    }
+  }
+  if (message.type === 'moebius:chat-control') {
+    const actions = new Set(['status', 'stop'])
+    if (
+      typeof message.requestId !== 'string'
+      || !/^chat-control:[a-z0-9]+:[a-z0-9]+$/i.test(message.requestId)
+      || !actions.has(message.action)
+      || typeof message.chatId !== 'string'
+      || !message.chatId.trim()
+    ) return null
+    return {
+      type: message.type,
+      requestId: message.requestId,
+      action: message.action,
+      chatId: message.chatId.trim().slice(0, 128),
     }
   }
   return {

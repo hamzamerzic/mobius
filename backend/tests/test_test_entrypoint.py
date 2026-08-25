@@ -45,3 +45,10 @@ def test_image_runtime_reports_when_its_python_lock_differs():
   assert 'cmp -s "$ROOT/backend/requirements.lock" /app/requirements.lock' in source
   assert "checkout requirements.lock differs from the image runtime" in source
   assert "not dependency-authoritative" in source
+
+
+def test_host_runner_clears_live_deployment_origin_derivation():
+  source = HOST_RUNNER.read_text()
+  assert "DOMAIN=localhost" in source
+  assert "FRONTEND_ORIGIN=http://localhost:5173" in source
+  assert "RAILWAY_PUBLIC_DOMAIN=" in source
