@@ -93,6 +93,7 @@ import {
   chatCacheEntryState,
   chatDetailCacheValue,
   chatSnapshotMatchesRuntime,
+  shouldRefetchTranscriptForRuntime,
   mergeRecentMessagesIntoLoadedWindow,
   messageKey,
   messageMatchesKey,
@@ -1200,6 +1201,21 @@ export default function ChatView({
           retireSettledStreamRef.current?.()
         }
         return
+      }
+      // A finalized reply can advance the durable transcript while this client
+      // holds a stale cache with no live turn to catch it up — a reply that
+      // landed while the tab was backgrounded, or one from another device. The
+      // mount path already trusts chatSnapshotMatchesRuntime to prove a cache
+      // current; reuse that same runtime read here so a foreground return that
+      // finds the version moved re-reads authoritatively instead of leaving the
+      // reply hidden until a full reload. A matching version does nothing.
+      if (shouldRefetchTranscriptForRuntime(
+        queryClient.getQueryData(chatMessagesQueryKey(chatId)),
+        data,
+        localAuthoritative,
+      )) {
+        await fetchMessages({ force: true, authoritative: true })
+        return runtime
       }
       if (data.running) {
         setSending(true)
