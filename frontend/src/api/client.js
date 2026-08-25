@@ -477,6 +477,12 @@ export const api = {
     recover: (chatId) => listAffectingMutation(
       'chats', `/chats/${chatId}/recover`, { method: 'POST' },
     ),
+    usage: (chatId, options = {}) => apiFetch(
+      `/chats/${encodeURIComponent(chatId)}/usage`, options,
+    ),
+    usageSummary: (chatId, options = {}) => apiFetch(
+      `/chats/${encodeURIComponent(chatId)}/usage?include_runs=false`, options,
+    ),
   },
   secureInputs: {
     submit: (chatId, requestId, payload) => apiFetch(
