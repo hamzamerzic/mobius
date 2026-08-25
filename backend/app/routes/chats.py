@@ -251,7 +251,10 @@ def _mirror_agent_defaults(
   settings_obj: dict,
 ) -> None:
   """Repair the best-effort defaults mirrored from a committed chat choice."""
-  patch = {}
+  # Keep the model's provider in the SAME atomic shared-file update. Live model
+  # discovery can expose ids outside KNOWN_MODELS, so model text alone is not a
+  # durable provider classifier.
+  patch = {"provider": provider_id}
   for key in ("model", "effort", "effort_by_provider"):
     value = settings_obj.get(key)
     if value is not None:
@@ -872,7 +875,10 @@ def create_chat(
 
   owner = db.query(models.Owner).first()
   data_dir = get_settings().data_dir
-  provider = providers.resolve_default_provider(
+  # Provider follows the last-selected model (the single source of truth) so a
+  # new chat always starts on the family of the model it will actually use —
+  # never a provider whose remembered model belongs to the other family.
+  provider = providers.owner_default_provider(
     data_dir, owner.provider if owner else None,
   )
 
@@ -1254,7 +1260,9 @@ async def patch_chat(
       and settings_obj
       and picker_settings_changed
     ):
-      mirror_patch = {}
+      # Model + provider are one picker choice. Persist them in one atomic
+      # shared-file update so concurrent chats cannot split the pair.
+      mirror_patch = {"provider": chat.provider}
       for key in ("model", "effort", "effort_by_provider"):
         value = settings_obj.get(key)
         if value is not None:
@@ -2500,7 +2508,7 @@ def create_app_chat(
 
   owner = db.query(models.Owner).first()
   data_dir = get_settings().data_dir
-  provider = body.provider or providers.resolve_default_provider(
+  provider = body.provider or providers.owner_default_provider(
     data_dir, owner.provider if owner else None,
   )
   if provider not in ("claude", "codex"):
