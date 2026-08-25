@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
@@ -15,7 +16,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import (
-  activity, auth, chat_search, models, providers, questions, secure_inputs,
+  activity, auth, chat_search, models, providers, questions, schemas,
+  secure_inputs,
 )
 from app.chat_visibility import coerce_agent_settings, visible_in_owner_drawer
 from app.chat_waits import (
@@ -2300,6 +2302,22 @@ class AppChatCreate(BaseModel):
     )
 
 
+class AppChatStart(AppChatCreate):
+  """One scoped app conversation plus the first durable agent turn."""
+
+  content: str = Field(min_length=1)
+  cid: str | None = None
+  timezone: str | None = None
+  viewport: dict | None = None
+
+  @field_validator("content")
+  @classmethod
+  def _validate_content(cls, value: str) -> str:
+    if not value.strip():
+      raise ValueError("content must not be empty")
+    return value
+
+
 class AppChatPatch(BaseModel):
   system_prompt: str | None = Field(default=None, max_length=20000)
   model: str | None = Field(default=None, max_length=256)
@@ -2435,6 +2453,19 @@ def _app_chat_summary(chat: models.Chat) -> dict:
   }
 
 
+def _app_chat_started(chat: models.Chat, db: Session) -> bool:
+  """Whether a scoped chat already owns a durable or live first turn."""
+  return bool(
+    chat.has_messages
+    or chat.messages
+    or chat.pending_messages
+    or chat.pending_question_id
+    or chat.session_id
+    or is_chat_running(chat.id)
+    or has_nonterminal_run(db, chat.id)
+  )
+
+
 @app_chat_router.get("")
 def list_app_chats(
   scope: str | None = None,
@@ -2540,6 +2571,123 @@ def create_app_chat(
     "title": chat.title,
     "created_by_app_id": chat.created_by_app_id,
   }
+
+
+@app_chat_router.post(
+  "/start", dependencies=[Depends(reject_cross_site)],
+)
+async def start_scoped_app_chat(
+  body: AppChatStart,
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+):
+  """Atomically create-or-reuse one app-owned scoped first turn.
+
+  Scope is the idempotency identity. The lock covers lookup, allocation, and
+  first-send admission so two panes cannot both observe an absent conversation.
+  A previously-created empty row is retried in place; any row that already owns
+  a durable/live turn is returned without submitting the prompt again.
+  """
+  if principal.app_id is None:
+    raise HTTPException(
+      status_code=403,
+      detail="Scoped app handoffs may only be started by an app token.",
+    )
+  if not body.scope:
+    raise HTTPException(status_code=422, detail="scope is required")
+
+  from app import chat_queue
+  from app.routes.chats_stream import send_message
+
+  app_id = principal.app_id
+  chat_id: str | None = None
+  outcome = "failed"
+  failure: str | None = None
+  started_at = time.monotonic()
+  try:
+    async with chat_queue.get_transition_lock(
+      f"app-scope:{app_id}:{body.scope}",
+    ):
+      # A concurrent request may have committed while this request waited.
+      db.rollback()
+      candidates = db.query(models.Chat).filter(
+        models.Chat.deleted_at.is_(None),
+        models.Chat.created_by_app_id == app_id,
+      ).all()
+      matches = [chat for chat in candidates if _app_chat_scope(chat) == body.scope]
+      matches.sort(key=_app_chat_sort_ts, reverse=True)
+      chat = matches[0] if matches else None
+
+      if chat is not None and _app_chat_started(chat, db):
+        chat_id = chat.id
+        outcome = "reused"
+        return {"chat_id": chat.id, "outcome": outcome, "response": None}
+
+      if chat is None:
+        created = create_app_chat(
+          AppChatCreate(**body.model_dump(exclude={
+            "content", "cid", "timezone", "viewport",
+          })),
+          principal,
+          db,
+        )
+        chat_id = str(created["id"])
+      else:
+        chat_id = chat.id
+
+      response = await send_message(
+        schemas.SendMessage(
+          content=body.content,
+          cid=body.cid,
+          timezone=body.timezone,
+          viewport=body.viewport,
+        ),
+        chat_id,
+        principal,
+        db,
+      )
+      status_code = getattr(response, "status_code", 202)
+      if status_code >= 400:
+        failure = "first_turn_rejected"
+        raise HTTPException(
+          status_code=502,
+          detail={
+            "code": failure,
+            "chat_id": chat_id,
+            "message": "The conversation exists, but its first turn was not accepted.",
+          },
+        )
+      outcome = "started"
+      return {"chat_id": chat_id, "outcome": outcome, "response": None}
+  except HTTPException:
+    failure = failure or "request_rejected"
+    raise
+  except Exception:
+    failure = "start_error"
+    log.exception(
+      "app chat handoff failed app_id=%s scope=%s chat_id=%s",
+      app_id, body.scope, chat_id,
+    )
+    raise HTTPException(
+      status_code=503,
+      detail={
+        "code": failure,
+        "chat_id": chat_id,
+        "message": "The app-owned conversation could not be started.",
+      },
+    )
+  finally:
+    fields = {
+      "app_id": app_id,
+      "scope": body.scope,
+      "outcome": outcome,
+      "duration_ms": max(0, round((time.monotonic() - started_at) * 1000)),
+    }
+    if chat_id:
+      fields["chat_id"] = chat_id
+    if failure:
+      fields["failure"] = failure
+    activity.log_event("app_chat_handoff", **fields)
 
 
 @app_chat_router.patch(

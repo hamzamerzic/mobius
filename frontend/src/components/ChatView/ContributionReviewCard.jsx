@@ -8,6 +8,8 @@ import {
   autopilotOnSend,
   contributeApp as findContributeApp,
   contributeAppId,
+  contributionRecoveryAction,
+  contributionReviewRunPhase,
   contributionReviewIntent,
   diffStatSummary,
   isHorizontalSwipe,
@@ -24,11 +26,14 @@ import {
 } from './contributionReviewModel.js'
 import './ContributionReviewCard.css'
 
-export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }) {
+export default function ContributionReviewCard({
+  chatId, turnActive, onOpenApp, onOpenChat,
+}) {
   const queryClient = useQueryClient()
   const { data: apps } = appQueries.list.useQuery()
   const appId = contributeAppId(apps)
   const contributeApp = findContributeApp(apps, appId)
+  const { data: appToken } = appQueries.token.useQuery(appId)
 
   const queryKey = useMemo(
     () => ['contributions-for-chat', appId, chatId],
@@ -131,13 +136,18 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
         </div>
       )}
       {pendingItems.map(item => {
-        const onOpenContribute = contributeApp && onOpenApp
-          ? (intent) => onOpenApp(contributeApp, { final: true, intent })
-          : null
         const onDismiss = () => {
           rememberReviewItemDismissed(item, storage)
           setDismissRevision(value => value + 1)
         }
+        // Opening the durable review consumes this version-scoped doorway. A
+        // revised review gets a new dismissal identity and can surface again.
+        const onOpenContribute = contributeApp && onOpenApp
+          ? (intent) => {
+              onOpenApp(contributeApp, { final: true, intent })
+              onDismiss()
+            }
+          : null
         if (item.kind === 'stack') {
           return (
             <StackReviewRow
@@ -156,6 +166,8 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
             connected={data?.connected !== false}
             onPublish={publish}
             onPublished={rememberPublished}
+            appToken={appToken}
+            onOpenChat={onOpenChat}
             onOpenContribute={onOpenContribute}
             onDismiss={onDismiss}
           />
@@ -299,20 +311,49 @@ function StackReviewRow({ item, onOpenContribute, onDismiss }) {
 }
 
 function ReviewRow({
-  record, connected, onPublish, onPublished, onOpenContribute, onDismiss,
+  record, connected, onPublish, onPublished, appToken, onOpenChat,
+  onOpenContribute, onDismiss,
 }) {
   const [sending, setSending] = useState(false)
   const [attemptFailure, setAttemptFailure] = useState(null)
+  const [startingReview, setStartingReview] = useState(false)
+  const [reviewRun, setReviewRun] = useState(null)
+  const [reviewStartError, setReviewStartError] = useState('')
   const diffStat = diffStatSummary(record.diff_stat)
   const submitting = record.status === 'submitting'
+  const busy = sending || submitting
   const cardRef = useSwipeToDismiss(onDismiss)
   const failure = submitFailure(record, {
     attempt: attemptFailure,
-    sending: sending || submitting,
+    sending: busy,
   })
   const intent = contributionReviewIntent(record)
   const blocker = sendBlocker(record, { connected })
   const action = publicationAction(record)
+  const recovery = contributionRecoveryAction(record)
+  const reviewQueryKey = ['contribution-review-run', recovery?.scope || 'none']
+  const { data: existingReview, isLoading: checkingReview } = useQuery({
+    queryKey: reviewQueryKey,
+    enabled: !!failure && !!appToken && !!recovery?.scope,
+    staleTime: 5000,
+    retry: false,
+    queryFn: async () => {
+      const response = await api.appChats.listWithToken(appToken, {
+        scope: recovery.scope,
+      })
+      if (!response.ok) throw new Error('Could not inspect app-owned reviews')
+      const rows = await response.json()
+      const chat = Array.isArray(rows) ? rows[0] : null
+      if (!chat?.id) return null
+      const runtimeResponse = await api.chats.runtime(chat.id, { timeoutMs: 5000 })
+      const runtime = runtimeResponse.ok ? await runtimeResponse.json() : null
+      return {
+        chatId: String(chat.id),
+        phase: contributionReviewRunPhase(runtime),
+      }
+    },
+  })
+  const resolvedReview = reviewRun || existingReview
 
   async function publish() {
     if (sending || blocker || typeof onPublish !== 'function') return
@@ -324,6 +365,40 @@ function ReviewRow({
       else if (outcome.failure) setAttemptFailure(outcome.failure)
     } finally {
       setSending(false)
+    }
+  }
+
+  async function startReview() {
+    if (!appToken || !recovery || startingReview || resolvedReview?.chatId) return
+    setStartingReview(true)
+    setReviewStartError('')
+    try {
+      let timezone = 'UTC'
+      try { timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' } catch {}
+      const response = await api.appChats.startWithToken(appToken, {
+        title: recovery.title,
+        scope: recovery.scope,
+        scope_label: recovery.scopeLabel,
+        owner_visible: true,
+        content: recovery.draft,
+        cid: typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `cid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+        timezone,
+      })
+      const body = await response.json().catch(() => null)
+      if (!response.ok || !body?.chat_id) throw new Error('Review did not start')
+      let phase = 'running'
+      const runtimeResponse = await api.chats.runtime(body.chat_id, { timeoutMs: 5000 })
+        .catch(() => null)
+      if (runtimeResponse?.ok) {
+        phase = contributionReviewRunPhase(await runtimeResponse.json())
+      }
+      setReviewRun({ chatId: String(body.chat_id), phase })
+    } catch {
+      setReviewStartError('Could not start the review. Nothing was duplicated; try again.')
+    } finally {
+      setStartingReview(false)
     }
   }
 
@@ -361,27 +436,73 @@ function ReviewRow({
       </p>
       {failure?.detail && (
         <details className="contrib-card__failure-detail">
-          <summary>What blocked it</summary>
+          <summary>Technical details</summary>
           <pre className="contrib-card__body">{failure.detail}</pre>
         </details>
       )}
 
       <div className="contrib-card__actions">
-        {!blocker && !submitting ? (
+        {failure ? (
+          <>
+            {resolvedReview?.chatId ? (
+              <button
+                type="button"
+                className="contrib-card__send"
+                disabled={typeof onOpenChat !== 'function'}
+                onClick={() => onOpenChat?.(resolvedReview.chatId)}
+              >
+                {['running', 'waiting', 'paused'].includes(resolvedReview.phase)
+                  ? 'Review in progress'
+                  : 'Open review conversation'}
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="contrib-card__send"
+                disabled={!appToken || !recovery || startingReview || checkingReview}
+                aria-busy={startingReview || checkingReview}
+                onClick={startReview}
+              >
+                {startingReview
+                  ? 'Starting review…'
+                  : checkingReview
+                    ? 'Checking review…'
+                    : 'Fix and review'}
+              </button>
+            )}
+            {!resolvedReview?.chatId ? (
+              <button
+                type="button"
+                className="contrib-card__review"
+                disabled={!onOpenContribute || !intent || startingReview}
+                onClick={() => onOpenContribute?.(intent)}
+              >
+                Review in Contribute
+              </button>
+            ) : null}
+          </>
+        ) : busy ? (
+          <button
+            type="button"
+            className="contrib-card__send"
+            disabled
+            aria-busy="true"
+          >
+            {action.busyLabel}
+          </button>
+        ) : !blocker ? (
           <>
             <button
               type="button"
               className="contrib-card__send"
-              disabled={sending}
-              aria-busy={sending}
               onClick={publish}
             >
-              {sending ? action.busyLabel : action.label}
+              {action.label}
             </button>
             <button
               type="button"
               className="contrib-card__review"
-              disabled={!onOpenContribute || !intent || sending}
+              disabled={!onOpenContribute || !intent}
               onClick={() => onOpenContribute?.(intent)}
             >
               Review
@@ -398,10 +519,13 @@ function ReviewRow({
           </button>
         )}
       </div>
-      {sending ? (
+      {busy ? (
         <p className="contrib-card__progress" role="status" aria-live="polite">
           {action.progress}
         </p>
+      ) : null}
+      {reviewStartError ? (
+        <p className="contrib-card__error" role="status">{reviewStartError}</p>
       ) : null}
     </div>
   )

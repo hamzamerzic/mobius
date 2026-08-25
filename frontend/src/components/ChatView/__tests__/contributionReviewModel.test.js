@@ -9,6 +9,9 @@ import {
   autopilotOnSend,
   contributeApp,
   contributeAppId,
+  contributionRecoveryAction,
+  contributionRecoveryDraft,
+  contributionReviewRunPhase,
   contributionReviewIntent,
   diffStatSummary,
   dismissKey,
@@ -24,6 +27,7 @@ import {
   reviewPanelSummary,
   sendBlocker,
   statusLabel,
+  submitFailure,
   visibleReviewItems,
   visibleRecords,
 } from '../contributionReviewModel.js'
@@ -31,6 +35,7 @@ import {
 const cardSrc = readFileSync(new URL('../ContributionReviewCard.jsx', import.meta.url), 'utf8')
 const clientSrc = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
 const cardCss = readFileSync(new URL('../ContributionReviewCard.css', import.meta.url), 'utf8')
+const chatViewSrc = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 
 const APPS = [
   { id: 3, slug: 'some-other-app' },
@@ -150,6 +155,47 @@ test('direct send requires the exact reviewed happy path', () => {
   assert.equal(autopilotOnSend({ autopilot_available: false }), false)
 })
 
+test('failed publication becomes a calm recovery action, not another blind send', () => {
+  const record = {
+    id: 'existing-pr',
+    title: 'Refine the existing contribution',
+    status: 'prepared',
+    last_submit_error: 'The approved pull request is no longer open on this exact branch.',
+    last_submit_stage: 'pushed',
+    last_submit_push_sha: 'a'.repeat(40),
+    plan: { head_sha: 'a'.repeat(40) },
+  }
+  assert.deepEqual(submitFailure(record), {
+    message: 'Contribute could not confirm the update after the reviewed branch reached GitHub.',
+    detail: record.last_submit_error,
+    code: '',
+  })
+  assert.match(contributionRecoveryDraft(record), /^Fix and review contribution existing-pr/)
+  assert.match(contributionRecoveryDraft(record), /reconcile the contribution record/)
+  assert.match(contributionRecoveryDraft(record), /existing approval button/)
+  const recovery = contributionRecoveryAction(record)
+  assert.equal(recovery.scope, 'contribute-review:b0661670f342e064')
+  assert.equal(recovery.scopeLabel, 'Fix and review contribution')
+  assert.equal(recovery.draft, contributionRecoveryDraft(record))
+  assert.match(cardSrc, /: 'Fix and review'\}/)
+  assert.match(cardSrc, />\s*Review in Contribute\s*</)
+  assert.match(cardSrc, /<summary>Technical details<\/summary>/)
+  assert.doesNotMatch(cardSrc, /<summary>What blocked it<\/summary>/)
+  assert.doesNotMatch(chatViewSrc, /handleContributionRecovery|onFixContribution/)
+  assert.match(cardSrc, /api\.appChats\.startWithToken\(appToken/)
+  assert.match(cardSrc, /'Review in progress'/)
+  assert.match(cardSrc, /'Open review conversation'/)
+  assert.match(cardSrc, /onOpenApp\(contributeApp, \{ final: true, intent \}\)[\s\S]*onDismiss\(\)/)
+})
+
+test('existing review runtime becomes one unambiguous continuation state', () => {
+  assert.equal(contributionReviewRunPhase({ running: true }), 'running')
+  assert.equal(contributionReviewRunPhase({ pending_question_id: 'q1' }), 'waiting')
+  assert.equal(contributionReviewRunPhase({ goal: { status: 'paused' } }), 'paused')
+  assert.equal(contributionReviewRunPhase({ running: false }), 'existing')
+  assert.equal(contributionReviewRunPhase(null), 'existing')
+})
+
 test('multiple independent items share one centered bounded panel', () => {
   assert.match(cardSrc, /const panel = reviewPanelSummary\(pendingItems\.length\)/)
   assert.match(cardSrc, /const grouped = panel\.count > 1/)
@@ -216,8 +262,10 @@ test('chat cards keep direct send and exact review on the same guarded routes', 
   assert.match(clientSrc, /record\?\.action === 'pr_update'/)
   assert.match(clientSrc, /update-existing/)
   assert.match(cardSrc, /api\.contributions\.publish\(appId, record/)
-  assert.match(cardSrc, /sending:\s*sending \|\| submitting/)
-  assert.match(cardSrc, /\{sending \? action\.busyLabel : action\.label\}/)
+  assert.match(cardSrc, /const busy = sending \|\| submitting/)
+  assert.match(cardSrc, /\) : busy \? \(/)
+  assert.match(cardSrc, /aria-busy="true"[\s\S]*\{action\.busyLabel\}/)
+  assert.doesNotMatch(cardSrc, /!blocker && !submitting/)
   assert.match(cardSrc, />\s*Review\s*</)
   assert.doesNotMatch(cardSrc, /body_draft|record\.files|The exact text that will be published/)
   assert.doesNotMatch(cardSrc, /Contribute this improvement|>Details<|>Layers</)

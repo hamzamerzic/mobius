@@ -4808,6 +4808,13 @@ export default function ChatView({
               chatId={chatId}
               turnActive={turnActive}
               onOpenApp={onOpenApp}
+              onOpenChat={(targetChatId) => {
+                if (!internalNav || !targetChatId) return
+                internalNav(new URL(
+                  `/?chat=${encodeURIComponent(targetChatId)}`,
+                  window.location.origin,
+                ))
+              }}
             />
           )}
         </div>

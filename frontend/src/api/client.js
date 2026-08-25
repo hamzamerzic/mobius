@@ -9,7 +9,10 @@ import { clearLatchedTokens } from '../lib/appToken.js'
 import { clearOwnerDraftStorage } from '../lib/ownerDraftStorage.js'
 import { clearReadingPositions } from '../components/ChatView/useScrollMode.js'
 import { clearDurableComposerDrafts } from '../components/ChatView/composerDraft.js'
-import { verifyConnectivity } from '../lib/connectivityStore.js'
+import {
+  reportNetworkReachable,
+  verifyConnectivity,
+} from '../lib/connectivityStore.js'
 import { SHELL_DATA_CACHE } from '../sw-cache-policy.js'
 
 export const BASE = (import.meta.env.BASE_URL || '/').replace(/\/$/, '')
@@ -276,6 +279,22 @@ export async function apiFetch(path, options = {}) {
   return res
 }
 
+// Shell-owned UI sometimes needs to invoke a generic app-attributed contract
+// (for example, starting an app-owned agent handoff without navigating away).
+// Keep that short-lived authority separate from apiFetch's OWNER-session 401
+// handling: an expired app token must never sign the owner out.
+async function appScopedFetch(path, appToken, options = {}) {
+  if (!appToken) throw new Error('App authorization is unavailable')
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(options.headers || {}),
+    Authorization: `Bearer ${appToken}`,
+  }
+  const response = await fetch(`${BASE}/api${path}`, { ...options, headers })
+  reportNetworkReachable()
+  return response
+}
+
 /**
  * Evict one offline shell projection after a confirmed list-affecting write.
  *
@@ -463,6 +482,18 @@ export const api = {
     ),
     recover: (chatId) => listAffectingMutation(
       'chats', `/chats/${chatId}/recover`, { method: 'POST' },
+    ),
+  },
+  appChats: {
+    listWithToken: (appToken, { scope } = {}) => {
+      const query = scope ? `?scope=${encodeURIComponent(scope)}` : ''
+      return appScopedFetch(`/app-chats${query}`, appToken)
+    },
+    startWithToken: (appToken, payload) => appScopedFetch(
+      '/app-chats/start', appToken, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
     ),
   },
   secureInputs: {

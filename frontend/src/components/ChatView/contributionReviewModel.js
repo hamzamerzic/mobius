@@ -121,7 +121,75 @@ export function submitFailure(record, { attempt = null, sending = false } = {}) 
   const message = typeof source.message === 'string' ? source.message.trim() : ''
   if (!message) return null
   const detail = typeof source.detail === 'string' ? source.detail.trim() : ''
-  return { message, detail }
+  const code = typeof source.code === 'string'
+    ? source.code
+    : String(record?.last_submit_error_code || '')
+  const reviewedHead = String(record?.plan?.head_sha || '')
+  const exactBranchReachedGitHub = record?.last_submit_stage === 'pushed'
+    && reviewedHead
+    && String(record?.last_submit_push_sha || '') === reviewedHead
+  if (code !== 'review_refresh_needed' && !exactBranchReachedGitHub) {
+    return { message, detail }
+  }
+  const calmMessage = code === 'review_refresh_needed'
+    ? 'The pull request changed after this review was prepared.'
+    : 'Contribute could not confirm the update after the reviewed branch reached GitHub.'
+  return {
+    message: calmMessage,
+    detail: [message, detail].filter(Boolean).join('\n\n'),
+    code,
+  }
+}
+
+/** The private agent intent behind the chat card's primary recovery action. */
+export function contributionRecoveryDraft(record) {
+  const id = String(record?.id || '').trim()
+  const title = String(record?.title || 'untitled').trim()
+  return [
+    `Fix and review contribution ${id} ("${title}").`,
+    '',
+    'Refresh the recorded pull request and branch first. If the exact reviewed head already reached the pull request, reconcile the contribution record and inspect its current checks. If the branch moved, rebuild the private review on its current head and run the relevant checks.',
+    '',
+    'Keep any further public update behind the existing approval button.',
+  ].join('\n')
+}
+
+function contributionRecoveryScope(record) {
+  const id = String(record?.id || '').trim()
+  if (!id) return ''
+  const head = String(record?.plan?.head_sha || '')
+  const input = `recovery\u0000${id}\u0000${head}`
+  let hash = 0xcbf29ce484222325n
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= BigInt(input.charCodeAt(index))
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n)
+  }
+  return `contribute-review:${hash.toString(16).padStart(16, '0')}`
+}
+
+/** One exact failed prepared head owns one app-attributed recovery run. */
+export function contributionRecoveryAction(record) {
+  const scope = contributionRecoveryScope(record)
+  if (!scope) return null
+  return {
+    title: `Fix and review ${record?.title || 'contribution'}`,
+    scope,
+    scopeLabel: 'Fix and review contribution',
+    draft: contributionRecoveryDraft(record),
+  }
+}
+
+export function contributionReviewRunPhase(runtime) {
+  if (!runtime || typeof runtime !== 'object') return 'existing'
+  if (runtime.running) return 'running'
+  if (runtime.pending_question_id) return 'waiting'
+  if (Array.isArray(runtime.pending_messages) && runtime.pending_messages.length > 0) {
+    return 'running'
+  }
+  const goal = runtime.goal
+  if (goal?.status === 'running') return 'running'
+  if (goal?.status === 'paused') return 'paused'
+  return 'existing'
 }
 
 /** Copy for the grouped panel while it still has pending work. */
