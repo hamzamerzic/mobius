@@ -427,16 +427,26 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     // rows because it exercises a real drawer press, so expose only these
     // owned fixtures as populated instead of depending on incidental account
     // history.
-    const visibleIds = new Set([target.id, current.id].map(String))
+    const visibleFixtures = new Map(
+      [target, current].map(chat => [String(chat.id), chat]),
+    )
     await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
       if (route.request().method() !== 'GET') return route.fallback()
       const response = await route.fetch()
       const chats = await response.json()
+      const visibleChats = chats.map(chat => visibleFixtures.has(String(chat.id))
+        ? { ...chat, has_messages: true }
+        : chat)
+      const returnedIds = new Set(visibleChats.map(chat => String(chat.id)))
+      for (const [id, chat] of visibleFixtures) {
+        // A lifecycle refetch may ask the production recent-chat query, which
+        // intentionally omits empty chats. Reinsert only this test's owned
+        // fixtures so the drawer target remains stable across that refresh.
+        if (!returnedIds.has(id)) visibleChats.push({ ...chat, has_messages: true })
+      }
       await route.fulfill({
         response,
-        json: chats.map(chat => visibleIds.has(String(chat.id))
-          ? { ...chat, has_messages: true }
-          : chat),
+        json: visibleChats,
       })
     })
     await page.goto(`${BASE}/shell/?chat=${current.id}`, { waitUntil: 'domcontentloaded' })
