@@ -14,6 +14,9 @@ configure_agent_sudo "${MOBIUS_AGENT_SUDO:-1}" || exit $?
 # hands pid 1 to the application server.
 cleanup() {
   kill "$(cat /var/run/crond.pid 2>/dev/null)" 2>/dev/null
+  if [ -n "${_identity_broker_pid:-}" ]; then
+    kill "$_identity_broker_pid" 2>/dev/null || true
+  fi
 }
 trap cleanup TERM INT
 
@@ -1096,6 +1099,38 @@ fi
 # the mobius user at runtime, causing subprocess "permission denied"
 # failures that look like generic CLI crashes.
 umask 022
+
+# Start the narrow identity/capability broker while this entrypoint is still
+# root. Its private key and linked account state live in a root-only directory;
+# the application receives only the explicitly allow-listed Unix-socket API,
+# and Codex receives only the loopback Responses proxy. The one-use Railway
+# bootstrap is inherited by this process and then removed before uvicorn starts.
+DATA_DIR=/data python3 -P /app/runtime/identity_broker.py &
+_identity_broker_pid=$!
+unset MOBIUS_IDENTITY_BOOTSTRAP
+# Scrub the retired direct-compute credential. Managed deployments still use
+# MOBIUS_SSO_CLIENT_SECRET for the account/identity bridge, so it must remain
+# available to uvicorn until that separate contract is deliberately migrated.
+unset MOBIUS_COMPUTE_INSTANCE_TOKEN
+_identity_broker_ready=0
+for _broker_wait in $(seq 1 50); do
+  if [ -S /run/mobius-identity-broker.sock ]; then
+    _identity_broker_ready=1
+    break
+  fi
+  if ! kill -0 "$_identity_broker_pid" 2>/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
+if [ "$_identity_broker_ready" -ne 1 ]; then
+  # The broker is an optional subscription component. If it cannot start
+  # (missing dependency, /run not writable, or takes longer than 5 s),
+  # degrade the Möbius subscription to unavailable rather than blocking the
+  # whole instance. MobiusProvider.check_auth catches the connection error
+  # and returns a "not linked" status; all other providers are unaffected.
+  echo "WARNING: identity broker did not become ready; the Möbius subscription will be unavailable" >&2
+fi
 
 # Root-owned half of the ordinary Settings restart handshake. The app publishes
 # a nonce-bound request; this poller accepts it and terminates pid 1 so Docker or

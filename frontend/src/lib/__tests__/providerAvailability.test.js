@@ -41,6 +41,7 @@ test('configured is authoritative with authenticated as a legacy fallback', () =
     claude: { authenticated: false },
     legacy: { authenticated: true },
     contradictory: { configured: false, authenticated: true },
+    unavailable: { configured: true, available: false },
     future: {},
   })
 

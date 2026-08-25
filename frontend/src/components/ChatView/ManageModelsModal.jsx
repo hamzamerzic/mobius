@@ -236,7 +236,9 @@ export default function ManageModelsModal({
                         >
                           <span className="mmm-row__main">
                             <span className="mmm-row__title">{m.label}</span>
-                            <span className="mmm-row__sub">{m.id}</span>
+                            {pid !== 'mobius' && (
+                              <span className="mmm-row__sub">{m.id}</span>
+                            )}
                           </span>
                           <input
                             type="checkbox"

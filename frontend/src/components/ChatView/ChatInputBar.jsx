@@ -474,7 +474,7 @@ function FileChips({ files, onRemove, chatId }) {
  *                        turn; the draft stays editable and Stop owns the
  *                        primary action until the card is answered.
  *   messageHistory     — visible owner-authored message text, oldest first.
- *   provider           — the chat's provider id ('claude' | 'codex'). Filters
+ *   provider           — the chat's provider id. Filters
  *                        the "/" menu to commands that actually dispatch on it;
  *                        provider-specific commands stay hidden while unknown.
  *

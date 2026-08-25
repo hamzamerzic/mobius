@@ -105,10 +105,12 @@ from app.events import (
   finalize_blocks,
 )
 from app.providers import (
-  authenticated_provider_ids,
+  PROVIDERS,
   effective_agent_settings,
   get_provider,
   get_skill_path,
+  provider_requirement_error,
+  provider_runtime_kind,
 )
 from app.runner_registry import registry
 
@@ -3021,7 +3023,7 @@ def _limit_exit(
 ) -> dict:
   """Classify a turn exit for limit parking and publish its error event.
 
-  One seam shared by all four SDK exits (claude/codex × success/except) so
+  One seam shared by every SDK exit (including Möbius through Codex) so
   the classification, the park-target parse, and the enriched error event
   can't drift apart. `runner_result` is None on an exception exit (classify
   by text only); on a terminal-result exit the structured
@@ -4515,11 +4517,19 @@ async def _run_chat_impl_with_db(
     _build_resumed_context(chat_row)
     if (
       session_id
-      and provider.name in ("Claude Code", "Codex")
+      and provider_runtime_kind(provider) in ("claude_sdk", "codex_sdk")
       and (run_policy is None or run_policy.allow_session_reseed)
     )
     else None
   )
+
+  # App ownership is database state, so snapshot every provider requirement
+  # before releasing this turn's request session. Credential checks remain
+  # after close because they can perform local I/O and must not pin the pool.
+  provider_requirement_errors = {
+    candidate_id: provider_requirement_error(candidate, db)
+    for candidate_id, candidate in PROVIDERS.items()
+  }
 
   # Everything needed to launch the provider is now detached or copied into
   # plain values. Return this turn's checked-out connection before the
@@ -4535,7 +4545,9 @@ async def _run_chat_impl_with_db(
 
   # Pre-flight: check that provider credentials exist before invoking
   # the SDK runner. Without this, the SDK fails with a cryptic error.
-  auth_error = provider.check_auth(settings.data_dir)
+  auth_error = provider_requirement_errors.get(provider_id)
+  if auth_error is None:
+    auth_error = provider.check_auth(settings.data_dir)
   if auth_error:
     # A fresh install may intentionally finish setup without connecting an
     # agent; a returning owner's sole credential can also expire. When no
@@ -4547,7 +4559,12 @@ async def _run_chat_impl_with_db(
     # disconnected. If another provider is connected, this chat's selected
     # provider genuinely failed and the existing error path below remains the
     # honest response.
-    if not authenticated_provider_ids(settings.data_dir):
+    runnable_provider = any(
+      provider_requirement_errors.get(candidate_id) is None
+      and candidate.check_auth(settings.data_dir) is None
+      for candidate_id, candidate in PROVIDERS.items()
+    )
+    if not runnable_provider:
       await _record_run_metrics(
         chat_id=chat_id,
         run_token=run_token or "",
@@ -4599,8 +4616,9 @@ async def _run_chat_impl_with_db(
 
   # SDK dispatch: route both Claude and Codex through their official
   # Agent SDK runners.
-  is_claude = provider.name == "Claude Code"
-  is_codex = provider.name == "Codex"
+  runtime_kind = provider_runtime_kind(provider)
+  is_claude = runtime_kind == "claude_sdk"
+  is_codex = runtime_kind == "codex_sdk"
   if is_codex:
     log.info(
       "chat start chat_id=%s provider=%s session=%s msg_len=%d sdk=codex",
@@ -4647,6 +4665,7 @@ async def _run_chat_impl_with_db(
         goal_continue=goal_continue,
         fallback_goal_objective=fallback_goal_objective,
         run_policy=run_policy,
+        provider_id=provider_id,
         connector_plan=connector_turn_plan,
       )
       new_session_id = runner_result.get("session_id")

@@ -350,3 +350,9 @@ def test_codex_fallback_efforts_match_current_catalog():
   assert by_id["gpt-5.6-sol"]["effort_levels"][-2:] == ["max", "ultra"]
   assert by_id["gpt-5.6-terra"]["effort_levels"][-2:] == ["max", "ultra"]
   assert by_id["gpt-5.6-luna"]["effort_levels"][-1] == "max"
+
+
+def test_mobius_effort_scale_uses_the_public_product_model():
+  assert providers.MODEL_EFFORT_LEVELS["inkling"] == [
+    "minimal", "low", "medium", "high", "max",
+  ]

@@ -1727,9 +1727,11 @@ def _pin_established_legacy_chat_models(eng) -> None:
       return "claude"
     if normalized.startswith("gpt-"):
       return "codex"
+    if normalized == "inkling":
+      return "mobius"
     return None
 
-  provider_ids = {"claude", "codex"}
+  provider_ids = {"claude", "codex", "mobius"}
   selected_models = {}
 
   # The shared file contains the latest picker choice. Associate a future or
