@@ -171,7 +171,6 @@
          while the new bundle restores the chosen destination. Ordinary links,
          auth redirects, and Back/Forward explicitly skip this opt-in below. -->
     <style data-mobius-shell-reload-transition>
-      @view-transition { navigation: auto; }
       @keyframes mobius-shell-reload-reveal {
         from { opacity: 1; }
         to { opacity: 0; }
@@ -204,13 +203,34 @@
         return typeof document.startViewTransition === 'function'
           && 'onpageswap' in window;
       }
+      function installNavigationOptIn() {
+        if (document.querySelector('style[data-mobius-shell-navigation-opt-in]')) return;
+        var style = document.createElement('style');
+        style.setAttribute('data-mobius-shell-navigation-opt-in', '');
+        style.textContent = '@view-transition { navigation: auto; }';
+        document.head.appendChild(style);
+      }
       if (hasShellReload() && supportsShellReloadTransition()) {
+        installNavigationOptIn();
         root.setAttribute('data-shell-reload-transition', 'incoming');
       }
 
-      // The at-rule is document-wide, but only the controlled shell replacement
-      // may retain pixels. Every unrelated cross-document navigation keeps its
-      // ordinary browser semantics.
+      // Cross-document view transitions are a document-wide opt-in. Installing
+      // that at-rule for every shell page and trying to skip unrelated
+      // navigations in `pageswap` is too late: the browser has already entered
+      // the transition lifecycle. Opt in only for the controlled replacement,
+      // immediately before navigation; the marked incoming document does the
+      // same above during pre-paint startup.
+      window.__mobiusPrepareShellReloadTransition = function () {
+        if (!supportsShellReloadTransition()) return false;
+        installNavigationOptIn();
+        root.setAttribute('data-shell-reload-transition', 'outgoing');
+        return true;
+      };
+
+      // Only a document that explicitly prepared the controlled replacement
+      // can receive a view transition here. Unrelated navigations never install
+      // the at-rule and therefore keep ordinary browser semantics.
       window.addEventListener('pageswap', function (event) {
         if (!event.viewTransition) return;
         if (hasShellReload()) {
@@ -220,6 +240,7 @@
           root.setAttribute('data-shell-reload-transition', 'outgoing');
           return;
         }
+        // Defensive only: a stale marker must not retain unrelated pixels.
         event.viewTransition.skipTransition();
       });
 

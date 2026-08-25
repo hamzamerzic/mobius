@@ -168,7 +168,7 @@ async function sendMessage(page, text) {
 }
 
 test.describe('shell update — apply on idle, SW on a leash', () => {
-  test('ordinary same-origin reload skips the document-wide view transition', async ({ page }) => {
+  test('ordinary same-origin reload never opts into a document transition', async ({ page }) => {
     await setup(page, {
       streamRoute: route => route.fulfill(fulfillStream(sse([{ type: 'done' }]))),
       systemBody: sse([{ type: 'system_stream_open' }]),
@@ -190,8 +190,9 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
 
     await page.reload({ waitUntil: 'domcontentloaded' })
     await page.waitForFunction(() => (
-      sessionStorage.getItem('__ordinary_navigation_transition') === 'skipped'
+      sessionStorage.getItem('__ordinary_navigation_transition') === 'unsupported'
     ))
+    await expect(page.locator('style[data-mobius-shell-navigation-opt-in]')).toHaveCount(0)
     await expect(page.locator('html[data-shell-reload-transition]')).toHaveCount(0)
   })
 

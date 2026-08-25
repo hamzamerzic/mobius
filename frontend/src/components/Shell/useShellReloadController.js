@@ -211,6 +211,7 @@ export default function useShellReloadController(inputs) {
       // supporting browsers to retain the outgoing pixels until the incoming
       // shell reports its destination ready. Reload is excluded from
       // cross-document view transitions.
+      win.__mobiusPrepareShellReloadTransition?.()
       win.location.replace('/shell/')
     }
     // Release the worker, but never wait for its activation to make the
