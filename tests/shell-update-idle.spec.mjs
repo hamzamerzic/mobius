@@ -422,6 +422,23 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     })
     const target = await createTaggedChat(page, 'handoff-target')
     const current = await createTaggedChat(page, 'handoff-current')
+    // API-created fixtures are intentionally empty, while the production
+    // drawer omits chats until their first message. This scenario needs both
+    // rows because it exercises a real drawer press, so expose only these
+    // owned fixtures as populated instead of depending on incidental account
+    // history.
+    const visibleIds = new Set([target.id, current.id].map(String))
+    await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      const response = await route.fetch()
+      const chats = await response.json()
+      await route.fulfill({
+        response,
+        json: chats.map(chat => visibleIds.has(String(chat.id))
+          ? { ...chat, has_messages: true }
+          : chat),
+      })
+    })
     await page.goto(`${BASE}/shell/?chat=${current.id}`, { waitUntil: 'domcontentloaded' })
     await expect(page.locator(`[data-chat-id="${current.id}"][data-chat-surface="painted"]`)).toBeVisible({ timeout: 8000 })
     await resetLoadCount(page)
