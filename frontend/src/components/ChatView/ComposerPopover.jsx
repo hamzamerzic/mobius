@@ -46,6 +46,7 @@ import {
   clientPointToLayout,
 } from '../../lib/layoutSpace.js'
 import useModelSelectionPopover from './hooks/useModelSelectionPopover.js'
+import useDiscardUnconfirmedSwitchOnPickerClose from './hooks/useDiscardUnconfirmedSwitchOnPickerClose.js'
 
 export default function ComposerPopover({
   chatInfo,
@@ -98,6 +99,9 @@ export default function ComposerPopover({
     composerInputRef,
   )
   const open = mode !== null
+
+  useDiscardUnconfirmedSwitchOnPickerClose(mode, providerSwitchState?.status, chatId)
+
   // Measured cap on the panel's height: the space above the trigger inside both
   // the chat pane (which clips with `overflow: hidden`) and the keyboard-shrunk
   // visible viewport. See composerPopoverHeight.js for why CSS viewport units
