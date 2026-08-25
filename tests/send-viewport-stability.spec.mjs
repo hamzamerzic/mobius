@@ -128,6 +128,9 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
   })
 
   await send(page, 'First user message')
+  await expect(page.locator(
+    '[data-chat-surface="painted"] .chat__msg--assistant',
+  )).toContainText('First response paragraph.', { timeout: 5000 })
   await page.waitForFunction(() => (
     !document.querySelector('[data-chat-surface="painted"] .chat__stop')
   ), undefined, { timeout: 5000 })

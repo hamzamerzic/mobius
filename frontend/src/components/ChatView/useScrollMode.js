@@ -1329,6 +1329,7 @@ export default function useScrollMode({
     // The observer tells us when the field actually changed size; ordinary
     // characters read only scrollTop and therefore do not force layout.
     let pendingInlineEditorInput = null
+    let pendingInlineEditorGrowth = null
     let inlineEditorRaf = 0
     let observedQuestionEditor = null
 
@@ -1361,6 +1362,11 @@ export default function useScrollMode({
         scrollTop: scrollEl.scrollTop,
         authorityVersion: currentAuthority(),
       }
+      pendingInlineEditorGrowth = {
+        editor: event.target,
+        mode: anchorModeFromScroll(scrollEl),
+        authorityVersion: currentAuthority(),
+      }
     }
 
     const settleInlineEditorInput = (event) => {
@@ -1374,6 +1380,9 @@ export default function useScrollMode({
         // second frame is still layout-free unless scrollTop actually changed.
         inlineEditorRaf = requestAnimationFrame(() => {
           inlineEditorRaf = 0
+          if (pendingInlineEditorGrowth?.editor === plan.editor) {
+            pendingInlineEditorGrowth = null
+          }
           if (Math.abs(scrollEl.scrollTop - plan.scrollTop) <= 0.5) return
           revealFocusedQuestionEditor('reader:inline-editor-caret', {
             editor: plan.editor,
@@ -1384,7 +1393,12 @@ export default function useScrollMode({
       })
     }
     const onInlineEditorFocus = (event) => observeQuestionEditor(event.target)
-    const onInlineEditorBlur = (event) => stopObservingQuestionEditor(event.target)
+    const onInlineEditorBlur = (event) => {
+      if (pendingInlineEditorGrowth?.editor === event.target) {
+        pendingInlineEditorGrowth = null
+      }
+      stopObservingQuestionEditor(event.target)
+    }
 
     // ResizeObserver — re-runs spacer sizing on content size changes.
     // Re-applies content-tracking modes:
@@ -1478,10 +1492,21 @@ export default function useScrollMode({
         // steady output below an unchanged anchor remains a no-op.
         settleAnchoredMode(authorityVersion)
       }
-      if (editorResized) revealFocusedQuestionEditor(
-        'layout:question-edit-resize',
-        { nativePositionAlreadyApplied: true, authorityVersion },
-      )
+      if (editorResized) {
+        const growth = pendingInlineEditorGrowth
+        pendingInlineEditorGrowth = null
+        if (growth?.editor === focusedQuestionEditor()
+            && growth.mode
+            && growth.authorityVersion === currentAuthority()) {
+          // Textarea growth is content geometry, not a request to move the
+          // conversation. Hold the card at its pre-input coordinate; once the
+          // field reaches its cap, the field itself owns overflow. A genuine
+          // keyboard/viewport resize takes the viewportChanged branch above
+          // and still adopts the browser's caret-visible position.
+          transitionMode(growth.mode, 'layout:question-edit-growth')
+          applyLayoutMode('layout:question-edit-growth', authorityVersion)
+        }
+      }
       requestRevealOnQuiet()  // each RO firing pushes the reveal back
     })
     ro.observe(listEl)
@@ -1584,7 +1609,12 @@ export default function useScrollMode({
         // settled semantic mode atomically; a bare sizeSpacer here would let
         // native scroll anchoring paint an intermediate displaced frame.
         if (!replayDeferredLayoutNow()) {
-          sizeSpacer(currentAuthority())
+          // Spacer changes can trigger native scroll anchoring or a clamp in
+          // the same frame. Re-apply the semantic mode after sizing so the
+          // quiet-edge handoff preserves the exact reader coordinate it just
+          // captured instead of publishing a hold and then moving underneath
+          // it.
+          syncLayout({ forceApply: true, authorityVersion: currentAuthority() })
         }
       }
 

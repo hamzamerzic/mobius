@@ -453,10 +453,8 @@ test('a focused inline editor keeps one current owner across keyboard and growth
       target: editor,
       borderBoxSize: [{ blockSize: editorHeight }],
     }])
-    assert.equal(scroll.scrollTop > beforeGrowth, true,
-      'field growth moves the answer upward instead of extending below the composer')
-    assert.equal(editor.getBoundingClientRect().bottom <= 222, true,
-      'the whole multiline writing surface remains in the usable viewport')
+    assert.equal(scroll.scrollTop, beforeGrowth,
+      'field growth keeps the question card at its reader-owned coordinate')
     flushFrames()
 
     scrollListeners.get('beforeinput')({ target: editor })
