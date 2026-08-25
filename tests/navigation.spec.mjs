@@ -1015,7 +1015,7 @@ test.describe('Touch navigation', () => {
     await expect(presentation.getByText("What's on your mind?", { exact: true })).toBeVisible()
     await expect(pendingOptions).toBeVisible()
     await expect(pendingOptions).toBeDisabled()
-    await expect(pendingOptions.locator('svg')).toBeVisible()
+    await expect(pendingOptions.locator(':scope > svg')).toBeVisible()
     const pendingOptionsBox = await pendingOptions.boundingBox()
     await expect(immediateComposer).toBeFocused()
     await page.keyboard.type('Typed while opening')
