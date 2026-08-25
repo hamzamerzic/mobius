@@ -34,6 +34,18 @@ export function modelContextTokenCounts(registry, provider, model) {
   return { used: 0, maximum: Math.round(maximum) }
 }
 
+export function resolvedContextTokenCounts(snapshot, registry, provider, model) {
+  if (!snapshot || snapshot.provider !== provider) return null
+  const live = contextTokenCounts(snapshot)
+  if (live !== null) return live
+  // The registry can prove the ceiling, but only the server can prove that a
+  // chat has used no context yet. An established session with missing usage is
+  // unknown—not an empty context—and a failed request has no snapshot at all.
+  return snapshot.provider_session_id === null
+    ? modelContextTokenCounts(registry, provider, model)
+    : null
+}
+
 export function formatRoundedTokenCount(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return ''
   if (Math.abs(value) < 500) return '0'

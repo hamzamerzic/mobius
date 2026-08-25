@@ -2,10 +2,9 @@ import { chatQueries, modelQueries, settingsQueries } from '../../hooks/queries.
 import BrainUsageIcon from './BrainUsageIcon.jsx'
 import { providerAllowance } from '../SettingsView/providerUsage.js'
 import {
-  contextTokenCounts,
   contextUsedPercent,
   formatRoundedTokenCount,
-  modelContextTokenCounts,
+  resolvedContextTokenCounts,
 } from './brainUsage.js'
 
 const PROVIDER_LABELS = {
@@ -36,16 +35,17 @@ export default function BrainUsageButton({
     ? providerAllowance(null)
     : providerAllowance(providerUsageQuery.data)
   const leftPercent = allowance.usedPercent
-  const liveContextTokens = (
+  const contextSnapshot = (
     contextUsageQuery.isLoading
     || contextUsageQuery.data?.provider !== provider
   )
     ? null
-    : contextTokenCounts(contextUsageQuery.data)
-  const contextTokens = liveContextTokens || (
-    !modelRegistryQuery.isLoading
-      ? modelContextTokenCounts(modelRegistryQuery.data, provider, model)
-      : null
+    : contextUsageQuery.data
+  const contextTokens = resolvedContextTokenCounts(
+    contextSnapshot,
+    modelRegistryQuery.isLoading ? null : modelRegistryQuery.data,
+    provider,
+    model,
   )
   const rightPercent = contextTokens === null
     ? null

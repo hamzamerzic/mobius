@@ -6,6 +6,7 @@ import {
   contextUsedPercent,
   formatRoundedTokenCount,
   modelContextTokenCounts,
+  resolvedContextTokenCounts,
 } from '../brainUsage.js'
 
 test('context gauge measures the latest model call against its context window', () => {
@@ -41,4 +42,35 @@ test('a new chat starts at zero against the selected model context', () => {
     { used: 0, maximum: 258_400 },
   )
   assert.equal(modelContextTokenCounts(registry, 'codex', 'missing'), null)
+  assert.deepEqual(resolvedContextTokenCounts({
+    provider: 'codex',
+    provider_session_id: null,
+    input_tokens: null,
+    context_window: null,
+  }, registry, 'codex', 'gpt-5.6-sol'), {
+    used: 0,
+    maximum: 258_400,
+  })
+})
+
+test('missing usage in an established session remains unknown', () => {
+  const registry = {
+    codex: [{ id: 'gpt-5.6-sol', context_window: 258_400 }],
+  }
+  assert.equal(resolvedContextTokenCounts({
+    provider: 'codex',
+    provider_session_id: 'session-without-usage',
+    input_tokens: null,
+    context_window: null,
+  }, registry, 'codex', 'gpt-5.6-sol'), null)
+  assert.equal(
+    resolvedContextTokenCounts(null, registry, 'codex', 'gpt-5.6-sol'),
+    null,
+  )
+  assert.equal(resolvedContextTokenCounts({
+    provider: 'claude',
+    provider_session_id: null,
+    input_tokens: null,
+    context_window: null,
+  }, registry, 'codex', 'gpt-5.6-sol'), null)
 })
