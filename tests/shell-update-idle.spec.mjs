@@ -482,13 +482,16 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     await page.waitForTimeout(7000)
     expect(await loadCount(page)).toBe(0)
 
-    await page.evaluate(() => {
+    await targetRow.evaluate(element => {
       Object.defineProperty(document, 'visibilityState', {
         configurable: true,
         value: 'visible',
       })
       document.dispatchEvent(new Event('visibilitychange'))
-      document.documentElement.dispatchEvent(new PointerEvent('pointerdown', {
+      // Use the actual navigation target for the fresh press. Dispatching on
+      // the document root is an outside press and correctly dismisses the
+      // mobile drawer before the paired click can supply its destination.
+      element.dispatchEvent(new PointerEvent('pointerdown', {
         bubbles: true,
         pointerType: 'touch',
       }))
