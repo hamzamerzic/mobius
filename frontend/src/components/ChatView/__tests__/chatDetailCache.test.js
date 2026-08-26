@@ -5,6 +5,7 @@ import {
   chatCacheEntryState,
   chatDetailCacheValue,
   chatSnapshotMatchesRuntime,
+  shouldRefetchTranscriptForRuntime,
   mergeRecentMessagesIntoLoadedWindow,
   messageKey,
   messageMatchesKey,
@@ -205,6 +206,22 @@ test('a retained snapshot requires both the row version and pending card', () =>
     updated_at,
     pending_question_id: 'question-2',
   }), false)
+})
+
+test('idle foreground reconciliation refetches only a disproven unowned snapshot', () => {
+  const cached = { updated_at: '2026-08-24T00:00:00Z', messages: [] }
+  const moved = { updated_at: '2026-08-24T00:00:01Z', running: false }
+  assert.equal(shouldRefetchTranscriptForRuntime(cached, moved), true)
+  assert.equal(shouldRefetchTranscriptForRuntime(cached, {
+    ...moved,
+    updated_at: cached.updated_at,
+  }), false, 'a matching durable version adds no transcript fetch')
+  assert.equal(shouldRefetchTranscriptForRuntime(cached, {
+    ...moved,
+    running: true,
+  }), false, 'an active runtime remains owned by the stream path')
+  assert.equal(shouldRefetchTranscriptForRuntime(cached, moved, true), false,
+    'an optimistic local turn cannot be overwritten by a foreground poll')
 })
 
 test('pending question lookup requires the exact unanswered owner row', () => {

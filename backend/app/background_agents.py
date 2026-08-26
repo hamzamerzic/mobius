@@ -40,7 +40,7 @@ from app import providers
 log = logging.getLogger(__name__)
 
 DEFAULT_PROVIDER = providers.DEFAULT_PROVIDER
-_PROVIDERS = ("claude", "codex")
+_PROVIDERS = providers.PROVIDER_NAMES
 
 
 def _clean_choice(raw: dict | None, *, default_provider: str | None = None,

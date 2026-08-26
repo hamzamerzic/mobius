@@ -23,6 +23,17 @@ export function isOwnerUserMessage(message) {
     && !isContinuationMessage(message)
 }
 
+/**
+ * A row that opens a new turn after an assistant partial: an owner message OR a
+ * continuation marker. The auto-resume "Resumed automatically" card is a
+ * role=user / kind=continuation row, so it IS a real turn boundary here even
+ * though isOwnerUserMessage excludes it for authorship purposes. The mount
+ * bridge that mirrors a kept partial must release once such a row follows it,
+ * otherwise a resumed turn renders above the pre-pause block it superseded. */
+export function startsFollowingTurn(message) {
+  return isOwnerUserMessage(message) || isContinuationMessage(message)
+}
+
 export function stripInternalUserMessageFields(raw) {
   if (!raw) return null
   // KEEP `cid` — it is now the durable row identity and must survive the

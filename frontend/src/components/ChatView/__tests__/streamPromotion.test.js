@@ -218,6 +218,63 @@ test('promoteAssistantStream replaces mounted partial even after steered user ro
   assert.equal(next[2].content, 'fast-forwarded q2')
 })
 
+test('assistant identity updates its exact row without using transcript position', () => {
+  const messages = [
+    { role: 'user', ts: 1, content: 'q1' },
+    { id: 'assistant-1', role: 'assistant', ts: 2, content: 'partial' },
+    { role: 'user', ts: 3, hidden: true, content: 'question answer' },
+  ]
+
+  const next = promoteAssistantStream(messages, {
+    assistantMessageId: 'assistant-1',
+    bridgeTs: 999,
+    items: [{ type: 'text', content: 'continued after the answer' }],
+  })
+
+  assert.equal(next.length, 3)
+  assert.equal(next[1].id, 'assistant-1')
+  assert.equal(next[1].content, 'continued after the answer')
+  assert.equal(next[2], messages[2])
+})
+
+test('a new assistant identity cannot replace a stale pre-restart bridge above later turns', () => {
+  const messages = [
+    { role: 'user', ts: 1, content: 'old request' },
+    { role: 'assistant', ts: 2, content: 'old pre-restart partial' },
+    { role: 'user', ts: 3, kind: 'continuation', content: 'resume' },
+    { id: 'assistant-older', role: 'assistant', ts: 4, content: 'older reply' },
+  ]
+
+  const next = promoteAssistantStream(messages, {
+    assistantMessageId: 'assistant-current',
+    bridgeTs: 2,
+    items: [{ type: 'question', question_id: 'restart-q', questions: [] }],
+  })
+
+  assert.equal(next.length, 5)
+  assert.equal(next[1].content, 'old pre-restart partial',
+    'the stale bridge remains untouched in history')
+  assert.equal(next.at(-1).id, 'assistant-current')
+  assert.equal(next.at(-1).blocks[0].question_id, 'restart-q')
+})
+
+test('an id-capable stream may adopt only a current id-less rolling partial', () => {
+  const messages = [
+    { role: 'user', ts: 1, content: 'request' },
+    { role: 'assistant', ts: 2, content: 'partial' },
+  ]
+
+  const next = promoteAssistantStream(messages, {
+    assistantMessageId: 'assistant-current',
+    bridgeTs: 2,
+    items: [{ type: 'text', content: 'complete' }],
+  })
+
+  assert.equal(next.length, 2)
+  assert.equal(next[1].id, 'assistant-current')
+  assert.equal(next[1].content, 'complete')
+})
+
 test('a restored continuation stays beside its bridged assistant, ahead of newer local rows', () => {
   const messages = [
     { role: 'user', ts: 1, content: 'original request' },
@@ -638,7 +695,7 @@ test('a later visible user row retires a stale mount bridge before new stream ou
   assert.equal(chooseActiveAssistantMirrorIndex({
     bridgeMsgIdx: 1,
     trailingAssistantPartialIdx: -1,
-    bridgeFollowedByVisibleUser: true,
+    bridgeFollowedByNewTurn: true,
     hasLivePayload: false,
     bridgeSurface: { hideMessage: false, suppressStream: false },
     surface: { hideMessage: false, suppressStream: false },

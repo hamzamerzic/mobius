@@ -423,6 +423,12 @@ def test_set_background_agents_persists_to_shared_settings(client, auth):
         "effort": "medium",
         "enabled": True,
       },
+      {
+        "provider": "mobius",
+        "model": "inkling",
+        "effort": "medium",
+        "enabled": False,
+      },
     ],
     "primary": {
       "provider": "claude",
@@ -715,11 +721,11 @@ def test_settings_update_provider_validator_rejects_unknown():
 
 
 def test_model_registry_returns_known_models_on_missing_creds(client, auth):
-  """`/api/models` returns KNOWN_MODELS for both providers when neither
+  """`/api/models` returns KNOWN_MODELS for every provider when no
   upstream is reachable. Confirms the per-provider fallback works.
 
-  The TestClient has no real Anthropic / Codex credentials so both
-  fetchers raise; the registry serves KNOWN_MODELS for both. Every
+  The TestClient has no real provider credentials or local broker, so all
+  fetchers raise; the registry serves KNOWN_MODELS for each. Every
   entry is `available=True` in the fallback path because there's no
   live signal to mark anything unavailable.
   """
@@ -730,14 +736,22 @@ def test_model_registry_returns_known_models_on_missing_creds(client, auth):
   res = client.get("/api/models", headers=auth)
   assert res.status_code == 200
   body = res.json()
-  assert set(body["providers"]) == {"claude", "codex"}
+  assert set(body["providers"]) == {"claude", "codex", "mobius"}
   claude_ids = [m["id"] for m in body["providers"]["claude"]]
   assert claude_ids == KNOWN_MODELS["claude"]
   codex_ids = [m["id"] for m in body["providers"]["codex"]]
   assert codex_ids == KNOWN_MODELS["codex"]
+  mobius_ids = [m["id"] for m in body["providers"]["mobius"]]
+  assert mobius_ids == KNOWN_MODELS["mobius"]
+  assert [m["label"] for m in body["providers"]["mobius"]] == [
+    "Spark", "Evolve",
+  ]
   # Offline fallbacks use the exact model id; live catalogs own display names.
   by_id = {m["id"]: m for m in body["providers"]["claude"]}
   assert by_id["claude-opus-4-8"]["label"] == "claude-opus-4-8"
+  assert by_id["claude-opus-4-8"]["context_window"] == 1_000_000
+  codex_by_id = {m["id"]: m for m in body["providers"]["codex"]}
+  assert codex_by_id["gpt-5.6-sol"]["context_window"] == 258_400
   # The user-facing API contract is `available=true` on every fallback
   # entry, but the route layer relies on Pydantic's `ModelEntry`
   # default to fill that field. Verify the underlying helper directly

@@ -6,8 +6,9 @@
  * than on the frame-paced reveal path.
  */
 
-const STREAM_SNAPSHOT_VERSION = 2
-const STREAM_SNAPSHOT_PREFIX = `chat-stream-items:v${STREAM_SNAPSHOT_VERSION}:`
+const STREAM_SNAPSHOT_VERSION = 3
+const STREAM_SNAPSHOT_BASE_PREFIX = 'chat-stream-items:'
+const STREAM_SNAPSHOT_PREFIX = `${STREAM_SNAPSHOT_BASE_PREFIX}v${STREAM_SNAPSHOT_VERSION}:`
 
 export function streamSnapshotKey(chatId) {
   return `${STREAM_SNAPSHOT_PREFIX}${chatId}`
@@ -18,21 +19,36 @@ function defaultStorage() {
 }
 
 export function readStoredStreamSnapshot(chatId, storage = defaultStorage()) {
-  if (!storage || !chatId) return []
+  if (!storage || !chatId) return { items: [], assistantMessageId: null }
   try {
     const raw = storage.getItem(streamSnapshotKey(chatId))
-    if (!raw) return []
+    if (!raw) return { items: [], assistantMessageId: null }
     const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed : []
+    if (!parsed || !Array.isArray(parsed.items)) {
+      return { items: [], assistantMessageId: null }
+    }
+    return {
+      items: parsed.items,
+      assistantMessageId: typeof parsed.assistantMessageId === 'string'
+        ? parsed.assistantMessageId
+        : null,
+    }
   } catch {
-    return []
+    return { items: [], assistantMessageId: null }
   }
 }
 
-export function writeStoredStreamSnapshot(chatId, items, storage = defaultStorage()) {
+export function writeStoredStreamSnapshot(
+  chatId,
+  { items, assistantMessageId = null },
+  storage = defaultStorage(),
+) {
   if (!storage || !chatId || !Array.isArray(items) || items.length === 0) return
   try {
-    storage.setItem(streamSnapshotKey(chatId), JSON.stringify(items))
+    storage.setItem(streamSnapshotKey(chatId), JSON.stringify({
+      items,
+      assistantMessageId,
+    }))
   } catch {
     // Best-effort only. If sessionStorage is unavailable, the durable DB
     // partial plus SSE catch-up still reconstruct the stream.
@@ -63,7 +79,7 @@ export function reclaimStoredStreamSnapshots(storage = defaultStorage()) {
     const keys = []
     for (let index = 0; index < storage.length; index++) {
       const key = storage.key(index)
-      if (key?.startsWith(STREAM_SNAPSHOT_PREFIX)) keys.push(key)
+      if (key?.startsWith(STREAM_SNAPSHOT_BASE_PREFIX)) keys.push(key)
     }
     for (const key of keys) {
       storage.removeItem(key)

@@ -7,6 +7,7 @@ import {
   clampUsagePercent,
   formatPlanStatus,
   formatUsagePercent,
+  formatTrialTimeLeft,
   formatUsageReset,
   visibleUsageWindows,
 } from '../../components/SettingsView/providerUsage.js'
@@ -36,6 +37,21 @@ test('usage percentages are bounded and retain useful precision', () => {
   assert.equal(clampUsagePercent(140), 100)
   assert.equal(formatUsagePercent(34.2), '34.2')
   assert.equal(formatUsagePercent(54), '54')
+})
+
+test('trial time remaining stays compact and is derived from the exact expiry', () => {
+  assert.equal(
+    formatTrialTimeLeft(
+      '2026-09-07T20:00:00Z',
+      new Date('2026-08-25T20:00:01Z'),
+    ),
+    '13d left',
+  )
+  assert.equal(formatTrialTimeLeft(
+    '2026-08-25T19:59:59Z',
+    new Date('2026-08-25T20:00:00Z'),
+  ), 'Ended')
+  assert.equal(formatTrialTimeLeft('not-a-date'), '')
 })
 
 test('reset formatting distinguishes today from another day', () => {

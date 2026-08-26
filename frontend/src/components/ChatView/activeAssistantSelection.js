@@ -1,6 +1,6 @@
 /* Active-assistant selection derives the stable DB/live rendering surface. */
 
-import { isOwnerUserMessage } from './chatRuntimeState.js'
+import { startsFollowingTurn } from './chatRuntimeState.js'
 import {
   chooseActiveAssistantMirrorIndex,
   chooseActiveAssistantSurface,
@@ -18,18 +18,55 @@ export function deriveActiveAssistantSelection({
   turnActive,
   messages,
   streamItems,
+  streamAssistantMessageId = null,
   liveItemsRetired = false,
   findBridgeIndex,
 }) {
-  const bridgeMsgIdx = turnActive ? findBridgeIndex(messages) : -1
-  const trailingAssistantPartialIdx = turnActive
+  const identityMsgIdx = turnActive && streamAssistantMessageId
+    ? messages.findIndex(message => (
+        message?.role === 'assistant'
+        && message.id != null
+        && String(message.id) === String(streamAssistantMessageId)
+      ))
+    : -1
+  const legacyBridgeMsgIdx = turnActive ? findBridgeIndex(messages) : -1
+  const legacyBridgeFollowedByNewTurn = legacyBridgeMsgIdx >= 0 && messages
+    .slice(legacyBridgeMsgIdx + 1)
+    .some(startsFollowingTurn)
+  const legacyBridgeAllowed = !streamAssistantMessageId || (
+    legacyBridgeMsgIdx >= 0
+    && messages[legacyBridgeMsgIdx]?.id == null
+    && !legacyBridgeFollowedByNewTurn
+  )
+  const bridgeMsgIdx = identityMsgIdx >= 0
+    ? identityMsgIdx
+    : (legacyBridgeAllowed ? legacyBridgeMsgIdx : -1)
+  let trailingAssistantPartialIdx = turnActive
     ? findTrailingAssistantPartialIndex(messages)
     : -1
-  const hasLiveAssistantPayload = turnActive && streamItems.length > 0
+  if (
+    streamAssistantMessageId
+    && identityMsgIdx < 0
+    && trailingAssistantPartialIdx >= 0
+    && messages[trailingAssistantPartialIdx]?.id != null
+  ) {
+    trailingAssistantPartialIdx = -1
+  }
   const bridgeMsg = bridgeMsgIdx >= 0 ? messages[bridgeMsgIdx] : null
-  const bridgeFollowedByVisibleUser = bridgeMsgIdx >= 0 && messages
+  const bridgeFollowedByNewTurn = bridgeMsgIdx >= 0 && messages
     .slice(bridgeMsgIdx + 1)
-    .some(isOwnerUserMessage)
+    .some(startsFollowingTurn)
+  // A sessionStorage snapshot can survive the restart that begins a successor
+  // turn. Its id is real but no longer current; a successor turn boundary
+  // proves the cached payload must not compete with the successor's DB row.
+  const staleIdentifiedPayload = !!(
+    streamAssistantMessageId
+    && identityMsgIdx >= 0
+    && bridgeFollowedByNewTurn
+  )
+  const hasLiveAssistantPayload = !!(
+    turnActive && streamItems.length > 0 && !staleIdentifiedPayload
+  )
   const trailingAssistantPartialMsg = trailingAssistantPartialIdx >= 0
     ? messages[trailingAssistantPartialIdx]
     : null
@@ -52,7 +89,7 @@ export function deriveActiveAssistantSelection({
   const activeMirrorMsgIdx = chooseActiveAssistantMirrorIndex({
     bridgeMsgIdx,
     trailingAssistantPartialIdx,
-    bridgeFollowedByVisibleUser,
+    bridgeFollowedByNewTurn,
     hasLivePayload: hasLiveAssistantPayload,
     bridgeSurface: bridgeAssistantSurface,
     surface: trailingAssistantSurface,
@@ -98,6 +135,7 @@ export function commitAssistantPromotion({
   retiredItemsRef,
   paintedItems,
   promotedItems,
+  assistantMessageId,
   bridgeTs,
   followingMessages = [],
   commitMessages,
@@ -106,6 +144,7 @@ export function commitAssistantPromotion({
   commitMessages(
     prev => promoteAssistantStreamWithFollowingMessages(prev, {
       items: promotedItems,
+      assistantMessageId,
       bridgeTs,
       followingMessages,
     }),

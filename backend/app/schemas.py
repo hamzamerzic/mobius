@@ -646,7 +646,7 @@ class ChatPatch(BaseModel):
 class ChatProviderSwitch(BaseModel):
   """Atomic cross-provider switch prepared by the incoming provider."""
 
-  provider: Literal["claude", "codex"]
+  provider: Literal["claude", "codex", "mobius"]
   agent_settings_json: AgentSettingsOverride
   # Stable across a network retry so the writer can return the already-stored
   # switch instead of appending a duplicate compaction marker.
@@ -670,6 +670,7 @@ class ChatProviderSwitch(BaseModel):
       "codex": {
         "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
       },
+      "mobius": {"minimal", "low", "medium", "high", "max"},
       "claude": {"low", "medium", "high", "xhigh", "max", "ultracode"},
     }
     if effort not in allowed_efforts[self.provider]:
@@ -843,6 +844,10 @@ class ModelEntry(BaseModel):
   # working. A future model with a narrower/different scale can declare it here
   # without teaching every picker about that model id.
   effort_levels: list[str] | None = None
+  # Effective pre-compaction capacity for this exact model. The composer uses
+  # it before a chat has a run, so a new chat can show `0 / N` immediately
+  # rather than waiting for the first provider event to establish the limit.
+  context_window: int | None = None
 
 
 class ModelRegistryResponse(BaseModel):

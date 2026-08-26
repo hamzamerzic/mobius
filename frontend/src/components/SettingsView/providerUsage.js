@@ -17,6 +17,15 @@ export function formatUsagePercent(value) {
   return Number.isInteger(numeric) ? String(numeric) : numeric.toFixed(1)
 }
 
+export function formatTrialTimeLeft(value, now = new Date()) {
+  if (!value) return ''
+  const expiry = new Date(value)
+  if (Number.isNaN(expiry.getTime())) return ''
+  const remainingMs = expiry.getTime() - now.getTime()
+  if (remainingMs <= 0) return 'Ended'
+  return `${Math.ceil(remainingMs / 86_400_000)}d left`
+}
+
 export function formatUsageReset(value, now = new Date()) {
   if (!value) return ''
   const reset = new Date(value)
@@ -43,11 +52,31 @@ export function visibleUsageWindows(snapshot) {
     .slice(0, 4)
 }
 
-export function mostConstrainedRemainingPercent(snapshot) {
-  if (snapshot?.state !== 'ready' || !Array.isArray(snapshot.windows)) return null
-  const used = snapshot.windows
-    .map(window => Number(window?.used_percent))
-    .filter(Number.isFinite)
-  if (used.length === 0) return null
-  return 100 - Math.max(...used.map(clampUsagePercent))
+export function providerAllowance(provider, snapshot) {
+  const kind = provider === 'mobius' ? 'api_credits' : 'weekly'
+  const label = kind === 'api_credits' ? 'API credits usage' : 'Weekly usage'
+  if (snapshot?.state !== 'ready' || !Array.isArray(snapshot.windows)) {
+    return { kind, label, usedPercent: null, expiresAt: null }
+  }
+  const window = snapshot.windows.find(candidate => candidate?.kind === kind)
+  const used = window?.used_percent == null ? Number.NaN : Number(window.used_percent)
+  return {
+    kind,
+    label,
+    usedPercent: Number.isFinite(used) ? clampUsagePercent(used) : null,
+    expiresAt: typeof window?.expires_at === 'string' ? window.expires_at : null,
+  }
+}
+
+export function providerAllowanceSummary(provider, allowance, now = new Date()) {
+  if (provider === 'mobius' && typeof allowance?.usedPercent === 'number') {
+    return [
+      `${Math.round(allowance.usedPercent)}% used`,
+      formatTrialTimeLeft(allowance.expiresAt, now),
+    ].filter(Boolean).join(' · ')
+  }
+  if (typeof allowance?.usedPercent === 'number') {
+    return `${Math.round(allowance.usedPercent)}% ${allowance.label.toLowerCase()}`
+  }
+  return allowance?.label || 'Usage'
 }

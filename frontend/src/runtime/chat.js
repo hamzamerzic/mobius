@@ -283,6 +283,58 @@ export function makeEmbedAuthorizationHandoff({
 const EMBED_BOOTSTRAP_TIMEOUT_MS = 15000
 
 export function makeChat({ appId, getToken, storage }) {
+  const CONTROL_TIMEOUT_MS = 20_000
+  let controlSequence = 0
+  const pendingControls = new Map()
+  let controlListening = false
+
+  function cleanControlText(value, maximum = 256) {
+    return typeof value === 'string' ? value.trim().slice(0, maximum) : ''
+  }
+
+  function onControlMessage(event) {
+    // Mini-app frames have an opaque (`null`) origin. The direct parent window
+    // is the trust boundary; request ids correlate replies to this runtime.
+    if (event.source !== window.parent) return
+    const message = event.data
+    if (!message || message.type !== 'moebius:chat-control-result') return
+    const pending = pendingControls.get(message.requestId)
+    if (!pending) return
+    pendingControls.delete(message.requestId)
+    clearTimeout(pending.timeout)
+    if (message.ok === true) pending.resolve(message.result)
+    else pending.reject(new Error(cleanControlText(message.error, 500) || 'Chat control failed.'))
+  }
+
+  function ensureControlListener() {
+    if (controlListening || typeof window === 'undefined') return
+    window.addEventListener('message', onControlMessage)
+    controlListening = true
+  }
+
+  function requestChatControl(action, chatId) {
+    const id = cleanControlText(chatId, 128)
+    if (!id) return Promise.reject(new Error('window.mobius.chat: chat id is required'))
+    if (typeof window === 'undefined' || !window.parent || window.parent === window) {
+      return Promise.reject(new Error('window.mobius.chat: trusted host is unavailable'))
+    }
+    ensureControlListener()
+    const requestId = `chat-control:${Date.now().toString(36)}:${(++controlSequence).toString(36)}`
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        pendingControls.delete(requestId)
+        reject(new Error('Möbius did not answer the chat control request.'))
+      }, CONTROL_TIMEOUT_MS)
+      pendingControls.set(requestId, { resolve, reject, timeout })
+      window.parent.postMessage({
+        type: 'moebius:chat-control',
+        requestId,
+        action,
+        chatId: id,
+      }, '*')
+    })
+  }
+
   // Lazily create a chat the agent turn can be attributed to, via the
   // app-attributed backend contract (design §1.1: POST /api/app-chats).
   // The ordinary /api/chats create route is owner-only and intentionally
@@ -980,5 +1032,19 @@ export function makeChat({ appId, getToken, storage }) {
     }
   }
   chat.start = startChat
+  chat.list = listChats
+  chat.status = chatId => requestChatControl('status', chatId)
+  chat.stop = chatId => requestChatControl('stop', chatId)
+  chat._destroy = () => {
+    if (controlListening && typeof window !== 'undefined') {
+      window.removeEventListener('message', onControlMessage)
+    }
+    controlListening = false
+    for (const pending of pendingControls.values()) {
+      clearTimeout(pending.timeout)
+      pending.reject(new Error('Chat controls were replaced.'))
+    }
+    pendingControls.clear()
+  }
   return chat
 }

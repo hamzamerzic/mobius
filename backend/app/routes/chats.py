@@ -253,7 +253,10 @@ def _mirror_agent_defaults(
   settings_obj: dict,
 ) -> None:
   """Repair the best-effort defaults mirrored from a committed chat choice."""
-  patch = {}
+  # Keep the model's provider in the SAME atomic shared-file update. Live model
+  # discovery can expose ids outside KNOWN_MODELS, so model text alone is not a
+  # durable provider classifier.
+  patch = {"provider": provider_id}
   for key in ("model", "effort", "effort_by_provider"):
     value = settings_obj.get(key)
     if value is not None:
@@ -454,10 +457,9 @@ def _chat_detail_response(
   running = is_chat_running(chat.id) or has_running_run(db, chat.id)
   live_snapshot = chat.live_assistant
   live_message = (
-    all_msgs[-1]
+    next((message for message in all_msgs if message is live_snapshot), None)
     if running
-    and all_msgs
-    and all_msgs[-1] is live_snapshot
+    and isinstance(live_snapshot, dict)
     else None
   )
   # A genuinely streaming assistant row must remain self-contained: the live
@@ -875,7 +877,10 @@ def create_chat(
 
   owner = db.query(models.Owner).first()
   data_dir = get_settings().data_dir
-  provider = providers.resolve_default_provider(
+  # Provider follows the last-selected model (the single source of truth) so a
+  # new chat always starts on the family of the model it will actually use —
+  # never a provider whose remembered model belongs to the other family.
+  provider = providers.owner_default_provider(
     data_dir, owner.provider if owner else None,
   )
 
@@ -1136,12 +1141,11 @@ async def patch_chat(
     target_provider = body.provider
     new_model = agent_settings_patch.get("model")
     if target_provider is None and new_model:
-      from app.providers import _model_belongs_to_other_provider
+      from app.providers import _known_model_provider
       current_provider = chat.provider or "claude"
-      if _model_belongs_to_other_provider(new_model, current_provider):
-        target_provider = (
-          "codex" if current_provider == "claude" else "claude"
-        )
+      inferred_provider = _known_model_provider(new_model)
+      if inferred_provider and inferred_provider != current_provider:
+        target_provider = inferred_provider
 
     if new_model:
       from app.providers import _model_belongs_to_other_provider
@@ -1188,20 +1192,23 @@ async def patch_chat(
           "handoff so the incoming provider can continue its context."
         ),
       )
-    if target_provider is not None and target_provider in ("claude", "codex"):
+    if target_provider is not None:
       # Reject a switch to a disconnected provider — the picker may
       # have raced ahead of /auth/providers/status, or the user may
       # be on stale state. Without this check the PATCH would succeed
       # silently and then every subsequent message turn would fail
       # auth, leaving the user confused. 409 surfaces the real
       # problem at pick-time.
-      from app.providers import get_provider
+      from app.providers import get_provider, provider_requirement_error
       candidate = get_provider(target_provider)
-      auth_error = candidate.check_auth(get_app_settings().data_dir)
+      requirement_error = provider_requirement_error(candidate, db)
+      auth_error = requirement_error or candidate.check_auth(
+        get_app_settings().data_dir
+      )
       if auth_error is not None:
         raise HTTPException(
           status_code=409,
-          detail=(
+          detail=requirement_error or (
             f"{candidate.name} is not connected. "
             "Open Settings to connect, then try again."
           ),
@@ -1257,7 +1264,9 @@ async def patch_chat(
       and settings_obj
       and picker_settings_changed
     ):
-      mirror_patch = {}
+      # Model + provider are one picker choice. Persist them in one atomic
+      # shared-file update so concurrent chats cannot split the pair.
+      mirror_patch = {"provider": chat.provider}
       for key in ("model", "effort", "effort_by_provider"):
         value = settings_obj.get(key)
         if value is not None:
@@ -1562,6 +1571,82 @@ def get_tool_output_by_id(
   )
 
 
+@router.get("/{chat_id}/edit-diffs")
+def get_chat_edit_diffs(
+  chat_id: str,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+) -> dict:
+  """Return only the file changes recorded by one chat, with full sidecars.
+
+  The ordinary chat payload keeps edit previews bounded. This explicit owner
+  action is the lazy expansion boundary: it scans the transcript for edit
+  blocks, fences already-queued sidecar writes, and substitutes complete diff
+  text wherever the block names one. Orphaned sidecars are never enumerable.
+  """
+  from app.chat_transcript import materialized_messages
+
+  chat = get_active_chat_or_404(db, chat_id)
+  _drain_writer_before_sidecar_read(db, chat_id, "chat changes")
+  chat = get_active_chat_or_404(db, chat_id)
+  messages = materialized_messages(chat)
+
+  entries: list[dict] = []
+  full_ids: set[str] = set()
+  for message_index, message in enumerate(messages):
+    blocks = message.get("blocks") if isinstance(message, dict) else None
+    if not isinstance(blocks, list):
+      continue
+    for block_index, block in enumerate(blocks):
+      if not isinstance(block, dict) or block.get("type") != "tool":
+        continue
+      preview = block.get("edit_preview")
+      if not (
+        isinstance(preview, dict)
+        and isinstance(preview.get("diff"), str)
+        and preview["diff"]
+      ):
+        continue
+      projected_preview = {
+        "diff": preview["diff"],
+        "truncated": preview.get("truncated") is True,
+        **({"relative": True} if preview.get("relative") is True else {}),
+      }
+      full_id = preview.get("full_id")
+      if isinstance(full_id, str) and full_id:
+        projected_preview["full_id"] = full_id
+        full_ids.add(full_id)
+      entries.append({
+        "id": block.get("tool_use_id") or f"message-{message_index}-block-{block_index}",
+        "tool": block.get("tool") or "Edit",
+        "ts": message.get("ts"),
+        "preview": projected_preview,
+      })
+
+  full_by_id: dict[str, str] = {}
+  if full_ids:
+    rows = db.query(
+      models.ToolOutput.tool_use_id,
+      cast(models.ToolOutput.output, Text),
+    ).filter(
+      models.ToolOutput.chat_id == chat_id,
+      models.ToolOutput.tool_use_id.in_(full_ids),
+    ).all()
+    full_by_id = {
+      full_id: decode_tool_output(stored)
+      for full_id, stored in rows
+    }
+
+  for entry in entries:
+    preview = entry["preview"]
+    full = full_by_id.get(preview.get("full_id"))
+    if full is not None:
+      preview["diff"] = full
+      preview["truncated"] = False
+
+  return {"entries": entries}
+
+
 @router.get(
   "/{chat_id}/thinking-trace/{thinking_id}",
   response_class=PlainTextResponse,
@@ -1724,6 +1809,7 @@ def get_chat_agent_context(
 @router.get("/{chat_id}/usage")
 def get_chat_usage(
   chat_id: str,
+  include_runs: bool = True,
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
@@ -1786,7 +1872,88 @@ def get_chat_usage(
         "usage": run.usage_json,
       }
       for run in runs
-    ],
+    ] if include_runs else [],
+  }
+
+
+def _latest_model_input_tokens(run: models.ChatRun) -> int | None:
+  """Read one call's context input from a normalized durable usage row."""
+  usage = run.usage_json
+  if not isinstance(usage, dict):
+    return None
+  direct = usage.get("latest_model_input_tokens")
+  if isinstance(direct, (int, float)) and not isinstance(direct, bool):
+    return max(0, int(direct))
+  # Some app-owned providers speak the Codex usage protocol while retaining
+  # their own provider identity on the run. Read the normalized shape rather
+  # than assuming only a direct Codex run can contain it.
+  model_calls = usage.get("model_calls")
+  if isinstance(model_calls, list) and model_calls:
+    latest = model_calls[-1]
+    if isinstance(latest, dict):
+      value = latest.get("input_tokens", latest.get("inputTokens"))
+      if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return max(0, int(value))
+  provider_usage = usage.get("provider_usage")
+  if isinstance(provider_usage, dict):
+    final = provider_usage.get("final")
+    if isinstance(final, dict):
+      latest = final.get("last")
+      if isinstance(latest, dict):
+        value = latest.get("input_tokens", latest.get("inputTokens"))
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+          return max(0, int(value))
+  return None
+
+
+@router.get("/{chat_id}/usage/current")
+def get_current_chat_usage(
+  chat_id: str,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Return the latest exact model-call context occupancy for one session.
+
+  The diagnostic ``/usage`` route intentionally returns every raw run. The
+  composer gauge needs only one bounded projection and is mounted for every
+  open chat pane, so it must not download an ever-growing usage history.
+  """
+  chat = get_active_chat_or_404(
+    db,
+    chat_id,
+    load_fields=(models.Chat.id, models.Chat.provider, models.Chat.session_id),
+  )
+  if not chat.session_id:
+    return {
+      "provider": chat.provider,
+      "provider_session_id": None,
+      "input_tokens": None,
+      "context_window": None,
+    }
+  run = (
+    db.query(models.ChatRun)
+    .filter(
+      models.ChatRun.chat_id == chat_id,
+      models.ChatRun.provider == chat.provider,
+      models.ChatRun.provider_session_id == chat.session_id,
+      models.ChatRun.usage_json.isnot(None),
+      models.ChatRun.model_context_window.isnot(None),
+    )
+    .order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc())
+    .first()
+  )
+  if run is None:
+    return {
+      "provider": chat.provider,
+      "provider_session_id": chat.session_id,
+      "input_tokens": None,
+      "context_window": None,
+    }
+  return {
+    "provider": run.provider,
+    "provider_session_id": run.provider_session_id,
+    "input_tokens": _latest_model_input_tokens(run),
+    "context_window": run.model_context_window,
   }
 
 
@@ -2036,7 +2203,9 @@ async def _compact_chat_locked(
     )
   data_dir = get_settings().data_dir
   candidate = providers.get_provider(body.provider)
-  auth_error = candidate.check_auth(data_dir)
+  auth_error = providers.provider_requirement_error(candidate, db)
+  if auth_error is None:
+    auth_error = candidate.check_auth(data_dir)
   if auth_error is not None:
     raise HTTPException(status_code=409, detail=auth_error)
 
@@ -2531,10 +2700,10 @@ def create_app_chat(
 
   owner = db.query(models.Owner).first()
   data_dir = get_settings().data_dir
-  provider = body.provider or providers.resolve_default_provider(
+  provider = body.provider or providers.owner_default_provider(
     data_dir, owner.provider if owner else None,
   )
-  if provider not in ("claude", "codex"):
+  if provider not in providers.PROVIDER_NAMES:
     raise HTTPException(status_code=422, detail=f"unknown provider: {provider}")
   if body.model and providers._model_belongs_to_other_provider(
     body.model, provider,
@@ -2739,7 +2908,7 @@ async def patch_app_chat(
         detail="The selected model does not belong to that provider.",
       )
     if body.provider is not None:
-      if body.provider not in ("claude", "codex"):
+      if body.provider not in providers.PROVIDER_NAMES:
         raise HTTPException(
           status_code=422, detail=f"unknown provider: {body.provider}"
         )
