@@ -434,14 +434,20 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
       ...chat,
       has_messages: true,
     }))
-    await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
-      if (route.request().method() !== 'GET') return route.fallback()
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        json: visibleFixtures,
-      })
-    })
+    await page.addInitScript(fixtures => {
+      const realFetch = window.fetch.bind(window)
+      window.fetch = (input, init) => {
+        const url = new URL(String(input?.url || input), window.location.href)
+        const method = String(init?.method || input?.method || 'GET').toUpperCase()
+        if (method === 'GET' && url.pathname === '/api/chats') {
+          return Promise.resolve(new Response(JSON.stringify(fixtures), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }))
+        }
+        return realFetch(input, init)
+      }
+    }, visibleFixtures)
     await page.goto(`${BASE}/shell/?chat=${current.id}`, { waitUntil: 'domcontentloaded' })
     await expect(page.locator(`[data-chat-id="${current.id}"][data-chat-surface="painted"]`)).toBeVisible({ timeout: 8000 })
     await resetLoadCount(page)
