@@ -428,16 +428,21 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     // owned fixtures as populated instead of depending on incidental account
     // history.
     const visibleFixtures = new Map(
-      [target, current].map(chat => [String(chat.id), chat]),
+      [target, current].map((chat, index) => [String(chat.id), {
+        ...chat,
+        // Drawer recents deliberately re-sort API rows by activity. Give only
+        // these owned fixtures deterministic leading recency so a busy shared
+        // test account cannot virtualize the navigation target away.
+        activity_at: `9999-01-01T00:00:0${2 - index}`,
+      }]),
     )
     await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
       if (route.request().method() !== 'GET') return route.fallback()
       const response = await route.fetch()
       const chats = await response.json()
-      // The drawer intentionally renders only the leading recents. Keep these
-      // two owned fixtures at the front even when a lifecycle refetch omits
-      // the empty server rows; appending them behind a busy account's history
-      // leaves valid fixtures outside the rendered recent window.
+      // A lifecycle refetch may omit empty fixtures entirely. Reinsert only
+      // this test's owned rows; their owned activity stamps above keep them in
+      // the drawer's leading virtualized window after its intentional sort.
       const visibleChats = [
         ...[...visibleFixtures.values()].map(chat => ({ ...chat, has_messages: true })),
         ...chats.filter(chat => !visibleFixtures.has(String(chat.id))),
