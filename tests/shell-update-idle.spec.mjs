@@ -427,29 +427,19 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     // rows because it exercises a real drawer press, so expose only these
     // owned fixtures as populated instead of depending on incidental account
     // history.
-    const visibleFixtures = new Map(
-      [target, current].map((chat, index) => [String(chat.id), {
-        ...chat,
-        // Drawer recents deliberately re-sort API rows by activity. Give only
-        // these owned fixtures deterministic leading recency so a busy shared
-        // test account cannot virtualize the navigation target away.
-        activity_at: `9999-01-01T00:00:0${2 - index}`,
-      }]),
-    )
+    // Own the complete list boundary for this page. Merging the shared CI
+    // account's concurrently changing chats makes this navigation contract
+    // depend on unrelated workers and the drawer's virtualization window.
+    const visibleFixtures = [target, current].map(chat => ({
+      ...chat,
+      has_messages: true,
+    }))
     await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
       if (route.request().method() !== 'GET') return route.fallback()
-      const response = await route.fetch()
-      const chats = await response.json()
-      // A lifecycle refetch may omit empty fixtures entirely. Reinsert only
-      // this test's owned rows; their owned activity stamps above keep them in
-      // the drawer's leading virtualized window after its intentional sort.
-      const visibleChats = [
-        ...[...visibleFixtures.values()].map(chat => ({ ...chat, has_messages: true })),
-        ...chats.filter(chat => !visibleFixtures.has(String(chat.id))),
-      ]
       await route.fulfill({
-        response,
-        json: visibleChats,
+        status: 200,
+        contentType: 'application/json',
+        json: visibleFixtures,
       })
     })
     await page.goto(`${BASE}/shell/?chat=${current.id}`, { waitUntil: 'domcontentloaded' })
