@@ -1185,7 +1185,48 @@ export default function useNavigation({
         }
         bootPaneId = workspaceStateRef.current.ws.focusedPaneId
       }
-      if (deepLink?.view === 'canvas' && Number.isFinite(deepLink.appId)) {
+      const claimedReloadDestination = shellReload?.destinationClaimed
+        ? {
+            view: shellReload.activeView,
+            appId: shellReload.activeAppId ?? null,
+            chatId: shellReload.activeChatId ?? null,
+          }
+        : null
+      if (claimedReloadDestination) {
+        if (
+          claimedReloadDestination.view === 'canvas'
+          && Number.isFinite(claimedReloadDestination.appId)
+        ) {
+          bootDeepLink(
+            {
+              view: 'canvas',
+              appId: claimedReloadDestination.appId,
+              chatId: null,
+              paneId: bootPaneId,
+            },
+            tabModel.makeTab('app', claimedReloadDestination.appId),
+          )
+        } else if (
+          claimedReloadDestination.view === 'chat'
+          && claimedReloadDestination.chatId
+        ) {
+          bootDeepLink(
+            {
+              view: 'chat',
+              chatId: claimedReloadDestination.chatId,
+              appId: null,
+              paneId: bootPaneId,
+            },
+            tabModel.makeTab('chat', claimedReloadDestination.chatId),
+          )
+        } else if (
+          claimedReloadDestination.view === 'settings'
+          && workspaceStateRef.current.ws.viewMode === 'panes'
+        ) {
+          applySettingsDestination(bootPaneId)
+          bootPaneId = workspaceStateRef.current.ws.focusedPaneId
+        }
+      } else if (deepLink?.view === 'canvas' && Number.isFinite(deepLink.appId)) {
         bootDeepLink(
           { view: 'canvas', appId: deepLink.appId, chatId: null, paneId: bootPaneId },
           tabModel.makeTab('app', deepLink.appId),
