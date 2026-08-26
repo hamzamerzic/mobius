@@ -11,6 +11,7 @@ import {
   normalizeChatDiffEntries,
   summarizeChatDiffs,
 } from './chatDiffs.js'
+import { chatContributionPrepareAction } from './chatContributionIntent.js'
 import './ChatWork.css'
 
 function updateLabel(entry) {
@@ -25,7 +26,13 @@ function updateTime(value) {
   return formatRelativeTime(value)
 }
 
-export default function ChatDiffViewer({ chatId, initialEntries, onClose }) {
+export default function ChatDiffViewer({
+  chatId,
+  initialEntries,
+  onClose,
+  onPrepareChanges,
+  turnActive = false,
+}) {
   const [state, setState] = useState({
     status: 'loading',
     entries: initialEntries || [],
@@ -82,6 +89,7 @@ export default function ChatDiffViewer({ chatId, initialEntries, onClose }) {
 
   const summary = useMemo(() => summarizeChatDiffs(state.entries), [state.entries])
   const shortenedCount = state.entries.filter(entry => entry.preview?.truncated).length
+  const prepareAction = chatContributionPrepareAction(turnActive)
 
   function setEveryDiffExpanded(expanded) {
     expansionSequenceRef.current += 1
@@ -181,6 +189,21 @@ export default function ChatDiffViewer({ chatId, initialEntries, onClose }) {
             </div>
           )}
         </div>
+        {state.entries.length > 0 && onPrepareChanges && (
+          <footer className="chat-work__prepare">
+            <div>
+              <strong>Turn these changes into contributions</strong>
+              <span id="chat-work-prepare-description">{prepareAction.description}</span>
+            </div>
+            <button
+              type="button"
+              onClick={onPrepareChanges}
+              aria-describedby="chat-work-prepare-description"
+            >
+              {prepareAction.label}
+            </button>
+          </footer>
+        )}
       </div>
     </div>
   )

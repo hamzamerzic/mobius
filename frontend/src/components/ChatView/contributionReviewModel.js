@@ -7,9 +7,19 @@
 // app by slug. Not installed → nothing staged → the card never renders.
 export const CONTRIBUTE_SLUG = 'contribute'
 
-// Records the owner can still act on. Settled ones (open/merged/closed) are
-// history and belong in the Contribute app, not above the composer.
+// Records that still expose a publication decision in chat.
 export const ACTIONABLE_STATUSES = new Set(['prepared', 'submitting'])
+
+// Once sent, the same source chat remains the lightweight place to follow the
+// contribution. Contribute owns cross-chat triage, stacks, and deeper history.
+export const TRACKING_STATUSES = new Set([
+  'draft', 'open', 'landing', 'merged', 'superseded', 'closed',
+])
+
+export const CHAT_VISIBLE_STATUSES = new Set([
+  ...ACTIONABLE_STATUSES,
+  ...TRACKING_STATUSES,
+])
 
 export function contributeAppId(apps) {
   const match = (apps || []).find(app => app && app.slug === CONTRIBUTE_SLUG)
@@ -24,6 +34,52 @@ export function actionableRecords(payload) {
   return (payload?.records || []).filter(
     record => ACTIONABLE_STATUSES.has(record?.status),
   )
+}
+
+export function chatContributionRecords(payload) {
+  return (payload?.records || []).filter(
+    record => CHAT_VISIBLE_STATUSES.has(record?.status),
+  )
+}
+
+export function isTrackingRecord(record) {
+  return TRACKING_STATUSES.has(record?.status)
+}
+
+export function trackingStatusLabel(record) {
+  if (record?.needs_attention === true) return 'Needs attention'
+  return {
+    draft: 'Draft PR open',
+    open: 'PR open',
+    landing: 'Merging',
+    merged: 'Merged',
+    superseded: 'Already shared',
+    closed: 'Not merged',
+  }[record?.status] || 'Contribution'
+}
+
+export function trackingNarration(record) {
+  if (record?.needs_attention === true) {
+    return 'Checks or review need attention. Ask the agent here to sort it out.'
+  }
+  return {
+    draft: 'The pull request is open as a draft. Its latest status stays attached to this chat.',
+    open: 'The pull request is open for review. Its latest status stays attached to this chat.',
+    landing: 'The verified contribution is being merged now.',
+    merged: 'This improvement has landed.',
+    superseded: 'Equivalent work reached the project another way.',
+    closed: 'This pull request closed without merging.',
+  }[record?.status] || ''
+}
+
+export function contributionFollowupPrompt(record) {
+  const id = String(record?.id || '').trim()
+  const title = String(record?.title || record?.summary || 'this contribution').trim()
+  return [
+    `Inspect and resolve the current attention on contribution ${id} ("${title}").`,
+    '',
+    'Refresh its GitHub and review state first, then make only the necessary local or private changes. Keep every further public update behind explicit approval in this chat.',
+  ].join('\n')
 }
 
 /** Why direct publication is unavailable, or null when the exact review can send. */
@@ -193,12 +249,25 @@ export function contributionReviewRunPhase(runtime) {
 }
 
 /** Copy for the grouped panel while it still has pending work. */
-export function reviewPanelSummary(pendingCount) {
-  const count = Math.max(0, Number(pendingCount) || 0)
+export function reviewPanelSummary(items) {
+  const list = Array.isArray(items) ? items : []
+  const count = list.length
+  const tracking = list.filter(
+    item => item?.kind === 'record' && isTrackingRecord(item.record),
+  ).length
+  if (tracking === 0) {
+    return {
+      count,
+      title: 'Reviews ready',
+      copy: 'Each opens at its exact decision in Contribute.',
+    }
+  }
   return {
     count,
-    title: 'Reviews ready',
-    copy: 'Each opens at its exact decision in Contribute.',
+    title: 'Contributions from this chat',
+    copy: tracking === count
+      ? 'Follow the latest status where the work happened.'
+      : 'Review what is ready and follow what was sent.',
   }
 }
 
@@ -297,12 +366,14 @@ function stackDescriptor(record) {
   }
 }
 
-/** Collapse every valid contribution stack into one logical review item. */
+/** Collapse prepared stacks; sent lifecycle records remain individually legible. */
 export function reviewItems(payload) {
   const items = []
   const stacks = new Map()
-  for (const record of actionableRecords(payload)) {
-    const stack = stackDescriptor(record)
+  for (const record of chatContributionRecords(payload)) {
+    const stack = ACTIONABLE_STATUSES.has(record.status)
+      ? stackDescriptor(record)
+      : null
     if (!stack) {
       items.push({ kind: 'record', id: record.id, record })
       continue

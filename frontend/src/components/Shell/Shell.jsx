@@ -4113,7 +4113,6 @@ export default function Shell({ onInitialVisualReady }) {
                 refreshChats={refreshChats}
                 markChatOwnerActivity={markChatOwnerActivity}
                 loadTheme={loadTheme}
-                navTo={stablePaneNavTo}
                 openAppWithIntent={openAppWithIntent}
                 onInternalNav={handleChatInternalNav}
                 onChatMissing={handlePaneChatMissing}

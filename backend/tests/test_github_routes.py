@@ -5398,7 +5398,7 @@ def test_for_chat_reports_local_drift_so_the_card_can_block_send(
   assert (repo / "index.jsx").read_text() == "export default 3\n"
 
 
-def test_for_chat_returns_only_records_that_still_need_a_chat_action(
+def test_for_chat_keeps_the_sent_lifecycle_with_its_source_chat(
   client, owner_token,
 ):
   _write_token(login="octocat", user_id=42)
@@ -5414,9 +5414,14 @@ def test_for_chat_returns_only_records_that_still_need_a_chat_action(
     f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
   )
   assert r.status_code == 200, r.text
-  # Abandoned work is gone; settled work is history owned by Contribute rather
-  # than irrelevant data the chat endpoint asks every client to discard.
-  assert r.json()["records"] == []
+  # Abandoned work is gone, while a sent contribution stays attached to the
+  # conversation that created it. Deeper cross-chat history remains Contribute's.
+  records = r.json()["records"]
+  assert [item["id"] for item in records] == ["already-open"]
+  assert records[0]["status"] == "open"
+  assert records[0]["number"] == 7
+  assert records[0]["needs_attention"] is False
+  assert records[0]["review"] is None
 
 
 def test_for_chat_honors_the_owner_s_autopilot_default(client, owner_token):

@@ -46,7 +46,6 @@ function PaneChatView({
   refreshChats,
   markChatOwnerActivity,
   loadTheme,
-  navTo,
   openAppWithIntent,
   onInternalNav,
   onChatMissing,

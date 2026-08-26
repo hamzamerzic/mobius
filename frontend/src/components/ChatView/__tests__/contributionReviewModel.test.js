@@ -3,12 +3,15 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
   ACTIONABLE_STATUSES,
+  CHAT_VISIBLE_STATUSES,
   DISMISS_DX_PX,
   PLATFORM_REPO,
   actionableRecords,
   autopilotOnSend,
+  chatContributionRecords,
   contributeApp,
   contributeAppId,
+  contributionFollowupPrompt,
   contributionRecoveryAction,
   contributionRecoveryDraft,
   contributionReviewRunPhase,
@@ -28,6 +31,8 @@ import {
   sendBlocker,
   statusLabel,
   submitFailure,
+  trackingNarration,
+  trackingStatusLabel,
   visibleReviewItems,
   visibleRecords,
 } from '../contributionReviewModel.js'
@@ -60,7 +65,7 @@ test('the ledger owner is resolved by slug, and a missing app hides the card', (
   assert.equal(contributeApp(APPS, 99), null)
 })
 
-test('only unsettled records reach the composer doorway', () => {
+test('publication decisions stay distinct from the lifecycle kept in chat', () => {
   const payload = { records: [
     { id: 'a', status: 'prepared' },
     { id: 'b', status: 'submitting' },
@@ -72,6 +77,30 @@ test('only unsettled records reach the composer doorway', () => {
   assert.deepEqual(actionableRecords(payload).map(record => record.id), ['a', 'b'])
   assert.deepEqual(actionableRecords(null), [])
   assert.deepEqual([...ACTIONABLE_STATUSES], ['prepared', 'submitting'])
+  assert.deepEqual(
+    chatContributionRecords(payload).map(record => record.id),
+    ['a', 'b', 'c', 'd', 'e'],
+  )
+  assert.equal(CHAT_VISIBLE_STATUSES.has('abandoned'), false)
+})
+
+test('sent contribution status stays plain-language and attention continues in chat', () => {
+  assert.equal(trackingStatusLabel({ status: 'open' }), 'PR open')
+  assert.equal(trackingStatusLabel({ status: 'merged' }), 'Merged')
+  assert.equal(
+    trackingStatusLabel({ status: 'open', needs_attention: true }),
+    'Needs attention',
+  )
+  assert.match(trackingNarration({ status: 'open' }), /latest status stays attached/)
+  assert.match(
+    trackingNarration({ status: 'open', needs_attention: true }),
+    /Ask the agent here/,
+  )
+  const prompt = contributionFollowupPrompt({
+    id: 'chat-flow', title: 'Keep the whole contribution in chat',
+  })
+  assert.match(prompt, /contribution chat-flow/)
+  assert.match(prompt, /Keep every further public update behind explicit approval in this chat/)
 })
 
 test('every unsettled record remains reachable even when its current review needs attention', () => {
@@ -197,7 +226,7 @@ test('existing review runtime becomes one unambiguous continuation state', () =>
 })
 
 test('multiple independent items share one centered bounded panel', () => {
-  assert.match(cardSrc, /const panel = reviewPanelSummary\(pendingItems\.length\)/)
+  assert.match(cardSrc, /const panel = reviewPanelSummary\(pendingItems\)/)
   assert.match(cardSrc, /const grouped = panel\.count > 1/)
   assert.match(cardSrc, /contrib-card-stack--grouped/)
   assert.match(cardSrc, /\{panel\.title\}/)
@@ -249,14 +278,34 @@ test('loaded older backends group canonical stack branches during hot reload', (
 
 test('the grouped panel uses one stable explanation instead of redundant counts', () => {
   for (const count of [0, 1, 3]) {
-    assert.deepEqual(reviewPanelSummary(count), {
-      count,
+    const items = Array.from({ length: count }, (_, index) => ({
+      kind: 'record', record: { id: String(index), status: 'prepared' },
+    }))
+    assert.deepEqual(reviewPanelSummary(items), {
+      count: items.length,
       title: 'Reviews ready',
       copy: 'Each opens at its exact decision in Contribute.',
     })
   }
+  assert.deepEqual(reviewPanelSummary([{
+    kind: 'record', record: { id: 'sent', status: 'open' },
+  }]), {
+    count: 1,
+    title: 'Contributions from this chat',
+    copy: 'Follow the latest status where the work happened.',
+  })
 })
 
+test('sent records remain as quiet tracking cards and can hand attention back to chat', () => {
+  assert.match(cardSrc, /function TrackingRow\(/)
+  assert.match(cardSrc, /trackingStatusLabel\(record\)/)
+  assert.match(cardSrc, /trackingNarration\(record\)/)
+  assert.match(cardSrc, /onContinueInChat\(record\)/)
+  assert.match(cardSrc, /'Ask agent to fix'/)
+  assert.match(chatViewSrc, /doSend\(contributionFollowupPrompt\(record\), \{/)
+  assert.match(chatViewSrc, /onContinueInChat=\{handleContributionFollowup\}/)
+  assert.match(cardSrc, /publication\?\.record\?\.status === 'draft'/)
+})
 test('chat cards keep direct send and exact review on the same guarded routes', () => {
   assert.match(clientSrc, /submitter:\s*'chat-review-card'/)
   assert.match(clientSrc, /record\?\.action === 'pr_update'/)
@@ -348,7 +397,7 @@ test('the swipe has a visible focusable equivalent', () => {
   assert.match(cardSrc, /aria-label="Dismiss — keeps it in Contribute"/)
   assert.match(cardSrc, /onClick=\{\(\) => onDismiss\?\.\(\)\}/)
   assert.match(cardSrc, /import \{ X \} from '@openai\/apps-sdk-ui\/components\/Icon'/)
-  assert.equal((cardSrc.match(/<X width=\{14\} height=\{14\} aria-hidden="true" \/>/g) || []).length, 2)
+  assert.equal((cardSrc.match(/<X width=\{14\} height=\{14\} aria-hidden="true" \/>/g) || []).length, 3)
 })
 
 test('the dismissal gesture is claimed with a non-passive touchmove', () => {
@@ -359,6 +408,6 @@ test('the dismissal gesture is claimed with a non-passive touchmove', () => {
 
 test('every card shape shares one swipe implementation', () => {
   assert.equal((cardSrc.match(/function useSwipeToDismiss\(/g) || []).length, 1)
-  assert.equal((cardSrc.match(/= useSwipeToDismiss\(onDismiss\)/g) || []).length, 2)
+  assert.equal((cardSrc.match(/= useSwipeToDismiss\(onDismiss\)/g) || []).length, 3)
   assert.equal((cardSrc.match(/addEventListener\('touchmove'/g) || []).length, 1)
 })

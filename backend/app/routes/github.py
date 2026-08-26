@@ -1127,6 +1127,14 @@ def _chat_review_projection(record: dict, app_id: int) -> dict:
     "title": text(plan.get("title") or record.get("title")),
     "summary": text(record.get("summary")),
     "repo": text(plan.get("repo") or record.get("repo")),
+    "number": (
+      record["number"]
+      if isinstance(record.get("number"), int)
+      and not isinstance(record.get("number"), bool)
+      and record["number"] > 0
+      else None
+    ),
+    "needs_attention": record.get("needs_attention") is True,
     "branch": text(plan.get("branch") or record.get("branch")),
     "body_draft": text(plan.get("body_draft")),
     "diff_stat": text(plan.get("diff_stat")),
@@ -1150,6 +1158,12 @@ def _chat_review_projection(record: dict, app_id: int) -> dict:
   }
 
 
+_CHAT_CONTRIBUTION_STATUSES = frozenset({
+  "prepared", "submitting", "draft", "open", "landing", "merged",
+  "superseded", "closed",
+})
+
+
 @router.get("/contributions/{app_id}/for-chat/{chat_id}")
 @_limiter.limit("60/minute")
 async def contributions_for_chat(
@@ -1159,17 +1173,16 @@ async def contributions_for_chat(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
-  """Contribution records staged from ONE chat, for that chat's review card.
+  """Contribution lifecycle records from ONE chat, for that chat's card.
 
-  The chat card is a second view over the same ledger the Contribute app reads,
-  so the owner can approve a staged PR where the work happened instead of
-  navigating to the app. It is strictly read-only and stays a projection: Send
-  still goes through the submit endpoint below, which owns every freshness,
-  attribution, and fork check.
+  The chat card is a second view over the same ledger the Contribute app reads.
+  The owner can approve a staged PR and follow it through sent/merged/closed
+  where the work happened. It is strictly read-only and stays a projection:
+  Send still goes through the submit endpoint below, which owns every
+  freshness, attribution, and fork check.
 
-  Only the local preflight is filtered by chat: ledger records are small and
-  bounded on read, then a single chat normally leaves zero or one prepared
-  candidate for the more expensive repository inspection below.
+  Only prepared records receive the local preflight. Ledger records are small
+  and bounded on read; later lifecycle states are display-only and cheap.
   """
   _validate_submit_app(app_id, principal, db)
   db.close()
@@ -1194,7 +1207,7 @@ async def contributions_for_chat(
           and _CONTRIBUTION_ID.match(record["id"])
           and str(record.get("chat_id") or "") == chat_id
           and record.get("type") == "pr"
-          and record.get("status") in {"prepared", "submitting"}
+          and record.get("status") in _CHAT_CONTRIBUTION_STATUSES
         ):
           records.append(record)
     settings_path = (

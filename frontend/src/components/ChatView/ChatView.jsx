@@ -47,6 +47,7 @@ import ChatDiffViewer from './ChatDiffViewer.jsx'
 import ChatUsageInspector from './ChatUsageInspector.jsx'
 import ChatUsageStrip from './ChatUsageStrip.jsx'
 import { formatUsageAriaSummary } from './chatUsageFormat.js'
+import { chatContributionPrepareSubmission } from './chatContributionIntent.js'
 import ComposerPopover from './ComposerPopover.jsx'
 import BrainUsageButton from './BrainUsageButton.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
@@ -56,6 +57,7 @@ import WaitingChip from './WaitingChip.jsx'
 import ActiveAssistantSurface from './ActiveAssistantSurface.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import ContributionReviewCard from './ContributionReviewCard.jsx'
+import { contributionFollowupPrompt } from './contributionReviewModel.js'
 import MsgContent from './MsgContent.jsx'
 import MessageMetaRow from './MessageMetaRow.jsx'
 import ActivityLineHeader from './ActivityLineHeader.jsx'
@@ -2499,6 +2501,7 @@ export default function ChatView({
 
     const pin = opts.pin !== false  // default true
     const continuation = opts.continuation === 'manual' ? 'manual' : undefined
+    const preserveComposer = opts.preserveComposer === true
     setSendFailure(null)
 
     // Stop voice recognition so a late onresult doesn't refill input
@@ -2560,7 +2563,7 @@ export default function ChatView({
       // in the composer. A failed request keeps the resumable card in place;
       // restoring the internal word "continue" as a draft would misattribute
       // it to the owner and make a retry look like ordinary prose.
-      if (!continuation) {
+      if (!continuation && !preserveComposer) {
         restoreComposerText(text, { preserveFailedAttempt: true })
       }
       if (usesComposerFiles) restoreFiles(composerFileSnapshot)
@@ -2617,9 +2620,9 @@ export default function ChatView({
       // to it (a user-driven scroll after send is the newer intent).
       const queuedPinIntent = sendPinIntent
       rememberSendIntent(cid, queuedPinIntent)
-      setComposerInput('')
+      if (!preserveComposer) setComposerInput('')
       clearComposerFilesForSend()
-      if (inputRef.current) {
+      if (!preserveComposer && inputRef.current) {
         resetComposerTextarea(inputRef.current)
         // Drop the multi-line `.chat__pill--tall` class so send/mic
         // re-center vertically. Without this, the pill stays in
@@ -2907,9 +2910,9 @@ export default function ChatView({
     }
     if (attachments.length > 0) userMsg.attachments = attachments
     commitMessages(prev => [...prev, userMsg])
-    setComposerInput('')
+    if (!preserveComposer) setComposerInput('')
     clearComposerFilesForSend()
-    if (inputRef.current) {
+    if (!preserveComposer && inputRef.current) {
       resetComposerTextarea(inputRef.current)
       // Drop the multi-line `.chat__pill--tall` class — see queue-path
       // comment above for the full rationale.
@@ -3918,6 +3921,20 @@ export default function ChatView({
   // (The fast-forward identity/readiness gates are computed separately below.)
   const turnActive = sending || isStreaming || serverRunning
 
+  const handlePrepareChatChanges = useCallback(() => {
+    setShowChanges(false)
+    const submission = chatContributionPrepareSubmission()
+    void doSend(submission.text, submission.options)
+  }, [doSend])
+
+  const handleContributionFollowup = useCallback((record) => {
+    setShowChanges(false)
+    void doSend(contributionFollowupPrompt(record), {
+      attachments: [],
+      preserveComposer: true,
+    })
+  }, [doSend])
+
   useOpenAppCtaAutoDismiss({
     builtApps,
     turnActive,
@@ -4547,6 +4564,8 @@ export default function ChatView({
           chatId={chatId}
           initialEntries={chatDiffEntries}
           onClose={() => setShowChanges(false)}
+          onPrepareChanges={handlePrepareChatChanges}
+          turnActive={turnActive}
         />
       )}
       {!embedded && showUsage && (
@@ -4879,6 +4898,7 @@ export default function ChatView({
               chatId={chatId}
               turnActive={turnActive}
               onOpenApp={onOpenApp}
+              onContinueInChat={handleContributionFollowup}
               onOpenChat={(targetChatId) => {
                 if (!internalNav || !targetChatId) return
                 internalNav(new URL(

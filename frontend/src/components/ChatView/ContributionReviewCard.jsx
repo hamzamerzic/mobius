@@ -12,6 +12,7 @@ import {
   contributionReviewRunPhase,
   contributionReviewIntent,
   diffStatSummary,
+  isTrackingRecord,
   isHorizontalSwipe,
   passedDismissThreshold,
   publicationAction,
@@ -22,12 +23,14 @@ import {
   sendBlocker,
   statusLabel,
   submitFailure,
+  trackingNarration,
+  trackingStatusLabel,
   visibleReviewItems,
 } from './contributionReviewModel.js'
 import './ContributionReviewCard.css'
 
 export default function ContributionReviewCard({
-  chatId, turnActive, onOpenApp, onOpenChat,
+  chatId, turnActive, onOpenApp, onOpenChat, onContinueInChat,
 }) {
   const queryClient = useQueryClient()
   const { data: apps } = appQueries.list.useQuery()
@@ -63,16 +66,10 @@ export default function ContributionReviewCard({
   // Dismissals are persisted, so this only forces the re-render; the stored
   // decision is what actually filters the list.
   const [dismissRevision, setDismissRevision] = useState(0)
-  // A successful public action leaves this compact surface immediately rather
-  // than waiting for the authoritative ledger refetch to finish.
-  const [publishedItems, setPublishedItems] = useState([])
 
   const storage = typeof localStorage !== 'undefined' ? localStorage : null
-  const pendingItems = visibleReviewItems(data, storage).filter(
-    item => item.kind !== 'record'
-      || !publishedItems.some(done => done.id === item.record.id),
-  )
-  const panel = reviewPanelSummary(pendingItems.length)
+  const pendingItems = visibleReviewItems(data, storage)
+  const panel = reviewPanelSummary(pendingItems)
   const grouped = panel.count > 1
   void dismissRevision
   if (!appId) return null
@@ -96,7 +93,7 @@ export default function ContributionReviewCard({
           },
         }
       }
-      return { published: true }
+      return { published: true, publication: body }
     } catch {
       return {
         failure: {
@@ -109,12 +106,25 @@ export default function ContributionReviewCard({
     }
   }
 
-  function rememberPublished(recordId) {
-    setPublishedItems(items => (
-      items.some(item => item.id === recordId)
-        ? items
-        : [...items, { id: recordId }]
-    ))
+  function rememberPublished(recordId, publication = null) {
+    const publishedStatus = publication?.record?.status === 'draft' ? 'draft' : 'open'
+    queryClient.setQueryData(queryKey, current => {
+      if (!current || !Array.isArray(current.records)) return current
+      return {
+        ...current,
+        records: current.records.map(record => (
+          record.id === recordId
+            ? {
+                ...record,
+                status: publishedStatus,
+                number: publication?.number ?? record.number,
+                url: publication?.url ?? record.url,
+                needs_attention: false,
+              }
+            : record
+        )),
+      }
+    })
   }
 
   return (
@@ -159,6 +169,17 @@ export default function ContributionReviewCard({
           )
         }
         const record = item.record
+        if (isTrackingRecord(record)) {
+          return (
+            <TrackingRow
+              key={item.id}
+              record={record}
+              turnActive={turnActive}
+              onContinueInChat={onContinueInChat}
+              onDismiss={onDismiss}
+            />
+          )
+        }
         return (
           <ReviewRow
             key={item.id}
@@ -310,6 +331,52 @@ function StackReviewRow({ item, onOpenContribute, onDismiss }) {
   )
 }
 
+function TrackingRow({ record, turnActive, onContinueInChat, onDismiss }) {
+  const cardRef = useSwipeToDismiss(onDismiss)
+  const canContinue = record.needs_attention === true
+    && typeof onContinueInChat === 'function'
+  const number = Number(record.number)
+  const meta = [
+    record.repo,
+    Number.isInteger(number) && number > 0 ? `PR #${number}` : '',
+  ].filter(Boolean).join(' · ')
+
+  return (
+    <div ref={cardRef} className="contrib-card contrib-card--tracking">
+      <div className="contrib-card__topline">
+        <span>{trackingStatusLabel(record)}</span>
+        <button
+          type="button"
+          className="contrib-card__dismiss"
+          aria-label="Dismiss — keeps it in Contribute"
+          onClick={() => onDismiss?.()}
+        >
+          <X width={14} height={14} aria-hidden="true" />
+        </button>
+      </div>
+      <p className="contrib-card__summary">
+        {record.summary || record.title || 'Contribution from this chat'}
+      </p>
+      {meta ? <p className="contrib-card__meta">{meta}</p> : null}
+      <p className={record.needs_attention ? 'contrib-card__error' : 'contrib-card__payoff'}>
+        {trackingNarration(record)}
+      </p>
+      {canContinue ? (
+        <div className="contrib-card__actions">
+          <button
+            type="button"
+            className="contrib-card__send"
+            onClick={() => onContinueInChat(record)}
+          >
+            {turnActive ? 'Queue agent follow-up' : 'Ask agent to fix'}
+          </button>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+
 function ReviewRow({
   record, connected, onPublish, onPublished, appToken, onOpenChat,
   onOpenContribute, onDismiss,
@@ -361,7 +428,7 @@ function ReviewRow({
     setAttemptFailure(null)
     try {
       const outcome = (await onPublish(record)) || {}
-      if (outcome.published) onPublished?.(record.id)
+      if (outcome.published) onPublished?.(record.id, outcome.publication)
       else if (outcome.failure) setAttemptFailure(outcome.failure)
     } finally {
       setSending(false)
