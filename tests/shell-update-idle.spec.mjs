@@ -434,16 +434,14 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
       if (route.request().method() !== 'GET') return route.fallback()
       const response = await route.fetch()
       const chats = await response.json()
-      const visibleChats = chats.map(chat => visibleFixtures.has(String(chat.id))
-        ? { ...chat, has_messages: true }
-        : chat)
-      const returnedIds = new Set(visibleChats.map(chat => String(chat.id)))
-      for (const [id, chat] of visibleFixtures) {
-        // A lifecycle refetch may ask the production recent-chat query, which
-        // intentionally omits empty chats. Reinsert only this test's owned
-        // fixtures so the drawer target remains stable across that refresh.
-        if (!returnedIds.has(id)) visibleChats.push({ ...chat, has_messages: true })
-      }
+      // The drawer intentionally renders only the leading recents. Keep these
+      // two owned fixtures at the front even when a lifecycle refetch omits
+      // the empty server rows; appending them behind a busy account's history
+      // leaves valid fixtures outside the rendered recent window.
+      const visibleChats = [
+        ...[...visibleFixtures.values()].map(chat => ({ ...chat, has_messages: true })),
+        ...chats.filter(chat => !visibleFixtures.has(String(chat.id))),
+      ]
       await route.fulfill({
         response,
         json: visibleChats,
