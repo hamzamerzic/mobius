@@ -132,6 +132,61 @@ def test_scoped_app_chat_start_reuses_one_exact_first_turn(
   assert all("content" not in row for row in handoffs)
 
 
+def test_scoped_app_chat_start_retries_rejected_first_turn_in_same_row(
+  client, owner_token, db, monkeypatch,
+):
+  from app.routes import chats_stream
+
+  app_id, app_token = _make_app(client, owner_token, "retry-scoped-chat")
+  calls = []
+
+  async def reject_then_accept(body, chat_id, principal, request_db):
+    calls.append(chat_id)
+    if len(calls) == 1:
+      return JSONResponse({"status": "busy"}, status_code=409)
+    row = request_db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+    row.messages = [{"role": "user", "content": body.content, "cid": body.cid}]
+    row.has_messages = True
+    request_db.commit()
+    return JSONResponse({"status": "started"}, status_code=202)
+
+  monkeypatch.setattr(chats_stream, "send_message", reject_then_accept)
+  auth = {"Authorization": f"Bearer {app_token}"}
+  payload = {
+    "scope": "contribute-review:retry-head",
+    "content": "private review prompt",
+    "cid": "retry-cid",
+  }
+
+  rejected = client.post("/api/app-chats/start", json=payload, headers=auth)
+  assert rejected.status_code == 502, rejected.text
+  detail = rejected.json()["detail"]
+  assert detail["code"] == "first_turn_rejected"
+  chat_id = detail["chat_id"]
+
+  rows = db.query(models.Chat).filter(
+    models.Chat.created_by_app_id == app_id,
+  ).all()
+  assert [row.id for row in rows] == [chat_id]
+  assert rows[0].messages == []
+  assert rows[0].has_messages is False
+
+  retried = client.post("/api/app-chats/start", json=payload, headers=auth)
+  assert retried.status_code == 200, retried.text
+  assert retried.json() == {
+    "chat_id": chat_id,
+    "outcome": "started",
+    "response": None,
+  }
+  assert calls == [chat_id, chat_id]
+  db.expire_all()
+  rows = db.query(models.Chat).filter(
+    models.Chat.created_by_app_id == app_id,
+  ).all()
+  assert [row.id for row in rows] == [chat_id]
+  assert [message["cid"] for message in rows[0].messages] == ["retry-cid"]
+
+
 def test_scoped_app_chat_start_keeps_different_scopes_independent(
   client, owner_token, db, monkeypatch,
 ):
