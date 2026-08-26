@@ -27,6 +27,7 @@ export function deriveShellReloadState({
   const destinationView = destination?.view
   const destinationIsSettings = destinationView === 'settings'
   return {
+    ...(destination ? { destinationClaimed: true } : {}),
     activeView: destinationIsSettings
       ? 'settings'
       : (destinationView || (activeView === 'settings' ? 'settings' : content.view)),

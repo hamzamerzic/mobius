@@ -121,6 +121,7 @@ test('a claimed Settings destination is serialized before the outgoing view pain
     drawerOpen: true,
     destination: { view: 'settings', chatId: 'kept', appId: null },
   }), {
+    destinationClaimed: true,
     activeView: 'settings',
     activeAppId: null,
     activeChatId: 'kept',
@@ -139,6 +140,7 @@ test('a claimed content destination becomes the reload route', () => {
       view: 'chat', chatId: 'new', appId: null,
     },
   }), {
+    destinationClaimed: true,
     activeView: 'chat',
     activeAppId: null,
     activeChatId: 'new',
