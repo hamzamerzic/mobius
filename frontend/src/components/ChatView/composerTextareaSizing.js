@@ -1,5 +1,6 @@
 export const COMPOSER_TEXTAREA_MAX_HEIGHT = 280
 export const COMPOSER_TEXTAREA_TALL_THRESHOLD = 45
+export const INLINE_EDITOR_LAYOUT_EVENT = 'mobius:inline-editor-layout'
 let nativeSizingSupport
 
 /**
@@ -122,6 +123,19 @@ export function autoGrowTextarea(textarea, maxHeight) {
   if (contentHeight <= 0) return
   textarea.style.height = `${Math.min(contentHeight, maxHeight)}px`
   textarea.style.overflowY = contentHeight > maxHeight ? 'auto' : 'hidden'
+}
+
+/** Publish the exact commit boundary at which an inline editor's new value has
+ * acquired its browser-owned height. Native `field-sizing` may coalesce the
+ * editor and containing row into one ResizeObserver delivery, so the scroll
+ * owner cannot infer this boundary from element observation alone. */
+export function notifyInlineEditorLayout(textarea) {
+  const EventCtor = textarea?.ownerDocument?.defaultView?.Event
+    || globalThis.Event
+  if (!textarea?.dispatchEvent || typeof EventCtor !== 'function') return
+  textarea.dispatchEvent(new EventCtor(INLINE_EDITOR_LAYOUT_EVENT, {
+    bubbles: true,
+  }))
 }
 
 /** Collapse immediately while React is still committing an empty value. */

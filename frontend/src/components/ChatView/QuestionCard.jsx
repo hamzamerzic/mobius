@@ -6,7 +6,11 @@ import {
   readQuestionDraft,
   writeQuestionDraft,
 } from './questionDraft.js'
-import { autoGrowTextarea, textareaUsesNativeSizing } from './composerTextareaSizing.js'
+import {
+  autoGrowTextarea,
+  notifyInlineEditorLayout,
+  textareaUsesNativeSizing,
+} from './composerTextareaSizing.js'
 import { placeCaretAtTextEnd } from './composerFocusPolicy.js'
 import { isInlineEditorSubmit } from './composerShortcuts.js'
 import { isTouchPrimary } from '../../lib/pointerPrimary.js'
@@ -31,6 +35,7 @@ const CUSTOM_ANSWER_MAX_HEIGHT = 180
 
 function resizeCustomAnswer(textarea) {
   autoGrowTextarea(textarea, CUSTOM_ANSWER_MAX_HEIGHT)
+  notifyInlineEditorLayout(textarea)
 }
 
 

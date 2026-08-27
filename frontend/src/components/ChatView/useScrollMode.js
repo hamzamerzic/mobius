@@ -74,6 +74,7 @@ import { useState, useRef, useLayoutEffect, useCallback } from 'react'
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 import { isPerfProbeEnabled, perfMark, perfTime } from '../../lib/perfProbe.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
+import { INLINE_EDITOR_LAYOUT_EVENT } from './composerTextareaSizing.js'
 import {
   _anchorEl,
   _anchorReapplyNeeded,
@@ -1358,7 +1359,7 @@ export default function useScrollMode({
       // reader scroll intent. Keep only the cheap pre-input scroll coordinate;
       // geometry is consulted later only if the browser actually moved.
       supersedePendingReaderGesture()
-      pendingInlineEditorInput = {
+      const plan = {
         editor: event.target,
         scrollTop: scrollEl.scrollTop,
         authorityVersion: currentAuthority(),
@@ -1367,11 +1368,8 @@ export default function useScrollMode({
         viewportHeight: scrollEl.clientHeight,
         viewportWidth: scrollEl.clientWidth,
       }
-      pendingInlineEditorGrowth = {
-        editor: event.target,
-        mode: anchorModeFromScroll(scrollEl),
-        authorityVersion: currentAuthority(),
-      }
+      pendingInlineEditorInput = plan
+      pendingInlineEditorGrowth = plan
     }
 
     const settleInlineEditorInput = (event) => {
@@ -1388,25 +1386,6 @@ export default function useScrollMode({
           // React may commit textarea auto-sizing after this caret pass. Keep
           // the pre-input anchor until ResizeObserver consumes it, a newer
           // input replaces it, or blur retires it.
-          const growthMode = modeForSettledInlineEditorGrowth({
-            capturedMode: plan.mode,
-            beforeEditorHeight: plan.editorHeight,
-            afterEditorHeight: plan.editor.getBoundingClientRect?.().height,
-            beforeViewportHeight: plan.viewportHeight,
-            afterViewportHeight: scrollEl.clientHeight,
-            beforeViewportWidth: plan.viewportWidth,
-            afterViewportWidth: scrollEl.clientWidth,
-          })
-          if (growthMode
-              && plan.editor === focusedQuestionEditor()
-              && plan.authorityVersion === currentAuthority()) {
-            transitionMode(growthMode, 'layout:question-edit-growth-fallback')
-            applyLayoutMode(
-              'layout:question-edit-growth-fallback',
-              plan.authorityVersion,
-            )
-            return
-          }
           if (Math.abs(scrollEl.scrollTop - plan.scrollTop) <= 0.5) return
           revealFocusedQuestionEditor('reader:inline-editor-caret', {
             editor: plan.editor,
@@ -1415,6 +1394,27 @@ export default function useScrollMode({
           })
         })
       })
+    }
+    const settleInlineEditorLayout = (event) => {
+      if (!isQuestionEditor(event.target)) return
+      const growth = pendingInlineEditorGrowth
+      pendingInlineEditorGrowth = null
+      if (!growth
+          || growth.editor !== event.target
+          || growth.editor !== focusedQuestionEditor()
+          || growth.authorityVersion !== currentAuthority()) return
+      const growthMode = modeForSettledInlineEditorGrowth({
+        capturedMode: growth.mode,
+        beforeEditorHeight: growth.editorHeight,
+        afterEditorHeight: growth.editor.getBoundingClientRect?.().height,
+        beforeViewportHeight: growth.viewportHeight,
+        afterViewportHeight: scrollEl.clientHeight,
+        beforeViewportWidth: growth.viewportWidth,
+        afterViewportWidth: scrollEl.clientWidth,
+      })
+      if (!growthMode) return
+      transitionMode(growthMode, 'layout:question-edit-growth')
+      applyLayoutMode('layout:question-edit-growth', growth.authorityVersion)
     }
     const onInlineEditorFocus = (event) => observeQuestionEditor(event.target)
     const onInlineEditorBlur = (event) => {
@@ -1983,6 +1983,11 @@ export default function useScrollMode({
     scrollEl.addEventListener('focusout', onInlineEditorBlur, { passive: true })
     scrollEl.addEventListener('beforeinput', captureInlineEditorInput, { passive: true })
     scrollEl.addEventListener('input', settleInlineEditorInput, { passive: true })
+    scrollEl.addEventListener(
+      INLINE_EDITOR_LAYOUT_EVENT,
+      settleInlineEditorLayout,
+      { passive: true },
+    )
     scrollEl.addEventListener('pointerup', onPointerUpInput, { passive: true })
     scrollEl.addEventListener('pointercancel', onPointerCancelInput, { passive: true })
     scrollEl.addEventListener('touchstart', onTouchContactChange, { passive: true })
@@ -2118,6 +2123,10 @@ export default function useScrollMode({
       scrollEl.removeEventListener('focusout', onInlineEditorBlur)
       scrollEl.removeEventListener('beforeinput', captureInlineEditorInput)
       scrollEl.removeEventListener('input', settleInlineEditorInput)
+      scrollEl.removeEventListener(
+        INLINE_EDITOR_LAYOUT_EVENT,
+        settleInlineEditorLayout,
+      )
       scrollEl.removeEventListener('pointerup', onPointerUpInput)
       scrollEl.removeEventListener('pointercancel', onPointerCancelInput)
       scrollEl.removeEventListener('touchstart', onTouchContactChange)
