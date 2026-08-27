@@ -89,6 +89,7 @@ import {
   isQuestionSubmissionMode,
   modeForInlineEditorReveal,
   modeForQuestionEditingViewportChange,
+  modeForSettledInlineEditorGrowth,
   nextPinViewportHeight,
   physicalBottomAnchorModeFromScroll,
   topRevealAnchorMode,
@@ -1361,6 +1362,10 @@ export default function useScrollMode({
         editor: event.target,
         scrollTop: scrollEl.scrollTop,
         authorityVersion: currentAuthority(),
+        mode: anchorModeFromScroll(scrollEl),
+        editorHeight: event.target.getBoundingClientRect?.().height,
+        viewportHeight: scrollEl.clientHeight,
+        viewportWidth: scrollEl.clientWidth,
       }
       pendingInlineEditorGrowth = {
         editor: event.target,
@@ -1383,6 +1388,25 @@ export default function useScrollMode({
           // React may commit textarea auto-sizing after this caret pass. Keep
           // the pre-input anchor until ResizeObserver consumes it, a newer
           // input replaces it, or blur retires it.
+          const growthMode = modeForSettledInlineEditorGrowth({
+            capturedMode: plan.mode,
+            beforeEditorHeight: plan.editorHeight,
+            afterEditorHeight: plan.editor.getBoundingClientRect?.().height,
+            beforeViewportHeight: plan.viewportHeight,
+            afterViewportHeight: scrollEl.clientHeight,
+            beforeViewportWidth: plan.viewportWidth,
+            afterViewportWidth: scrollEl.clientWidth,
+          })
+          if (growthMode
+              && plan.editor === focusedQuestionEditor()
+              && plan.authorityVersion === currentAuthority()) {
+            transitionMode(growthMode, 'layout:question-edit-growth-fallback')
+            applyLayoutMode(
+              'layout:question-edit-growth-fallback',
+              plan.authorityVersion,
+            )
+            return
+          }
           if (Math.abs(scrollEl.scrollTop - plan.scrollTop) <= 0.5) return
           revealFocusedQuestionEditor('reader:inline-editor-caret', {
             editor: plan.editor,
