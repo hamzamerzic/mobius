@@ -13,6 +13,7 @@
 import { test, expect } from '@playwright/test'
 import { streamSnapshotKey } from '../frontend/src/components/ChatView/streamSnapshotCache.js'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -775,6 +776,8 @@ test.describe('Stream reconnection', () => {
           ],
           total: 2,
           offset: 0,
+          provider: 'claude',
+          ...testChatAgentSettings(),
         }),
       })
     })
