@@ -178,7 +178,7 @@ import {
   reconcileComposerTextarea,
   resetComposerTextarea,
 } from './composerTextareaSizing.js'
-import { needsModelSelection } from './modelSelectionPolicy.js'
+import { needsModelSelection, selectedChatModel } from './modelSelectionPolicy.js'
 import { collectChatDiffs } from './chatDiffs.js'
 import {
   EMPTY_BUILD_PHASE_RAIL,
@@ -5065,7 +5065,7 @@ export default function ChatView({
               usageEnabled={!embedded}
               chatId={chatId}
               provider={chatInfo?.provider}
-              model={chatInfo?.effective?.model}
+              model={selectedChatModel(chatInfo)}
             >
               {({ icon, ariaLabel, providerUsage }) => (
               <ComposerPopover
