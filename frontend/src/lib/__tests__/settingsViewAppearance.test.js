@@ -26,7 +26,10 @@ test('model and synced commit use the same normal-weight standard highlight', ()
   assert.match(view, /provider-row__status-text settings__last-model/)
   assert.match(view, /Choose which models appear\. New chats use your last pick\./)
   assert.match(view, /Last model: <span className="settings__standard-highlight">/)
-  assert.match(view, /Synced to [\s\S]*settings__standard-highlight/)
+  assert.match(view, /Current with upstream [\s\S]*settings__standard-highlight/)
+  assert.match(view, /contained_upstream_committed_at/)
+  assert.match(view, /upstream_checked_at/)
+  assert.match(view, /settings__update-check/)
   assert.doesNotMatch(view, /Serving local \{mobiusVersion\.localSha\}/)
   assert.match(css, /\.settings__last-model\s*\{[^}]*color:\s*var\(--muted\);[^}]*font-weight:\s*400;/s)
   assert.match(css, /\.settings__standard-highlight\s*\{[^}]*color:\s*var\(--green\);[^}]*font-weight:\s*inherit;/s)
@@ -70,6 +73,12 @@ test('new provider connections use the curated unattended defaults', () => {
   assert.match(view, /if \(!saved\) return[\s\S]*setExpandedAuth\(null\)/)
   assert.doesNotMatch(view, /api\.settings\.save\(\{ provider \}\)/)
   assert.match(view, /effort: defaultEffort\(provider\)/)
+})
+
+test('Möbius subscription status uses the same consumed-credit copy as the brain', () => {
+  assert.match(view, /enabled: active && providerReady && mobiusAvailable && mobiusAuthenticated/)
+  assert.match(view, /providerAllowanceSummary\('mobius', mobiusAllowance\)/)
+  assert.doesNotMatch(view, /mobiusRemaining|spendable_units/)
 })
 
 test('appearance indicator waits for the same seeded theme repaint as the palette', () => {

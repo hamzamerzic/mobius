@@ -7,6 +7,10 @@ import { api, clearQueryCache, clearToken } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
 import { platformVersionIdentity } from '../../lib/platformVersionIdentity.js'
 import {
+  formatUpstreamCheckTime,
+  formatUpstreamCommitDate,
+} from '../../lib/platformProvenance.js'
+import {
   rebuildIsActive,
   rebuildPollShouldContinue,
   rebuildProgressMessage,
@@ -40,7 +44,12 @@ import { modelEfforts, validEffort } from '../ui/modelEfforts.js'
 import ManageModelsModal from '../ChatView/ManageModelsModal.jsx'
 import UpdateReviewModal from './UpdateReviewModal.jsx'
 import ProviderUsage from './ProviderUsage.jsx'
-import { formatPlanStatus } from './providerUsage.js'
+import {
+  formatPlanStatus,
+  formatTrialTimeLeft,
+  providerAllowance,
+  providerAllowanceSummary,
+} from './providerUsage.js'
 import { PROVIDER_INFO, PROVIDER_ORDER } from '../ChatView/providerRegistry.jsx'
 import '../ui/StatusDot.css'
 import '../ui/ModelSheet.css'
@@ -436,24 +445,12 @@ export default function SettingsView({
   const mobiusAvailable = providerStatusQuery.data?.mobius?.available === true
   const mobiusAuthenticated = configuredProviders.has('mobius')
   const mobiusTrial = providerStatusQuery.data?.mobius?.trial
-  const mobiusRemainingUnits = Number(mobiusTrial?.balance?.spendable_units)
-  const mobiusRemaining = Number.isFinite(mobiusRemainingUnits)
-    ? `$${(mobiusRemainingUnits / 1_000_000).toFixed(2)} remaining`
-    : 'Trial balance unavailable'
   const mobiusExpiryRaw = mobiusTrial?.trial_expires_at
     || mobiusTrial?.account?.trial_expires_at
     || mobiusTrial?.balance?.grants?.find(grant => grant?.kind === 'trial')?.expires_at
   const mobiusExpiryTime = Date.parse(mobiusExpiryRaw || '')
   const mobiusHasExpiry = Number.isFinite(mobiusExpiryTime)
-  const mobiusExpiryLabel = mobiusHasExpiry
-    ? new Intl.DateTimeFormat(undefined, {
-        year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC',
-      }).format(new Date(mobiusExpiryTime))
-    : ''
   const mobiusExpired = mobiusHasExpiry && mobiusExpiryTime <= Date.now()
-  const mobiusTrialSubtitle = mobiusAuthenticated
-    ? `${mobiusRemaining}. ${mobiusExpired ? 'Expired' : 'Expires'} ${mobiusExpiryLabel || 'after the trial period'}.`
-    : 'Sign in from Möbius · You to activate your trial.'
   // Live-probed CLI versions (null when the CLI isn't installed or
   // didn't respond). Read-only — updates happen via the agent, not here.
   const claudeVersion = settingsQuery.data?.claude_version
@@ -489,6 +486,21 @@ export default function SettingsView({
       && expandedUsage.claude
     ),
   })
+  const mobiusUsageQuery = settingsQueries.providerUsage.useQuery('mobius', {
+    enabled: active && providerReady && mobiusAvailable && mobiusAuthenticated,
+  })
+  const mobiusAllowance = providerAllowance('mobius', mobiusUsageQuery.data)
+  const mobiusTrialSubtitle = mobiusAuthenticated
+    ? (
+        mobiusExpired
+          ? 'Trial expired'
+          : (
+              typeof mobiusAllowance.usedPercent === 'number'
+                ? providerAllowanceSummary('mobius', mobiusAllowance)
+                : formatTrialTimeLeft(mobiusExpiryRaw) || 'Trial usage unavailable'
+            )
+      )
+    : 'Sign in from Möbius · You to activate your trial.'
   // Registry and provider/settings probes are independent. Starting them
   // together avoids an unnecessary request waterfall on a first open.
   const modelRegistryQuery = modelQueries.registry.useQuery()
@@ -1474,6 +1486,12 @@ export default function SettingsView({
   const buildDate = version?.build_date && version.build_date !== 'unknown'
     ? version.build_date
     : null
+  const upstreamCommitDate = formatUpstreamCommitDate(
+    platform?.contained_upstream_committed_at,
+  )
+  const upstreamCheckTime = formatUpstreamCheckTime(
+    platform?.upstream_checked_at,
+  )
   // Derived state for the single "Möbius" update row (see the section below).
   const platformConflict = platform?.state === 'conflict'
   // A text-clean update that failed the post-merge import probe was rolled back
@@ -1827,11 +1845,20 @@ export default function SettingsView({
                 {platformUpdateStatusLabel(platform)}
               </StatusDot>
               {mobiusVersion.primarySha && (
-                <p className="settings__build">
-                  {mobiusVersion.synced ? 'Synced to ' : 'Serving '}
-                  <span className="settings__standard-highlight">{mobiusVersion.primarySha}</span>
-                  {!mobiusVersion.synced && buildDate ? ` · ${buildDate}` : ''}
-                </p>
+                <>
+                  <p className="settings__build">
+                    {mobiusVersion.synced ? 'Current with upstream ' : 'Serving '}
+                    <span className="settings__standard-highlight">{mobiusVersion.primarySha}</span>
+                    {mobiusVersion.synced && upstreamCommitDate
+                      ? ` · ${upstreamCommitDate}`
+                      : !mobiusVersion.synced && buildDate
+                        ? ` · ${buildDate}`
+                        : ''}
+                  </p>
+                  {mobiusVersion.synced && upstreamCheckTime && (
+                    <p className="settings__update-check">{upstreamCheckTime}</p>
+                  )}
+                </>
               )}
             </div>
             {platformConflict ? (
