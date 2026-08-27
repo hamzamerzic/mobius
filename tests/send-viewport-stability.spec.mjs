@@ -120,6 +120,7 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
         pending_messages: [],
         pending_question_id: null,
         provider: 'codex',
+        agent_settings_json: { model: 'claude-sonnet-4-6' },
       }),
     })
   })

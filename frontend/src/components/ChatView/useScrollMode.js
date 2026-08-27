@@ -1380,9 +1380,9 @@ export default function useScrollMode({
         // second frame is still layout-free unless scrollTop actually changed.
         inlineEditorRaf = requestAnimationFrame(() => {
           inlineEditorRaf = 0
-          if (pendingInlineEditorGrowth?.editor === plan.editor) {
-            pendingInlineEditorGrowth = null
-          }
+          // React may commit textarea auto-sizing after this caret pass. Keep
+          // the pre-input anchor until ResizeObserver consumes it, a newer
+          // input replaces it, or blur retires it.
           if (Math.abs(scrollEl.scrollTop - plan.scrollTop) <= 0.5) return
           revealFocusedQuestionEditor('reader:inline-editor-caret', {
             editor: plan.editor,

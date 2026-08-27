@@ -495,14 +495,16 @@ test('a focused inline editor keeps one current owner across keyboard and growth
     scrollListeners.get('beforeinput')({ target: editor })
     editorHeight = 72
     scrollListeners.get('input')({ target: editor })
+    // React textarea sizing can commit after the input handler's two-frame
+    // caret pass. The ResizeObserver remains the owner of the pre-growth
+    // anchor even when its delivery is later than that pass.
+    flushFrames()
     observers[0].callback([{
       target: editor,
       borderBoxSize: [{ blockSize: editorHeight }],
     }])
     assert.equal(scroll.scrollTop, beforeGrowth,
       'field growth keeps the question card at its reader-owned coordinate')
-    flushFrames()
-
     scrollListeners.get('beforeinput')({ target: editor })
     editorHeight = 100
     scrollListeners.get('input')({ target: editor })
