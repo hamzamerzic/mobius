@@ -3,8 +3,6 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 import {
-  INLINE_EDITOR_LAYOUT_EVENT,
-  notifyInlineEditorLayout,
   textareaUsesNativeSizing,
   reconcileComposerTextarea,
   resetComposerTextarea,
@@ -106,15 +104,6 @@ test('native resize observation owns only the tall alignment class', () => {
   assert.equal(pill.classList.contains('chat__pill--tall'), false)
   assert.equal(syncComposerTallClass(textarea, 55), 55)
   assert.equal(pill.classList.contains('chat__pill--tall'), true)
-})
-
-test('inline editor sizing publishes one bubbling commit boundary', () => {
-  let dispatched = null
-  notifyInlineEditorLayout({
-    dispatchEvent(event) { dispatched = event },
-  })
-  assert.equal(dispatched?.type, INLINE_EDITOR_LAYOUT_EVENT)
-  assert.equal(dispatched?.bubbles, true)
 })
 
 test('ChatView reconciles textarea geometry on value commits and foreground return', () => {

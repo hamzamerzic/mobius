@@ -6,11 +6,7 @@ import {
   readQuestionDraft,
   writeQuestionDraft,
 } from './questionDraft.js'
-import {
-  autoGrowTextarea,
-  notifyInlineEditorLayout,
-  textareaUsesNativeSizing,
-} from './composerTextareaSizing.js'
+import { autoGrowTextarea, textareaUsesNativeSizing } from './composerTextareaSizing.js'
 import { placeCaretAtTextEnd } from './composerFocusPolicy.js'
 import { isInlineEditorSubmit } from './composerShortcuts.js'
 import { isTouchPrimary } from '../../lib/pointerPrimary.js'
@@ -35,7 +31,6 @@ const CUSTOM_ANSWER_MAX_HEIGHT = 180
 
 function resizeCustomAnswer(textarea) {
   autoGrowTextarea(textarea, CUSTOM_ANSWER_MAX_HEIGHT)
-  notifyInlineEditorLayout(textarea)
 }
 
 
@@ -80,6 +75,7 @@ function CustomAnswerArea({
       ref={textareaRef}
       className={`qcard__input${active ? ' qcard__input--active' : ''}`}
       data-chat-scroll-region
+      data-chat-inline-editor="question-answer"
       aria-label={`Custom answer for: ${question}`}
       placeholder={answered ? 'No custom answer' : 'Or type your own answer…'}
       autoComplete="off"

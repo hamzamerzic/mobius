@@ -479,40 +479,6 @@ export function modeForQuestionEditingViewportChange(mode, caretAnchor = null) {
 }
 
 
-/** Settle textarea auto-growth back onto the pre-input reading coordinate.
- *
- * ResizeObserver is the ordinary owner of this repair, but browsers are
- * allowed to coalesce an auto-sized textarea with its containing row. In that
- * case the editor observation can be omitted even though native caret reveal
- * already moved the transcript. The input settlement pass uses this same pure
- * decision as a fallback. A real viewport resize (for example the software
- * keyboard opening) is intentionally excluded: that path adopts the browser's
- * new caret-visible coordinate instead of restoring stale geometry. */
-export function modeForSettledInlineEditorGrowth({
-  capturedMode,
-  beforeEditorHeight,
-  afterEditorHeight,
-  beforeViewportHeight,
-  afterViewportHeight,
-  beforeViewportWidth,
-  afterViewportWidth,
-} = {}) {
-  const finite = [
-    beforeEditorHeight,
-    afterEditorHeight,
-    beforeViewportHeight,
-    afterViewportHeight,
-    beforeViewportWidth,
-    afterViewportWidth,
-  ].every(Number.isFinite)
-  if (!capturedMode || !finite) return null
-  const editorGrew = afterEditorHeight - beforeEditorHeight > 0.5
-  const viewportChanged = Math.abs(afterViewportHeight - beforeViewportHeight) >= 1
-    || Math.abs(afterViewportWidth - beforeViewportWidth) >= 1
-  return editorGrew && !viewportChanged ? capturedMode : null
-}
-
-
 /** The ANCHOR_AT twin of `_pinReapplyNeeded` — the SAME two-case repair. A
  *  settled anchor drifts off its reader-chosen position when either the anchor
  *  element's offsetTop SHIFTED (content grew above it) or scrollTop was CLAMPED
