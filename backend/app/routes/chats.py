@@ -38,7 +38,11 @@ from app.chat import (
 )
 from app.broadcast import get_system_broadcast
 from app.chat_retention import purge_expired_chat_tombstones
-from app.chat_titles import first_user_message_title
+from app.chat_titles import (
+  apply_generated_title,
+  first_user_message_title,
+  renamed_event,
+)
 from app.database import get_db
 from app.memory_observability import record_memory_checkpoint_once
 from app.owner_input import OwnerInputKind
@@ -1101,8 +1105,7 @@ async def patch_chat(
       new_title = body.title.strip()
       if new_title:
         if body.by_agent:
-          if not chat.title_locked:
-            chat.title = new_title
+          apply_generated_title(chat, new_title)
         else:
           chat.title = new_title
           chat.title_locked = True
@@ -1232,16 +1235,11 @@ async def patch_chat(
     db.commit()
     db.refresh(chat)
     if chat.title != previous_title:
-      # The platform summary publisher PATCHes the generated name immediately
-      # after its durable note CAS. Publish only committed truth so every open
-      # shell can refresh its drawer and tab labels without waiting for another
-      # drawer open or chat-list poll. Manual-title precedence still lives above.
-      get_system_broadcast().publish({
-        "type": "chat_renamed",
-        "chatId": str(chat_id),
-        "title": chat.title,
-        "updatedAt": chat.updated_at.isoformat() if chat.updated_at else None,
-      })
+      # Manual rename and compatibility callers share this projection path.
+      # The normal summary publisher commits in-process through
+      # `_sync_generated_chat_title`; publish only committed route truth here
+      # so older callers update every open drawer and tab without a later poll.
+      get_system_broadcast().publish(renamed_event(chat))
     # Record a real provider switch (Claude <-> Codex) once, after this first
     # commit — NOT after the owner-provider mirror commit below, which would
     # double-log. Model/effort tweaks within a provider are deliberately not
