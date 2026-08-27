@@ -19,6 +19,7 @@ from app import (
   activity, auth, chat_search, models, providers, questions, schemas,
   secure_inputs,
 )
+from app.chat_provider import resolve_chat_provider
 from app.chat_visibility import coerce_agent_settings, visible_in_owner_drawer
 from app.chat_waits import (
   armed_wait_chat_ids,
@@ -30,6 +31,7 @@ from app.chat import (
   _finish_run,
   bump_run_generation,
   is_chat_running,
+  is_draining,
   mark_chat_deleted,
   recover_chat_generation,
   stop_chat_for,
@@ -537,8 +539,14 @@ def _chat_detail_response(
       next_page[relative_index] = projected_message
     page = next_page
 
-  provider = chat.provider or "claude"
   settings_obj = _coerce_agent_settings(chat.agent_settings_json) or None
+  _has_assistant_turns = any(m.get("role") == "assistant" for m in all_msgs)
+  provider = resolve_chat_provider(
+    chat,
+    data_dir=get_settings().data_dir,
+    running=running,
+    draining=is_draining(),
+  )
   active_goal_objective = running_goal_objective(db, chat.id)
   response = {
     "id": chat.id,
@@ -564,9 +572,7 @@ def _chat_detail_response(
       settings_obj,
       provider=provider,
     ),
-    "has_assistant_turns": any(
-      message.get("role") == "assistant" for message in all_msgs
-    ),
+    "has_assistant_turns": _has_assistant_turns,
     # Armed durable waits: the visible "Waiting for …" state. Refreshed by the
     # detail refetches the run lifecycle already triggers, so declare (during a
     # run) and resume (a new run) both reach the UI without extra plumbing.
